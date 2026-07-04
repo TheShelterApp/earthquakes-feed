@@ -112,6 +112,13 @@ function main(): void {
   };
   write(feedDirs, 'manifest.json', JSON.stringify(manifest, null, 2));
 
+  // Cloudflare Pages headers: fresh-but-edge-cached live feed, full CORS (design §9).
+  mkdirSync(PUBLIC_DIR, { recursive: true });
+  writeFileSync(
+    join(PUBLIC_DIR, '_headers'),
+    '/v1/*\n  Cache-Control: public, max-age=30, stale-while-revalidate=120\n  Access-Control-Allow-Origin: *\n',
+  );
+
   console.log(`derive: live=${live.length} summaries=${Object.keys(summ).length} partitions=${parts.length}`);
 }
 

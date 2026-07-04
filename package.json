@@ -1,0 +1,27 @@
+{
+  "name": "earthquakes-feed",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Open, free, worldwide earthquake feed — aggregated from many seismic networks, historized in Git.",
+  "homepage": "https://earthquakes-feed.theshelter.app",
+  "repository": { "type": "git", "url": "https://github.com/TheShelterApp/earthquakes-feed.git" },
+  "license": "CDLA-Permissive-2.0",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "aggregate": "tsx src/aggregate.ts",
+    "derive": "tsx src/derive.ts",
+    "validate": "tsx src/validate.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

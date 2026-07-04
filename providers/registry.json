@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "_comment": "Provider registry. `priority` is the PROVIDER_PRIORITY rank (lower = more authoritative) used by the preferred-pick tiebreak. `license`/`attribution`/`doi`/`contact` travel with every observation as provenance (publish-all posture — see design §11). Set `active:false` to hold a source out without deleting its config. `parse` selects the response parser; `queryFormat` is the FDSN `format` query param value.",
+  "providers": [
+    {
+      "id": "usgs", "name": "USGS (ANSS ComCat)", "priority": 0, "active": true,
+      "adapter": "fdsn", "parse": "geojson", "queryFormat": "geojson",
+      "base": "https://earthquake.usgs.gov/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 300,
+      "license": "US-PD", "attribution": "U.S. Geological Survey (ANSS ComCat)",
+      "doi": "10.5066/F7MS3QZH", "contact": "https://earthquake.usgs.gov/contactus/",
+      "params": { "orderby": "time" }
+    },
+    {
+      "id": "emsc", "name": "EMSC / CSEM (seismicportal)", "priority": 1, "active": true,
+      "adapter": "fdsn", "parse": "geojson", "queryFormat": "json",
+      "base": "https://www.seismicportal.eu/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 300,
+      "license": "CC-BY-4.0", "attribution": "EMSC/CSEM, https://www.emsc-csem.org",
+      "doi": null, "contact": "https://www.emsc-csem.org/#2w"
+    },
+    {
+      "id": "geofon", "name": "GEOFON / GFZ Potsdam", "priority": 2, "active": true,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "https://geofon.gfz.de/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 300,
+      "license": "CC-BY-4.0", "attribution": "GEOFON Program, GFZ German Research Centre for Geosciences",
+      "doi": "10.14470/TR560404", "contact": "geofon@gfz-potsdam.de"
+    },
+    {
+      "id": "ingv", "name": "INGV (Italy)", "priority": 3, "active": true,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "https://webservices.ingv.it/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 300,
+      "license": "CC-BY-4.0", "attribution": "Istituto Nazionale di Geofisica e Vulcanologia (INGV)",
+      "doi": "10.13127/iside", "contact": "https://www.ingv.it"
+    },
+    {
+      "id": "geonet", "name": "GeoNet (New Zealand)", "priority": 4, "active": true,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "https://service.geonet.org.nz/fdsnws/event/1/query",
+      "supportsTimeRange": true, "noLimit": true, "refreshSeconds": 300,
+      "license": "CC-BY-4.0", "attribution": "GeoNet (GNS Science / Toka Tū Ake EQC), New Zealand",
+      "doi": null, "contact": "https://www.geonet.org.nz/contact"
+    },
+    {
+      "id": "resif", "name": "RESIF (France)", "priority": 5, "active": true,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "https://ws.resif.fr/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 600,
+      "license": "CC-BY-4.0", "attribution": "RESIF / Réseau Sismologique et géodésique Français",
+      "doi": "10.15778/RESIF.FR", "contact": "https://www.resif.fr"
+    },
+    {
+      "id": "noa", "name": "NOA (Greece)", "priority": 6, "active": true,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "https://eida.gein.noa.gr/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 600,
+      "license": "CC-BY-4.0", "attribution": "National Observatory of Athens (NOA), Institute of Geodynamics",
+      "doi": null, "contact": "https://www.gein.noa.gr"
+    },
+
+    {
+      "id": "bmkg", "name": "BMKG (Indonesia)", "priority": 20, "active": false,
+      "adapter": "custom:bmkg", "parse": "custom", "queryFormat": "json",
+      "base": "https://data.bmkg.go.id/DataMKG/TEWS/gempadirasakan.json",
+      "supportsTimeRange": false, "refreshSeconds": 300,
+      "license": "restricted", "attribution": "Badan Meteorologi, Klimatologi, dan Geofisika (BMKG)",
+      "doi": null, "contact": "https://www.bmkg.go.id",
+      "notes": "TODO custom adapter: WIB (UTC+7) timestamps, latest-N JSON, no time-range query."
+    },
+    {
+      "id": "jma", "name": "JMA (Japan, via p2pquake mirror)", "priority": 21, "active": false,
+      "adapter": "custom:p2pquake", "parse": "custom", "queryFormat": "json",
+      "base": "https://api.p2pquake.net/v2/history",
+      "supportsTimeRange": false, "refreshSeconds": 300,
+      "license": "restricted", "attribution": "Japan Meteorological Agency (JMA) via P2P地震情報",
+      "doi": null, "contact": "https://www.p2pquake.net",
+      "notes": "TODO custom adapter: JMA times are Asia/Tokyo (UTC+9); depth in meters on the raw JMA feed."
+    },
+    {
+      "id": "raspberryshake", "name": "Raspberry Shake", "priority": 30, "active": false,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "https://fdsnws.raspberryshakedata.com/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 900,
+      "license": "CC-BY-4.0", "attribution": "Raspberry Shake, S.A. citizen-science network",
+      "doi": null, "contact": "https://raspberryshake.org",
+      "notes": "TODO enable on the heavy 15-min sub-schedule (firehose of M0.5+ globally)."
+    }
+  ]
+}

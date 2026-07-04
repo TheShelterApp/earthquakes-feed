@@ -1,0 +1,48 @@
+name: aggregate
+
+# Phase 1: fetch every source, dedup, append to the observation log, commit to `data`.
+# Public repo => Actions is free & unlimited. Cron is offset off :00 to dodge the
+# top-of-hour drop zone; a run is fail-open (a dead source loses zero data).
+on:
+  schedule:
+    - cron: '4,9,14,19,24,29,34,39,44,49,54,59 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: earthquakes-feed-writer
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  aggregate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: data
+          path: .data
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - name: Aggregate
+        env:
+          DATA_DIR: .data
+          RUN_BUDGET_MS: '180000'
+        run: npx tsx src/aggregate.ts
+      - name: Commit & push observation log
+        working-directory: .data
+        run: |
+          git config user.name  "earthquakes-feed-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -A
+          git commit -m "aggregate: seq=$(node -e "process.stdout.write(String(require('./knowledge/index/head.json').seq))") @ $(date -u +%FT%TZ)" \
+            || { echo 'no changes'; exit 0; }
+          git pull --rebase --autostash origin data || true
+          git push origin HEAD:data

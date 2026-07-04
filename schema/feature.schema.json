@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://earthquakes-feed.theshelter.app/schema/feature.schema.json",
+  "title": "Feed Feature (USGS-GeoJSON superset)",
+  "type": "object",
+  "required": ["type", "id", "geometry", "properties"],
+  "properties": {
+    "type": { "const": "Feature" },
+    "id": { "type": "string", "pattern": "^efd_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "geometry": {
+      "type": "object",
+      "required": ["type", "coordinates"],
+      "properties": {
+        "type": { "const": "Point" },
+        "coordinates": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "type": ["number", "null"] }
+        }
+      }
+    },
+    "properties": {
+      "type": "object",
+      "required": ["time", "status", "feed"],
+      "properties": {
+        "mag": { "type": ["number", "null"] },
+        "magType": { "type": ["string", "null"] },
+        "place": { "type": ["string", "null"] },
+        "time": { "type": "integer" },
+        "updated": { "type": ["integer", "null"] },
+        "status": { "type": ["string", "null"] },
+        "type": { "type": ["string", "null"] },
+        "feed": {
+          "type": "object",
+          "required": ["schema_version", "feed_id", "event_time", "ingest_time", "revision", "chosen_provider", "provenance"],
+          "properties": {
+            "schema_version": { "type": "integer" },
+            "feed_id": { "type": "string" },
+            "event_time": { "type": "string", "format": "date-time" },
+            "ingest_time": { "type": "string", "format": "date-time" },
+            "first_seen_seq": { "type": "integer" },
+            "ingest_seq": { "type": "integer" },
+            "revision": { "type": "integer" },
+            "tombstone": { "type": "boolean" },
+            "chosen_provider": { "type": "string" },
+            "aliases": { "type": "array", "items": { "type": "string" } },
+            "provenance": { "type": "array", "items": { "type": "object" } }
+          }
+        }
+      }
+    }
+  }
+}

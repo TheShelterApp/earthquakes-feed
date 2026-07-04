@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://earthquakes-feed.theshelter.app/schema/observation.schema.json",
+  "title": "Observation atom",
+  "description": "One provider's report of one event at one moment of our knowledge. Append-only line of knowledge/observations/ingest=YYYY/MM/DD/HH.ndjson.",
+  "type": "object",
+  "required": ["seq", "op", "feed_id", "revision", "ingest_time", "event_time", "provider", "provider_event_id", "lat", "lon"],
+  "properties": {
+    "seq": { "type": "integer", "minimum": 0, "description": "Global monotonic knowledge clock." },
+    "op": { "enum": ["observe", "tombstone", "correction", "merge", "supersede"] },
+    "feed_id": { "type": "string", "pattern": "^efd_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "ingest_time": { "type": "string", "format": "date-time" },
+    "event_time": { "type": "string", "format": "date-time" },
+    "provider": { "type": "string" },
+    "provider_event_id": { "type": "string" },
+    "provider_updated": { "type": ["string", "null"], "format": "date-time" },
+    "status": { "type": ["string", "null"] },
+    "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+    "lon": { "type": "number", "minimum": -180, "maximum": 180 },
+    "depth": { "type": ["number", "null"] },
+    "mag": { "type": ["number", "null"] },
+    "magType": { "type": ["string", "null"] },
+    "place": { "type": ["string", "null"] },
+    "backfilled": { "type": "boolean" },
+    "extra": { "type": "object" },
+    "reason": { "type": "string" },
+    "superseded_by": { "type": "string" }
+  },
+  "additionalProperties": false
+}

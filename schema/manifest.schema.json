@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://earthquakes-feed.theshelter.app/schema/manifest.schema.json",
+  "title": "Feed catalog manifest",
+  "type": "object",
+  "required": ["schema_version", "generated", "head_seq", "data_repo", "summaries", "partitions"],
+  "properties": {
+    "schema_version": { "type": "integer" },
+    "generated": { "type": "string", "format": "date-time" },
+    "head_seq": { "type": "integer" },
+    "data_repo": { "type": "string" },
+    "jsdelivr_base": { "type": "string" },
+    "event_count": { "type": "integer" },
+    "summaries": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["path", "count"],
+        "properties": {
+          "path": { "type": "string" },
+          "url": { "type": "string" },
+          "count": { "type": "integer" }
+        }
+      }
+    },
+    "partitions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["date", "path", "count"],
+        "properties": {
+          "date": { "type": "string" },
+          "path": { "type": "string" },
+          "url": { "type": "string" },
+          "count": { "type": "integer" },
+          "bytes": { "type": "integer" },
+          "min_mag": { "type": ["number", "null"] },
+          "max_mag": { "type": ["number", "null"] }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,24 @@
+name: health
+
+# Hourly heartbeat + freshness check. Also keeps scheduled workflows from being
+# auto-disabled after 60 days of inactivity.
+on:
+  schedule:
+    - cron: '25 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: data
+          fetch-depth: 1
+      - name: Check feed freshness
+        run: |
+          node -e "const s=require('./status.json');const a=(Date.now()-Date.parse(s.generated))/60000;console.log('head_seq='+s.head_seq+' events='+s.events_total+' age='+a.toFixed(1)+'min degraded=['+(s.degraded||[]).join(',')+']');if(a>20)console.error('::warning::feed is '+a.toFixed(0)+'min stale')"

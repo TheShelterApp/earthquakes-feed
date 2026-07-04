@@ -1,0 +1,63 @@
+name: derive
+
+# Phase 2: rebuild the derived views (rolling summaries, event-day partitions,
+# manifest) as a pure function of the log, then publish the live feed.
+# Immutable partitions serve via jsDelivr @sha; the fresh rolling feed is
+# published to Cloudflare Pages via Direct Upload (does NOT count against the
+# 500-builds/month cap), and only if CF secrets are configured.
+on:
+  workflow_run:
+    workflows: ['aggregate']
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: earthquakes-feed-writer
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  derive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: data
+          path: .data
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - name: Derive views
+        env:
+          DATA_DIR: .data
+          PUBLIC_DIR: public
+        run: npx tsx src/derive.ts
+      - name: Validate output (size + schema gate)
+        env:
+          DATA_DIR: .data
+        run: npx tsx src/validate.ts
+      - name: Commit & push derived views
+        working-directory: .data
+        run: |
+          git config user.name  "earthquakes-feed-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -A
+          git commit -m "derive: views @ $(date -u +%FT%TZ)" || { echo 'no changes'; exit 0; }
+          git pull --rebase --autostash origin data || true
+          git push origin HEAD:data
+      - name: Publish live feed to Cloudflare Pages (Direct Upload)
+        if: ${{ env.CF_API_TOKEN != '' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ env.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ env.CF_ACCOUNT_ID }}
+        run: npx wrangler@3 pages deploy public --project-name=earthquakes-feed --branch=main --commit-dirty=true

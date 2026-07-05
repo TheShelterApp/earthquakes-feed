@@ -24,6 +24,11 @@ export const SWARM_CELL_ABSOLUTE = 50;
 export const MAG_MERGE_MAX_DELTA = 0.8;
 /** Only events within this many days are kept in the in-memory dedup index. */
 export const HOT_WINDOW_DAYS = 7;
+/** aggregate loads only this many days of event_map shards (fast hot path). */
+export const LIVE_INDEX_DAYS = Number(process.env.LIVE_INDEX_DAYS ?? 10);
+/** derive loads this many days (covers the 30-day month summary + revision tail);
+ *  event_map shards older than this are pruned (their identity lives in frozen partitions). */
+export const EVENT_MAP_HORIZON_DAYS = Number(process.env.EVENT_MAP_HORIZON_DAYS ?? 45);
 
 // --- fetching ---
 export const FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS ?? 8000);
@@ -56,8 +61,11 @@ export function dataPaths(root = DATA_DIR) {
     snapshotsDir: join(root, 'knowledge', 'snapshots'),
     indexDir: join(root, 'knowledge', 'index'),
     head: join(root, 'knowledge', 'index', 'head.json'),
-    eventMap: join(root, 'knowledge', 'index', 'event_map.ndjson'),
+    eventMapDir: join(root, 'knowledge', 'index', 'event_map'),
+    eventMapLegacy: join(root, 'knowledge', 'index', 'event_map.ndjson'),
     watermarks: join(root, 'knowledge', 'index', 'watermarks.json'),
+    backfillCursor: join(root, 'knowledge', 'index', 'backfill.json'),
+    archivesIndex: join(root, 'knowledge', 'index', 'archives.json'),
     eventsDir: join(root, 'events'),
     feedDir: join(root, 'v1'),
     manifest: join(root, 'manifest.json'),

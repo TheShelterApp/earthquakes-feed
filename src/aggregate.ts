@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { DATA_DIR, HOT_WINDOW_DAYS, dataPaths } from './config.js';
-import { appendObservations, loadState, saveState } from './bitemporal.js';
+import { DATA_DIR, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS, dataPaths } from './config.js';
+import { appendObservations, loadState, saveEventMap, saveMeta } from './bitemporal.js';
 import { Resolver, type IngestResult } from './dedup.js';
 import { activeProviders, configMap, fetchProvider, loadRegistry, priorityMap } from './providers.js';
 import type { Observation, RawObs } from './types.js';
@@ -69,7 +69,7 @@ async function main(): Promise<void> {
   const ingestTime = process.env.RUN_INGEST_TIME ?? isoFromMs(nowMs);
   const all = loadRegistry();
   const active = activeProviders(all);
-  const state = loadState(DATA_DIR);
+  const state = loadState(DATA_DIR, { sinceDays: LIVE_INDEX_DAYS, nowMs });
   assertHeadMatchesLog(DATA_DIR, state.head.seq);
   const resolver = new Resolver(state.eventMap, priorityMap(all), configMap(all), nowMs);
 
@@ -116,7 +116,7 @@ async function main(): Promise<void> {
   const status = {
     generated: ingestTime,
     head_seq: seq,
-    events_total: state.eventMap.size,
+    events_indexed: state.eventMap.size,
     observations_returned: fetched.length,
     stale_dropped: staleDropped,
     new_observations: newObs.length,
@@ -124,10 +124,11 @@ async function main(): Promise<void> {
     degraded,
     providers,
   };
-  saveState(DATA_DIR, state, status);
+  saveEventMap(DATA_DIR, state.eventMap);
+  saveMeta(DATA_DIR, state.head, state.watermarks, status);
 
   console.log(
-    `aggregate: seq=${seq} events=${state.eventMap.size} fetched=${fetched.length} stale_dropped=${staleDropped} new=${newObs.length} ` +
+    `aggregate: seq=${seq} indexed=${state.eventMap.size} fetched=${fetched.length} stale_dropped=${staleDropped} new=${newObs.length} ` +
       `providers=${outcomes.filter((o) => o.status.ok).length}/${outcomes.length}` +
       (degraded.length ? ` degraded=[${degraded.join(',')}]` : ''),
   );

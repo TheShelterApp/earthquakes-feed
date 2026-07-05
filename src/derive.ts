@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   DATA_DIR,
+  EVENT_MAP_HORIZON_DAYS,
   JSDELIVR_BASE,
   PUBLIC_DIR,
   REPO,
@@ -10,7 +10,7 @@ import {
   SUMMARY_WINDOWS,
   dataPaths,
 } from './config.js';
-import { loadState, nodeToFeature } from './bitemporal.js';
+import { loadState, nodeToFeature, pruneEventMapShards, writeIfChanged } from './bitemporal.js';
 import type { EventNode } from './types.js';
 import { isoFromMs } from './util.js';
 
@@ -31,14 +31,6 @@ const FUTURE_LEEWAY_MS = 10 * 60_000;
 
 const NOTICE =
   'Aggregated by earthquakes-feed (https://earthquakes-feed.theshelter.app). Per-source attribution in each feature properties.feed.provenance[]. Sources include USGS/ANSS (public domain), EMSC/CSEM and FDSN networks (CC-BY-4.0).';
-
-/** Write only when content differs — keeps git blobs and Pages hashes stable. */
-function writeIfChanged(file: string, data: string): boolean {
-  if (existsSync(file) && readFileSync(file, 'utf8') === data) return false;
-  mkdirSync(join(file, '..'), { recursive: true });
-  writeFileSync(file, data);
-  return true;
-}
 
 const dayKey = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
@@ -151,7 +143,7 @@ function headers(todayKey: string): string {
 
 function main(): void {
   const nowMs = Date.now();
-  const state = loadState(DATA_DIR);
+  const state = loadState(DATA_DIR, { sinceDays: EVENT_MAP_HORIZON_DAYS, nowMs });
   const publicV1 = join(PUBLIC_DIR, 'v1');
   const live = [...state.eventMap.values()].filter((n: EventNode) => n.state === 'live');
   const feats: Feat[] = live
@@ -189,9 +181,13 @@ function main(): void {
   writeIfChanged(join(DATA_DIR, 'manifest.json'), manifest);
   writeIfChanged(join(PUBLIC_DIR, '_headers'), headers(dayKey(nowMs)));
 
+  // Old identity now lives in frozen partitions — drop event_map shards past the horizon (C1).
+  const pruned = pruneEventMapShards(DATA_DIR, nowMs - EVENT_MAP_HORIZON_DAYS * 86_400_000);
+
   console.log(
     `derive: live=${feats.length} summaries=${Object.keys(summ).length} partitions=${parts.list.length} rewritten=${parts.written}` +
-      (dropped ? ` future_dropped=${dropped}` : ''),
+      (dropped ? ` future_dropped=${dropped}` : '') +
+      (pruned.length ? ` pruned_shards=${pruned.length}` : ''),
   );
 }
 

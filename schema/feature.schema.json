@@ -38,10 +38,13 @@
             "feed_id": { "type": "string" },
             "event_time": { "type": "string", "format": "date-time" },
             "ingest_time": { "type": "string", "format": "date-time" },
+            "first_ingest_time": { "type": "string", "format": "date-time" },
             "first_seen_seq": { "type": "integer" },
             "ingest_seq": { "type": "integer" },
             "revision": { "type": "integer" },
+            "state": { "enum": ["live", "tombstoned", "superseded"] },
             "tombstone": { "type": "boolean" },
+            "superseded_by": { "type": "string" },
             "chosen_provider": { "type": "string" },
             "aliases": { "type": "array", "items": { "type": "string" } },
             "provenance": { "type": "array", "items": { "type": "object" } }

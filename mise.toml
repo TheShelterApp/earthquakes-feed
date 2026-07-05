@@ -1,0 +1,7 @@
+[tools]
+node = "20"
+
+# Explicitly opt in to reading .nvmrc so mise doesn't emit the idiomatic-version-file
+# deprecation warning (its default is changing; this pins the behavior).
+[settings]
+idiomatic_version_file_enable_tools = ["node"]

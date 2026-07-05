@@ -136,10 +136,19 @@ const maxUpdated = (node: EventNode): number | null => {
 /** Materialize an EventNode into a USGS-GeoJSON-superset Feature, losslessly. */
 export function nodeToFeature(node: EventNode): unknown {
   const updated = maxUpdated(node);
+  // 2-element [lon, lat] when depth is unknown — never emit a null Z, so strictly
+  // typed consumers (iOS `coordinates: [Double]`) can decode every Feature.
+  const coordinates =
+    node.depth == null
+      ? [round6(node.lon), round6(node.lat)]
+      : [round6(node.lon), round6(node.lat), node.depth];
   return {
     type: 'Feature',
     id: node.feedId,
-    geometry: { type: 'Point', coordinates: [round6(node.lon), round6(node.lat), node.depth] },
+    // Top-level `source` mirrors `properties.net` (the chosen network). Lets a strict
+    // client key its source enum off one required field without reading `properties`.
+    source: node.chosenProvider,
+    geometry: { type: 'Point', coordinates },
     properties: {
       mag: node.mag,
       magType: node.magType,
@@ -149,6 +158,12 @@ export function nodeToFeature(node: EventNode): unknown {
       status: node.status,
       tsunami: node.extra['tsunami'] ?? 0,
       sig: node.extra['sig'] ?? null,
+      // Hoist the quality metrics USGS clients read at top level (still kept verbatim
+      // in provenance[].extra); null when the chosen provider didn't report them.
+      nst: node.extra['nst'] ?? null,
+      dmin: node.extra['dmin'] ?? null,
+      rms: node.extra['rms'] ?? null,
+      gap: node.extra['gap'] ?? null,
       net: node.chosenProvider,
       type: (node.extra['type'] as string) ?? 'earthquake',
       feed: {
@@ -190,7 +205,7 @@ export function nodeToFeature(node: EventNode): unknown {
 
 interface FeatureShape {
   id: string;
-  geometry: { coordinates: [number, number, number | null] };
+  geometry: { coordinates: [number, number, (number | null)?] };
   properties: {
     mag: number | null;
     magType: string | null;
@@ -206,7 +221,9 @@ export function featureToNode(feature: unknown): EventNode {
   const f = feature as FeatureShape;
   const props = f.properties;
   const feed = props.feed;
-  const [lon, lat, depth] = f.geometry.coordinates;
+  const [lon, lat] = f.geometry.coordinates;
+  // Accept both new 2-element [lon, lat] (undefined) and legacy [lon, lat, null].
+  const depth = f.geometry.coordinates[2] ?? null;
   const provenance: ProvenanceRow[] = (feed['provenance'] as Record<string, unknown>[]).map((r) => ({
     provider: r['provider'] as string,
     nativeId: r['native_id'] as string,

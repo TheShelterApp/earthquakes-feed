@@ -70,8 +70,12 @@ Last run's per-provider health, counts, timings, `degraded[]`.
 ## The Feature
 
 USGS-GeoJSON superset. Top-level `properties` is USGS-standard (`mag`, `magType`,
-`place`, `time` ms, `updated` ms, `status`, `net`, `type`). Feed data is under
-`properties.feed`:
+`place`, `time` ms, `updated` ms, `status`, `net`, `tsunami`, `sig`, `nst`, `dmin`,
+`rms`, `gap`, `type`). A top-level **`source`** (string, = `properties.net`, the chosen
+network) sits beside `id`/`geometry`/`properties` for clients that key a source enum off
+one required field. `geometry.coordinates` is `[lon, lat]` or `[lon, lat, depthKm]` — the
+depth slot is **omitted (never null)** when unknown, so a strictly typed
+`[Double]`/`[number]` decoder never trips. Feed data is under `properties.feed`:
 
 | `feed.*` | Meaning |
 |---|---|

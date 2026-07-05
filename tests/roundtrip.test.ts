@@ -45,6 +45,36 @@ test('nodeToFeature <-> featureToNode is byte-identical round-trip', () => {
   assert.equal(back.chosenProvider, 'usgs');
 });
 
+test('Feature carries the iOS contract fields (source, hoisted metrics)', () => {
+  const f = nodeToFeature(buildNode()) as {
+    source: string;
+    geometry: { coordinates: number[] };
+    properties: { net: string; nst: number | null; dmin: number | null; rms: number | null; gap: number | null };
+  };
+  assert.equal(f.source, 'usgs', 'top-level source = chosen network (required by iOS Earthquake)');
+  assert.equal(f.source, f.properties.net, 'source mirrors properties.net');
+  assert.equal(f.geometry.coordinates.length, 3, 'depth present -> [lon, lat, depth]');
+  assert.equal(f.properties.nst, 41, 'nst hoisted from chosen provenance');
+  assert.equal(f.properties.gap, 71, 'gap hoisted from chosen provenance');
+  assert.equal(f.properties.dmin, null, 'unreported metric hoists to null, not undefined');
+});
+
+test('null depth -> 2-element coords (no null Z) and lossless round-trip', () => {
+  const node = buildNode();
+  node.depth = null;
+  for (const r of node.provenance) r.depth = null;
+  const f = nodeToFeature(node) as { geometry: { coordinates: number[] } };
+  assert.deepEqual(f.geometry.coordinates.length, 2, 'omit the Z entirely when depth is unknown');
+  assert.ok(
+    f.geometry.coordinates.every((c) => typeof c === 'number'),
+    'never emit a null coordinate (would fail iOS [Double] decode)',
+  );
+  const f1 = JSON.stringify(f);
+  const f2 = JSON.stringify(nodeToFeature(featureToNode(JSON.parse(f1))));
+  assert.equal(f2, f1, 'null-depth Feature round-trips byte-identically');
+  assert.equal(featureToNode(JSON.parse(f1)).depth, null, 'depth reconstructs as null');
+});
+
 test('event_map shards: save by day, load by window, prune, migrate legacy', () => {
   const root = mkdtempSync(join(tmpdir(), 'efd-shard-'));
   try {

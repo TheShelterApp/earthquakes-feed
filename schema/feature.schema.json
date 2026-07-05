@@ -7,6 +7,7 @@
   "properties": {
     "type": { "const": "Feature" },
     "id": { "type": "string", "pattern": "^efd_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "source": { "type": "string", "description": "Chosen network (mirrors properties.net). Always emitted going forward; absent on partitions written before v1.1 — read `source ?? net`." },
     "geometry": {
       "type": "object",
       "required": ["type", "coordinates"],
@@ -15,7 +16,9 @@
         "coordinates": {
           "type": "array",
           "minItems": 2,
-          "items": { "type": ["number", "null"] }
+          "maxItems": 3,
+          "items": { "type": ["number", "null"] },
+          "description": "[lon, lat] or [lon, lat, depthKm]. New writes omit the depth slot when unknown; legacy partitions may carry a null Z."
         }
       }
     },
@@ -29,6 +32,13 @@
         "time": { "type": "integer" },
         "updated": { "type": ["integer", "null"] },
         "status": { "type": ["string", "null"] },
+        "net": { "type": ["string", "null"] },
+        "tsunami": { "type": ["integer", "null"] },
+        "sig": { "type": ["integer", "null"] },
+        "nst": { "type": ["integer", "null"] },
+        "dmin": { "type": ["number", "null"] },
+        "rms": { "type": ["number", "null"] },
+        "gap": { "type": ["number", "null"] },
         "type": { "type": ["string", "null"] },
         "feed": {
           "type": "object",

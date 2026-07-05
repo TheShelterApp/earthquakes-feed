@@ -57,16 +57,20 @@ overrides `archives[]` for any day in both).
 ### The Feature shape
 
 Top-level `properties` is USGS-style (`mag`, `place`, `time` in ms, `updated`,
-`status`, `net`, …). Feed-specific data lives under `properties.feed`:
+`status`, `net`, `nst`/`dmin`/`rms`/`gap`, …). A top-level `source` (= `net`) sits beside
+`id`/`geometry`/`properties`; `coordinates` omits the depth slot (never `null`) when
+unknown. Feed-specific data lives under `properties.feed`:
 
 ```jsonc
 {
   "type": "Feature",
   "id": "efd_01KWQM1FJ06ZG64AHRSAVXS7CW",     // stable feed id, never churns
-  "geometry": { "type": "Point", "coordinates": [lon, lat, depthKm] },
+  "source": "usgs",                            // = properties.net (chosen network)
+  "geometry": { "type": "Point", "coordinates": [lon, lat, depthKm] },  // [lon, lat] if depth unknown
   "properties": {
     "mag": 4.6, "magType": "ml", "place": "…", "time": 1783204207460,
     "updated": 1783204304415, "status": "reviewed", "net": "usgs", "type": "earthquake",
+    "nst": 41, "dmin": 0.35, "rms": 0.82, "gap": 71,
     "feed": {
       "feed_id": "efd_…",
       "event_time": "…Z", "ingest_time": "…Z",   // the two clocks

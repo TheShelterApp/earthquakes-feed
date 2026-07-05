@@ -64,6 +64,7 @@ export function dataPaths(root = DATA_DIR) {
     eventMapLegacy: join(root, 'knowledge', 'index', 'event_map.ndjson'),
     watermarks: join(root, 'knowledge', 'index', 'watermarks.json'),
     backfillCursor: join(root, 'knowledge', 'index', 'backfill.json'),
+    onboardCursor: join(root, 'knowledge', 'index', 'onboard.json'),
     archivesIndex: join(root, 'knowledge', 'index', 'archives.json'),
     partitionsIndex: join(root, 'knowledge', 'index', 'partitions.json'),
     eventsDir: join(root, 'events'),

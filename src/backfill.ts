@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dataPaths } from './config.js';
+import { type BackfillCfg, backfillCfg } from './backfill-cfg.js';
 import { readArchivedDays } from './archive-io.js';
 import { eventDayKey } from './bitemporal.js';
 import { Resolver } from './dedup.js';
@@ -31,28 +32,6 @@ interface ProviderCursor {
 interface Cursor {
   targetStart: string;
   providers: Record<string, ProviderCursor>;
-}
-
-interface BackfillCfg {
-  earliestMs: number;
-  minmag?: number;
-  maxWindowDays: number;
-  initialWindowDays: number;
-}
-
-/** A provider is backfill-eligible if it is FDSN or one of the time-range custom APIs,
- *  unless the registry explicitly disables it. */
-function backfillCfg(p: ProviderConfig): BackfillCfg | null {
-  const eligible = p.adapter === 'fdsn' || p.id === 'afad' || p.id === 'kagsr';
-  const enabled = p.backfill?.enabled ?? eligible;
-  if (!enabled) return null;
-  const isAfad = p.id === 'afad';
-  return {
-    earliestMs: Date.parse(`${p.backfill?.earliest ?? (isAfad ? '2015-01-01' : '1990-01-01')}T00:00:00Z`),
-    minmag: p.backfill?.minmag,
-    maxWindowDays: p.backfill?.maxWindowDays ?? (isAfad ? 7 : 30),
-    initialWindowDays: p.backfill?.initialWindowDays ?? (isAfad ? 3 : 14),
-  };
 }
 
 const dayStartMs = (dayKey: string): number => Date.parse(`${dayKey}T00:00:00Z`);

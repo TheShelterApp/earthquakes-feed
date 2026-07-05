@@ -1,7 +1,8 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DATA_DIR, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS, dataPaths } from './config.js';
-import { appendObservations, loadState, saveEventMap, saveMeta } from './bitemporal.js';
+import { appendObservations, earliestEventMapDay, loadState, saveEventMap, saveMeta } from './bitemporal.js';
+import { onboardStep } from './onboard.js';
 import { Resolver, type IngestResult } from './dedup.js';
 import { activeProviders, configMap, fetchProvider, fetchProviderDeleted, fetchProviderUpdated, loadRegistry, priorityMap } from './providers.js';
 import type { Observation, Op, RawObs } from './types.js';
@@ -184,6 +185,17 @@ async function main(): Promise<void> {
   };
   saveEventMap(DATA_DIR, state.eventMap);
   saveMeta(DATA_DIR, state.head, state.watermarks, status);
+
+  // Onboard a newly-added source's recent live window [liveDay, now-lookback] into the
+  // event_map (one paced chunk/run) so it has NO gap between the live path and deep backfill.
+  // Runs after the main save (loads the just-saved shards fresh); fail-safe — never breaks
+  // the critical aggregate run. derive rebuilds the touched partitions on its next run.
+  try {
+    const ob = await onboardStep(DATA_DIR, all, active, earliestEventMapDay(DATA_DIR, nowMs), nowMs, ingestTime);
+    if (ob.provider) console.log(`onboard: ${JSON.stringify(ob)}`);
+  } catch (err) {
+    console.error(`onboard: step failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   console.log(
     `aggregate: seq=${seq} indexed=${state.eventMap.size} fetched=${fetched.length} stale_dropped=${staleDropped} new=${newObs.length} revisions=${revisions} tombstoned=${tombstoned} ` +

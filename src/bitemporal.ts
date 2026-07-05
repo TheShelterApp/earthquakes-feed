@@ -85,6 +85,19 @@ export function pruneEventMapShards(root: string, beforeMs: number): string[] {
   return pruned;
 }
 
+/** Oldest UTC event-day that still has an event_map shard — the live-window floor.
+ *  Backfill fills strictly before it; onboarding fills the recent window at/after it. */
+export function earliestEventMapDay(root: string, nowMs: number): string {
+  const dir = dataPaths(root).eventMapDir;
+  const today = eventDayKey(nowMs);
+  if (!existsSync(dir)) return today;
+  const days = readdirSync(dir)
+    .filter((f) => f.endsWith('.ndjson'))
+    .map((f) => f.slice(0, 10))
+    .sort();
+  return days[0] ?? today;
+}
+
 export function loadState(root: string, opts: { sinceDays?: number; nowMs?: number } = {}): State {
   const p = dataPaths(root);
   return {

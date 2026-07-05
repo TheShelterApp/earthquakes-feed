@@ -54,7 +54,8 @@ export const NULLABLE_STD_KEYS = ['tz', 'url', 'detail', 'felt', 'cdi', 'mmi', '
 export const EXTRA_CANON_KEYS = ['author', 'magAuthor', 'catalog', 'contributor', 'contributorId', 'country', 'province', 'district', 'neighborhood', 'region'] as const;
 const QUALITY_KEYS = ['nst', 'gap', 'dmin', 'rms'] as const;
 
-function pick(fields: Extra, spec: Spec): number | string | boolean | null {
+function pick(fields: Extra | null | undefined, spec: Spec): number | string | boolean | null {
+  if (!fields) return null;
   for (const a of spec.aliases) {
     const v = fields[a];
     if (v != null && v !== '') return spec.num ? num(v) : v;
@@ -82,8 +83,10 @@ export function mergeCanonical(orderedFields: Extra[]): Extra {
   return out;
 }
 
-/** How many quality metrics (nst/gap/dmin/rms) a record carries — a richness signal. */
-export function qualityCount(fields: Extra): number {
+/** How many quality metrics (nst/gap/dmin/rms) a record carries — a richness signal.
+ *  Tolerant of a missing field-map (never crash dedup on a malformed row). */
+export function qualityCount(fields: Extra | null | undefined): number {
+  if (!fields) return 0;
   let n = 0;
   for (const k of QUALITY_KEYS) if (fields[k] != null) n++;
   return n;

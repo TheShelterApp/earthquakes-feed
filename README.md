@@ -152,8 +152,13 @@ copyrightable expression) and honor removal requests reactively — see
 
 Live end-to-end: 18 sources, stateful dedup, bitemporal log, 20 rolling feeds,
 per-day partitions + Pages day files, manifest, CI, and Cloudflare Pages serving.
+State scales: `event_map` is sharded by day and pruned to a 45-day dedup horizon,
+with older identity preserved in the day partitions.
 
-**Roadmap** (see the engineering review for detail): shard the `event_map` state by
-day and prune it; `updatedafter` revision/tombstone tracking; monthly Release
-archival; historical backfill (paced, ~3-year target); `@sha` immutable partition
-URLs; `op:merge` survivor selection; knowledge-time snapshots. Contributions welcome.
+Historical **backfill** (paced, idempotent, ~3-year target) and monthly **Release
+archival** of cold months are implemented (`backfill.yml` is dispatch-only and the
+auto-fill cron turns on once archival is confirmed rolling).
+
+**Roadmap:** `updatedafter` revision/tombstone tracking; `@sha` immutable partition
+URLs; `op:merge` survivor selection; knowledge-time snapshots; an external 5-minute
+heartbeat for tighter freshness. Contributions welcome.

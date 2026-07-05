@@ -6,7 +6,8 @@ name: archive
 # un-metered cold storage. Runs monthly + on demand.
 on:
   schedule:
-    - cron: '17 3 2 * *'
+    # Every 6h so cold months roll promptly while backfill is actively growing history.
+    - cron: '17 */6 * * *'
   workflow_dispatch:
 
 concurrency:

@@ -9,6 +9,8 @@ import { isoFromMs } from './util.js';
 
 const DAY = 86_400_000;
 const HOT_DAYS = Number(process.env.ARCHIVE_HOT_DAYS ?? 120);
+/** Cap months per run so a run stays short and doesn't hog the shared writer group. */
+const MAX_MONTHS = Number(process.env.ARCHIVE_MAX_MONTHS ?? 12);
 const DRY_RUN = process.env.ARCHIVE_DRY_RUN === '1';
 
 interface ArchiveEntry {
@@ -113,6 +115,10 @@ function main(): void {
 
   try {
     for (const [month, { days, files }] of [...months.entries()].sort()) {
+      if (archived >= MAX_MONTHS) {
+        console.log(`archive: reached per-run cap (${MAX_MONTHS}); remaining months roll next run`);
+        break;
+      }
       // Only fully-cold months (every day older than the hot window).
       if (days.some((d) => d >= cutoff)) continue;
       const entry = archives.list.find((a) => a.period === month);

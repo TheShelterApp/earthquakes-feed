@@ -102,13 +102,12 @@ async function main(): Promise<void> {
   const liveDayMs = dayStartMs(liveDay);
   // Days already rolled to Releases are no longer in-tree; touching them would re-mint
   // duplicates (their nodes aren't in the transient index). Skip them.
-  const archivedDays = new Set<string>();
   const archFile = dataPaths(root).archivesIndex;
-  if (existsSync(archFile)) {
-    for (const a of (JSON.parse(readFileSync(archFile, 'utf8')) as { list?: { days?: string[] }[] }).list ?? []) {
-      for (const d of a.days ?? []) archivedDays.add(d);
-    }
-  }
+  const archives = existsSync(archFile)
+    ? (JSON.parse(readFileSync(archFile, 'utf8')) as { list: { period: string; days?: string[]; needs_reroll?: boolean }[] })
+    : { list: [] };
+  const archivedDays = new Set<string>();
+  for (const a of archives.list) for (const d of a.days ?? []) archivedDays.add(d);
   const cursor = loadCursor(root, nowMs, liveDay);
   const targetMs = dayStartMs(cursor.targetStart);
 
@@ -121,20 +120,26 @@ async function main(): Promise<void> {
   interface Job {
     p: ProviderConfig;
     cfg: BackfillCfg;
-    cur: ProviderCursor;
+    cur: ProviderCursor | null;
     startMs: number;
     endMs: number;
   }
+  // Dispatch is a one-off fill of an explicit range — it must NOT move the auto-cursor,
+  // or it leaves a gap (the auto-walk would skip the range between it and the live edge).
+  const isDispatch = dispatchStart != null && dispatchEnd != null;
   const jobs: Job[] = [];
   for (const p of providers) {
     if (onlyProviders && !onlyProviders.has(p.id)) continue;
     const cfg = backfillCfg(p);
     if (!cfg) continue;
+    if (isDispatch) {
+      jobs.push({ p, cfg, cur: null, startMs: dispatchStart, endMs: dispatchEnd });
+      continue;
+    }
     const cur = (cursor.providers[p.id] ??= { filledBackTo: liveDay, windowDays: cfg.initialWindowDays, done: false, failures: 0, lastCount: 0, lastRun: '' });
-    if (cur.done && !dispatchStart) continue;
-    const endMs = dispatchEnd ?? Math.min(dayStartMs(cur.filledBackTo), liveDayMs);
-    const lowerBound = dispatchStart ?? Math.max(targetMs, cfg.earliestMs);
-    const startMs = Math.max(lowerBound, endMs - cur.windowDays * DAY);
+    if (cur.done) continue;
+    const endMs = Math.min(dayStartMs(cur.filledBackTo), liveDayMs);
+    const startMs = Math.max(targetMs, cfg.earliestMs, endMs - cur.windowDays * DAY);
     if (startMs >= endMs) {
       cur.done = true;
       continue;
@@ -169,26 +174,30 @@ async function main(): Promise<void> {
   for (let i = 0; i < jobs.length; i++) {
     const j = jobs[i]!;
     const res = results[i]!;
-    j.cur.lastRun = ingestTime;
+    const cur = j.cur;
+    if (cur) cur.lastRun = ingestTime;
     if (res.overflow) {
-      j.cur.windowDays = Math.max(1, Math.floor(j.cur.windowDays / 2));
+      // Truncated window: retry narrower next run, ingest nothing (avoid partial-window gaps).
+      if (cur) cur.windowDays = Math.max(1, Math.floor(cur.windowDays / 2));
       overflowCount++;
-      continue; // do not advance filledBackTo; retry a narrower window next run
-    }
-    if (!res.status.ok) {
-      j.cur.failures++;
       continue;
     }
-    j.cur.failures = 0;
-    j.cur.lastCount = res.obs.length;
+    if (!res.status.ok) {
+      if (cur) cur.failures++;
+      continue;
+    }
     for (const o of res.obs) {
       const day = eventDayKey(o.eventTimeMs);
       if (day < liveDay && !archivedDays.has(day)) raws.push(o);
     }
-    // Advance + adapt the window (grow when sparse).
-    j.cur.filledBackTo = eventDayKey(j.startMs);
-    if (res.obs.length < 0.3 * 5000) j.cur.windowDays = Math.min(j.cfg.maxWindowDays, Math.ceil(j.cur.windowDays * 1.5));
-    if (dayStartMs(j.cur.filledBackTo) <= Math.max(targetMs, j.cfg.earliestMs)) j.cur.done = true;
+    if (cur) {
+      cur.failures = 0;
+      cur.lastCount = res.obs.length;
+      // Advance + adapt the window (grow when sparse).
+      cur.filledBackTo = eventDayKey(j.startMs);
+      if (res.obs.length < 0.3 * 5000) cur.windowDays = Math.min(j.cfg.maxWindowDays, Math.ceil(cur.windowDays * 1.5));
+      if (dayStartMs(cur.filledBackTo) <= Math.max(targetMs, j.cfg.earliestMs)) cur.done = true;
+    }
   }
 
   raws.sort(
@@ -227,6 +236,17 @@ async function main(): Promise<void> {
     inv[day] = stat;
   }
   saveInventory(root, inv);
+  // If we wrote into a month that's partially archived, flag it so archive.ts re-rolls
+  // the whole month (merging the new in-tree days with the old Release asset).
+  const touchedMonths = new Set([...touchedDays].map((d) => d.slice(0, 7)));
+  let reroll = false;
+  for (const a of archives.list) {
+    if (touchedMonths.has(a.period) && !a.needs_reroll) {
+      a.needs_reroll = true;
+      reroll = true;
+    }
+  }
+  if (reroll) writeFileSync(archFile, JSON.stringify(archives, null, 2) + '\n');
   if (newObs.length) appendObservations(root, newObs);
   head.seq = seq;
   head.ingest_time = ingestTime;

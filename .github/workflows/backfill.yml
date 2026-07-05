@@ -1,17 +1,19 @@
 name: backfill
 
 # Walks history backward, one paced window per provider per run, into day partitions
-# (idempotent via the same dedup path). Dispatch-only for now; the scheduled auto-fill
-# is enabled once archive.yml is rolling old partitions to Releases (so the tree stays
-# bounded). A dispatch with start/end programs the cursor for a specific range.
+# (idempotent via the same dedup path), toward a 3-year target. Cold months are rolled
+# to Releases by archive.yml so the tree stays bounded. A dispatch with start/end is a
+# one-off fill of that range and does NOT move the auto-cursor.
 on:
+  schedule:
+    - cron: '41 * * * *'
   workflow_dispatch:
     inputs:
       starttime:
-        description: 'ISO start (e.g. 2025-01-01T00:00:00Z); blank = continue cursor'
+        description: 'ISO start (e.g. 2025-01-01T00:00:00Z); one-off, does not move the cursor'
         required: false
       endtime:
-        description: 'ISO end; blank = continue cursor'
+        description: 'ISO end'
         required: false
       providers:
         description: 'Comma-separated provider ids (blank = all eligible)'
@@ -19,8 +21,6 @@ on:
       minmag:
         description: 'Minimum magnitude (blank = provider default)'
         required: false
-  # schedule:
-  #   - cron: '41 * * * *'   # enable after archive.yml is live
 
 concurrency:
   group: earthquakes-feed-writer

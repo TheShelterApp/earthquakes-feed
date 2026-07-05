@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   DATA_DIR,
@@ -11,7 +12,15 @@ import {
   dataPaths,
 } from './config.js';
 import { loadState, nodeToFeature, pruneEventMapShards, writeIfChanged } from './bitemporal.js';
+import {
+  loadInventory,
+  manifestPartitions,
+  saveInventory,
+  writeDayPartition,
+  type Inventory,
+} from './partitions.js';
 import type { EventNode } from './types.js';
+import { eventDayKey } from './bitemporal.js';
 import { isoFromMs } from './util.js';
 
 interface Feat {
@@ -22,17 +31,11 @@ interface Feat {
 }
 
 const DOMAIN = 'https://earthquakes-feed.theshelter.app';
-/** Days of per-day GeoJSON published to Pages for the map time-slider. */
-const PAGES_DAY_WINDOW = 120;
-/** A day older than this is considered frozen (late revisions are rare beyond it). */
-const FROZEN_AFTER_DAYS = 3;
 /** Reject future-timestamped events (adapter timezone bugs) beyond this leeway. */
 const FUTURE_LEEWAY_MS = 10 * 60_000;
 
 const NOTICE =
   'Aggregated by earthquakes-feed (https://earthquakes-feed.theshelter.app). Per-source attribution in each feature properties.feed.provenance[]. Sources include USGS/ANSS (public domain), EMSC/CSEM and FDSN networks (CC-BY-4.0).';
-
-const dayKey = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
 function collectionJson(name: string, feats: Feat[], nowMs: number, headIngestTime: string): string {
   const ageSeconds = headIngestTime ? Math.max(0, Math.round((nowMs - Date.parse(headIngestTime)) / 1000)) : null;
@@ -75,57 +78,6 @@ function summaries(feats: Feat[], nowMs: number, publicV1: string, headIngestTim
   return out;
 }
 
-interface PartitionEntry {
-  date: string;
-  path: string;
-  url: string;
-  pages_url?: string;
-  count: number;
-  bytes: number;
-  min_mag: number | null;
-  max_mag: number | null;
-  frozen: boolean;
-}
-
-function partitions(feats: Feat[], nowMs: number, publicV1: string, headIngestTime: string): { list: PartitionEntry[]; written: number } {
-  const byDay = new Map<string, Feat[]>();
-  for (const f of feats) {
-    const key = dayKey(f.timeMs);
-    (byDay.get(key) ?? byDay.set(key, []).get(key)!).push(f);
-  }
-  const p = dataPaths(DATA_DIR);
-  const today = dayKey(nowMs);
-  const pagesFloor = dayKey(nowMs - PAGES_DAY_WINDOW * 86_400_000);
-  const frozenBefore = dayKey(nowMs - FROZEN_AFTER_DAYS * 86_400_000);
-  const list: PartitionEntry[] = [];
-  let written = 0;
-  for (const [key, dayFeats] of [...byDay.entries()].sort()) {
-    dayFeats.sort((a, b) => a.timeMs - b.timeMs);
-    const pathKey = key.replace(/-/g, '/');
-    // Committed partition: plain NDJSON (git delta-compresses text; CDNs compress on the wire).
-    const ndjson = dayFeats.map((f) => JSON.stringify(f.feature)).join('\n') + '\n';
-    if (writeIfChanged(join(p.eventsDir, `${pathKey}.ndjson`), ndjson)) written++;
-    // Pages copy for the map time-slider: a ready-to-render GeoJSON FeatureCollection.
-    const inPagesWindow = key >= pagesFloor;
-    if (inPagesWindow) {
-      writeIfChanged(join(publicV1, 'events', `${key}.geojson`), collectionJson(`events ${key}`, dayFeats, nowMs, headIngestTime));
-    }
-    const mags = dayFeats.map((f) => f.mag).filter((m): m is number => m != null);
-    list.push({
-      date: key,
-      path: `events/${pathKey}.ndjson`,
-      url: `${JSDELIVR_BASE}@data/events/${pathKey}.ndjson`,
-      ...(inPagesWindow ? { pages_url: `${DOMAIN}/v1/events/${key}.geojson` } : {}),
-      count: dayFeats.length,
-      bytes: Buffer.byteLength(ndjson),
-      min_mag: mags.length ? Math.min(...mags) : null,
-      max_mag: mags.length ? Math.max(...mags) : null,
-      frozen: key < frozenBefore && key !== today,
-    });
-  }
-  return { list, written };
-}
-
 function headers(todayKey: string): string {
   return [
     '/v1/*',
@@ -145,19 +97,30 @@ function main(): void {
   const nowMs = Date.now();
   const state = loadState(DATA_DIR, { sinceDays: EVENT_MAP_HORIZON_DAYS, nowMs });
   const publicV1 = join(PUBLIC_DIR, 'v1');
-  const live = [...state.eventMap.values()].filter((n: EventNode) => n.state === 'live');
-  const feats: Feat[] = live
+  const allNodes = [...state.eventMap.values()];
+
+  // Summaries: live events only, no future timestamps.
+  const liveFeats: Feat[] = allNodes
+    .filter((n: EventNode) => n.state === 'live' && n.eventTimeMs <= nowMs + FUTURE_LEEWAY_MS)
     .map((n) => ({
       feature: nodeToFeature(n),
       timeMs: n.eventTimeMs,
       mag: n.mag,
       sig: typeof n.extra['sig'] === 'number' ? (n.extra['sig'] as number) : null,
-    }))
-    .filter((f) => f.timeMs <= nowMs + FUTURE_LEEWAY_MS);
-  const dropped = live.length - feats.length;
+    }));
+  const summ = summaries(liveFeats, nowMs, publicV1, state.head.ingest_time);
 
-  const summ = summaries(feats, nowMs, publicV1, state.head.ingest_time);
-  const parts = partitions(feats, nowMs, publicV1, state.head.ingest_time);
+  // Partitions: every state, one file per event-day, only for the days we loaded.
+  const byDay = new Map<string, EventNode[]>();
+  for (const n of allNodes) (byDay.get(eventDayKey(n.eventTimeMs)) ?? byDay.set(eventDayKey(n.eventTimeMs), []).get(eventDayKey(n.eventTimeMs))!).push(n);
+  const inv: Inventory = loadInventory(DATA_DIR);
+  let rewritten = 0;
+  for (const [day, nodes] of byDay) {
+    const { written, stat } = writeDayPartition(DATA_DIR, day, nodes, { publicV1, nowMs, headIngestTime: state.head.ingest_time });
+    if (written) rewritten++;
+    inv[day] = stat;
+  }
+  saveInventory(DATA_DIR, inv);
 
   const manifest = JSON.stringify(
     {
@@ -165,30 +128,34 @@ function main(): void {
       generated: nowMs,
       generated_iso: isoFromMs(nowMs),
       head_seq: state.head.seq,
-      event_count: feats.length,
+      event_count: liveFeats.length,
       freshness: { expected_interval_seconds: 300, stale_after_seconds: 1800 },
       data_repo: REPO,
       jsdelivr_base: `${JSDELIVR_BASE}@data`,
       summaries: summ,
-      partitions: parts.list,
-      archives: [],
+      partitions: manifestPartitions(inv, nowMs),
+      archives: loadArchives(),
     },
     null,
     2,
   );
-  // Canonical manifest on Pages; a copy at the data-branch root for jsDelivr discovery.
   writeIfChanged(join(publicV1, 'manifest.json'), manifest);
   writeIfChanged(join(DATA_DIR, 'manifest.json'), manifest);
-  writeIfChanged(join(PUBLIC_DIR, '_headers'), headers(dayKey(nowMs)));
+  writeIfChanged(join(PUBLIC_DIR, '_headers'), headers(eventDayKey(nowMs)));
 
-  // Old identity now lives in frozen partitions — drop event_map shards past the horizon (C1).
   const pruned = pruneEventMapShards(DATA_DIR, nowMs - EVENT_MAP_HORIZON_DAYS * 86_400_000);
 
   console.log(
-    `derive: live=${feats.length} summaries=${Object.keys(summ).length} partitions=${parts.list.length} rewritten=${parts.written}` +
-      (dropped ? ` future_dropped=${dropped}` : '') +
+    `derive: live=${liveFeats.length} summaries=${Object.keys(summ).length} partitions=${byDay.size} rewritten=${rewritten}` +
       (pruned.length ? ` pruned_shards=${pruned.length}` : ''),
   );
+}
+
+/** Archive catalog (regenerated from archives.json, source of truth written by archive.ts). */
+function loadArchives(): unknown[] {
+  const f = dataPaths(DATA_DIR).archivesIndex;
+  if (!existsSync(f)) return [];
+  return (JSON.parse(readFileSync(f, 'utf8')) as { list?: unknown[] }).list ?? [];
 }
 
 main();

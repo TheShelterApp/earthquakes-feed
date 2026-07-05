@@ -79,12 +79,20 @@ const htmlDecode = (s: string): string =>
     .replace(/&gt;/g, '>')
     .replace(/&amp;/g, '&');
 
-export type CustomAdapter = (cfg: ProviderConfig, nowMs: number) => Promise<RawObs[]>;
+export interface Window {
+  startMs: number;
+  endMs: number;
+}
+export type CustomAdapter = (cfg: ProviderConfig, nowMs: number, window?: Window) => Promise<RawObs[]>;
 
-// --- Turkey: AFAD (local time UTC+3, dense down to ~M0.6) ---
-const afad: CustomAdapter = async (cfg, nowMs) => {
-  const start = fmt(nowMs - QUERY_LOOKBACK_MS).replace(' ', '%20');
-  const end = fmt(nowMs + 6 * 3_600_000).replace(' ', '%20');
+// --- Turkey: AFAD (query is local time UTC+3, dense down to ~M0.6) ---
+const afad: CustomAdapter = async (cfg, nowMs, window) => {
+  const startMs = window ? window.startMs : nowMs - QUERY_LOOKBACK_MS;
+  const endMs = window ? window.endMs : nowMs;
+  // Pad ±4h so the UTC window is fully covered by the local-time (UTC+3) query bounds;
+  // fetchProviderWindow re-filters to the exact UTC window afterward.
+  const start = fmt(startMs - 4 * 3_600_000).replace(' ', '%20');
+  const end = fmt(endMs + 4 * 3_600_000).replace(' ', '%20');
   const url = `${cfg.base}?start=${start}&end=${end}&orderby=timedesc&limit=500`;
   const raw = JSON.parse(await getText(url, { timeoutMs: 12_000, retries: 2 })) as unknown;
   const list = Array.isArray(raw) ? raw : ((raw as { eventList?: unknown[] }).eventList ?? []);
@@ -143,9 +151,11 @@ const tmd: CustomAdapter = async (cfg) => {
   return out.filter((o) => o.providerEventId);
 };
 
-// --- Russia (Kamchatka/Kurils): KAGSR — non-standard FDSN geojson, flaky ---
-const kagsr: CustomAdapter = async (cfg, nowMs) => {
-  const url = `${cfg.base}?format=geojson&starttime=${fmt(nowMs - QUERY_LOOKBACK_MS).replace(' ', 'T')}&endtime=${fmt(nowMs).replace(' ', 'T')}`;
+// --- Russia (Kamchatka/Kurils): KAGSR — non-standard FDSN geojson (UTC), flaky ---
+const kagsr: CustomAdapter = async (cfg, nowMs, window) => {
+  const startMs = window ? window.startMs : nowMs - QUERY_LOOKBACK_MS;
+  const endMs = window ? window.endMs : nowMs;
+  const url = `${cfg.base}?format=geojson&starttime=${fmt(startMs).replace(' ', 'T')}&endtime=${fmt(endMs).replace(' ', 'T')}`;
   const body = await getText(url, { timeoutMs: 15_000, retries: 3, ua: BROWSER_UA });
   const json = JSON.parse(body) as { features?: { geometry?: { coordinates?: number[] }; properties?: Record<string, unknown> }[] };
   const out: RawObs[] = [];

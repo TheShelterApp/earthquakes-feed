@@ -38,8 +38,11 @@ export class Resolver {
     private readonly priority: Map<string, number>,
     private readonly cfg: Map<string, ProviderConfig>,
     nowMs: number,
+    opts: { hotFloorMs?: number } = {},
   ) {
-    this.hotFloor = nowMs - HOT_WINDOW_DAYS * 86_400_000;
+    // Backfill passes hotFloorMs=0 to index events by event-time window (not wall-clock
+    // recency), so historical reports dedup against the transient partition index (C2).
+    this.hotFloor = opts.hotFloorMs ?? nowMs - HOT_WINDOW_DAYS * 86_400_000;
     for (const node of eventMap.values()) {
       if (node.state === 'live') {
         this.alias.set(`${node.chosenProvider}:${node.provenance.find((r) => r.chosen)?.nativeId ?? ''}`, node.feedId);

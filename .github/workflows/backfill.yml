@@ -1,0 +1,73 @@
+name: backfill
+
+# Walks history backward, one paced window per provider per run, into day partitions
+# (idempotent via the same dedup path). Dispatch-only for now; the scheduled auto-fill
+# is enabled once archive.yml is rolling old partitions to Releases (so the tree stays
+# bounded). A dispatch with start/end programs the cursor for a specific range.
+on:
+  workflow_dispatch:
+    inputs:
+      starttime:
+        description: 'ISO start (e.g. 2025-01-01T00:00:00Z); blank = continue cursor'
+        required: false
+      endtime:
+        description: 'ISO end; blank = continue cursor'
+        required: false
+      providers:
+        description: 'Comma-separated provider ids (blank = all eligible)'
+        required: false
+      minmag:
+        description: 'Minimum magnitude (blank = provider default)'
+        required: false
+  # schedule:
+  #   - cron: '41 * * * *'   # enable after archive.yml is live
+
+concurrency:
+  group: earthquakes-feed-writer
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: data
+          path: .data
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - name: Backfill
+        env:
+          DATA_DIR: .data
+          BACKFILL_STARTTIME: ${{ inputs.starttime }}
+          BACKFILL_ENDTIME: ${{ inputs.endtime }}
+          BACKFILL_PROVIDERS: ${{ inputs.providers }}
+        run: npx --no-install tsx src/backfill.ts
+      - name: Validate log delta
+        env:
+          DATA_DIR: .data
+        run: npx --no-install tsx src/validate.ts
+      - name: Commit & push
+        working-directory: .data
+        run: |
+          git config user.name  "earthquakes-feed-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add events knowledge
+          git commit -m "backfill: @ $(date -u +%FT%TZ)" || { echo 'no changes'; exit 0; }
+          for i in 1 2 3; do
+            git push origin HEAD:data && exit 0
+            git fetch origin data
+            git rebase origin/data || { git rebase --abort; echo '::error::rebase conflict'; exit 1; }
+          done
+          echo '::error::push failed after 3 attempts'; exit 1

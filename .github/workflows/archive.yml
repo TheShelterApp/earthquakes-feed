@@ -1,0 +1,54 @@
+name: archive
+
+# Rolls fully-cold event-months (older than the 120-day hot window) into monthly
+# tar.zst GitHub Release assets, then removes them from the tree — keeping the data
+# branch (and consumer clones) bounded while backfill grows history. Releases are
+# un-metered cold storage. Runs monthly + on demand.
+on:
+  schedule:
+    - cron: '17 3 2 * *'
+  workflow_dispatch:
+
+concurrency:
+  group: earthquakes-feed-writer
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: data
+          path: .data
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - name: Archive cold months to Releases
+        env:
+          DATA_DIR: .data
+          GH_TOKEN: ${{ github.token }}
+        run: npx --no-install tsx src/archive.ts
+      - name: Commit & push (tree pruned, index updated)
+        working-directory: .data
+        run: |
+          git config user.name  "earthquakes-feed-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add events knowledge
+          git commit -m "archive: roll cold months to Releases @ $(date -u +%FT%TZ)" || { echo 'no changes'; exit 0; }
+          for i in 1 2 3; do
+            git push origin HEAD:data && exit 0
+            git fetch origin data
+            git rebase origin/data || { git rebase --abort; echo '::error::rebase conflict'; exit 1; }
+          done
+          echo '::error::push failed after 3 attempts'; exit 1

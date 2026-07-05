@@ -23,12 +23,47 @@ export function configMap(all: ProviderConfig[]): Map<string, ProviderConfig> {
 /** FDSN-safe timestamp: no fractional seconds, no trailing Z (some nodes reject both). */
 const fdsnTime = (ms: number): string => isoFromMs(ms).slice(0, 19);
 
-function buildUrl(p: ProviderConfig, nowMs: number): string {
-  const params = new URLSearchParams({ format: p.queryFormat });
-  if (!p.noLimit) params.set('limit', String(FETCH_LIMIT));
-  if (p.supportsTimeRange) params.set('starttime', fdsnTime(nowMs - QUERY_LOOKBACK_MS));
-  for (const [k, v] of Object.entries(p.params ?? {})) params.set(k, v);
-  return `${p.base}?${params.toString()}`;
+interface FetchParams {
+  starttime?: number;
+  endtime?: number;
+  minmag?: number;
+}
+
+function buildUrl(p: ProviderConfig, params: FetchParams): string {
+  const q = new URLSearchParams({ format: p.queryFormat });
+  if (!p.noLimit) q.set('limit', String(FETCH_LIMIT));
+  if (params.starttime != null) q.set('starttime', fdsnTime(params.starttime));
+  if (params.endtime != null) q.set('endtime', fdsnTime(params.endtime));
+  if (params.minmag != null) q.set('minmagnitude', String(params.minmag));
+  for (const [k, v] of Object.entries(p.params ?? {})) q.set(k, v);
+  return `${p.base}?${q.toString()}`;
+}
+
+interface FdsnResult {
+  obs: RawObs[];
+  status: ProviderStatus;
+  overflow: boolean;
+}
+
+/** Fail-open FDSN fetch. `overflow` = the result likely hit the row cap (window too wide). */
+async function fetchFdsn(p: ProviderConfig, params: FetchParams): Promise<FdsnResult> {
+  try {
+    const res = await fetchText(buildUrl(p, params), FETCH_TIMEOUT_MS);
+    if (res.status === 204 || res.status === 404) {
+      return { obs: [], status: { ok: true, http_status: res.status, latency_ms: res.latencyMs, events_returned: 0 }, overflow: false };
+    }
+    if (res.status >= 400) {
+      return { obs: [], status: { ok: false, http_status: res.status, latency_ms: res.latencyMs, error: `HTTP ${res.status}` }, overflow: res.status === 400 || res.status === 413 };
+    }
+    const obs = p.parse === 'geojson' ? parseGeoJSON(res.body, p.id) : parseFdsnText(res.body, p.id);
+    return {
+      obs,
+      status: { ok: true, http_status: res.status, latency_ms: res.latencyMs, events_returned: obs.length },
+      overflow: !p.noLimit && obs.length >= FETCH_LIMIT,
+    };
+  } catch (err) {
+    return { obs: [], status: { ok: false, error: err instanceof Error ? err.message : String(err) }, overflow: false };
+  }
 }
 
 export interface FetchOutcome {
@@ -36,8 +71,11 @@ export interface FetchOutcome {
   obs: RawObs[];
   status: ProviderStatus;
 }
+export interface WindowOutcome extends FetchOutcome {
+  overflow: boolean;
+}
 
-/** Fail-open: any error yields zero observations and a `degraded` status, never a throw. */
+/** Live path: recent events only (starttime = now − lookback). Fail-open. */
 export async function fetchProvider(p: ProviderConfig, nowMs: number): Promise<FetchOutcome> {
   if (p.adapter.startsWith('custom')) {
     const adapter = CUSTOM_ADAPTERS[p.id];
@@ -50,19 +88,25 @@ export async function fetchProvider(p: ProviderConfig, nowMs: number): Promise<F
       return { provider: p.id, obs: [], status: { ok: false, latency_ms: Math.round(performance.now() - started), error: err instanceof Error ? err.message : String(err) } };
     }
   }
-  const url = buildUrl(p, nowMs);
-  try {
-    const res = await fetchText(url, FETCH_TIMEOUT_MS);
-    // FDSN "no data" is 204/404 — a successful empty result, not a failure.
-    if (res.status === 204 || res.status === 404) {
-      return { provider: p.id, obs: [], status: { ok: true, http_status: res.status, latency_ms: res.latencyMs, events_returned: 0 } };
+  const r = await fetchFdsn(p, p.supportsTimeRange ? { starttime: nowMs - QUERY_LOOKBACK_MS } : {});
+  return { provider: p.id, obs: r.obs, status: r.status };
+}
+
+/** Backfill path: a bounded [startMs, endMs] window; rows outside are dropped (providers
+ *  ignore params). `overflow` drives the caller's window-halving. */
+export async function fetchProviderWindow(p: ProviderConfig, startMs: number, endMs: number, minmag?: number): Promise<WindowOutcome> {
+  const inWindow = (o: RawObs): boolean => o.eventTimeMs >= startMs - 60_000 && o.eventTimeMs <= endMs + 60_000;
+  if (p.adapter.startsWith('custom')) {
+    const adapter = CUSTOM_ADAPTERS[p.id];
+    if (!adapter) return { provider: p.id, obs: [], status: { ok: false, error: `no custom adapter for '${p.id}'` }, overflow: false };
+    const started = performance.now();
+    try {
+      const raw = await adapter(p, endMs, { startMs, endMs });
+      return { provider: p.id, obs: raw.filter(inWindow), status: { ok: true, latency_ms: Math.round(performance.now() - started), events_returned: raw.length }, overflow: raw.length >= 490 };
+    } catch (err) {
+      return { provider: p.id, obs: [], status: { ok: false, latency_ms: Math.round(performance.now() - started), error: err instanceof Error ? err.message : String(err) }, overflow: false };
     }
-    if (res.status >= 400) {
-      return { provider: p.id, obs: [], status: { ok: false, http_status: res.status, latency_ms: res.latencyMs, error: `HTTP ${res.status}` } };
-    }
-    const obs = p.parse === 'geojson' ? parseGeoJSON(res.body, p.id) : parseFdsnText(res.body, p.id);
-    return { provider: p.id, obs, status: { ok: true, http_status: res.status, latency_ms: res.latencyMs, events_returned: obs.length } };
-  } catch (err) {
-    return { provider: p.id, obs: [], status: { ok: false, error: err instanceof Error ? err.message : String(err) } };
   }
+  const r = await fetchFdsn(p, { starttime: startMs, endtime: endMs, minmag });
+  return { provider: p.id, obs: r.obs.filter(inWindow), status: r.status, overflow: r.overflow };
 }

@@ -104,6 +104,13 @@ export interface ProviderConfig {
   contact: string;
   params?: Record<string, string>;
   notes?: string;
+  backfill?: {
+    enabled?: boolean;
+    earliest?: string;
+    minmag?: number;
+    maxWindowDays?: number;
+    initialWindowDays?: number;
+  };
 }
 
 export interface Head {

@@ -66,6 +66,7 @@ export function dataPaths(root = DATA_DIR) {
     watermarks: join(root, 'knowledge', 'index', 'watermarks.json'),
     backfillCursor: join(root, 'knowledge', 'index', 'backfill.json'),
     archivesIndex: join(root, 'knowledge', 'index', 'archives.json'),
+    partitionsIndex: join(root, 'knowledge', 'index', 'partitions.json'),
     eventsDir: join(root, 'events'),
     feedDir: join(root, 'v1'),
     manifest: join(root, 'manifest.json'),

@@ -144,6 +144,12 @@ function main(): void {
   writeIfChanged(join(DATA_DIR, 'manifest.json'), manifest);
   writeIfChanged(join(PUBLIC_DIR, '_headers'), headers(eventDayKey(nowMs)));
 
+  // Publish the last aggregate's per-provider health onto Pages so /v1/status.json is a
+  // real endpoint (documented in APIs.md, read by the health watchdog). It's written to
+  // DATA_DIR by aggregate; without this copy it only lived on the data branch → 404.
+  const statusSrc = dataPaths(DATA_DIR).status;
+  if (existsSync(statusSrc)) writeIfChanged(join(publicV1, 'status.json'), readFileSync(statusSrc, 'utf8'));
+
   const pruned = pruneEventMapShards(DATA_DIR, nowMs - EVENT_MAP_HORIZON_DAYS * 86_400_000);
 
   console.log(

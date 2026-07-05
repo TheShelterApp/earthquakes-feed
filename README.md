@@ -119,7 +119,7 @@ catalogs until an open source appears.
 
 ## Run locally
 
-Requires Node 20+.
+Requires Node 22+.
 
 ```bash
 npm install

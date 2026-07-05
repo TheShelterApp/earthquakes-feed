@@ -26,7 +26,8 @@ export function gridKey(lat: number, lon: number, cellDeg: number): string {
 /**
  * Every grid cell whose block can hold a point within `km` of (lat, lon).
  * Neighborhood widens by km (adaptive in longitude near the poles) and wraps
- * the antimeridian — exact coverage, no corner-miss (fixes the grid-sampling bug).
+ * the antimeridian. Exact away from the poles; above ~89.8° a tiny fraction of ≤10 km
+ * pairs can still split (grid cells converge) — negligible, no seismicity there.
  */
 export function gatherCellKeys(lat: number, lon: number, km: number, cellDeg: number): string[] {
   const n = Math.round(360 / cellDeg);

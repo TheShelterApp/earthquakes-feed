@@ -16,7 +16,7 @@ An open community dataset stewarded by [TheShelterApp](https://github.com/TheShe
 ## Consuming the feed
 
 Everything is plain GeoJSON/NDJSON over a CDN with `Access-Control-Allow-Origin: *`.
-Start from the manifest; don't hardcode paths.
+Start from the manifest; don't hardcode paths. **Full API reference: [APIs.md](APIs.md).**
 
 ```bash
 # Catalog: every summary + partition, with freshness and cache hints:

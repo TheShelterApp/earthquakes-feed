@@ -32,7 +32,6 @@ export const EVENT_MAP_HORIZON_DAYS = Number(process.env.EVENT_MAP_HORIZON_DAYS 
 
 // --- fetching ---
 export const FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS ?? 8000);
-export const RUN_BUDGET_MS = Number(process.env.RUN_BUDGET_MS ?? 180_000);
 /** Each run asks providers for events in [now - lookback, now]; dedup absorbs overlap. */
 export const QUERY_LOOKBACK_MS = Number(process.env.QUERY_LOOKBACK_MS ?? 2 * 24 * 3600 * 1000);
 export const FETCH_LIMIT = Number(process.env.FETCH_LIMIT ?? 5000);

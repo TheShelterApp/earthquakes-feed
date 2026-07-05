@@ -1,6 +1,6 @@
 # earthquakes-feed
 
-An open, free earthquake feed. A GitHub Actions job aggregates earthquakes from 18
+An open, free earthquake feed. A GitHub Actions job aggregates earthquakes from 29
 seismic networks on a schedule, deduplicates them into one feed, and commits the
 result to Git — so the full history is queryable by both *when the quake happened*
 and *when the feed learned about it*. Served worldwide over a CDN, free to consume.
@@ -22,7 +22,7 @@ Start from the manifest; don't hardcode paths. **Full API reference: [APIs.md](A
 # Catalog: every summary + partition, with freshness and cache hints:
 curl -s https://earthquakes-feed.theshelter.app/v1/manifest.json
 
-# The current day, all 18 sources deduped (one CORS-open request):
+# The current day, all 29 sources deduped (one CORS-open request):
 curl -s https://earthquakes-feed.theshelter.app/v1/all_day.geojson
 
 # One recent day as a ready-to-render FeatureCollection (Pages, last 120 days):
@@ -56,10 +56,18 @@ overrides `archives[]` for any day in both).
 
 ### The Feature shape
 
-Top-level `properties` is USGS-style (`mag`, `place`, `time` in ms, `updated`,
-`status`, `net`, `nst`/`dmin`/`rms`/`gap`, …). A top-level `source` (= `net`) sits beside
-`id`/`geometry`/`properties`; `coordinates` omits the depth slot (never `null`) when
-unknown. Feed-specific data lives under `properties.feed`:
+Top-level `properties` is the full USGS-standard set (`mag`, `place`, `time` in ms,
+`updated`, `status`, `net`, `tz`/`url`/`felt`/`cdi`/`mmi`/`alert`/`sig`/`nst`/`dmin`/
+`rms`/`gap`/`code`/`ids`/`sources`/`types`/`title`, …) plus cross-source extras when a
+source provides them (`author`, `magAuthor`, `catalog`, `country`/`province`/…). A
+top-level `source` (= `net`) sits beside `id`/`geometry`/`properties`; `coordinates`
+omits the depth slot (never `null`) when unknown. These top-level values are a
+**fill-only field merge** — the chosen provider's coherent solution leads, gaps fill
+from the other providers, core geometry/magnitude is never mixed across solutions.
+
+**No source field is ever dropped:** each provider's *complete* original vocabulary is
+preserved verbatim under `provenance[].fields` (dedup is field-addressable, not a
+lowest-common-denominator subset). Feed-specific data lives under `properties.feed`:
 
 ```jsonc
 {
@@ -70,15 +78,16 @@ unknown. Feed-specific data lives under `properties.feed`:
   "properties": {
     "mag": 4.6, "magType": "ml", "place": "…", "time": 1783204207460,
     "updated": 1783204304415, "status": "reviewed", "net": "usgs", "type": "earthquake",
-    "nst": 41, "dmin": 0.35, "rms": 0.82, "gap": 71,
+    "nst": 41, "dmin": 0.35, "rms": 0.82, "gap": 71, "felt": 12, "mmi": 3.4, "sig": 326,
     "feed": {
       "feed_id": "efd_…",
       "event_time": "…Z", "ingest_time": "…Z",   // the two clocks
-      "first_seen_seq": 1516, "ingest_seq": 1702, "revision": 3, "tombstone": false,
+      "first_seen_seq": 1516, "ingest_seq": 1702, "revision": 3, "state": "live", "tombstone": false,
       "chosen_provider": "usgs",
       "aliases": ["usgs:us7000nabc", "emsc:20260704_0000117"],
       "provenance": [ { "provider": "usgs", "native_id": "us7000nabc", "mag": 4.6,
-        "status": "reviewed", "license": "US-PD", "attribution": "…", "chosen": true }, … ]
+        "status": "reviewed", "license": "US-PD", "attribution": "…", "chosen": true,
+        "fields": { "code": "us7000nabc", "ids": ",us7000nabc,", "nst": 41, … } }, … ]
     }
   }
 }
@@ -97,20 +106,25 @@ WebSocket event that shares an alias or falls within ±60 s / ±10 km.
 
 ## Sources
 
-18 networks, configured in [`providers/registry.json`](providers/registry.json)
+29 networks, configured in [`providers/registry.json`](providers/registry.json)
 (add more — see [CONTRIBUTING.md](CONTRIBUTING.md)). A server runner has no CORS limit,
 so the feed carries national sources a browser can't reach directly, down to small
 local magnitudes. Full credits: [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
 
-- **Global (FDSN):** USGS/ANSS, EMSC/CSEM, GEOFON.
-- **Europe (FDSN):** INGV (Italy), RESIF (France), NOA (Greece), ETHZ (Switzerland), KNMI (Netherlands).
-- **Americas / Oceania (FDSN):** NCEDC + SCEDC (California), NRCan (Canada), GeoNet (New Zealand), AusPass (Australia).
-- **National APIs (custom adapters):** AFAD (Turkey, to ~M0.6), CENC (China), NCS (India), TMD (Thailand + Myanmar), KAGSR (Russia — Kamchatka/Kurils).
+- **Global (FDSN):** USGS/ANSS, EMSC/CSEM, GEOFON, ISC (reviewed but months-delayed — backfill-only).
+- **Europe (FDSN):** INGV (Italy), RESIF + RéNaSS + IPGP (France), NOA (Greece), ETHZ (Switzerland), KNMI (Netherlands), LMU (Germany/Bavaria).
+- **Americas / Oceania (FDSN):** NCEDC + SCEDC (California), NRCan (Canada), GeoNet (New Zealand), AusPass (Australia), USP (Brazil).
+- **National APIs (custom adapters):** AFAD (Turkey, to ~M0.6), CENC (China), JMA (Japan), NCS (India), TMD (Thailand + Myanmar), KAGSR (Russia — Kamchatka/Kurils), SSN (Mexico), IPMA (Portugal + Azores), IGP (Peru), ENSN (Egypt), BGS (UK).
+
+A monthly [`discover.yml`](.github/workflows/discover.yml) scans the FDSN datacenter
+registry and re-probes known-down endpoints, opening an issue with vetted candidates —
+new sources are reviewed and enabled by hand, then **auto-backfilled** into history.
 
 Kazakhstan, Kyrgyzstan, Uzbekistan, Tajikistan, Turkmenistan, Belarus, Ukraine, Iran,
 and Pakistan have no open real-time earthquake API (KNDC is CTBTO-restricted; others
-publish only delayed waveforms). Those regions are covered only via the global
-catalogs until an open source appears.
+publish only delayed waveforms). Indonesia (BMKG) and Chile (CSN) publish openly but
+currently block server-side fetches. Those regions are covered via the global catalogs
+until an open, reachable source appears.
 
 ## Architecture
 
@@ -121,6 +135,14 @@ catalogs until an open source appears.
   **rebuildable derived view** of that log.
 - **Two phases:** `aggregate` (fetch → dedup → append the log) → `derive` (rebuild
   views, publish). Each source fetch is fail-open — one dead source loses nothing.
+- **History & growth:** `backfill` walks each source backward (paced, idempotent, ~3-yr
+  target), and `archive` rolls cold months (>120 d) to GitHub Releases (un-metered) and
+  prunes the tree — so the `data` branch stays bounded. `event_map` is sharded by
+  event-day and pruned to a 45-day dedup horizon; identity older than that lives in the
+  frozen day partitions.
+- **A newly-added source fills in automatically:** its recent live window is onboarded
+  into the `event_map`, deep history is backfilled, and already-archived months are
+  pulled from their Release, merged, and re-rolled — no manual steps, no gaps.
 - **Serving split:** the live surface (summaries + recent day files + manifest) is
   published to **Cloudflare Pages** via Direct Upload (which doesn't consume the
   500 git-builds/month cap); full-history partitions serve from the `data` branch via
@@ -160,15 +182,16 @@ copyrightable expression) and honor removal requests reactively — see
 
 ## Status
 
-Live end-to-end: 18 sources, stateful dedup, bitemporal log, 20 rolling feeds,
-per-day partitions + Pages day files, manifest, CI, and Cloudflare Pages serving.
-State scales: `event_map` is sharded by day and pruned to a 45-day dedup horizon,
-with older identity preserved in the day partitions.
+Live end-to-end: 29 sources, stateful field-level dedup (superset model — every source
+field preserved), bitemporal log, 20 rolling feeds, per-day partitions + Pages day
+files, manifest, CI, and Cloudflare Pages serving. `event_map` is sharded by day and
+pruned to a 45-day dedup horizon, with older identity preserved in the day partitions.
 
-Historical **backfill** (paced, idempotent, ~3-year target) and monthly **Release
-archival** of cold months are implemented (`backfill.yml` is dispatch-only and the
-auto-fill cron turns on once archival is confirmed rolling).
+Running in production: `updatedafter` revision + `includedeleted` tombstone sweeps,
+`@sha` immutable partition URLs, paced historical **backfill** (~3-yr target) with
+monthly **Release archival** of cold months (and re-roll when a new source backfills
+into one), automatic **new-source onboarding** of the recent window, an external
+5-minute Cloudflare-Worker **heartbeat**, and a monthly source **discovery-assist**.
 
-**Roadmap:** `updatedafter` revision/tombstone tracking; `@sha` immutable partition
-URLs; `op:merge` survivor selection; knowledge-time snapshots; an external 5-minute
-heartbeat for tighter freshness. Contributions welcome.
+**Roadmap:** `op:merge` survivor selection (heals residual cross-provider duplicates);
+knowledge-time snapshots; empirical swarm-guard calibration. Contributions welcome.

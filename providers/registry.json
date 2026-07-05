@@ -163,7 +163,7 @@
       "notes": "TODO custom adapter: WIB (UTC+7) timestamps, latest-N JSON, no time-range query."
     },
     {
-      "id": "jma", "name": "JMA (Japan Meteorological Agency)", "priority": 21, "active": true,
+      "id": "jma", "name": "JMA (Japan Meteorological Agency)", "priority": 9, "active": true,
       "adapter": "custom", "parse": "custom", "queryFormat": "json",
       "base": "https://www.jma.go.jp/bosai/quake/data/list.json",
       "supportsTimeRange": false, "refreshSeconds": 300,
@@ -197,7 +197,7 @@
       "doi": null, "contact": "https://www.ipgp.fr"
     },
     {
-      "id": "usp", "name": "USP — Centro de Sismologia (Brazil)", "priority": 12, "active": true,
+      "id": "usp", "name": "USP — Centro de Sismologia (Brazil)", "priority": 7, "active": true,
       "adapter": "fdsn", "parse": "text", "queryFormat": "text",
       "base": "http://www.moho.iag.usp.br/fdsnws/event/1/query",
       "supportsTimeRange": true, "refreshSeconds": 600, "timeoutMs": 12000,
@@ -205,7 +205,7 @@
       "doi": null, "contact": "http://www.moho.iag.usp.br"
     },
     {
-      "id": "lmu", "name": "LMU München (Germany / Bavaria)", "priority": 13, "active": true,
+      "id": "lmu", "name": "LMU München (Germany / Bavaria)", "priority": 8, "active": true,
       "adapter": "fdsn", "parse": "text", "queryFormat": "text",
       "base": "https://erde.geophysik.uni-muenchen.de/fdsnws/event/1/query",
       "supportsTimeRange": true, "refreshSeconds": 600,
@@ -223,7 +223,7 @@
       "backfill": { "earliest": "1990-01-01", "minmag": 3.0 }
     },
     {
-      "id": "mexico", "name": "SSN — Servicio Sismológico Nacional (Mexico)", "priority": 14, "active": true,
+      "id": "mexico", "name": "SSN — Servicio Sismológico Nacional (Mexico)", "priority": 22, "active": true,
       "adapter": "custom", "parse": "custom", "queryFormat": "rss",
       "base": "http://www.ssn.unam.mx/rss/ultimos-sismos.xml",
       "supportsTimeRange": false, "refreshSeconds": 300,
@@ -231,7 +231,7 @@
       "doi": "10.21766/SSNMX/EC/MX", "contact": "http://www.ssn.unam.mx"
     },
     {
-      "id": "ipma", "name": "IPMA (Portugal + Azores)", "priority": 15, "active": true,
+      "id": "ipma", "name": "IPMA (Portugal + Azores)", "priority": 23, "active": true,
       "adapter": "custom", "parse": "custom", "queryFormat": "json",
       "base": "https://api.ipma.pt/open-data/observation/seismic/",
       "supportsTimeRange": false, "refreshSeconds": 300,
@@ -240,7 +240,7 @@
       "notes": "Adapter fetches areas 3 (Azores) + 7 (mainland); magnitud -99 = no magnitude."
     },
     {
-      "id": "igp", "name": "IGP — Instituto Geofísico del Perú (Peru)", "priority": 16, "active": true,
+      "id": "igp", "name": "IGP — Instituto Geofísico del Perú (Peru)", "priority": 27, "active": true,
       "adapter": "custom", "parse": "custom", "queryFormat": "json",
       "base": "https://ultimosismo.igp.gob.pe/api/ultimo-sismo/ajaxb/",
       "supportsTimeRange": false, "refreshSeconds": 300,
@@ -249,7 +249,7 @@
       "notes": "Adapter appends the current UTC year to the path; returns the whole year (stale-dropped on ingest)."
     },
     {
-      "id": "egypt", "name": "ENSN — Egyptian National Seismic Network (NRIAG)", "priority": 17, "active": true,
+      "id": "egypt", "name": "ENSN — Egyptian National Seismic Network (NRIAG)", "priority": 28, "active": true,
       "adapter": "custom", "parse": "custom", "queryFormat": "json",
       "base": "https://ensn.nriag.sci.eg/earthquakes.json",
       "supportsTimeRange": false, "refreshSeconds": 300,
@@ -257,7 +257,7 @@
       "doi": null, "contact": "https://ensn.nriag.sci.eg"
     },
     {
-      "id": "bgs", "name": "BGS — British Geological Survey (UK)", "priority": 18, "active": true,
+      "id": "bgs", "name": "BGS — British Geological Survey (UK)", "priority": 29, "active": true,
       "adapter": "custom", "parse": "custom", "queryFormat": "rss",
       "base": "http://www.earthquakes.bgs.ac.uk/feeds/MhSeismology.xml",
       "supportsTimeRange": false, "refreshSeconds": 600,

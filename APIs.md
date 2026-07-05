@@ -69,13 +69,18 @@ Last run's per-provider health, counts, timings, `degraded[]`.
 
 ## The Feature
 
-USGS-GeoJSON superset. Top-level `properties` is USGS-standard (`mag`, `magType`,
-`place`, `time` ms, `updated` ms, `status`, `net`, `tsunami`, `sig`, `nst`, `dmin`,
-`rms`, `gap`, `type`). A top-level **`source`** (string, = `properties.net`, the chosen
-network) sits beside `id`/`geometry`/`properties` for clients that key a source enum off
-one required field. `geometry.coordinates` is `[lon, lat]` or `[lon, lat, depthKm]` — the
-depth slot is **omitted (never null)** when unknown, so a strictly typed
-`[Double]`/`[number]` decoder never trips. Feed data is under `properties.feed`:
+USGS-GeoJSON superset. Top-level `properties` is the full USGS-standard set (`mag`,
+`magType`, `place`, `time` ms, `updated` ms, `status`, `net`, `tsunami`, `sig`, `nst`,
+`dmin`, `rms`, `gap`, `tz`, `url`, `felt`, `cdi`, `mmi`, `alert`, `code`, `ids`,
+`sources`, `types`, `title`, `type`) plus cross-source extras when present (`author`,
+`magAuthor`, `catalog`, `contributor`, `country`/`province`/`district`/…). These are a
+**fill-only field merge**: the chosen provider's coherent solution leads, gaps fill from
+other providers, core geometry/magnitude is never mixed. A top-level **`source`** (=
+`properties.net`, the chosen network) sits beside `id`/`geometry`/`properties` for
+clients that key a source enum off one required field. `geometry.coordinates` is
+`[lon, lat]` or `[lon, lat, depthKm]` — the depth slot is **omitted (never null)** when
+unknown, so a strictly typed `[Double]`/`[number]` decoder never trips. Feed data is
+under `properties.feed`:
 
 | `feed.*` | Meaning |
 |---|---|
@@ -85,7 +90,7 @@ depth slot is **omitted (never null)** when unknown, so a strictly typed
 | `state` / `tombstone` | `live`\|`tombstoned`\|`superseded` (filter `state==='live'` for a map) |
 | `chosen_provider` | which provenance row won the top-level fields |
 | `aliases[]` | every `provider:native_id` for this event (for realtime dedup) |
-| `provenance[]` | every reporting provider with its solution + `license`/`attribution`/`doi` |
+| `provenance[]` | every reporting provider with its solution + `license`/`attribution`/`doi`, and `fields` = that provider's **complete original vocabulary** (nothing dropped) |
 
 ## Freshness contract
 

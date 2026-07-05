@@ -12,7 +12,7 @@ Adding one is a single entry in [`providers/registry.json`](providers/registry.j
 
 ```jsonc
 {
-  "id": "ethz", "name": "ETH Zürich (Switzerland)", "priority": 16, "active": true,
+  "id": "ethz", "name": "ETH Zürich / Swiss Seismological Service", "priority": 12, "active": true,
   "adapter": "fdsn", "parse": "text", "queryFormat": "text",
   "base": "https://eida.ethz.ch/fdsnws/event/1/query",
   "supportsTimeRange": true, "refreshSeconds": 600,
@@ -25,7 +25,15 @@ Adding one is a single entry in [`providers/registry.json`](providers/registry.j
 - `queryFormat`: the value sent as the FDSN `format=` query param.
 - Add `"noLimit": true` if the service rejects the `limit` param (e.g. GeoNet).
 - `priority`: lower = more authoritative; it's the preferred-pick tiebreak.
+- `"timeoutMs": 20000` for a slow endpoint (default 8 s on the live path).
+- `"liveActive": false` for a months-delayed catalog (e.g. ISC) — skipped on the 5-min
+  live path but still backfilled for historical depth.
 - **License & attribution are required** — put the source's real terms and any DOI.
+
+Once merged and enabled, the source **fills in automatically**: its recent window is
+onboarded into the live `event_map`, deep history is backfilled toward the ~3-year
+target, and any already-archived months are pulled from their Release, merged, and
+re-rolled. No manual steps, no gaps.
 
 Then regenerate credits and run the checks:
 
@@ -37,12 +45,15 @@ npm run typecheck && npm test
 
 ### Custom (non-FDSN) sources
 
-For sources with a bespoke JSON/HTML format (AFAD, CENC, TMD, …), add a `CustomAdapter`
-in [`src/custom.ts`](src/custom.ts) and register it in the `CUSTOM_ADAPTERS` map (keyed
-by the provider `id`); set `"adapter": "custom"` in the registry. Return `RawObs[]`,
-stay fail-open, convert the source's timezone to UTC, and reuse the shared `getText`
-helper (browser UA by default; `insecure: true` for gov endpoints with a broken TLS
-chain). The existing adapters (AFAD/CENC/TMD/KAGSR/NCS) are the templates.
+For sources with a bespoke JSON/HTML/RSS format (AFAD, CENC, JMA, IPMA, …), add a
+`CustomAdapter` in [`src/custom.ts`](src/custom.ts) and register it in the
+`CUSTOM_ADAPTERS` map (keyed by the provider `id`); set `"adapter": "custom"` in the
+registry. Return `RawObs[]`, stay fail-open, convert the source's timezone to UTC, and
+reuse the shared `getText` helper (browser UA by default; `insecure: true` for gov
+endpoints with a broken TLS chain). **Set `fields: flattenScalars(rawRecord)`** so the
+provider's *entire* original vocabulary is preserved (never an allowlist — the feed's
+promise is that no source field is dropped). The existing adapters (AFAD/CENC/TMD/KAGSR/
+NCS/JMA/IPMA/IGP/mexico/egypt/BGS) are the templates.
 
 ## Ground rules
 

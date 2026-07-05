@@ -29,6 +29,16 @@ export function parseGeoJSON(body: string, provider: string): RawObs[] {
     if (eventTimeMs == null) continue;
     const providerEventId = String(feat.id ?? p['unid'] ?? p['source_id'] ?? p['eventid'] ?? '').trim();
     if (!providerEventId) continue;
+    // USGS lists every contributing catalog id in `ids` (",us7000abc,ci12345,").
+    // Registering them as same-provider aliases survives USGS preferred-id churn
+    // and gives the dense-cell guard real id-level linkage (design §8.3/§8.4).
+    const knownAliasIds: string[] = [];
+    if (typeof p['ids'] === 'string') {
+      for (const t of (p['ids'] as string).split(',')) {
+        const id = t.trim();
+        if (id && id !== providerEventId) knownAliasIds.push(`${provider}:${id}`);
+      }
+    }
     out.push({
       provider,
       providerEventId,
@@ -41,7 +51,7 @@ export function parseGeoJSON(body: string, provider: string): RawObs[] {
       mag: num(p['mag']) ?? num(p['magnitude']),
       magType: (p['magType'] as string) ?? (p['magtype'] as string) ?? null,
       place: (p['place'] as string) ?? (p['flynn_region'] as string) ?? (p['region'] as string) ?? null,
-      knownAliasIds: [],
+      knownAliasIds,
       extra: collectExtra(p),
     });
   }

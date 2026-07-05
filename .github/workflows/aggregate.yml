@@ -1,8 +1,8 @@
 name: aggregate
 
 # Phase 1: fetch every source, dedup, append to the observation log, commit to `data`.
-# Public repo => Actions is free & unlimited. Cron is offset off :00 to dodge the
-# top-of-hour drop zone; a run is fail-open (a dead source loses zero data).
+# Public repo => Actions is free & unlimited. Cron is offset off :00; GitHub delivers
+# scheduled runs best-effort (often sparser than 5 min) — freshness contract is 30 min.
 on:
   schedule:
     - cron: '4,9,14,19,24,29,34,39,44,49,54,59 * * * *'
@@ -18,9 +18,11 @@ permissions:
 jobs:
   aggregate:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/checkout@v4
         with:
           ref: data
@@ -34,15 +36,19 @@ jobs:
       - name: Aggregate
         env:
           DATA_DIR: .data
-          RUN_BUDGET_MS: '180000'
-        run: npx tsx src/aggregate.ts
+        run: npx --no-install tsx src/aggregate.ts
       - name: Commit & push observation log
         working-directory: .data
         run: |
           git config user.name  "earthquakes-feed-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add -A
+          git add knowledge status status.json .gitignore
           git commit -m "aggregate: seq=$(node -e "process.stdout.write(String(require('./knowledge/index/head.json').seq))") @ $(date -u +%FT%TZ)" \
             || { echo 'no changes'; exit 0; }
-          git pull --rebase --autostash origin data || true
-          git push origin HEAD:data
+          # Fail-loud push loop: a swallowed rebase conflict here silently loses data (H3).
+          for i in 1 2 3; do
+            git push origin HEAD:data && exit 0
+            git fetch origin data
+            git rebase origin/data || { git rebase --abort; echo '::error::rebase conflict pushing to data'; exit 1; }
+          done
+          echo '::error::push to data failed after 3 attempts'; exit 1

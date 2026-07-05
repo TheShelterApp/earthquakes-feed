@@ -1,9 +1,46 @@
-import { DATA_DIR } from './config.js';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { DATA_DIR, HOT_WINDOW_DAYS, dataPaths } from './config.js';
 import { appendObservations, loadState, saveState } from './bitemporal.js';
 import { Resolver, type IngestResult } from './dedup.js';
 import { activeProviders, configMap, fetchProvider, loadRegistry, priorityMap } from './providers.js';
 import type { Observation, RawObs } from './types.js';
 import { isoFromMs } from './util.js';
+
+const FUTURE_LEEWAY_MS = 10 * 60_000;
+
+/** M4 guard: head.seq must equal the max seq in the most recent log files —
+ *  a mismatch means a torn or out-of-band write; refuse to append on top of it. */
+function assertHeadMatchesLog(root: string, headSeq: number): void {
+  const dir = dataPaths(root).observationsDir;
+  const files: string[] = [];
+  const walk = (d: string): void => {
+    let entries: string[];
+    try {
+      entries = readdirSync(d, { withFileTypes: true }).map((e) => (e.isDirectory() ? (walk(join(d, e.name)), '') : join(d, e.name)));
+    } catch {
+      return;
+    }
+    for (const f of entries) if (f && f.endsWith('.ndjson')) files.push(f);
+  };
+  walk(dir);
+  if (!files.length) {
+    if (headSeq !== 0) throw new Error(`head.seq=${headSeq} but observation log is empty`);
+    return;
+  }
+  files.sort();
+  let maxSeq = 0;
+  for (const f of files.slice(-2)) {
+    for (const line of readFileSync(f, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      const seq = (JSON.parse(line) as { seq: number }).seq;
+      if (seq > maxSeq) maxSeq = seq;
+    }
+  }
+  if (maxSeq !== headSeq) {
+    throw new Error(`seq reconciliation failed: head.seq=${headSeq} but log max seq=${maxSeq} — refusing to append (torn or out-of-band write)`);
+  }
+}
 
 function makeObservation(raw: RawObs, r: IngestResult, seq: number, ingestTime: string): Observation {
   return {
@@ -33,10 +70,17 @@ async function main(): Promise<void> {
   const all = loadRegistry();
   const active = activeProviders(all);
   const state = loadState(DATA_DIR);
+  assertHeadMatchesLog(DATA_DIR, state.head.seq);
   const resolver = new Resolver(state.eventMap, priorityMap(all), configMap(all), nowMs);
 
   const outcomes = await Promise.all(active.map((p) => fetchProvider(p, nowMs)));
-  const raws = outcomes.flatMap((o) => o.obs);
+  const fetched = outcomes.flatMap((o) => o.obs);
+  // Live path handles the hot window only; older rows (e.g. CENC's rolling year file)
+  // would bypass dedup outside it (C2) — drop them; backfill owns history.
+  const hotFloor = nowMs - HOT_WINDOW_DAYS * 86_400_000;
+  const futureCeil = nowMs + FUTURE_LEEWAY_MS;
+  const raws = fetched.filter((r) => r.eventTimeMs >= hotFloor && r.eventTimeMs <= futureCeil);
+  const staleDropped = fetched.length - raws.length;
   // Deterministic ingest order (idempotency, design §8.10).
   raws.sort(
     (a, b) =>
@@ -73,15 +117,17 @@ async function main(): Promise<void> {
     generated: ingestTime,
     head_seq: seq,
     events_total: state.eventMap.size,
-    observations_returned: raws.length,
+    observations_returned: fetched.length,
+    stale_dropped: staleDropped,
     new_observations: newObs.length,
+    duration_ms: Math.round(Date.now() - nowMs),
     degraded,
     providers,
   };
   saveState(DATA_DIR, state, status);
 
   console.log(
-    `aggregate: seq=${seq} events=${state.eventMap.size} fetched=${raws.length} new=${newObs.length} ` +
+    `aggregate: seq=${seq} events=${state.eventMap.size} fetched=${fetched.length} stale_dropped=${staleDropped} new=${newObs.length} ` +
       `providers=${outcomes.filter((o) => o.status.ok).length}/${outcomes.length}` +
       (degraded.length ? ` degraded=[${degraded.join(',')}]` : ''),
   );

@@ -5,9 +5,14 @@
   "type": "module",
   "description": "Open, free, worldwide earthquake feed — aggregated from many seismic networks, historized in Git.",
   "homepage": "https://earthquakes-feed.theshelter.app",
-  "repository": { "type": "git", "url": "https://github.com/TheShelterApp/earthquakes-feed.git" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TheShelterApp/earthquakes-feed.git"
+  },
   "license": "CDLA-Permissive-2.0",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "aggregate": "tsx src/aggregate.ts",
     "derive": "tsx src/derive.ts",
@@ -22,6 +27,7 @@
   "devDependencies": {
     "@types/node": "^22.10.2",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "wrangler": "3.114.17"
   }
 }

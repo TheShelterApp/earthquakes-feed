@@ -63,9 +63,16 @@ export class Resolver {
     return (this.geo.get(gridKey(lat, lon, GRID_CELL_DEG))?.size ?? 0) >= SWARM_CELL_ABSOLUTE;
   }
 
+  /** Id-level linkage ONLY (design §8.4): in a dense cell the sole trustworthy evidence
+   *  that two reports are one event is a shared identifier — never bare provider equality. */
   private sharesIdentity(raw: RawObs, node: EventNode): boolean {
-    if (node.provenance.some((r) => r.provider === raw.provider)) return true;
     return raw.knownAliasIds.some((a) => node.aliases.includes(a));
+  }
+
+  /** A provider re-reporting the SAME event resolves via alias; the same provider using a
+   *  DIFFERENT native id means its pipeline considers these distinct events — never merge. */
+  private sameProviderDistinct(raw: RawObs, node: EventNode): boolean {
+    return node.provenance.some((r) => r.provider === raw.provider && r.nativeId !== raw.providerEventId);
   }
 
   private windows(raw: RawObs, node: EventNode, dense: boolean): { km: number; ms: number } {
@@ -118,6 +125,7 @@ export class Resolver {
         if (Math.abs(raw.eventTimeMs - node.eventTimeMs) > ms) continue;
         const d = haversineKm(raw.lat, raw.lon, node.lat, node.lon);
         if (d > km) continue;
+        if (this.sameProviderDistinct(raw, node)) continue;
         if (dense && !this.sharesIdentity(raw, node)) continue;
         if (this.magGuardBlocks(raw, node)) continue;
         if (d < bestKm) {
@@ -192,11 +200,20 @@ export class Resolver {
   }
 
   private static solutionEqual(a: ProvenanceRow, r: RawObs): boolean {
-    return a.mag === r.mag && a.magType === r.magType && a.status === r.status && a.lat === r.lat && a.lon === r.lon && a.depth === r.depth;
+    return (
+      a.mag === r.mag &&
+      a.magType === r.magType &&
+      a.status === r.status &&
+      a.lat === r.lat &&
+      a.lon === r.lon &&
+      a.depth === r.depth &&
+      a.eventTimeMs === r.eventTimeMs &&
+      a.place === r.place
+    );
   }
 
   private static sig(node: EventNode): string {
-    return [node.mag, node.magType, node.status, node.lat.toFixed(4), node.lon.toFixed(4), node.depth, node.chosenProvider, node.eventTimeMs].join('|');
+    return [node.mag, node.magType, node.status, node.lat.toFixed(4), node.lon.toFixed(4), node.depth, node.chosenProvider, node.eventTimeMs, node.place].join('|');
   }
 
   ingest(raw: RawObs, ingestTime: string): IngestResult {
@@ -235,21 +252,25 @@ export class Resolver {
       return { node, changed: true, revision: 1 };
     }
 
-    if (!node.aliases.includes(key)) node.aliases.push(key);
+    const hadAlias = node.aliases.includes(key);
     const idx = node.provenance.findIndex((r) => r.provider === raw.provider && r.nativeId === raw.providerEventId);
     let structural = false;
     if (idx < 0) {
       node.provenance.push(this.makeRow(raw));
       structural = true;
-    } else {
-      const prev = node.provenance[idx]!;
-      if (Resolver.solutionEqual(prev, raw)) {
-        prev.providerUpdatedMs = Math.max(prev.providerUpdatedMs ?? -Infinity, raw.providerUpdatedMs ?? -Infinity) || prev.providerUpdatedMs;
-        node.lastIngestTime = ingestTime;
+    } else if (Resolver.solutionEqual(node.provenance[idx]!, raw)) {
+      // Unchanged re-report: a pure no-op — no unlogged mutation, replay stays
+      // reproducible from the log and cold partitions stay byte-stable (M2).
+      if (!hadAlias) {
+        node.aliases.push(key);
+        structural = true;
+      } else {
         return { node, changed: false, revision: node.revision };
       }
+    } else {
       node.provenance[idx] = this.makeRow(raw);
     }
+    if (!hadAlias && !node.aliases.includes(key)) node.aliases.push(key);
 
     const beforeSig = Resolver.sig(node);
     const beforeHash = node.geohash;
@@ -259,10 +280,10 @@ export class Resolver {
       this.deindexGeo(beforeHash, node.feedId);
       if (node.eventTimeMs >= this.hotFloor) this.indexGeo(node);
     }
-    node.lastIngestTime = ingestTime;
 
     if (structural || Resolver.sig(node) !== beforeSig) {
       node.revision += 1;
+      node.lastIngestTime = ingestTime;
       return { node, changed: true, revision: node.revision };
     }
     return { node, changed: false, revision: node.revision };

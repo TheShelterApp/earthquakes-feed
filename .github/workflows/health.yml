@@ -1,7 +1,8 @@
 name: health
 
-# Hourly heartbeat + freshness check. Also keeps scheduled workflows from being
-# auto-disabled after 60 days of inactivity.
+# Hourly watchdog. Checks the LIVE Pages manifest (the only check that catches every
+# stale mode: dead cron, failed derive, failed deploy) and per-provider degradation.
+# On failure: opens/refreshes a pinned issue and fails the run (visible red).
 on:
   schedule:
     - cron: '25 * * * *'
@@ -14,11 +15,40 @@ permissions:
 jobs:
   health:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: data
-          fetch-depth: 1
-      - name: Check feed freshness
+      - name: Check live feed freshness + providers
+        id: check
         run: |
-          node -e "const s=require('./status.json');const a=(Date.now()-Date.parse(s.generated))/60000;console.log('head_seq='+s.head_seq+' events='+s.events_total+' age='+a.toFixed(1)+'min degraded=['+(s.degraded||[]).join(',')+']');if(a>20)console.error('::warning::feed is '+a.toFixed(0)+'min stale')"
+          set -e
+          M=$(curl -sf --max-time 20 "https://earthquakes-feed.theshelter.app/v1/manifest.json") || { echo "problem=manifest unreachable" >> "$GITHUB_OUTPUT"; exit 0; }
+          S=$(curl -sf --max-time 20 "https://earthquakes-feed.theshelter.app/v1/status.json" || echo '{}')
+          node -e '
+            const m = JSON.parse(process.argv[1]); const s = JSON.parse(process.argv[2]);
+            const ageS = (Date.now() - m.generated) / 1000;
+            const staleAfter = (m.freshness && m.freshness.stale_after_seconds) || 1800;
+            const degraded = s.degraded || [];
+            console.log(`age=${Math.round(ageS)}s (stale_after=${staleAfter}) head_seq=${m.head_seq} events=${m.event_count} degraded=[${degraded.join(",")}]`);
+            const problems = [];
+            if (ageS > staleAfter) problems.push(`live manifest is ${Math.round(ageS / 60)} min stale (contract: ${staleAfter / 60} min)`);
+            if (degraded.length >= 5) problems.push(`${degraded.length} providers degraded: ${degraded.join(", ")}`);
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `problem=${problems.join("; ")}\n`);
+          ' "$M" "$S"
+      - name: Open/refresh health issue and fail
+        if: steps.check.outputs.problem != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROBLEM: ${{ steps.check.outputs.problem }}
+        run: |
+          TITLE="[health] feed unhealthy"
+          BODY="Automated watchdog: ${PROBLEM}
+
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} ($(date -u +%FT%TZ))"
+          EXISTING=$(gh issue list --repo "${{ github.repository }}" --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "${{ github.repository }}" --body "$BODY"
+          else
+            gh issue create --repo "${{ github.repository }}" --title "$TITLE" --body "$BODY" --label bug
+          fi
+          echo "::error::$PROBLEM"
+          exit 1

@@ -302,11 +302,39 @@ export class Resolver {
       if (node.eventTimeMs >= this.hotFloor) this.indexGeo(node);
     }
 
-    if (structural || Resolver.sig(node) !== beforeSig) {
+    // A live observation to a previously-tombstoned event un-hides it (design §8.6).
+    const unhidden = node.state === 'tombstoned';
+    if (unhidden) node.state = 'live';
+
+    if (structural || unhidden || Resolver.sig(node) !== beforeSig) {
       node.revision += 1;
       node.lastIngestTime = ingestTime;
       return { node, changed: true, revision: node.revision };
     }
     return { node, changed: false, revision: node.revision };
+  }
+
+  /** Upstream delete signal for one provider's contribution. Drops that provenance row;
+   *  tombstones the event if no provider is left, else recomputes the preferred solution.
+   *  Never mints — a delete for an unknown event is a no-op. */
+  tombstoneProvider(raw: RawObs, ingestTime: string): IngestResult | null {
+    const fid = this.findExisting(raw);
+    if (!fid) return null;
+    const node = this.eventMap.get(fid);
+    if (!node || node.state !== 'live') return null;
+    const idx = node.provenance.findIndex((r) => r.provider === raw.provider && r.nativeId === raw.providerEventId);
+    if (idx < 0) return null;
+    node.provenance.splice(idx, 1);
+    node.revision += 1;
+    node.lastIngestTime = ingestTime;
+    if (node.provenance.length === 0) {
+      // Keep the alias so a later re-report can un-hide via the same id.
+      node.state = 'tombstoned';
+      this.deindexGeo(node.geohash, node.feedId);
+    } else {
+      this.applyRepr(node);
+      node.geohash = gridKey(node.lat, node.lon, GRID_CELL_DEG);
+    }
+    return { node, changed: true, revision: node.revision };
   }
 }

@@ -28,6 +28,7 @@ interface FetchParams {
   endtime?: number;
   updatedafter?: number;
   minmag?: number;
+  includedeleted?: 'only' | 'true';
 }
 
 function buildUrl(p: ProviderConfig, params: FetchParams): string {
@@ -37,6 +38,7 @@ function buildUrl(p: ProviderConfig, params: FetchParams): string {
   if (params.endtime != null) q.set('endtime', fdsnTime(params.endtime));
   if (params.updatedafter != null) q.set('updatedafter', fdsnTime(params.updatedafter));
   if (params.minmag != null) q.set('minmagnitude', String(params.minmag));
+  if (params.includedeleted != null) q.set('includedeleted', params.includedeleted);
   for (const [k, v] of Object.entries(p.params ?? {})) q.set(k, v);
   return `${p.base}?${q.toString()}`;
 }
@@ -95,10 +97,16 @@ export async function fetchProvider(p: ProviderConfig, nowMs: number): Promise<F
 }
 
 /** Revision sweep (H2): FDSN events UPDATED since `sinceMs`, regardless of origin time —
- *  catches reviewed-solution upgrades and deletes that fall outside the 48h origin window. */
+ *  catches reviewed-solution upgrades that fall outside the 48h origin window. */
 export async function fetchProviderUpdated(p: ProviderConfig, sinceMs: number): Promise<FetchOutcome> {
   if (p.adapter !== 'fdsn' || !p.supportsTimeRange) return { provider: p.id, obs: [], status: { ok: true, events_returned: 0 } };
   const r = await fetchFdsn(p, { updatedafter: sinceMs });
+  return { provider: p.id, obs: r.obs, status: r.status };
+}
+
+/** Delete sweep: events DELETED upstream since `sinceMs` (USGS `includedeleted=only`). */
+export async function fetchProviderDeleted(p: ProviderConfig, sinceMs: number): Promise<FetchOutcome> {
+  const r = await fetchFdsn(p, { updatedafter: sinceMs, includedeleted: 'only' });
   return { provider: p.id, obs: r.obs, status: r.status };
 }
 

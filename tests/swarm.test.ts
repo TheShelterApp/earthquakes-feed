@@ -84,6 +84,42 @@ test('revision: origin-time-only correction IS a revision (M1)', () => {
   assert.equal(revised.revision, 2);
 });
 
+test('tombstone: deleting the only provider tombstones the event; re-observe un-hides it', () => {
+  const map = new Map<string, EventNode>();
+  const r = new Resolver(map, prio, cfg, T0);
+  const first = r.ingest(obs('usgs', 'us_del'), '2026-07-05T12:00:10Z');
+  assert.equal(first.node.state, 'live');
+  const t = r.tombstoneProvider(obs('usgs', 'us_del'), '2026-07-05T12:05:00Z');
+  assert.equal(t?.changed, true);
+  assert.equal(first.node.state, 'tombstoned');
+  assert.equal(first.node.provenance.length, 0);
+  // A later observation of the same id un-hides it.
+  const back = r.ingest(obs('usgs', 'us_del'), '2026-07-05T12:10:00Z');
+  assert.equal(back.node.state, 'live');
+  assert.equal(back.changed, true);
+});
+
+test('tombstone: deleting one of two providers keeps the event live', () => {
+  const map = new Map<string, EventNode>();
+  const r = new Resolver(map, prio, cfg, T0);
+  r.ingest(obs('usgs', 'us_x', { status: 'reviewed' }), '2026-07-05T12:00:10Z');
+  r.ingest(obs('emsc', 'em_x', { lat: 38.101, lon: 21.901 }), '2026-07-05T12:00:20Z');
+  const node = [...map.values()][0]!;
+  assert.equal(node.provenance.length, 2);
+  const t = r.tombstoneProvider(obs('usgs', 'us_x'), '2026-07-05T12:05:00Z');
+  assert.equal(t?.changed, true);
+  assert.equal(node.state, 'live');
+  assert.equal(node.provenance.length, 1);
+  assert.equal(node.chosenProvider, 'emsc');
+});
+
+test('tombstone: delete for an unknown event is a no-op (never mints)', () => {
+  const map = new Map<string, EventNode>();
+  const r = new Resolver(map, prio, cfg, T0);
+  assert.equal(r.tombstoneProvider(obs('usgs', 'ghost'), '2026-07-05T12:00:10Z'), null);
+  assert.equal(map.size, 0);
+});
+
 test('no-op re-report mutates nothing (M2: replay purity)', () => {
   const map = new Map<string, EventNode>();
   const r = new Resolver(map, prio, cfg, T0);

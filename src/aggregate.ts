@@ -3,8 +3,11 @@ import { join } from 'node:path';
 import { DATA_DIR, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS, dataPaths } from './config.js';
 import { appendObservations, loadState, saveEventMap, saveMeta } from './bitemporal.js';
 import { Resolver, type IngestResult } from './dedup.js';
-import { activeProviders, configMap, fetchProvider, fetchProviderUpdated, loadRegistry, priorityMap } from './providers.js';
-import type { Observation, RawObs } from './types.js';
+import { activeProviders, configMap, fetchProvider, fetchProviderDeleted, fetchProviderUpdated, loadRegistry, priorityMap } from './providers.js';
+import type { Observation, Op, RawObs } from './types.js';
+
+/** FDSN nodes that support the `includedeleted` delete query (extensible). */
+const DELETE_PROVIDERS = new Set(['usgs']);
 import { isoFromMs } from './util.js';
 
 const FUTURE_LEEWAY_MS = 10 * 60_000;
@@ -42,10 +45,10 @@ function assertHeadMatchesLog(root: string, headSeq: number): void {
   }
 }
 
-function makeObservation(raw: RawObs, r: IngestResult, seq: number, ingestTime: string): Observation {
+function makeObservation(raw: RawObs, r: IngestResult, seq: number, ingestTime: string, op: Op = 'observe'): Observation {
   return {
     seq,
-    op: 'observe',
+    op,
     feed_id: r.node.feedId,
     revision: r.revision,
     ingest_time: ingestTime,
@@ -75,12 +78,17 @@ async function main(): Promise<void> {
 
   // Query updatedafter from LAST run's watermark (revisions since we last looked).
   const prevWatermarks = { ...state.watermarks };
-  const [outcomes, updateOutcomes] = await Promise.all([
+  const [outcomes, updateOutcomes, deleteOutcomes] = await Promise.all([
     Promise.all(active.map((p) => fetchProvider(p, nowMs))),
     Promise.all(
       active
         .filter((p) => p.adapter === 'fdsn' && prevWatermarks[p.id])
         .map((p) => fetchProviderUpdated(p, prevWatermarks[p.id]! - 300_000)),
+    ),
+    Promise.all(
+      active
+        .filter((p) => DELETE_PROVIDERS.has(p.id) && prevWatermarks[p.id])
+        .map((p) => fetchProviderDeleted(p, prevWatermarks[p.id]! - 300_000)),
     ),
   ]);
   const fetched = outcomes.flatMap((o) => o.obs);
@@ -139,6 +147,19 @@ async function main(): Promise<void> {
     }
   }
 
+  // Delete sweep: tombstone events retracted upstream (op:tombstone; never mints).
+  const deletes = deleteOutcomes.flatMap((o) => o.obs);
+  let tombstoned = 0;
+  for (const raw of deletes) {
+    const r = resolver.tombstoneProvider(raw, ingestTime);
+    if (r?.changed) {
+      seq += 1;
+      r.node.lastSeq = seq;
+      newObs.push(makeObservation(raw, r, seq, ingestTime, 'tombstone'));
+      tombstoned++;
+    }
+  }
+
   if (newObs.length) appendObservations(DATA_DIR, newObs);
   state.head = { seq, ingest_time: ingestTime };
 
@@ -156,6 +177,7 @@ async function main(): Promise<void> {
     stale_dropped: staleDropped,
     new_observations: newObs.length,
     revisions,
+    tombstoned,
     duration_ms: Math.round(Date.now() - nowMs),
     degraded,
     providers,
@@ -164,7 +186,7 @@ async function main(): Promise<void> {
   saveMeta(DATA_DIR, state.head, state.watermarks, status);
 
   console.log(
-    `aggregate: seq=${seq} indexed=${state.eventMap.size} fetched=${fetched.length} stale_dropped=${staleDropped} new=${newObs.length} revisions=${revisions} ` +
+    `aggregate: seq=${seq} indexed=${state.eventMap.size} fetched=${fetched.length} stale_dropped=${staleDropped} new=${newObs.length} revisions=${revisions} tombstoned=${tombstoned} ` +
       `providers=${outcomes.filter((o) => o.status.ok).length}/${outcomes.length}` +
       (degraded.length ? ` degraded=[${degraded.join(',')}]` : ''),
   );

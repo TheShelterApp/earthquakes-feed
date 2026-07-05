@@ -68,11 +68,20 @@ Top-level `properties` is populated USGS-style (`mag`, `place`, `time`, `updated
 
 ## Sources
 
-7 FDSN networks are active today; more are added through
-[`providers/registry.json`](providers/registry.json) (see [CONTRIBUTING.md](CONTRIBUTING.md)):
-USGS/ANSS, EMSC/CSEM, GEOFON, INGV, GeoNet, RESIF, NOA. A server runner has no CORS
-limit, so the feed can carry sources a browser can't reach directly. Full credits:
-[ATTRIBUTIONS.md](ATTRIBUTIONS.md).
+**18 networks active**, via [`providers/registry.json`](providers/registry.json)
+(add more — see [CONTRIBUTING.md](CONTRIBUTING.md)). A server runner has no CORS limit,
+so the feed carries national sources a browser can't reach directly, down to very small
+local magnitudes. Full credits: [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
+
+- **Global / multi-region (FDSN):** USGS/ANSS, EMSC/CSEM, GEOFON.
+- **Europe (FDSN):** INGV (Italy), RESIF (France), NOA (Greece), ETHZ (Switzerland), KNMI (Netherlands).
+- **Americas / Oceania (FDSN):** NCEDC + SCEDC (California), NRCan (Canada), GeoNet (New Zealand), AusPass (Australia).
+- **National APIs (custom adapters, fill gaps USGS misses):** AFAD (Turkey, to ~M0.6), CENC (China), NCS (India), TMD (Thailand **+ Myanmar**), KAGSR (Russia — Kamchatka/Kurils).
+
+**Honest coverage gaps:** Kazakhstan, Kyrgyzstan, Uzbekistan, Tajikistan, Turkmenistan,
+Belarus, Ukraine, Iran, Pakistan have **no open real-time earthquake API** (KNDC is
+CTBTO-restricted; others expose only delayed waveforms). Those regions are covered
+only via the global catalogs (USGS/EMSC/GEOFON) until an open source appears.
 
 ## Architecture (short version)
 
@@ -119,7 +128,8 @@ copyrightable expression) and honor removal requests reactively — see
 
 ## Status
 
-**MVP.** Working end-to-end: 7 sources, stateful dedup, bitemporal log, 20 rolling
-feeds, day partitions, manifest, CI. Not yet built: the full ~40-source adapter set,
-hourly knowledge-snapshots + replay endpoint, `op:merge` survivor selection, Releases
-archival, and `backfill`. Contributions welcome.
+**Live.** Working end-to-end: 18 sources, stateful dedup, bitemporal log, 20 rolling
+feeds, day partitions, manifest, CI, Cloudflare Pages serving. Not yet built: more
+national adapters (Caucasus/SE-Asia HTML sources), hourly knowledge-snapshots + replay
+endpoint, `op:merge` survivor selection, Releases archival, and `backfill`.
+Contributions welcome.

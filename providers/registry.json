@@ -59,6 +59,99 @@
       "license": "CC-BY-4.0", "attribution": "National Observatory of Athens (NOA), Institute of Geodynamics",
       "doi": null, "contact": "https://www.gein.noa.gr"
     },
+    {
+      "id": "ethz", "name": "ETH Zürich / Swiss Seismological Service", "priority": 12, "active": true,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "https://eida.ethz.ch/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 600,
+      "license": "CC-BY-4.0", "attribution": "Swiss Seismological Service (SED) at ETH Zürich",
+      "doi": null, "contact": "https://www.seismo.ethz.ch"
+    },
+    {
+      "id": "nrcan", "name": "Earthquakes Canada (NRCan)", "priority": 13, "active": true,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "https://www.earthquakescanada.nrcan.gc.ca/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 300,
+      "license": "OGL-Canada-2.0", "attribution": "Natural Resources Canada — Earthquakes Canada",
+      "doi": null, "contact": "https://www.earthquakescanada.nrcan.gc.ca"
+    },
+    {
+      "id": "ncedc", "name": "Northern California Earthquake Data Center", "priority": 14, "active": true,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "https://service.ncedc.org/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 300,
+      "license": "CC-BY-4.0", "attribution": "NCEDC (UC Berkeley Seismological Laboratory & USGS)",
+      "doi": "10.7932/NCEDC", "contact": "https://ncedc.org"
+    },
+    {
+      "id": "scedc", "name": "Southern California Earthquake Data Center", "priority": 15, "active": true,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "https://service.scedc.caltech.edu/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 300,
+      "license": "CC-BY-4.0", "attribution": "SCEDC (Caltech / USGS)",
+      "doi": "10.7909/C3WD3xH1", "contact": "https://scedc.caltech.edu"
+    },
+    {
+      "id": "knmi", "name": "KNMI (Netherlands)", "priority": 16, "active": true,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "https://rdsa.knmi.nl/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 600,
+      "license": "CC-BY-4.0", "attribution": "Royal Netherlands Meteorological Institute (KNMI)",
+      "doi": null, "contact": "https://www.knmi.nl"
+    },
+    {
+      "id": "auspass", "name": "AusPass (Australia)", "priority": 17, "active": true,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "https://auspass.edu.au/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 600,
+      "license": "CC-BY-4.0", "attribution": "AusPass — Australian Passive Seismic Server (ANU)",
+      "doi": null, "contact": "https://auspass.edu.au"
+    },
+    {
+      "id": "afad", "name": "AFAD (Turkey)", "priority": 18, "active": true,
+      "adapter": "custom", "parse": "custom", "queryFormat": "json",
+      "base": "https://servisnet.afad.gov.tr/apigateway/deprem/apiv2/event/filter",
+      "supportsTimeRange": true, "refreshSeconds": 300,
+      "license": "unknown", "attribution": "AFAD — Republic of Türkiye, Disaster and Emergency Management Presidency (deprem.afad.gov.tr)",
+      "doi": null, "contact": "https://deprem.afad.gov.tr",
+      "notes": "Custom JSON. Local time UTC+3 (adapter converts). Dense small local events down to ~M0.6."
+    },
+    {
+      "id": "cenc", "name": "CENC — China Earthquake Networks Center", "priority": 19, "active": true,
+      "adapter": "custom", "parse": "custom", "queryFormat": "json",
+      "base": "https://www.ceic.ac.cn/data/data.json",
+      "supportsTimeRange": false, "refreshSeconds": 300,
+      "license": "unknown", "attribution": "China Earthquake Networks Center (CENC), China Earthquake Administration — www.ceic.ac.cn",
+      "doi": null, "contact": "https://www.ceic.ac.cn",
+      "notes": "Custom JSON rolling file. Beijing time UTC+8 (adapter converts). Mainland China local events."
+    },
+    {
+      "id": "ncs", "name": "NCS — National Center for Seismology (India)", "priority": 21, "active": true,
+      "adapter": "custom", "parse": "custom", "queryFormat": "html",
+      "base": "https://riseq.seismo.gov.in/riseq/earthquake/",
+      "supportsTimeRange": false, "refreshSeconds": 300,
+      "license": "unknown", "attribution": "National Center for Seismology (NCS), Ministry of Earth Sciences, Government of India — riseq.seismo.gov.in",
+      "doi": null, "contact": "https://riseq.seismo.gov.in",
+      "notes": "Custom: events embedded as data-json attributes in HTML. IST UTC+5:30 (adapter converts). India/Himalaya."
+    },
+    {
+      "id": "tmd", "name": "TMD — Thai Meteorological Department", "priority": 24, "active": true,
+      "adapter": "custom", "parse": "custom", "queryFormat": "json",
+      "base": "https://eq.tmd.go.th/map-events.json",
+      "supportsTimeRange": false, "refreshSeconds": 300,
+      "license": "unknown", "attribution": "Thai Meteorological Department (TMD), Earthquake Observation Division — earthquake.tmd.go.th",
+      "doi": null, "contact": "https://earthquake.tmd.go.th",
+      "notes": "Custom JSON, otime already UTC. Covers Thailand AND Myanmar (Myanmar has no native open feed)."
+    },
+    {
+      "id": "kagsr", "name": "KAGSR — Kamchatka Branch GS RAS (Russia)", "priority": 25, "active": true,
+      "adapter": "custom", "parse": "custom", "queryFormat": "geojson",
+      "base": "https://sdis.emsd.ru/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 300,
+      "license": "unknown", "attribution": "Kamchatka Branch, Geophysical Survey of the Russian Academy of Sciences (KB GS RAS), sdis.emsd.ru",
+      "doi": null, "contact": "https://emsd.ru",
+      "notes": "Custom non-standard FDSN geojson (only format=geojson works). FLAKY: adapter retries 3x + browser UA. Local Kamchatka/Kuril events USGS misses — the only open real-time Russia source."
+    },
 
     {
       "id": "bmkg", "name": "BMKG (Indonesia)", "priority": 20, "active": false,

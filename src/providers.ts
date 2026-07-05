@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { FETCH_LIMIT, FETCH_TIMEOUT_MS, QUERY_LOOKBACK_MS, REGISTRY_PATH } from './config.js';
+import { CUSTOM_ADAPTERS } from './custom.js';
 import { parseFdsnText, parseGeoJSON } from './fdsn.js';
 import type { ProviderConfig, ProviderStatus, RawObs } from './types.js';
 import { fetchText, isoFromMs } from './util.js';
@@ -38,6 +39,17 @@ export interface FetchOutcome {
 
 /** Fail-open: any error yields zero observations and a `degraded` status, never a throw. */
 export async function fetchProvider(p: ProviderConfig, nowMs: number): Promise<FetchOutcome> {
+  if (p.adapter.startsWith('custom')) {
+    const adapter = CUSTOM_ADAPTERS[p.id];
+    if (!adapter) return { provider: p.id, obs: [], status: { ok: false, error: `no custom adapter for '${p.id}'` } };
+    const started = performance.now();
+    try {
+      const obs = await adapter(p, nowMs);
+      return { provider: p.id, obs, status: { ok: true, latency_ms: Math.round(performance.now() - started), events_returned: obs.length } };
+    } catch (err) {
+      return { provider: p.id, obs: [], status: { ok: false, latency_ms: Math.round(performance.now() - started), error: err instanceof Error ? err.message : String(err) } };
+    }
+  }
   const url = buildUrl(p, nowMs);
   try {
     const res = await fetchText(url, FETCH_TIMEOUT_MS);

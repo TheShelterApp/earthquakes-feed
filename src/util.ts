@@ -6,8 +6,11 @@ export function parseUtcMs(v: string | number | null | undefined): number | null
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
   let t = v.trim();
   if (!t) return null;
+  // Slash dates (SCEDC: 2026/07/04 23:14:10.1100) → ISO dashes.
+  t = t.replace(/^(\d{4})\/(\d{2})\/(\d{2})/, '$1-$2-$3');
   if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(t)) {
     t = t.replace(' ', 'T');
+    t = t.replace(/(\.\d{3})\d+/, '$1'); // trim >3 fractional digits
     if (!/([zZ]|[+-]\d{2}:?\d{2})$/.test(t)) t += 'Z';
   }
   const ms = Date.parse(t);

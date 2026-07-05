@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { DATA_DIR, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS, dataPaths } from './config.js';
 import { appendObservations, loadState, saveEventMap, saveMeta } from './bitemporal.js';
 import { Resolver, type IngestResult } from './dedup.js';
-import { activeProviders, configMap, fetchProvider, loadRegistry, priorityMap } from './providers.js';
+import { activeProviders, configMap, fetchProvider, fetchProviderUpdated, loadRegistry, priorityMap } from './providers.js';
 import type { Observation, RawObs } from './types.js';
 import { isoFromMs } from './util.js';
 
@@ -73,7 +73,16 @@ async function main(): Promise<void> {
   assertHeadMatchesLog(DATA_DIR, state.head.seq);
   const resolver = new Resolver(state.eventMap, priorityMap(all), configMap(all), nowMs);
 
-  const outcomes = await Promise.all(active.map((p) => fetchProvider(p, nowMs)));
+  // Query updatedafter from LAST run's watermark (revisions since we last looked).
+  const prevWatermarks = { ...state.watermarks };
+  const [outcomes, updateOutcomes] = await Promise.all([
+    Promise.all(active.map((p) => fetchProvider(p, nowMs))),
+    Promise.all(
+      active
+        .filter((p) => p.adapter === 'fdsn' && prevWatermarks[p.id])
+        .map((p) => fetchProviderUpdated(p, prevWatermarks[p.id]! - 300_000)),
+    ),
+  ]);
   const fetched = outcomes.flatMap((o) => o.obs);
   // Live path handles the hot window only; older rows (e.g. CENC's rolling year file)
   // would bypass dedup outside it (C2) — drop them; backfill owns history.
@@ -104,6 +113,32 @@ async function main(): Promise<void> {
     }
   }
 
+  // Revision sweep (H2): updatedafter results revise KNOWN events only (reviseExisting
+  // never mints), so revisions to events outside the hot index are skipped, not duped.
+  const updates = updateOutcomes
+    .flatMap((o) => o.obs)
+    .filter((r) => r.eventTimeMs <= futureCeil);
+  updates.sort(
+    (a, b) =>
+      a.eventTimeMs - b.eventTimeMs ||
+      (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0) ||
+      (a.providerEventId < b.providerEventId ? -1 : a.providerEventId > b.providerEventId ? 1 : 0),
+  );
+  let revisions = 0;
+  for (const raw of updates) {
+    if (raw.providerUpdatedMs != null) {
+      state.watermarks[raw.provider] = Math.max(state.watermarks[raw.provider] ?? 0, raw.providerUpdatedMs);
+    }
+    const r = resolver.reviseExisting(raw, ingestTime);
+    if (r?.changed) {
+      seq += 1;
+      r.node.lastSeq = seq;
+      if (r.node.firstSeenSeq < 0) r.node.firstSeenSeq = seq;
+      newObs.push(makeObservation(raw, r, seq, ingestTime));
+      revisions++;
+    }
+  }
+
   if (newObs.length) appendObservations(DATA_DIR, newObs);
   state.head = { seq, ingest_time: ingestTime };
 
@@ -120,6 +155,7 @@ async function main(): Promise<void> {
     observations_returned: fetched.length,
     stale_dropped: staleDropped,
     new_observations: newObs.length,
+    revisions,
     duration_ms: Math.round(Date.now() - nowMs),
     degraded,
     providers,
@@ -128,7 +164,7 @@ async function main(): Promise<void> {
   saveMeta(DATA_DIR, state.head, state.watermarks, status);
 
   console.log(
-    `aggregate: seq=${seq} indexed=${state.eventMap.size} fetched=${fetched.length} stale_dropped=${staleDropped} new=${newObs.length} ` +
+    `aggregate: seq=${seq} indexed=${state.eventMap.size} fetched=${fetched.length} stale_dropped=${staleDropped} new=${newObs.length} revisions=${revisions} ` +
       `providers=${outcomes.filter((o) => o.status.ok).length}/${outcomes.length}` +
       (degraded.length ? ` degraded=[${degraded.join(',')}]` : ''),
   );

@@ -101,7 +101,8 @@ export class Resolver {
     return false;
   }
 
-  private resolve(raw: RawObs): string {
+  /** Resolve to an existing feed_id (alias → cross-alias → spatial), or null. Never mints. */
+  private findExisting(raw: RawObs): string | null {
     const key = `${raw.provider}:${raw.providerEventId}`;
     const hit = this.alias.get(key);
     if (hit) return hit;
@@ -141,11 +142,17 @@ export class Resolver {
         return best;
       }
     }
+    return null;
+  }
+
+  private resolve(raw: RawObs): string {
+    const existing = this.findExisting(raw);
+    if (existing) return existing;
     let fid = deterministicFeedId(raw.eventTimeMs, raw.lat, raw.lon);
     for (let salt = 1; this.eventMap.has(fid); salt++) {
       fid = deterministicFeedId(raw.eventTimeMs, raw.lat, raw.lon, salt);
     }
-    this.alias.set(key, fid);
+    this.alias.set(`${raw.provider}:${raw.providerEventId}`, fid);
     return fid;
   }
 
@@ -219,8 +226,19 @@ export class Resolver {
     return [node.mag, node.magType, node.status, node.lat.toFixed(4), node.lon.toFixed(4), node.depth, node.chosenProvider, node.eventTimeMs, node.place].join('|');
   }
 
+  /** Ingest a fresh observation (mints a new event if unknown). */
   ingest(raw: RawObs, ingestTime: string): IngestResult {
-    const fid = this.resolve(raw);
+    return this.applyIngest(this.resolve(raw), raw, ingestTime);
+  }
+
+  /** Ingest an `updatedafter` observation as a revision ONLY — never mints a new event
+   *  (H2). A revision to an event outside the loaded index is skipped, not duplicated. */
+  reviseExisting(raw: RawObs, ingestTime: string): IngestResult | null {
+    const fid = this.findExisting(raw);
+    return fid ? this.applyIngest(fid, raw, ingestTime) : null;
+  }
+
+  private applyIngest(fid: string, raw: RawObs, ingestTime: string): IngestResult {
     const key = `${raw.provider}:${raw.providerEventId}`;
     let node = this.eventMap.get(fid);
 

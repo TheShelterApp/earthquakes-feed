@@ -26,6 +26,7 @@ const fdsnTime = (ms: number): string => isoFromMs(ms).slice(0, 19);
 interface FetchParams {
   starttime?: number;
   endtime?: number;
+  updatedafter?: number;
   minmag?: number;
 }
 
@@ -34,6 +35,7 @@ function buildUrl(p: ProviderConfig, params: FetchParams): string {
   if (!p.noLimit) q.set('limit', String(FETCH_LIMIT));
   if (params.starttime != null) q.set('starttime', fdsnTime(params.starttime));
   if (params.endtime != null) q.set('endtime', fdsnTime(params.endtime));
+  if (params.updatedafter != null) q.set('updatedafter', fdsnTime(params.updatedafter));
   if (params.minmag != null) q.set('minmagnitude', String(params.minmag));
   for (const [k, v] of Object.entries(p.params ?? {})) q.set(k, v);
   return `${p.base}?${q.toString()}`;
@@ -89,6 +91,14 @@ export async function fetchProvider(p: ProviderConfig, nowMs: number): Promise<F
     }
   }
   const r = await fetchFdsn(p, p.supportsTimeRange ? { starttime: nowMs - QUERY_LOOKBACK_MS } : {});
+  return { provider: p.id, obs: r.obs, status: r.status };
+}
+
+/** Revision sweep (H2): FDSN events UPDATED since `sinceMs`, regardless of origin time —
+ *  catches reviewed-solution upgrades and deletes that fall outside the 48h origin window. */
+export async function fetchProviderUpdated(p: ProviderConfig, sinceMs: number): Promise<FetchOutcome> {
+  if (p.adapter !== 'fdsn' || !p.supportsTimeRange) return { provider: p.id, obs: [], status: { ok: true, events_returned: 0 } };
+  const r = await fetchFdsn(p, { updatedafter: sinceMs });
   return { provider: p.id, obs: r.obs, status: r.status };
 }
 

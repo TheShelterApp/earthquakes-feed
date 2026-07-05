@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { GRID_CELL_DEG, dataPaths } from './config.js';
-import { appendObservations, eventDayKey } from './bitemporal.js';
-import { Resolver, type IngestResult } from './dedup.js';
+import { eventDayKey } from './bitemporal.js';
+import { Resolver } from './dedup.js';
 import {
   loadInventory,
   readDayPartitionNodes,
@@ -10,7 +10,7 @@ import {
   type Inventory,
 } from './partitions.js';
 import { activeProviders, fetchProviderWindow, loadRegistry, priorityMap, configMap } from './providers.js';
-import type { EventNode, Head, Observation, ProviderConfig, RawObs } from './types.js';
+import type { EventNode, Head, ProviderConfig, RawObs } from './types.js';
 import { isoFromMs } from './util.js';
 
 const DAY = 86_400_000;
@@ -67,29 +67,6 @@ function loadCursor(root: string, nowMs: number, liveDay: string): Cursor {
   const f = dataPaths(root).backfillCursor;
   if (existsSync(f)) return JSON.parse(readFileSync(f, 'utf8')) as Cursor;
   return { targetStart: eventDayKey(nowMs - BACKFILL_TARGET_YEARS * 365 * DAY), providers: {} };
-}
-
-function makeObservation(raw: RawObs, r: IngestResult, seq: number, ingestTime: string): Observation {
-  return {
-    seq,
-    op: 'observe',
-    feed_id: r.node.feedId,
-    revision: r.revision,
-    ingest_time: ingestTime,
-    event_time: isoFromMs(raw.eventTimeMs),
-    provider: raw.provider,
-    provider_event_id: raw.providerEventId,
-    provider_updated: raw.providerUpdatedMs != null ? isoFromMs(raw.providerUpdatedMs) : null,
-    status: raw.status,
-    lat: raw.lat,
-    lon: raw.lon,
-    depth: raw.depth,
-    mag: raw.mag,
-    magType: raw.magType,
-    place: raw.place,
-    backfilled: true,
-    extra: raw.extra,
-  };
 }
 
 async function main(): Promise<void> {
@@ -207,16 +184,19 @@ async function main(): Promise<void> {
       (a.providerEventId < b.providerEventId ? -1 : a.providerEventId > b.providerEventId ? 1 : 0),
   );
 
+  // Backfill does NOT append to the observation log or advance head.seq. Historical
+  // data lives in the (lossless) day partitions; the log stays the LIVE knowledge
+  // stream, so a fast multi-year backfill can't bloat it. Backfilled nodes carry the
+  // current head.seq as a "learned-around" marker.
   const head = JSON.parse(readFileSync(dataPaths(root).head, 'utf8')) as Head;
-  let seq = head.seq;
-  const newObs: Observation[] = [];
+  const seqMarker = head.seq;
+  let changedCount = 0;
   for (const raw of raws) {
     const r = resolver.ingest(raw, ingestTime);
     if (r.changed) {
-      seq += 1;
-      r.node.lastSeq = seq;
-      if (r.node.firstSeenSeq < 0) r.node.firstSeenSeq = seq;
-      newObs.push(makeObservation(raw, r, seq, ingestTime));
+      r.node.lastSeq = seqMarker;
+      if (r.node.firstSeenSeq < 0) r.node.firstSeenSeq = seqMarker;
+      changedCount++;
     }
   }
 
@@ -247,16 +227,12 @@ async function main(): Promise<void> {
     }
   }
   if (reroll) writeFileSync(archFile, JSON.stringify(archives, null, 2) + '\n');
-  if (newObs.length) appendObservations(root, newObs);
-  head.seq = seq;
-  head.ingest_time = ingestTime;
-  writeFileSync(dataPaths(root).head, JSON.stringify(head, null, 2) + '\n');
   writeFileSync(dataPaths(root).backfillCursor, JSON.stringify(cursor, null, 2) + '\n');
 
   const remaining = Object.values(cursor.providers).filter((c) => !c.done).length;
   console.log(
-    `backfill: jobs=${jobs.length} fetched=${raws.length} new=${newObs.length} days_written=${rewritten} ` +
-      `overflow=${overflowCount} providers_remaining=${remaining} head_seq=${seq}`,
+    `backfill: jobs=${jobs.length} fetched=${raws.length} changed=${changedCount} days_written=${rewritten} ` +
+      `overflow=${overflowCount} providers_remaining=${remaining}`,
   );
 }
 

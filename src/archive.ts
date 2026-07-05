@@ -24,8 +24,17 @@ interface ArchiveEntry {
   days: string[];
   needs_reroll?: boolean;
 }
+interface LogArchiveEntry {
+  period: string;
+  tag: string;
+  asset: string;
+  bytes: number;
+  sha256: string;
+  files: number;
+}
 interface Archives {
   list: ArchiveEntry[];
+  log_list?: LogArchiveEntry[];
 }
 
 const dayKey = (ms: number): string => isoFromMs(ms).slice(0, 10);
@@ -42,8 +51,8 @@ const HAS_ZSTD = (() => {
 })();
 
 /** tar a directory then compress (zstd -19, gzip fallback). Returns {path, asset}. */
-function makeTarball(memberDir: string, members: string[], month: string): { path: string; asset: string } {
-  const base = `events-${month}.tar`;
+function makeTarball(memberDir: string, members: string[], baseName: string): { path: string; asset: string } {
+  const base = `${baseName}.tar`;
   const tar = join(memberDir, '..', base);
   execFileSync('tar', ['-cf', tar, '-C', memberDir, ...members]);
   if (HAS_ZSTD) {
@@ -102,6 +111,69 @@ function shardDays(root: string): Set<string> {
   return new Set(readdirSync(dir).filter((f) => f.endsWith('.ndjson')).map((f) => f.slice(0, 10)));
 }
 
+/** Map ingest YYYY-MM -> its observation-log files (knowledge/observations/ingest=YYYY/MM/DD/HH.ndjson). */
+function observationMonths(obsDir: string): Map<string, { files: string[]; days: string[]; monthDir: string }> {
+  const months = new Map<string, { files: string[]; days: string[]; monthDir: string }>();
+  if (!existsSync(obsDir)) return months;
+  for (const yEntry of readdirSync(obsDir)) {
+    const m = /^ingest=(\d{4})$/.exec(yEntry);
+    if (!m) continue;
+    const yyyy = m[1]!;
+    const yDir = join(obsDir, yEntry);
+    for (const mm of readdirSync(yDir)) {
+      if (!/^\d{2}$/.test(mm)) continue;
+      const monthDir = join(yDir, mm);
+      const key = `${yyyy}-${mm}`;
+      const e = months.get(key) ?? months.set(key, { files: [], days: [], monthDir }).get(key)!;
+      for (const dd of readdirSync(monthDir)) {
+        const ddDir = join(monthDir, dd);
+        if (!/^\d{2}$/.test(dd)) continue;
+        for (const f of readdirSync(ddDir)) {
+          if (f.endsWith('.ndjson')) {
+            e.files.push(join(ddDir, f));
+            if (!e.days.includes(`${key}-${dd}`)) e.days.push(`${key}-${dd}`);
+          }
+        }
+      }
+    }
+  }
+  return months;
+}
+
+/** Roll fully-cold ingest-months of the observation log into Release tarballs, then prune. */
+function archiveLog(root: string, cutoff: string, archives: Archives, staging: string): number {
+  const obsDir = dataPaths(root).observationsDir;
+  const done = new Set((archives.log_list ?? []).map((a) => a.period));
+  let n = 0;
+  for (const [month, { files, days, monthDir }] of [...observationMonths(obsDir).entries()].sort()) {
+    if (n >= MAX_MONTHS || done.has(month) || days.some((d) => d >= cutoff)) continue;
+    const memberDir = join(staging, `obs-${month}`);
+    mkdirSync(memberDir, { recursive: true });
+    for (const f of files) cpSync(f, join(memberDir, f.split('/').slice(-3).join('_'))); // YYYY_MM_DD_HH.ndjson? use DD_HH
+    const members = readdirSync(memberDir).sort();
+    const { path: tarPath, asset } = makeTarball(memberDir, members, `observations-${month}`);
+    const tag = `archive-${month}`;
+    const bytes = statSync(tarPath).size;
+    const sha256 = sha256File(tarPath);
+    if (!DRY_RUN) {
+      try {
+        gh(['release', 'view', tag, '-R', REPO]);
+      } catch {
+        gh(['release', 'create', tag, '-R', REPO, '--target', 'main', '--title', tag, '--notes', `Archive for ${month}.`]);
+      }
+      gh(['release', 'upload', tag, tarPath, '-R', REPO, '--clobber']);
+      const verify = join(staging, `verify-${asset}`);
+      gh(['release', 'download', tag, '-R', REPO, '-p', asset, '-O', verify, '--clobber']);
+      if (sha256File(verify) !== sha256) throw new Error(`log archive verify failed for ${month}`);
+    }
+    (archives.log_list ??= []).push({ period: month, tag, asset, bytes, sha256, files: files.length });
+    rmSync(monthDir, { recursive: true, force: true });
+    n++;
+    console.log(`archive-log: ${month} -> ${asset} (${(bytes / 1e6).toFixed(2)} MB, ${files.length} hours)${DRY_RUN ? ' [dry-run]' : ''}`);
+  }
+  return n;
+}
+
 function main(): void {
   const root = dataPaths().root;
   const nowMs = Date.now();
@@ -140,7 +212,7 @@ function main(): void {
       for (const f of files) cpSync(f, join(memberDir, f.slice(-9))); // DD.ndjson
 
       const members = readdirSync(memberDir).sort();
-      const { path: tarPath, asset } = makeTarball(memberDir, members, month);
+      const { path: tarPath, asset } = makeTarball(memberDir, members, `events-${month}`);
       const bytes = statSync(tarPath).size;
       const sha256 = sha256File(tarPath);
       const tag = `archive-${month}`;
@@ -171,9 +243,12 @@ function main(): void {
       console.log(`archive: ${month} -> ${asset} (${(bytes / 1e6).toFixed(2)} MB, ${count} events)${DRY_RUN ? ' [dry-run]' : ''}`);
     }
 
+    // Second pass: roll the observation log's cold ingest-months to Releases too.
+    const logArchived = archiveLog(root, cutoff, archives, staging);
+
     saveArchives(root, archives);
     saveInventory(root, inv);
-    console.log(`archive: ${archived} month(s) archived`);
+    console.log(`archive: ${archived} event-month(s) + ${logArchived} log-month(s) archived`);
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }

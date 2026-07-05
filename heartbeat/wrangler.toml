@@ -2,9 +2,9 @@ name = "earthquakes-feed-heartbeat"
 main = "src/worker.js"
 compatibility_date = "2024-11-01"
 
-# Fires every 5 minutes to dispatch the `aggregate` workflow — GitHub throttles
-# low-activity scheduled workflows, so this external tick keeps the feed fresh.
+# GitHub throttles/delays low-activity scheduled workflows, so this external tick
+# drives them reliably: aggregate every 5 min, backfill hourly.
 # Needs a secret GH_PAT (fine-grained token, repo earthquakes-feed, Actions: write):
 #   cd heartbeat && wrangler secret put GH_PAT
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/5 * * * *", "41 * * * *"]

@@ -50,6 +50,9 @@ jobs:
       - name: Backfill
         env:
           DATA_DIR: .data
+          # gh release download: lets backfill pull archived (cold) months back to merge a
+          # newly-added source into them (re-materialize + flag month for re-roll).
+          GH_TOKEN: ${{ github.token }}
           BACKFILL_STARTTIME: ${{ inputs.starttime }}
           BACKFILL_ENDTIME: ${{ inputs.endtime }}
           BACKFILL_PROVIDERS: ${{ inputs.providers }}

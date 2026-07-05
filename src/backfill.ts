@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { GRID_CELL_DEG, dataPaths } from './config.js';
+import { dataPaths } from './config.js';
+import { readArchivedDays } from './archive-io.js';
 import { eventDayKey } from './bitemporal.js';
 import { Resolver } from './dedup.js';
 import {
@@ -80,11 +81,13 @@ async function main(): Promise<void> {
   const providers = activeProviders(all);
   const liveDay = earliestLiveDay(root, nowMs);
   const liveDayMs = dayStartMs(liveDay);
-  // Days already rolled to Releases are no longer in-tree; touching them would re-mint
-  // duplicates (their nodes aren't in the transient index). Skip them.
+  // Days already rolled to Releases are no longer in-tree. To let a (new) source dedup
+  // against + merge into that cold history, we pull the touched archived days back from
+  // their Release tarballs (below), re-materialize the changed ones, and flag the month for
+  // re-roll — instead of blindly skipping (which would re-mint duplicates).
   const archFile = dataPaths(root).archivesIndex;
   const archives = existsSync(archFile)
-    ? (JSON.parse(readFileSync(archFile, 'utf8')) as { list: { period: string; days?: string[]; needs_reroll?: boolean }[] })
+    ? (JSON.parse(readFileSync(archFile, 'utf8')) as { list: { period: string; tag: string; asset: string; days?: string[]; needs_reroll?: boolean }[] })
     : { list: [] };
   const archivedDays = new Set<string>();
   for (const a of archives.list) for (const d of a.days ?? []) archivedDays.add(d);
@@ -139,12 +142,27 @@ async function main(): Promise<void> {
   // 3) Build a transient index from existing partitions across the union day range.
   const minStart = Math.min(...jobs.map((j) => j.startMs));
   const maxEnd = Math.max(...jobs.map((j) => j.endMs));
-  const touchedDays = new Set<string>();
   const transient = new Map<string, EventNode>();
   for (let ms = dayStartMs(eventDayKey(minStart)); ms <= maxEnd; ms += DAY) {
     const day = eventDayKey(ms);
     if (day >= liveDay) continue; // never touch live-owned days
     for (const node of readDayPartitionNodes(root, day)) transient.set(node.feedId, node);
+  }
+  // Pull the archived days this run's fetch actually lands on (from their Release tarballs)
+  // into the transient BEFORE the Resolver is built, so their existing events are in its
+  // identity index and the new source merges instead of re-minting. Bounded: only touched days.
+  const archivedTouched = new Set<string>();
+  for (const res of results) {
+    if (!res.status.ok) continue;
+    for (const o of res.obs) {
+      const day = eventDayKey(o.eventTimeMs);
+      if (day < liveDay && archivedDays.has(day)) archivedTouched.add(day);
+    }
+  }
+  if (archivedTouched.size) {
+    const arch = readArchivedDays(archives.list, archivedTouched);
+    for (const nodes of arch.values()) for (const n of nodes) transient.set(n.feedId, n);
+    console.log(`backfill: pulled ${arch.size}/${archivedTouched.size} archived day(s) for merge`);
   }
   const resolver = new Resolver(transient, priorityMap(all), configMap(all), nowMs, { hotFloorMs: 0 });
 
@@ -179,7 +197,8 @@ async function main(): Promise<void> {
     }
     for (const o of res.obs) {
       const day = eventDayKey(o.eventTimeMs);
-      if (day < liveDay && !archivedDays.has(day)) raws.push(o);
+      // Archived days are now pulled into the transient above, so they can be ingested too.
+      if (day < liveDay) raws.push(o);
     }
     if (cur) {
       cur.failures = 0;
@@ -206,11 +225,13 @@ async function main(): Promise<void> {
   const head = JSON.parse(readFileSync(dataPaths(root).head, 'utf8')) as Head;
   const seqMarker = head.seq;
   let changedCount = 0;
+  const changedDays = new Set<string>();
   for (const raw of raws) {
     const r = resolver.ingest(raw, ingestTime);
     if (r.changed) {
       r.node.lastSeq = seqMarker;
       if (r.node.firstSeenSeq < 0) r.node.firstSeenSeq = seqMarker;
+      changedDays.add(eventDayKey(r.node.eventTimeMs));
       changedCount++;
     }
   }
@@ -221,19 +242,28 @@ async function main(): Promise<void> {
     const day = eventDayKey(node.eventTimeMs);
     if (day >= liveDay) continue;
     (byDay.get(day) ?? byDay.set(day, []).get(day)!).push(node);
-    touchedDays.add(day);
   }
   const inv: Inventory = loadInventory(root);
   let rewritten = 0;
+  let rematerialized = 0;
+  const writtenDays = new Set<string>();
   for (const [day, nodes] of byDay) {
+    // An archived day is in `transient` only because we pulled it to merge a new source —
+    // re-materialize it to the tree ONLY if it actually changed (else a needless re-roll).
+    const isArchived = archivedDays.has(day);
+    if (isArchived && !changedDays.has(day)) continue;
     const { written, stat } = writeDayPartition(root, day, nodes, { nowMs, headIngestTime: ingestTime });
-    if (written) rewritten++;
+    if (written) {
+      rewritten++;
+      writtenDays.add(day);
+      if (isArchived) rematerialized++;
+    }
     inv[day] = stat;
   }
   saveInventory(root, inv);
-  // If we wrote into a month that's partially archived, flag it so archive.ts re-rolls
-  // the whole month (merging the new in-tree days with the old Release asset).
-  const touchedMonths = new Set([...touchedDays].map((d) => d.slice(0, 7)));
+  // If we byte-changed a day in a month that's archived, flag it so archive.ts re-rolls the
+  // whole month (merging the re-materialized in-tree days back into the Release asset).
+  const touchedMonths = new Set([...writtenDays].map((d) => d.slice(0, 7)));
   let reroll = false;
   for (const a of archives.list) {
     if (touchedMonths.has(a.period) && !a.needs_reroll) {
@@ -247,7 +277,7 @@ async function main(): Promise<void> {
   const remaining = Object.values(cursor.providers).filter((c) => !c.done).length;
   console.log(
     `backfill: jobs=${jobs.length} fetched=${raws.length} changed=${changedCount} days_written=${rewritten} ` +
-      `overflow=${overflowCount} saturated=${saturatedCount} providers_remaining=${remaining}`,
+      `rematerialized=${rematerialized} overflow=${overflowCount} saturated=${saturatedCount} providers_remaining=${remaining}`,
   );
 }
 

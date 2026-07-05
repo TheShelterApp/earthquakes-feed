@@ -230,13 +230,20 @@ function main(): void {
         if (sha256File(verify) !== sha256) throw new Error(`archive verify failed for ${month}`);
       }
 
-      const count = days.reduce((n, d) => n + (inv[d]?.count ?? 0), 0);
-      const next: ArchiveEntry = { period: month, tag, asset, url, bytes, sha256, count, days: days.sort(), needs_reroll: false };
+      // Days/count reflect the FULL tarball (old archive + any re-materialized in-tree days
+      // on re-roll), derived from the members actually written — not just the in-tree overlay,
+      // so the entry stays accurate when a backfilled new source re-rolls a cold month.
+      const memberDays = members.filter((m) => m.endsWith('.ndjson'));
+      const allDays = memberDays.map((m) => `${month}-${m.slice(0, 2)}`).sort();
+      let count = 0;
+      for (const m of memberDays) count += readFileSync(join(memberDir, m), 'utf8').split('\n').filter(Boolean).length;
+      const next: ArchiveEntry = { period: month, tag, asset, url, bytes, sha256, count, days: allDays, needs_reroll: false };
       const idx = archives.list.findIndex((a) => a.period === month);
       if (idx >= 0) archives.list[idx] = next;
       else archives.list.push(next);
 
-      // Only now (verified) remove the tree files + inventory entries.
+      // Only now (verified) remove the RE-MATERIALIZED in-tree files + their inventory entries
+      // (the old-archive days were never in-tree). `days`/`files` are in-tree only.
       for (const f of files) rmSync(f);
       for (const d of days) delete inv[d];
       archived++;

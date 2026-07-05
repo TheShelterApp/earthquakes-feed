@@ -1,0 +1,46 @@
+name: discover
+
+# Monthly source discovery-assist: scan the FDSN datacenter registry for newly-registered
+# event services + re-probe known-down FDSN endpoints, and open/refresh a GitHub issue listing
+# any that now return events (with a ready-to-paste registry entry). NEVER auto-adds a source —
+# a human vets and enables each. Read-only on data; one HTTP scan/month → no quota/ban risk.
+on:
+  schedule:
+    - cron: '0 6 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Discover FDSN sources
+        id: disc
+        env:
+          REPORT_FILE: discovery-report.md
+        run: |
+          npx --no-install tsx src/discover.ts | tee disc.out
+          echo "count=$(grep -oE 'candidates=[0-9]+' disc.out | tail -1 | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+      - name: Open / refresh discovery issue
+        if: steps.disc.outputs.count != '0' && steps.disc.outputs.count != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          TITLE="🛰️ FDSN source discovery: ${{ steps.disc.outputs.count }} new candidate(s)"
+          EXISTING=$(gh issue list --repo "$REPO" --state open --search "FDSN source discovery in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --repo "$REPO" --title "$TITLE" --body-file discovery-report.md
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body-file discovery-report.md
+          fi

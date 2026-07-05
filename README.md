@@ -22,11 +22,15 @@ Everything is plain GeoJSON/NDJSON over a CDN with `Access-Control-Allow-Origin:
 # The current day, all sources deduped (one CORS-open request):
 curl -s https://earthquakes-feed.theshelter.app/v1/all_day.geojson
 
-# Before Cloudflare Pages is wired up, the same files serve free via jsDelivr:
-curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/v1/all_day.geojson
-
 # The catalog of everything available (rolling feeds + historical partitions):
-curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/v1/manifest.json
+curl -s https://earthquakes-feed.theshelter.app/v1/manifest.json
+
+# One historical day (event-time), straight from the data branch via jsDelivr
+# (note: branch refs are cached ~12h at the CDN — resolve paths via the manifest):
+curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2026/07/04.ndjson
+
+# The same day as ready-to-render GeoJSON on Pages (last 120 days):
+curl -s https://earthquakes-feed.theshelter.app/v1/events/2026-07-04.geojson
 ```
 
 ### Rolling summary feeds (USGS-style matrix)
@@ -37,8 +41,12 @@ and `window ∈ {hour, day, week, month}` — e.g. `4.5_week.geojson`, `all_hour
 
 ### Historical event-time slices
 
-`events/YYYY/MM/DD.ndjson.gz` — every event whose origin time is that UTC day, one
-GeoJSON Feature per line. Discover them via `manifest.json`.
+Two shapes per UTC day, same Features:
+- `/v1/events/YYYY-MM-DD.geojson` (Pages, last 120 days) — ready-to-render
+  FeatureCollection for map time-sliders.
+- `events/YYYY/MM/DD.ndjson` (data branch / jsDelivr, full history) — one Feature
+  per line. Discover paths and freshness via `manifest.json` (`partitions[]`,
+  `frozen`, `pages_url`).
 
 ### The Feature shape
 

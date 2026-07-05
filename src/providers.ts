@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { FETCH_LIMIT, FETCH_TIMEOUT_MS, QUERY_LOOKBACK_MS, REGISTRY_PATH } from './config.js';
+import { BACKFILL_FETCH_TIMEOUT_MS, FETCH_LIMIT, FETCH_TIMEOUT_MS, QUERY_LOOKBACK_MS, REGISTRY_PATH } from './config.js';
 import { CUSTOM_ADAPTERS } from './custom.js';
 import { parseFdsnText, parseGeoJSON } from './fdsn.js';
 import type { ProviderConfig, ProviderStatus, RawObs } from './types.js';
@@ -50,9 +50,9 @@ interface FdsnResult {
 }
 
 /** Fail-open FDSN fetch. `overflow` = the result likely hit the row cap (window too wide). */
-async function fetchFdsn(p: ProviderConfig, params: FetchParams): Promise<FdsnResult> {
+async function fetchFdsn(p: ProviderConfig, params: FetchParams, timeoutMs = FETCH_TIMEOUT_MS): Promise<FdsnResult> {
   try {
-    const res = await fetchText(buildUrl(p, params), FETCH_TIMEOUT_MS);
+    const res = await fetchText(buildUrl(p, params), timeoutMs);
     if (res.status === 204 || res.status === 404) {
       return { obs: [], status: { ok: true, http_status: res.status, latency_ms: res.latencyMs, events_returned: 0 }, overflow: false };
     }
@@ -81,6 +81,9 @@ export interface WindowOutcome extends FetchOutcome {
 
 /** Live path: recent events only (starttime = now − lookback). Fail-open. */
 export async function fetchProvider(p: ProviderConfig, nowMs: number): Promise<FetchOutcome> {
+  // Delayed catalogs (e.g. ISC) contribute nothing to the 2-day live window — skip them here
+  // (no wasted fetch, no false "degraded"); backfill still uses them for historical depth.
+  if (p.liveActive === false) return { provider: p.id, obs: [], status: { ok: true, events_returned: 0 } };
   if (p.adapter.startsWith('custom')) {
     const adapter = CUSTOM_ADAPTERS[p.id];
     if (!adapter) return { provider: p.id, obs: [], status: { ok: false, error: `no custom adapter for '${p.id}'` } };
@@ -92,7 +95,7 @@ export async function fetchProvider(p: ProviderConfig, nowMs: number): Promise<F
       return { provider: p.id, obs: [], status: { ok: false, latency_ms: Math.round(performance.now() - started), error: err instanceof Error ? err.message : String(err) } };
     }
   }
-  const r = await fetchFdsn(p, p.supportsTimeRange ? { starttime: nowMs - QUERY_LOOKBACK_MS } : {});
+  const r = await fetchFdsn(p, p.supportsTimeRange ? { starttime: nowMs - QUERY_LOOKBACK_MS } : {}, p.timeoutMs ?? FETCH_TIMEOUT_MS);
   return { provider: p.id, obs: r.obs, status: r.status };
 }
 
@@ -125,6 +128,6 @@ export async function fetchProviderWindow(p: ProviderConfig, startMs: number, en
       return { provider: p.id, obs: [], status: { ok: false, latency_ms: Math.round(performance.now() - started), error: err instanceof Error ? err.message : String(err) }, overflow: false };
     }
   }
-  const r = await fetchFdsn(p, { starttime: startMs, endtime: endMs, minmag });
+  const r = await fetchFdsn(p, { starttime: startMs, endtime: endMs, minmag }, p.timeoutMs ?? BACKFILL_FETCH_TIMEOUT_MS);
   return { provider: p.id, obs: r.obs.filter(inWindow), status: r.status, overflow: r.overflow };
 }

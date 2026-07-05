@@ -101,6 +101,10 @@ export interface ProviderConfig {
   base: string;
   supportsTimeRange: boolean;
   noLimit?: boolean;
+  /** Per-provider fetch timeout override (ms) for slow endpoints (e.g. ISC). */
+  timeoutMs?: number;
+  /** false = skip on the live 5-min path (e.g. a months-delayed catalog); still backfilled. */
+  liveActive?: boolean;
   refreshSeconds: number;
   license: string;
   attribution: string;

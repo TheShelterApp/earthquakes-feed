@@ -32,6 +32,8 @@ export const EVENT_MAP_HORIZON_DAYS = Number(process.env.EVENT_MAP_HORIZON_DAYS 
 
 // --- fetching ---
 export const FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS ?? 8000);
+/** Backfill/onboarding tolerate slower nodes (hourly, not the 5-min hot path). */
+export const BACKFILL_FETCH_TIMEOUT_MS = Number(process.env.BACKFILL_FETCH_TIMEOUT_MS ?? 20000);
 /** Each run asks providers for events in [now - lookback, now]; dedup absorbs overlap. */
 export const QUERY_LOOKBACK_MS = Number(process.env.QUERY_LOOKBACK_MS ?? 2 * 24 * 3600 * 1000);
 export const FETCH_LIMIT = Number(process.env.FETCH_LIMIT ?? 5000);

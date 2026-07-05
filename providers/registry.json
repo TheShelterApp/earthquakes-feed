@@ -179,6 +179,48 @@
       "license": "CC-BY-4.0", "attribution": "Raspberry Shake, S.A. citizen-science network",
       "doi": null, "contact": "https://raspberryshake.org",
       "notes": "TODO enable on the heavy 15-min sub-schedule (firehose of M0.5+ globally)."
+    },
+    {
+      "id": "renass", "name": "RéNaSS / BCSF (France)", "priority": 10, "active": true,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "https://api.franceseisme.fr/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 300,
+      "license": "CC-BY-4.0", "attribution": "Réseau National de Surveillance Sismique (RéNaSS), Université de Strasbourg / BCSF",
+      "doi": null, "contact": "https://renass.unistra.fr"
+    },
+    {
+      "id": "ipgp", "name": "IPGP (France + overseas volcano observatories)", "priority": 11, "active": true,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "http://ws.ipgp.fr/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 300,
+      "license": "CC-BY-4.0", "attribution": "Institut de Physique du Globe de Paris (IPGP)",
+      "doi": null, "contact": "https://www.ipgp.fr"
+    },
+    {
+      "id": "usp", "name": "USP — Centro de Sismologia (Brazil)", "priority": 12, "active": true,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "http://www.moho.iag.usp.br/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 600, "timeoutMs": 12000,
+      "license": "CC-BY-4.0", "attribution": "Centro de Sismologia, Universidade de São Paulo (USP)",
+      "doi": null, "contact": "http://www.moho.iag.usp.br"
+    },
+    {
+      "id": "lmu", "name": "LMU München (Germany / Bavaria)", "priority": 13, "active": true,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "https://erde.geophysik.uni-muenchen.de/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 600,
+      "license": "CC-BY-4.0", "attribution": "Department of Earth and Environmental Sciences, Ludwig-Maximilians-Universität München (LMU)",
+      "doi": null, "contact": "https://www.geophysik.uni-muenchen.de"
+    },
+    {
+      "id": "isc", "name": "ISC — International Seismological Centre (global, reviewed, delayed)", "priority": 26, "active": true,
+      "adapter": "fdsn", "parse": "text", "queryFormat": "text",
+      "base": "https://www.isc.ac.uk/fdsnws/event/1/query",
+      "supportsTimeRange": true, "refreshSeconds": 3600, "liveActive": false, "timeoutMs": 30000,
+      "license": "CC-BY-4.0", "attribution": "International Seismological Centre (ISC) On-line Bulletin",
+      "doi": "10.31905/D808B830", "contact": "https://www.isc.ac.uk",
+      "notes": "Authoritative REVIEWED global catalog but months-delayed — near-empty on the live 2-day path; its value is backfill depth.",
+      "backfill": { "earliest": "1990-01-01", "minmag": 3.0 }
     }
   ]
 }

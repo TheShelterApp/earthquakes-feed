@@ -23,6 +23,9 @@ interface ProviderCursor {
   failures: number;
   lastCount: number;
   lastRun: string;
+  /** Days denser than the provider's page cap even at a 1-day window — captured partially,
+   *  recorded here (bounded) for optional later sub-day remediation. */
+  saturatedDays?: string[];
 }
 interface Cursor {
   targetStart: string;
@@ -148,13 +151,15 @@ async function main(): Promise<void> {
   // 4) Ingest (deterministic order). Overflowed windows are dropped + retried narrower.
   const raws: RawObs[] = [];
   let overflowCount = 0;
+  let saturatedCount = 0;
   for (let i = 0; i < jobs.length; i++) {
     const j = jobs[i]!;
     const res = results[i]!;
     const cur = j.cur;
     if (cur) cur.lastRun = ingestTime;
-    if (res.overflow) {
-      // Truncated window: retry narrower next run, ingest nothing (avoid partial-window gaps).
+    // Overflow WITH room to narrow: retry a smaller window next run, ingest nothing
+    // (avoid partial-window gaps). At windowDays<=1 we can't narrow further — fall through.
+    if (res.overflow && (!cur || cur.windowDays > 1)) {
       if (cur) cur.windowDays = Math.max(1, Math.floor(cur.windowDays / 2));
       overflowCount++;
       continue;
@@ -163,6 +168,15 @@ async function main(): Promise<void> {
       if (cur) cur.failures++;
       continue;
     }
+    // Saturated single day (overflow even at a 1-day window): this one day is denser than the
+    // provider's page cap. Never spin — capture the capped rows we got (partial), record the
+    // day for later sub-day remediation, and advance past it below.
+    const saturated = res.overflow;
+    if (saturated && cur) {
+      (cur.saturatedDays ??= []).push(eventDayKey(j.startMs));
+      if (cur.saturatedDays.length > 100) cur.saturatedDays.shift();
+      saturatedCount++;
+    }
     for (const o of res.obs) {
       const day = eventDayKey(o.eventTimeMs);
       if (day < liveDay && !archivedDays.has(day)) raws.push(o);
@@ -170,9 +184,10 @@ async function main(): Promise<void> {
     if (cur) {
       cur.failures = 0;
       cur.lastCount = res.obs.length;
-      // Advance + adapt the window (grow when sparse).
+      // Advance + adapt the window: reset after a saturated day, else grow when sparse.
       cur.filledBackTo = eventDayKey(j.startMs);
-      if (res.obs.length < 0.3 * 5000) cur.windowDays = Math.min(j.cfg.maxWindowDays, Math.ceil(cur.windowDays * 1.5));
+      if (saturated) cur.windowDays = j.cfg.initialWindowDays;
+      else if (res.obs.length < 0.3 * 5000) cur.windowDays = Math.min(j.cfg.maxWindowDays, Math.ceil(cur.windowDays * 1.5));
       if (dayStartMs(cur.filledBackTo) <= Math.max(targetMs, j.cfg.earliestMs)) cur.done = true;
     }
   }
@@ -232,7 +247,7 @@ async function main(): Promise<void> {
   const remaining = Object.values(cursor.providers).filter((c) => !c.done).length;
   console.log(
     `backfill: jobs=${jobs.length} fetched=${raws.length} changed=${changedCount} days_written=${rewritten} ` +
-      `overflow=${overflowCount} providers_remaining=${remaining}`,
+      `overflow=${overflowCount} saturated=${saturatedCount} providers_remaining=${remaining}`,
   );
 }
 

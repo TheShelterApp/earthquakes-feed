@@ -37,10 +37,12 @@ npm run typecheck && npm test
 
 ### Custom (non-FDSN) sources
 
-For sources with a bespoke JSON/HTML format (BMKG, JMA, …), add an adapter under
-`src/providers/` and wire it in `src/providers.ts`. Mirror the FDSN adapters:
-fail-open, return `RawObs[]`, and handle the source's timezone/units quirks. See the
-`active:false` placeholders in the registry for the known-quirk notes.
+For sources with a bespoke JSON/HTML format (AFAD, CENC, TMD, …), add a `CustomAdapter`
+in [`src/custom.ts`](src/custom.ts) and register it in the `CUSTOM_ADAPTERS` map (keyed
+by the provider `id`); set `"adapter": "custom"` in the registry. Return `RawObs[]`,
+stay fail-open, convert the source's timezone to UTC, and reuse the shared `getText`
+helper (browser UA by default; `insecure: true` for gov endpoints with a broken TLS
+chain). The existing adapters (AFAD/CENC/TMD/KAGSR/NCS) are the templates.
 
 ## Ground rules
 

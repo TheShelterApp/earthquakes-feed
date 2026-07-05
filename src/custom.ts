@@ -206,4 +206,142 @@ const ncs: CustomAdapter = async (cfg) => {
   return out.filter((o) => o.providerEventId);
 };
 
-export const CUSTOM_ADAPTERS: Record<string, CustomAdapter> = { afad, cenc, tmd, kagsr, ncs };
+// --- Japan: JMA official hypocenter/intensity list (times carry +09:00 offset; `cod`
+//     encodes "+lat+lon-depth(m)/") ---
+const jma: CustomAdapter = async (cfg) => {
+  const list = JSON.parse(await getText(cfg.base, { timeoutMs: 12_000, retries: 2 })) as Record<string, unknown>[];
+  const out: RawObs[] = [];
+  for (const e of Array.isArray(list) ? list : []) {
+    const m = String(e['cod'] ?? '').match(/([+-][\d.]+)([+-][\d.]+)([+-]\d+)?/);
+    if (!m) continue;
+    const lat = num(m[1]);
+    const lon = num(m[2]);
+    const t = parseUtcMs((e['at'] as string) ?? (e['rdt'] as string));
+    if (lat == null || lon == null || t == null) continue;
+    const depthM = m[3] != null ? num(m[3]) : null;
+    out.push({
+      provider: cfg.id, providerEventId: String(e['eid'] ?? ''), eventTimeMs: t,
+      providerUpdatedMs: parseUtcMs(e['rdt'] as string), status: null, lat, lon,
+      depth: depthM != null ? Math.abs(depthM) / 1000 : null, mag: num(e['mag']), magType: 'Mj',
+      place: (e['en_anm'] as string) || (e['anm'] as string) || null, knownAliasIds: [], fields: flattenScalars(e),
+    });
+  }
+  return out.filter((o) => o.providerEventId);
+};
+
+// --- Mexico: SSN/UNAM (RSS; local time America/Mexico_City = UTC-6, no DST) ---
+const mexico: CustomAdapter = async (cfg) => {
+  const xml = await getText(cfg.base, { timeoutMs: 12_000, retries: 2 });
+  const out: RawObs[] = [];
+  for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
+    const it = m[1]!;
+    const lat = num(/<geo:lat>([^<]+)</.exec(it)?.[1]);
+    const lon = num(/<geo:long>([^<]+)</.exec(it)?.[1]);
+    const desc = /<description>([\s\S]*?)<\/description>/.exec(it)?.[1] ?? '';
+    const local = /Fecha:\s*([\d-]+ [\d:]+)/.exec(desc)?.[1] ?? null;
+    const t = local ? shiftUtc(local, -6) : null;
+    if (lat == null || lon == null || t == null) continue;
+    const title = htmlDecode(/<title>([^<]+)</.exec(it)?.[1] ?? '');
+    out.push({
+      provider: cfg.id, providerEventId: `${local!.replace(/[ :]/g, '')}_${lat}_${lon}`, eventTimeMs: t,
+      providerUpdatedMs: null, status: null, lat, lon, depth: num(/Profundidad:\s*([\d.]+)/.exec(desc)?.[1]),
+      mag: num(/^([\d.]+)/.exec(title)?.[1]), magType: null, place: title.replace(/^[\d.]+,\s*/, '') || null,
+      knownAliasIds: [], fields: { title, description: desc.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() },
+    });
+  }
+  return out;
+};
+
+// --- Portugal + Azores: IPMA (UTC times; areas 3=Azores, 7=mainland; magnitud -99 = none) ---
+const ipma: CustomAdapter = async (cfg) => {
+  const out: RawObs[] = [];
+  for (const area of ['3', '7']) {
+    let list: Record<string, unknown>[] = [];
+    try {
+      list = (JSON.parse(await getText(`${cfg.base}${area}.json`, { timeoutMs: 12_000, retries: 1 })) as { data?: Record<string, unknown>[] }).data ?? [];
+    } catch {
+      continue;
+    }
+    for (const e of list) {
+      const lat = num(e['lat']);
+      const lon = num(e['lon']);
+      const t = parseUtcMs(e['time'] as string);
+      if (lat == null || lon == null || t == null) continue;
+      const mag = num(e['magnitud']);
+      out.push({
+        provider: cfg.id, providerEventId: String(e['sismoId'] || `${e['time']}_${lat}_${lon}`), eventTimeMs: t,
+        providerUpdatedMs: parseUtcMs(e['dataUpdate'] as string), status: null, lat, lon, depth: num(e['depth']),
+        mag: mag != null && mag > -90 ? mag : null, magType: (e['magType'] as string) || null,
+        place: (e['obsRegion'] as string) || null, knownAliasIds: [], fields: flattenScalars(e),
+      });
+    }
+  }
+  return out.filter((o) => o.providerEventId);
+};
+
+// --- Peru: IGP (year in the path; fecha_utc has the date, hora_utc the time-of-day) ---
+const igp: CustomAdapter = async (cfg, nowMs) => {
+  const year = new Date(nowMs).getUTCFullYear();
+  const list = JSON.parse(await getText(`${cfg.base}${year}`, { timeoutMs: 12_000, retries: 2 })) as Record<string, unknown>[];
+  const out: RawObs[] = [];
+  for (const e of Array.isArray(list) ? list : []) {
+    const lat = num(e['latitud']);
+    const lon = num(e['longitud']);
+    const dstr = String(e['fecha_utc'] ?? '').slice(0, 10);
+    const tstr = String(e['hora_utc'] ?? '').slice(11, 19);
+    const t = dstr ? parseUtcMs(`${dstr}T${tstr || '00:00:00'}Z`) : null;
+    if (lat == null || lon == null || t == null) continue;
+    out.push({
+      provider: cfg.id, providerEventId: String(e['codigo'] ?? ''), eventTimeMs: t,
+      providerUpdatedMs: parseUtcMs(e['updatedAt'] as string), status: null, lat, lon, depth: num(e['profundidad']),
+      mag: num(e['magnitud']), magType: (e['tipomagnitud'] as string) || null, place: (e['referencia'] as string) || null,
+      knownAliasIds: [], fields: flattenScalars(e),
+    });
+  }
+  return out.filter((o) => o.providerEventId);
+};
+
+// --- Egypt: ENSN/NRIAG (JSON; `time` is UNIX epoch seconds) ---
+const egypt: CustomAdapter = async (cfg) => {
+  const j = JSON.parse(await getText(cfg.base, { timeoutMs: 12_000, retries: 2 })) as { data?: { earthquakes?: Record<string, unknown>[] } };
+  const out: RawObs[] = [];
+  for (const e of j.data?.earthquakes ?? []) {
+    const lat = num(e['latitude']);
+    const lon = num(e['longitude']);
+    const ts = num(e['time']);
+    if (lat == null || lon == null || ts == null) continue;
+    out.push({
+      provider: cfg.id, providerEventId: String(e['id'] ?? e['name'] ?? ''), eventTimeMs: Math.round(ts * 1000),
+      providerUpdatedMs: null, status: e['isManual'] === true ? 'reviewed' : 'automatic', lat, lon, depth: num(e['depth']),
+      mag: num(e['magnitudeValue']), magType: (e['magnitudeType'] as string) || null,
+      place: (e['nearestMajorPlace'] as string) || (e['nearestPlace'] as string) || null, knownAliasIds: [], fields: flattenScalars(e),
+    });
+  }
+  return out.filter((o) => o.providerEventId);
+};
+
+// --- United Kingdom: BGS (RSS; pubDate is RFC822 in GMT/UTC) ---
+const bgs: CustomAdapter = async (cfg) => {
+  const xml = await getText(cfg.base, { timeoutMs: 12_000, retries: 2 });
+  const out: RawObs[] = [];
+  for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
+    const it = m[1]!;
+    const lat = num(/<geo:lat>([^<]+)</.exec(it)?.[1]);
+    const lon = num(/<geo:long>([^<]+)</.exec(it)?.[1]);
+    const pub = /<pubDate>([^<]+)</.exec(it)?.[1];
+    const t = pub ? Date.parse(`${pub} GMT`) : NaN;
+    if (lat == null || lon == null || !Number.isFinite(t)) continue;
+    const desc = htmlDecode(/<description>([\s\S]*?)<\/description>/.exec(it)?.[1] ?? '');
+    const link = /<link>([^<]+)</.exec(it)?.[1] ?? '';
+    out.push({
+      provider: cfg.id, providerEventId: /(\d{14})/.exec(link)?.[1] ?? `${t}_${lat}_${lon}`, eventTimeMs: t,
+      providerUpdatedMs: null, status: null, lat, lon, depth: num(/Depth:\s*([\d.]+)/.exec(desc)?.[1]),
+      mag: num(/Magnitude:\s*([\d.]+)/.exec(desc)?.[1]), magType: null,
+      place: (/Location:\s*([^;]+)/.exec(desc)?.[1] ?? '').trim() || null, knownAliasIds: [],
+      fields: { title: htmlDecode(/<title>([^<]+)</.exec(it)?.[1] ?? ''), description: desc.trim() },
+    });
+  }
+  return out;
+};
+
+export const CUSTOM_ADAPTERS: Record<string, CustomAdapter> = { afad, cenc, tmd, kagsr, ncs, jma, mexico, ipma, igp, egypt, bgs };

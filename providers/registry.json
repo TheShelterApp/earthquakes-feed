@@ -163,13 +163,13 @@
       "notes": "TODO custom adapter: WIB (UTC+7) timestamps, latest-N JSON, no time-range query."
     },
     {
-      "id": "jma", "name": "JMA (Japan, via p2pquake mirror)", "priority": 21, "active": false,
-      "adapter": "custom:p2pquake", "parse": "custom", "queryFormat": "json",
-      "base": "https://api.p2pquake.net/v2/history",
+      "id": "jma", "name": "JMA (Japan Meteorological Agency)", "priority": 21, "active": true,
+      "adapter": "custom", "parse": "custom", "queryFormat": "json",
+      "base": "https://www.jma.go.jp/bosai/quake/data/list.json",
       "supportsTimeRange": false, "refreshSeconds": 300,
-      "license": "restricted", "attribution": "Japan Meteorological Agency (JMA) via P2P地震情報",
-      "doi": null, "contact": "https://www.p2pquake.net",
-      "notes": "TODO custom adapter: JMA times are Asia/Tokyo (UTC+9); depth in meters on the raw JMA feed."
+      "license": "JMA-terms", "attribution": "Japan Meteorological Agency (気象庁)",
+      "doi": null, "contact": "https://www.jma.go.jp",
+      "notes": "Official bosai list.json; `at` carries +09:00, `cod` encodes +lat+lon-depth(m)."
     },
     {
       "id": "raspberryshake", "name": "Raspberry Shake", "priority": 30, "active": false,
@@ -221,6 +221,48 @@
       "doi": "10.31905/D808B830", "contact": "https://www.isc.ac.uk",
       "notes": "Authoritative REVIEWED global catalog but months-delayed — near-empty on the live 2-day path; its value is backfill depth.",
       "backfill": { "earliest": "1990-01-01", "minmag": 3.0 }
+    },
+    {
+      "id": "mexico", "name": "SSN — Servicio Sismológico Nacional (Mexico)", "priority": 14, "active": true,
+      "adapter": "custom", "parse": "custom", "queryFormat": "rss",
+      "base": "http://www.ssn.unam.mx/rss/ultimos-sismos.xml",
+      "supportsTimeRange": false, "refreshSeconds": 300,
+      "license": "SSN-UNAM", "attribution": "Servicio Sismológico Nacional (SSN), UNAM, Mexico",
+      "doi": "10.21766/SSNMX/EC/MX", "contact": "http://www.ssn.unam.mx"
+    },
+    {
+      "id": "ipma", "name": "IPMA (Portugal + Azores)", "priority": 15, "active": true,
+      "adapter": "custom", "parse": "custom", "queryFormat": "json",
+      "base": "https://api.ipma.pt/open-data/observation/seismic/",
+      "supportsTimeRange": false, "refreshSeconds": 300,
+      "license": "IPMA-open-data", "attribution": "Instituto Português do Mar e da Atmosfera (IPMA)",
+      "doi": null, "contact": "https://www.ipma.pt",
+      "notes": "Adapter fetches areas 3 (Azores) + 7 (mainland); magnitud -99 = no magnitude."
+    },
+    {
+      "id": "igp", "name": "IGP — Instituto Geofísico del Perú (Peru)", "priority": 16, "active": true,
+      "adapter": "custom", "parse": "custom", "queryFormat": "json",
+      "base": "https://ultimosismo.igp.gob.pe/api/ultimo-sismo/ajaxb/",
+      "supportsTimeRange": false, "refreshSeconds": 300,
+      "license": "IGP-Peru", "attribution": "Instituto Geofísico del Perú (IGP)",
+      "doi": null, "contact": "https://www.igp.gob.pe",
+      "notes": "Adapter appends the current UTC year to the path; returns the whole year (stale-dropped on ingest)."
+    },
+    {
+      "id": "egypt", "name": "ENSN — Egyptian National Seismic Network (NRIAG)", "priority": 17, "active": true,
+      "adapter": "custom", "parse": "custom", "queryFormat": "json",
+      "base": "https://ensn.nriag.sci.eg/earthquakes.json",
+      "supportsTimeRange": false, "refreshSeconds": 300,
+      "license": "ENSN-NRIAG", "attribution": "Egyptian National Seismic Network (ENSN), NRIAG",
+      "doi": null, "contact": "https://ensn.nriag.sci.eg"
+    },
+    {
+      "id": "bgs", "name": "BGS — British Geological Survey (UK)", "priority": 18, "active": true,
+      "adapter": "custom", "parse": "custom", "queryFormat": "rss",
+      "base": "http://www.earthquakes.bgs.ac.uk/feeds/MhSeismology.xml",
+      "supportsTimeRange": false, "refreshSeconds": 600,
+      "license": "OGL-3.0", "attribution": "British Geological Survey © UKRI (Open Government Licence v3.0)",
+      "doi": null, "contact": "https://www.earthquakes.bgs.ac.uk"
     }
   ]
 }

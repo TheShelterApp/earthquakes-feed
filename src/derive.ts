@@ -132,6 +132,9 @@ function main(): void {
       freshness: { expected_interval_seconds: 300, stale_after_seconds: 1800 },
       data_repo: REPO,
       jsdelivr_base: `${JSDELIVR_BASE}@data`,
+      // Injected post-commit into the Pages manifest (derive.yml). For an immutable copy
+      // of any frozen partition: `${jsdelivr_base%@data}@<data_commit>/<partition.path>`.
+      data_commit: null,
       summaries: summ,
       partitions: manifestPartitions(inv, nowMs),
       archives: loadArchives(),

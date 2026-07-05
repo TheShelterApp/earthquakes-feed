@@ -74,6 +74,10 @@ jobs:
               [ "$i" = "3" ] && { echo '::error::push to data failed after 3 attempts'; exit 1; }
             done
           fi
+      - name: Pin manifest to the data commit (@sha immutable URLs)
+        run: |
+          SHA=$(git -C .data rev-parse HEAD)
+          node -e "const f='public/v1/manifest.json',fs=require('fs');const m=JSON.parse(fs.readFileSync(f));m.data_commit='$SHA';fs.writeFileSync(f,JSON.stringify(m,null,2));console.log('data_commit='+'$SHA'.slice(0,8))"
       - name: Publish live feed to Cloudflare Pages (Direct Upload)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}

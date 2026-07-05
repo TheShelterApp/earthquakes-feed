@@ -20,6 +20,7 @@
     },
     "data_repo": { "type": "string" },
     "jsdelivr_base": { "type": "string" },
+    "data_commit": { "type": ["string", "null"], "description": "data-branch commit SHA; build immutable URLs as {jsdelivr}/gh/{repo}@{data_commit}/{path}" },
     "summaries": {
       "type": "object",
       "additionalProperties": {

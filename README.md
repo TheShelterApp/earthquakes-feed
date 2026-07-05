@@ -48,6 +48,12 @@ Same Features, two shapes per UTC day:
   branch (via jsDelivr `@data`). Discover paths, counts, and `frozen`/`pages_url`
   through `manifest.json`.
 
+For an **immutable, cache-forever** copy of a `frozen` partition, pin it to the
+manifest's `data_commit` (a git SHA) instead of the `@data` branch ref:
+`https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@<data_commit>/events/YYYY/MM/DD.ndjson`.
+Very old months live in Release tarballs — see `manifest.archives[]` (`partitions[]`
+overrides `archives[]` for any day in both).
+
 ### The Feature shape
 
 Top-level `properties` is USGS-style (`mag`, `place`, `time` in ms, `updated`,

@@ -102,12 +102,10 @@ function main(): void {
   // Summaries: live events only, no future timestamps.
   const liveFeats: Feat[] = allNodes
     .filter((n: EventNode) => n.state === 'live' && n.eventTimeMs <= nowMs + FUTURE_LEEWAY_MS)
-    .map((n) => ({
-      feature: nodeToFeature(n),
-      timeMs: n.eventTimeMs,
-      mag: n.mag,
-      sig: typeof n.extra['sig'] === 'number' ? (n.extra['sig'] as number) : null,
-    }));
+    .map((n) => {
+      const feature = nodeToFeature(n) as { properties: { mag: number | null; sig: number | null } };
+      return { feature, timeMs: n.eventTimeMs, mag: feature.properties.mag, sig: feature.properties.sig };
+    });
   const summ = summaries(liveFeats, nowMs, publicV1, state.head.ingest_time);
 
   // Partitions: every state, one file per event-day, only for the days we loaded.

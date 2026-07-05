@@ -54,7 +54,24 @@ test('GeoJSON: USGS format (ms time, ids -> same-provider aliases)', () => {
   assert.equal(o!.depth, 12.4);
   assert.equal(o!.status, 'reviewed');
   assert.deepEqual(o!.knownAliasIds, ['usgs:gcmt123'], 'ids parsed, self excluded, provider-prefixed');
-  assert.equal(o!.extra['sig'], 326);
+  assert.equal(o!.fields['sig'], 326);
+  // capture-all: fields the old allowlist dropped are now retained verbatim.
+  assert.equal(o!.fields['ids'], ',us7000nabc,gcmt123,', 'ids kept in full field vocabulary');
+  assert.equal(o!.fields['nst'], 41);
+});
+
+test('FDSN text: every column captured under its header name (no allowlist)', () => {
+  const body = [
+    '#EventID|Time|Latitude|Longitude|Depth/km|Author|Catalog|Contributor|ContributorID|MagType|Magnitude|MagAuthor|EventLocationName|EventType',
+    'gfz2026abc|2026-07-04T12:38:02.140000|38.114|21.907|12.4|GFZ|GFZ-CAT|EMSC|1234|mb|4.7|GFZ|Western Greece|earthquake',
+  ].join('\n');
+  const [o] = parseFdsnText(body, 'geofon');
+  assert.equal(o!.fields['Author'], 'GFZ', 'Author column retained (was dropped before)');
+  assert.equal(o!.fields['Catalog'], 'GFZ-CAT');
+  assert.equal(o!.fields['Contributor'], 'EMSC');
+  assert.equal(o!.fields['ContributorID'], '1234');
+  assert.equal(o!.fields['MagAuthor'], 'GFZ');
+  assert.equal(o!.fields['EventType'], 'earthquake');
 });
 
 test('GeoJSON: EMSC format (ISO time string, lowercase magtype, flynn_region)', () => {

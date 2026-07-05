@@ -25,7 +25,7 @@ function obs(provider: string, id: string, over: Partial<RawObs> = {}): RawObs {
     magType: 'ml',
     place: 'Greece',
     knownAliasIds: [],
-    extra: {},
+    fields: {},
     ...over,
   };
 }

@@ -1,17 +1,5 @@
 import type { Extra, RawObs } from './types.js';
-import { num, parseUtcMs } from './util.js';
-
-const EXTRA_KEYS = ['nst', 'gap', 'dmin', 'rms', 'sig', 'tsunami', 'mmi', 'cdi', 'felt', 'alert', 'type', 'auth'];
-
-function collectExtra(p: Record<string, unknown>): Extra {
-  const e: Extra = {};
-  for (const k of EXTRA_KEYS) {
-    const v = p[k];
-    if (v == null) continue;
-    if (typeof v === 'number' || typeof v === 'string') e[k] = v;
-  }
-  return e;
-}
+import { flattenScalars, num, parseUtcMs } from './util.js';
 
 /** Tolerant parser for USGS-GeoJSON and EMSC seismicportal `format=json` (a GeoJSON superset). */
 export function parseGeoJSON(body: string, provider: string): RawObs[] {
@@ -52,7 +40,8 @@ export function parseGeoJSON(body: string, provider: string): RawObs[] {
       magType: (p['magType'] as string) ?? (p['magtype'] as string) ?? null,
       place: (p['place'] as string) ?? (p['flynn_region'] as string) ?? (p['region'] as string) ?? null,
       knownAliasIds,
-      extra: collectExtra(p),
+      // Capture the provider's ENTIRE property vocabulary, not a fixed allowlist.
+      fields: flattenScalars(p),
     });
   }
   return out;
@@ -63,8 +52,13 @@ export function parseGeoJSON(body: string, provider: string): RawObs[] {
  * #EventID|Time|Latitude|Longitude|Depth/km|Author|Catalog|Contributor|ContributorID|MagType|Magnitude|MagAuthor|EventLocationName|EventType
  */
 export function parseFdsnText(body: string, provider: string): RawObs[] {
+  const lines = body.split('\n');
+  // Header names the columns (they vary: SCEDC adds ET/GT + a "Longtitude" typo; RESIF
+  // uses MagnitudeType/MagnitudeAuthor) — capture every column verbatim by its real name.
+  const header = lines.find((l) => l.startsWith('#'));
+  const cols = header ? header.replace(/^#/, '').split('|').map((s) => s.trim()) : [];
   const out: RawObs[] = [];
-  for (const line of body.split('\n')) {
+  for (const line of lines) {
     const row = line.trim();
     if (!row || row.startsWith('#')) continue;
     const c = row.split('|');
@@ -74,9 +68,12 @@ export function parseFdsnText(body: string, provider: string): RawObs[] {
     const lon = num(c[3]);
     const providerEventId = (c[0] ?? '').trim();
     if (eventTimeMs == null || lat == null || lon == null || !providerEventId) continue;
-    const extra: Extra = {};
-    if (c[5]) extra['auth'] = c[5].trim();
-    if (c[13]) extra['type'] = c[13].trim();
+    const fields: Extra = {};
+    for (let i = 0; i < c.length; i++) {
+      const name = cols[i] ?? `col${i}`;
+      const val = (c[i] ?? '').trim();
+      if (val) fields[name] = val;
+    }
     out.push({
       provider,
       providerEventId,
@@ -90,7 +87,7 @@ export function parseFdsnText(body: string, provider: string): RawObs[] {
       magType: (c[9] ?? '').trim() || null,
       place: (c[12] ?? '').trim() || null,
       knownAliasIds: [],
-      extra,
+      fields,
     });
   }
   return out;

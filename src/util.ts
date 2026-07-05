@@ -25,6 +25,27 @@ export function num(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * Flatten a source record into a scalar field-map, losslessly capturing its WHOLE
+ * vocabulary: nested objects become dotted keys (`nearestLocality.distance`), arrays are
+ * JSON-serialized, null/empty are dropped. No allowlist — every field a provider emits is
+ * kept verbatim under its original name.
+ */
+export function flattenScalars(
+  obj: Record<string, unknown>,
+  prefix = '',
+  out: Record<string, number | string | boolean | null> = {},
+): Record<string, number | string | boolean | null> {
+  for (const [k, v] of Object.entries(obj)) {
+    const key = prefix ? `${prefix}.${k}` : k;
+    if (v == null || v === '') continue;
+    if (Array.isArray(v)) out[key] = JSON.stringify(v);
+    else if (typeof v === 'object') flattenScalars(v as Record<string, unknown>, key, out);
+    else if (typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean') out[key] = v;
+  }
+  return out;
+}
+
 /** Deterministic stringify with recursively sorted keys (for hashing / golden output). */
 export function canonicalJson(value: unknown): string {
   const seen = new WeakSet<object>();

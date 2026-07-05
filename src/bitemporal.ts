@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { EXTRA_CANON_KEYS, NULLABLE_STD_KEYS, mergeCanonical } from './canonical.js';
 import { GRID_CELL_DEG, SCHEMA_VERSION, dataPaths } from './config.js';
 import { gridKey } from './geo.js';
 import type { EventNode, Extra, Head, Observation, ProvenanceRow, State, Watermarks } from './types.js';
@@ -142,6 +143,67 @@ export function nodeToFeature(node: EventNode): unknown {
     node.depth == null
       ? [round6(node.lon), round6(node.lat)]
       : [round6(node.lon), round6(node.lat), node.depth];
+
+  // Fill-only field merge: the chosen provider's coherent solution leads, then gaps fill
+  // from the other providers (first non-null per canonical field wins). Core geometry and
+  // magnitude stay from the chosen solution only — never mixed across providers.
+  const chosen = node.provenance.find((r) => r.chosen) ?? node.provenance[0];
+  const ordered = chosen ? [chosen, ...node.provenance.filter((r) => r !== chosen)] : node.provenance;
+  const canon = mergeCanonical(ordered.map((r) => r.fields));
+  const place = node.place ?? ordered.map((r) => r.place).find((p) => p != null) ?? null;
+
+  const properties: Record<string, unknown> = {
+    mag: node.mag,
+    magType: node.magType,
+    place,
+    time: node.eventTimeMs,
+    updated: updated ?? node.eventTimeMs,
+    status: node.status,
+    net: node.chosenProvider,
+    tsunami: canon['tsunami'] ?? 0,
+    type: (canon['type'] as string) ?? 'earthquake',
+  };
+  // USGS-standard nullable metrics/refs — always present (null when absent) for USGS-parser parity.
+  for (const k of NULLABLE_STD_KEYS) properties[k] = canon[k] ?? null;
+  // Cross-source attribution + geo-admin — surfaced only when a source actually provided them.
+  for (const k of EXTRA_CANON_KEYS) if (canon[k] != null) properties[k] = canon[k];
+
+  properties['feed'] = {
+    schema_version: SCHEMA_VERSION,
+    feed_id: node.feedId,
+    event_time: isoFromMs(node.eventTimeMs),
+    ingest_time: node.lastIngestTime,
+    first_ingest_time: node.firstIngestTime,
+    first_seen_seq: node.firstSeenSeq,
+    ingest_seq: node.lastSeq,
+    revision: node.revision,
+    state: node.state,
+    tombstone: node.state === 'tombstoned',
+    ...(node.supersededBy ? { superseded_by: node.supersededBy } : {}),
+    chosen_provider: node.chosenProvider,
+    aliases: node.aliases,
+    // Every provider's COMPLETE original field vocabulary is retained here under `fields` —
+    // nothing a source reported is ever dropped, even fields not surfaced at top level.
+    provenance: node.provenance.map((r) => ({
+      provider: r.provider,
+      native_id: r.nativeId,
+      event_time: isoFromMs(r.eventTimeMs),
+      mag: r.mag,
+      magType: r.magType,
+      status: r.status,
+      provider_updated: r.providerUpdatedMs != null ? isoFromMs(r.providerUpdatedMs) : null,
+      lat: round6(r.lat),
+      lon: round6(r.lon),
+      depth: r.depth,
+      place: r.place,
+      chosen: r.chosen,
+      license: r.license,
+      attribution: r.attribution,
+      doi: r.doi,
+      ...(Object.keys(r.fields).length ? { fields: r.fields } : {}),
+    })),
+  };
+
   return {
     type: 'Feature',
     id: node.feedId,
@@ -149,57 +211,7 @@ export function nodeToFeature(node: EventNode): unknown {
     // client key its source enum off one required field without reading `properties`.
     source: node.chosenProvider,
     geometry: { type: 'Point', coordinates },
-    properties: {
-      mag: node.mag,
-      magType: node.magType,
-      place: node.place,
-      time: node.eventTimeMs,
-      updated: updated ?? node.eventTimeMs,
-      status: node.status,
-      tsunami: node.extra['tsunami'] ?? 0,
-      sig: node.extra['sig'] ?? null,
-      // Hoist the quality metrics USGS clients read at top level (still kept verbatim
-      // in provenance[].extra); null when the chosen provider didn't report them.
-      nst: node.extra['nst'] ?? null,
-      dmin: node.extra['dmin'] ?? null,
-      rms: node.extra['rms'] ?? null,
-      gap: node.extra['gap'] ?? null,
-      net: node.chosenProvider,
-      type: (node.extra['type'] as string) ?? 'earthquake',
-      feed: {
-        schema_version: SCHEMA_VERSION,
-        feed_id: node.feedId,
-        event_time: isoFromMs(node.eventTimeMs),
-        ingest_time: node.lastIngestTime,
-        first_ingest_time: node.firstIngestTime,
-        first_seen_seq: node.firstSeenSeq,
-        ingest_seq: node.lastSeq,
-        revision: node.revision,
-        state: node.state,
-        tombstone: node.state === 'tombstoned',
-        ...(node.supersededBy ? { superseded_by: node.supersededBy } : {}),
-        chosen_provider: node.chosenProvider,
-        aliases: node.aliases,
-        provenance: node.provenance.map((r) => ({
-          provider: r.provider,
-          native_id: r.nativeId,
-          event_time: isoFromMs(r.eventTimeMs),
-          mag: r.mag,
-          magType: r.magType,
-          status: r.status,
-          provider_updated: r.providerUpdatedMs != null ? isoFromMs(r.providerUpdatedMs) : null,
-          lat: round6(r.lat),
-          lon: round6(r.lon),
-          depth: r.depth,
-          place: r.place,
-          chosen: r.chosen,
-          license: r.license,
-          attribution: r.attribution,
-          doi: r.doi,
-          ...(Object.keys(r.extra).length ? { extra: r.extra } : {}),
-        })),
-      },
-    },
+    properties,
   };
 }
 
@@ -240,9 +252,8 @@ export function featureToNode(feature: unknown): EventNode {
     license: r['license'] as string,
     attribution: r['attribution'] as string,
     doi: (r['doi'] as string | null) ?? null,
-    extra: (r['extra'] as Extra) ?? {},
+    fields: (r['fields'] as Extra) ?? {},
   }));
-  const chosen = provenance.find((r) => r.chosen) ?? provenance[0]!;
   return {
     feedId: f.id,
     aliases: feed['aliases'] as string[],
@@ -264,6 +275,5 @@ export function featureToNode(feature: unknown): EventNode {
     state: (feed['state'] as EventNode['state']) ?? (feed['tombstone'] ? 'tombstoned' : 'live'),
     ...(feed['superseded_by'] ? { supersededBy: feed['superseded_by'] as string } : {}),
     geohash: gridKey(lat, lon, GRID_CELL_DEG),
-    extra: chosen.extra,
   };
 }

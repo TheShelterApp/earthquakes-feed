@@ -22,11 +22,12 @@ function buildNode(): EventNode {
   const map = new Map<string, EventNode>();
   const r = new Resolver(map, prio, cfg, T0);
   r.ingest(
-    { provider: 'usgs', providerEventId: 'us7000nabc', eventTimeMs: T0, providerUpdatedMs: T0 + 120_000, status: 'reviewed', lat: 38.114, lon: 21.907, depth: 12.4, mag: 4.6, magType: 'ml', place: 'Western Greece', knownAliasIds: [], extra: { nst: 41, gap: 71, sig: 326, tsunami: 0, type: 'earthquake' } },
+    { provider: 'usgs', providerEventId: 'us7000nabc', eventTimeMs: T0, providerUpdatedMs: T0 + 120_000, status: 'reviewed', lat: 38.114, lon: 21.907, depth: 12.4, mag: 4.6, magType: 'ml', place: 'Western Greece', knownAliasIds: [], fields: { nst: 41, gap: 71, sig: 326, tsunami: 0, type: 'earthquake', code: 'us7000nabc' } },
     '2026-07-05T12:02:11Z',
   );
   r.ingest(
-    { provider: 'emsc', providerEventId: '20260705_0000117', eventTimeMs: T0 + 4000, providerUpdatedMs: T0 + 60_000, status: 'automatic', lat: 38.11, lon: 21.91, depth: 12, mag: 4.7, magType: 'mb', place: 'WESTERN GREECE', knownAliasIds: [], extra: {} },
+    // EMSC carries felt/mmi that USGS lacks — used to prove fill-only merge.
+    { provider: 'emsc', providerEventId: '20260705_0000117', eventTimeMs: T0 + 4000, providerUpdatedMs: T0 + 60_000, status: 'automatic', lat: 38.11, lon: 21.91, depth: 12, mag: 4.7, magType: 'mb', place: 'WESTERN GREECE', knownAliasIds: [], fields: { felt: 12, mmi: 3.4, nst: 99, source_catalog: 'EMSC-RTS' } },
     '2026-07-05T12:03:00Z',
   );
   const node = [...map.values()][0]!;
@@ -54,9 +55,28 @@ test('Feature carries the iOS contract fields (source, hoisted metrics)', () => 
   assert.equal(f.source, 'usgs', 'top-level source = chosen network (required by iOS Earthquake)');
   assert.equal(f.source, f.properties.net, 'source mirrors properties.net');
   assert.equal(f.geometry.coordinates.length, 3, 'depth present -> [lon, lat, depth]');
-  assert.equal(f.properties.nst, 41, 'nst hoisted from chosen provenance');
-  assert.equal(f.properties.gap, 71, 'gap hoisted from chosen provenance');
-  assert.equal(f.properties.dmin, null, 'unreported metric hoists to null, not undefined');
+  assert.equal(f.properties.nst, 41, 'nst from chosen provenance');
+  assert.equal(f.properties.gap, 71, 'gap from chosen provenance');
+  assert.equal(f.properties.dmin, null, 'unreported metric is null, not undefined');
+});
+
+test('fill-only field merge: chosen leads, gaps fill from others, present values never overwritten', () => {
+  const f = nodeToFeature(buildNode()) as {
+    properties: { mag: number | null; nst: number | null; felt: number | null; mmi: number | null; catalog?: string; feed: { provenance: { provider: string; fields: Record<string, unknown> }[] } };
+  };
+  const p = f.properties;
+  // Core solution stays coherent from the chosen provider (USGS) — never mixed with EMSC.
+  assert.equal(p.mag, 4.6, 'mag is the chosen (USGS) solution, not filled from EMSC 4.7');
+  // Chosen provider's own value is not overwritten by a later provider's.
+  assert.equal(p.nst, 41, 'USGS nst=41 wins over EMSC nst=99 (fill-only, chosen first)');
+  // Gaps ARE filled from other providers.
+  assert.equal(p.felt, 12, 'felt filled from EMSC (USGS lacked it)');
+  assert.equal(p.mmi, 3.4, 'mmi filled from EMSC');
+  assert.equal(p.catalog, 'EMSC-RTS', 'cross-source catalog surfaced from EMSC source_catalog');
+  // Nothing dropped: each provider keeps its COMPLETE original vocabulary.
+  const emsc = p.feed.provenance.find((r) => r.provider === 'emsc')!;
+  assert.equal(emsc.fields['nst'], 99, "EMSC's own nst is preserved verbatim in provenance");
+  assert.equal(emsc.fields['source_catalog'], 'EMSC-RTS');
 });
 
 test('null depth -> 2-element coords (no null Z) and lossless round-trip', () => {

@@ -63,7 +63,7 @@ function makeObservation(raw: RawObs, r: IngestResult, seq: number, ingestTime: 
     mag: raw.mag,
     magType: raw.magType,
     place: raw.place,
-    extra: raw.extra,
+    fields: raw.fields,
   };
 }
 

@@ -25,7 +25,7 @@ function obs(provider: string, id: string, over: Partial<RawObs> = {}): RawObs {
     magType: 'ml',
     place: 'swarm zone',
     knownAliasIds: [],
-    extra: {},
+    fields: {},
     ...over,
   };
 }

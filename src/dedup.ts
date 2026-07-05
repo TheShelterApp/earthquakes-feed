@@ -6,6 +6,7 @@ import {
   SWARM_CELL_ABSOLUTE,
   TEMPORAL_MS,
 } from './config.js';
+import { qualityCount } from './canonical.js';
 import { gatherCellKeys, gridKey, haversineKm } from './geo.js';
 import type { EventNode, ProvenanceRow, ProviderConfig, RawObs } from './types.js';
 import { deterministicFeedId } from './ulid.js';
@@ -18,7 +19,7 @@ function richness(r: ProvenanceRow): number {
   let n = 0;
   if (r.mag != null) n++;
   if (r.magType != null) n++;
-  for (const k of ['nst', 'gap', 'dmin', 'rms']) if (r.extra[k] != null) n++;
+  n += qualityCount(r.fields);
   return n;
 }
 
@@ -174,7 +175,7 @@ export class Resolver {
       license: c?.license ?? 'unknown',
       attribution: c?.attribution ?? raw.provider,
       doi: c?.doi ?? null,
-      extra: raw.extra,
+      fields: raw.fields,
     };
   }
 
@@ -206,7 +207,6 @@ export class Resolver {
     node.status = chosen.status;
     node.place = chosen.place;
     node.chosenProvider = chosen.provider;
-    node.extra = chosen.extra;
   }
 
   private static solutionEqual(a: ProvenanceRow, r: RawObs): boolean {
@@ -264,7 +264,6 @@ export class Resolver {
         lastSeq: -1,
         state: 'live',
         geohash: gridKey(raw.lat, raw.lon, GRID_CELL_DEG),
-        extra: raw.extra,
       };
       this.applyRepr(node);
       node.geohash = gridKey(node.lat, node.lon, GRID_CELL_DEG);

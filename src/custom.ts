@@ -1,7 +1,7 @@
 import { request as httpsRequest } from 'node:https';
 import { QUERY_LOOKBACK_MS } from './config.js';
-import type { Extra, ProviderConfig, RawObs } from './types.js';
-import { num, parseUtcMs } from './util.js';
+import type { ProviderConfig, RawObs } from './types.js';
+import { flattenScalars, num, parseUtcMs } from './util.js';
 
 const BROWSER_UA =
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
@@ -107,7 +107,7 @@ const afad: CustomAdapter = async (cfg, nowMs, window) => {
       providerUpdatedMs: shiftUtc(e['lastUpdateDate'], 3),
       status: null, lat, lon, depth: num(e['depth']),
       mag: num(e['magnitude']), magType: (e['type'] as string) ?? null,
-      place: (e['location'] as string) ?? null, knownAliasIds: [], extra: {},
+      place: (e['location'] as string) ?? null, knownAliasIds: [], fields: flattenScalars(e),
     });
   }
   return out.filter((o) => o.providerEventId);
@@ -126,7 +126,7 @@ const cenc: CustomAdapter = async (cfg) => {
     out.push({
       provider: cfg.id, providerEventId: String(e['id'] ?? ''), eventTimeMs: t, providerUpdatedMs: null,
       status: null, lat, lon, depth: num(e['depth']), mag: num(e['magnitude']), magType: null,
-      place: (e['location'] as string) ?? null, knownAliasIds: [], extra: {},
+      place: (e['location'] as string) ?? null, knownAliasIds: [], fields: flattenScalars(e),
     });
   }
   return out.filter((o) => o.providerEventId);
@@ -145,7 +145,7 @@ const tmd: CustomAdapter = async (cfg) => {
     out.push({
       provider: cfg.id, providerEventId: String(e['eventID'] ?? ''), eventTimeMs: t, providerUpdatedMs: null,
       status: null, lat, lon, depth: num(e['depth']), mag: num(e['mag']), magType: null,
-      place: (e['region'] as string) ?? null, knownAliasIds: [], extra: {},
+      place: (e['region'] as string) ?? null, knownAliasIds: [], fields: flattenScalars(e),
     });
   }
   return out.filter((o) => o.providerEventId);
@@ -171,7 +171,7 @@ const kagsr: CustomAdapter = async (cfg, nowMs, window) => {
       provider: cfg.id, providerEventId: String(p['eventId'] ?? p['eventName'] ?? ''), eventTimeMs: t,
       providerUpdatedMs: null, status: null, lat, lon, depth: num(p['depth']),
       mag: num(p['magnitude']), magType: (p['magnitudeType'] as string) ?? null,
-      place: loc?.name ?? null, knownAliasIds: [], extra: {},
+      place: loc?.name ?? null, knownAliasIds: [], fields: flattenScalars(p),
     });
   }
   return out.filter((o) => o.providerEventId);
@@ -200,7 +200,7 @@ const ncs: CustomAdapter = async (cfg) => {
     out.push({
       provider: cfg.id, providerEventId: String(obj['event_id'] ?? ''), eventTimeMs: t, providerUpdatedMs: null,
       status: (obj['event_type'] as string) ?? null, lat, lon, depth, mag, magType: null,
-      place: (String(obj['event_name'] ?? '').replace(/^M:\s*[-\d.]+\s*-\s*/i, '') || null), knownAliasIds: [], extra: {},
+      place: (String(obj['event_name'] ?? '').replace(/^M:\s*[-\d.]+\s*-\s*/i, '') || null), knownAliasIds: [], fields: flattenScalars(obj),
     });
   }
   return out.filter((o) => o.providerEventId);

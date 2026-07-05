@@ -1,6 +1,8 @@
 export type Op = 'observe' | 'tombstone' | 'correction' | 'merge' | 'supersede';
 
-export type Extra = Record<string, number | string | null>;
+/** A scalar field-map: one provider's complete original vocabulary, flattened (nested
+ *  objects -> dotted keys, arrays -> JSON strings). Never an allowlist — capture all. */
+export type Extra = Record<string, number | string | boolean | null>;
 
 /** A normalized single provider report, before identity resolution. */
 export interface RawObs {
@@ -16,7 +18,8 @@ export interface RawObs {
   magType: string | null;
   place: string | null;
   knownAliasIds: string[];
-  extra: Extra;
+  /** The provider's COMPLETE original field vocabulary (nothing dropped). */
+  fields: Extra;
 }
 
 /** One provider's contribution to a merged event, preserved forever. */
@@ -36,7 +39,8 @@ export interface ProvenanceRow {
   license: string;
   attribution: string;
   doi: string | null;
-  extra: Extra;
+  /** This provider's COMPLETE original field vocabulary for this report. */
+  fields: Extra;
 }
 
 /** The persisted per-event state (node of the event_map). */
@@ -61,7 +65,6 @@ export interface EventNode {
   state: 'live' | 'tombstoned' | 'superseded';
   supersededBy?: string;
   geohash: string;
-  extra: Extra;
 }
 
 /** One append-only line of the observation log. */
@@ -83,7 +86,8 @@ export interface Observation {
   magType: string | null;
   place: string | null;
   backfilled?: boolean;
-  extra: Extra;
+  /** The reporting provider's COMPLETE original field vocabulary. */
+  fields: Extra;
 }
 
 export interface ProviderConfig {

@@ -39,7 +39,29 @@
         "dmin": { "type": ["number", "null"] },
         "rms": { "type": ["number", "null"] },
         "gap": { "type": ["number", "null"] },
+        "tz": { "type": ["number", "null"] },
+        "url": { "type": ["string", "null"] },
+        "detail": { "type": ["string", "null"] },
+        "felt": { "type": ["number", "null"] },
+        "cdi": { "type": ["number", "null"] },
+        "mmi": { "type": ["number", "null"] },
+        "alert": { "type": ["string", "null"] },
+        "code": { "type": ["string", "null"] },
+        "ids": { "type": ["string", "null"] },
+        "sources": { "type": ["string", "null"] },
+        "types": { "type": ["string", "null"] },
+        "title": { "type": ["string", "null"] },
         "type": { "type": ["string", "null"] },
+        "author": { "type": ["string", "null"], "description": "Cross-source: solution author/agency (present when a source provides it)." },
+        "magAuthor": { "type": ["string", "null"] },
+        "catalog": { "type": ["string", "null"] },
+        "contributor": { "type": ["string", "null"] },
+        "contributorId": { "type": ["string", "null"] },
+        "country": { "type": ["string", "null"] },
+        "province": { "type": ["string", "null"] },
+        "district": { "type": ["string", "null"] },
+        "neighborhood": { "type": ["string", "null"] },
+        "region": { "type": ["string", "null"] },
         "feed": {
           "type": "object",
           "required": ["schema_version", "feed_id", "event_time", "ingest_time", "revision", "chosen_provider", "provenance"],
@@ -57,7 +79,16 @@
             "superseded_by": { "type": "string" },
             "chosen_provider": { "type": "string" },
             "aliases": { "type": "array", "items": { "type": "string" } },
-            "provenance": { "type": "array", "items": { "type": "object" } }
+            "provenance": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["provider", "native_id"],
+                "properties": {
+                  "fields": { "type": "object", "description": "This provider's COMPLETE original field vocabulary — every field it reported, verbatim." }
+                }
+              }
+            }
           }
         }
       }

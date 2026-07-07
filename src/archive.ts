@@ -61,7 +61,14 @@ function ghRetry(args: string[], attempts = 5): string {
     } catch (e) {
       lastErr = e;
       const msg = String((e as { stderr?: string }).stderr ?? (e as Error)?.message ?? '');
-      const transient = /HTTP (404|429|5\d\d)|rate limit|abuse|timed? ?out|EOF|ECONN|ETIMEDOUT|TLS|handshake|Not Found|temporar/i.test(msg);
+      // Transient = GitHub eventual consistency / rate / network. `Not Found` (case-
+      // insensitive) already covers "release/asset not found"; the crucial addition is the
+      // gh-specific "no assets to download" — an `upload --clobber`'s freshly-uploaded asset
+      // isn't listed yet when the verify-download runs microseconds later.
+      const transient =
+        /HTTP (404|429|5\d\d)|rate limit|abuse|timed? ?out|EOF|ECONN|ETIMEDOUT|TLS|handshake|Not Found|no assets? to download|could not find|temporar/i.test(
+          msg,
+        );
       if (!transient || i === attempts - 1) break;
       const backoff = Math.min(30_000, 2_000 * 2 ** i);
       console.error(`gh ${args[0]} ${args[1]} failed (${i + 1}/${attempts}), retry in ${backoff / 1000}s: ${msg.trim().slice(0, 140)}`);

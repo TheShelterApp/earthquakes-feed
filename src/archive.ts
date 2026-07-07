@@ -41,6 +41,53 @@ const dayKey = (ms: number): string => isoFromMs(ms).slice(0, 10);
 const sha256File = (f: string): string => createHash('sha256').update(readFileSync(f)).digest('hex');
 const gh = (args: string[]): string => execFileSync('gh', args, { encoding: 'utf8' });
 
+/** Block synchronously for `ms` (this whole pipeline is sync execFileSync). */
+const sleepMs = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
+
+/**
+ * Run a `gh` command, retrying transient GitHub API failures with backoff. The Releases
+ * upload/download endpoints 404 (or 5xx/429) for a short window right after a release is
+ * created — GitHub eventual consistency. A bare call then aborts the entire archive run
+ * mid-way (2026-01 upload: `HTTP 404 .../releases/<id>/assets`). Non-transient errors
+ * still fail loudly on the first try.
+ */
+function ghRetry(args: string[], attempts = 5): string {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return gh(args);
+    } catch (e) {
+      lastErr = e;
+      const msg = String((e as { stderr?: string }).stderr ?? (e as Error)?.message ?? '');
+      const transient = /HTTP (404|429|5\d\d)|rate limit|abuse|timed? ?out|EOF|ECONN|ETIMEDOUT|TLS|handshake|Not Found|temporar/i.test(msg);
+      if (!transient || i === attempts - 1) break;
+      const backoff = Math.min(30_000, 2_000 * 2 ** i);
+      console.error(`gh ${args[0]} ${args[1]} failed (${i + 1}/${attempts}), retry in ${backoff / 1000}s: ${msg.trim().slice(0, 140)}`);
+      sleepMs(backoff);
+    }
+  }
+  throw lastErr;
+}
+
+/** Ensure a release tag exists — idempotent under create races / eventual consistency. */
+function ensureRelease(tag: string, notes: string): void {
+  try {
+    gh(['release', 'view', tag, '-R', REPO]);
+    return;
+  } catch {
+    /* not visible yet — create below */
+  }
+  try {
+    gh(['release', 'create', tag, '-R', REPO, '--target', 'main', '--title', tag, '--notes', notes]);
+  } catch {
+    // Lost a create race or it materialized post-consistency; tolerate iff it now exists.
+    sleepMs(3_000);
+    gh(['release', 'view', tag, '-R', REPO]); // rethrows if genuinely absent
+  }
+}
+
 const HAS_ZSTD = (() => {
   try {
     execFileSync('zstd', ['--version'], { stdio: 'ignore' });
@@ -156,14 +203,10 @@ function archiveLog(root: string, cutoff: string, archives: Archives, staging: s
     const bytes = statSync(tarPath).size;
     const sha256 = sha256File(tarPath);
     if (!DRY_RUN) {
-      try {
-        gh(['release', 'view', tag, '-R', REPO]);
-      } catch {
-        gh(['release', 'create', tag, '-R', REPO, '--target', 'main', '--title', tag, '--notes', `Archive for ${month}.`]);
-      }
-      gh(['release', 'upload', tag, tarPath, '-R', REPO, '--clobber']);
+      ensureRelease(tag, `Archive for ${month}.`);
+      ghRetry(['release', 'upload', tag, tarPath, '-R', REPO, '--clobber']);
       const verify = join(staging, `verify-${asset}`);
-      gh(['release', 'download', tag, '-R', REPO, '-p', asset, '-O', verify, '--clobber']);
+      ghRetry(['release', 'download', tag, '-R', REPO, '-p', asset, '-O', verify, '--clobber']);
       if (sha256File(verify) !== sha256) throw new Error(`log archive verify failed for ${month}`);
     }
     (archives.log_list ??= []).push({ period: month, tag, asset, bytes, sha256, files: files.length });
@@ -206,7 +249,7 @@ function main(): void {
       // Re-roll: extract the old archive first so in-tree days overlay it (in-tree wins).
       if (entry?.needs_reroll && !DRY_RUN) {
         const old = join(staging, entry.asset);
-        gh(['release', 'download', entry.tag, '-R', REPO, '-p', entry.asset, '-O', old, '--clobber']);
+        ghRetry(['release', 'download', entry.tag, '-R', REPO, '-p', entry.asset, '-O', old, '--clobber']);
         extractTarball(old, memberDir);
       }
       for (const f of files) cpSync(f, join(memberDir, f.slice(-9))); // DD.ndjson
@@ -219,14 +262,10 @@ function main(): void {
       const url = `https://github.com/${REPO}/releases/download/${tag}/${asset}`;
 
       if (!DRY_RUN) {
-        try {
-          gh(['release', 'view', tag, '-R', REPO]);
-        } catch {
-          gh(['release', 'create', tag, '-R', REPO, '--target', 'main', '--title', tag, '--notes', `Archived event partitions for ${month}.`]);
-        }
-        gh(['release', 'upload', tag, tarPath, '-R', REPO, '--clobber']);
+        ensureRelease(tag, `Archived event partitions for ${month}.`);
+        ghRetry(['release', 'upload', tag, tarPath, '-R', REPO, '--clobber']);
         const verify = join(staging, `verify-${asset}`);
-        gh(['release', 'download', tag, '-R', REPO, '-p', asset, '-O', verify, '--clobber']);
+        ghRetry(['release', 'download', tag, '-R', REPO, '-p', asset, '-O', verify, '--clobber']);
         if (sha256File(verify) !== sha256) throw new Error(`archive verify failed for ${month}`);
       }
 

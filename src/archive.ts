@@ -256,8 +256,30 @@ function main(): void {
       // Re-roll: extract the old archive first so in-tree days overlay it (in-tree wins).
       if (entry?.needs_reroll && !DRY_RUN) {
         const old = join(staging, entry.asset);
-        ghRetry(['release', 'download', entry.tag, '-R', REPO, '-p', entry.asset, '-O', old, '--clobber']);
-        extractTarball(old, memberDir);
+        try {
+          ghRetry(['release', 'download', entry.tag, '-R', REPO, '-p', entry.asset, '-O', old, '--clobber']);
+          extractTarball(old, memberDir);
+        } catch (e) {
+          // The prior asset is gone — e.g. a failed `upload --clobber` deleted it before the
+          // re-upload landed (2026-01). Recover IFF the tree already holds every day the entry
+          // claims: re-materialized re-roll days are COMPLETE merged days, so an in-tree
+          // superset of entry.days fully replaces the lost asset. If any archived day is
+          // missing from the tree, skip the month (keep needs_reroll + in-tree) rather than
+          // rebuild a partial archive that would silently drop those days.
+          const inTreeDays = new Set(files.map((f) => `${month}-${f.slice(-9, -7)}`));
+          const missing = (entry.days ?? []).filter((d) => !inTreeDays.has(d));
+          if (missing.length) {
+            console.error(
+              `::error::cannot re-roll ${month}: prior asset ${entry.asset} unavailable and ${missing.length} archived day(s) not in tree (${missing.slice(0, 3).join(', ')}…); leaving in place for recovery`,
+            );
+            rmSync(memberDir, { recursive: true, force: true });
+            continue;
+          }
+          console.warn(
+            `::warning::re-roll ${month}: prior asset ${entry.asset} lost; rebuilding from ${files.length} in-tree day(s) (complete superset of the ${entry.days?.length ?? 0} archived day(s))`,
+          );
+          // fall through with an empty memberDir — the in-tree copy below is authoritative.
+        }
       }
       for (const f of files) cpSync(f, join(memberDir, f.slice(-9))); // DD.ndjson
 

@@ -485,7 +485,13 @@
       "attribution": "Instituto Geofísico del Perú (IGP)",
       "doi": null,
       "contact": "https://www.igp.gob.pe",
-      "notes": "Adapter appends the current UTC year to the path; returns the whole year (stale-dropped on ingest)."
+      "notes": "Adapter appends the current UTC year to the path; returns the whole year (stale-dropped on ingest).",
+      "backfill": {
+        "enabled": true,
+        "earliest": "2016-01-01",
+        "initialWindowDays": 90,
+        "maxWindowDays": 120
+      }
     },
     {
       "id": "egypt",
@@ -549,7 +555,14 @@
       "license": "CC-BY-4.0",
       "attribution": "Icelandic Meteorological Office (Veðurstofa Íslands)",
       "doi": null,
-      "contact": "https://en.vedur.is/about-imo/the-web/conditions"
+      "contact": "https://en.vedur.is/about-imo/the-web/conditions",
+      "backfill": {
+        "enabled": true,
+        "earliest": "1991-01-07",
+        "minmag": 1,
+        "initialWindowDays": 14,
+        "maxWindowDays": 30
+      }
     },
     {
       "id": "inpres",
@@ -629,7 +642,13 @@
       "license": "gov-open",
       "attribution": "Centro Sismológico Nacional, Universidad de Chile (CSN)",
       "doi": null,
-      "contact": "https://www.sismologia.cl"
+      "contact": "https://www.sismologia.cl",
+      "backfill": {
+        "enabled": true,
+        "earliest": "2012-01-01",
+        "initialWindowDays": 7,
+        "maxWindowDays": 10
+      }
     }
   ]
 }

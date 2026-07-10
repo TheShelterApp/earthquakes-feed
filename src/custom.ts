@@ -279,24 +279,36 @@ const ipma: CustomAdapter = async (cfg) => {
   return out.filter((o) => o.providerEventId);
 };
 
-// --- Peru: IGP (year in the path; fecha_utc has the date, hora_utc the time-of-day) ---
-const igp: CustomAdapter = async (cfg, nowMs) => {
-  const year = new Date(nowMs).getUTCFullYear();
-  const list = JSON.parse(await getText(`${cfg.base}${year}`, { timeoutMs: 12_000, retries: 2 })) as Record<string, unknown>[];
+// --- Peru: IGP (one JSON file per year; fecha_utc has the date, hora_utc the time-of-day) ---
+const igp: CustomAdapter = async (cfg, nowMs, window) => {
+  const endMs = window ? window.endMs : nowMs;
+  const startMs = window ? window.startMs : endMs;
   const out: RawObs[] = [];
-  for (const e of Array.isArray(list) ? list : []) {
-    const lat = num(e['latitud']);
-    const lon = num(e['longitud']);
-    const dstr = String(e['fecha_utc'] ?? '').slice(0, 10);
-    const tstr = String(e['hora_utc'] ?? '').slice(11, 19);
-    const t = dstr ? parseUtcMs(`${dstr}T${tstr || '00:00:00'}Z`) : null;
-    if (lat == null || lon == null || t == null) continue;
-    out.push({
-      provider: cfg.id, providerEventId: String(e['codigo'] ?? ''), eventTimeMs: t,
-      providerUpdatedMs: parseUtcMs(e['updatedAt'] as string), status: null, lat, lon, depth: num(e['profundidad']),
-      mag: num(e['magnitud']), magType: (e['tipomagnitud'] as string) || null, place: (e['referencia'] as string) || null,
-      knownAliasIds: [], fields: flattenScalars(e),
-    });
+  // Live = current year; backfill = every year the window spans (each is one file).
+  for (let year = new Date(startMs).getUTCFullYear(); year <= new Date(endMs).getUTCFullYear(); year++) {
+    let list: Record<string, unknown>[] = [];
+    try {
+      const j = JSON.parse(await getText(`${cfg.base}${year}`, { timeoutMs: 15_000, retries: 2 }));
+      list = Array.isArray(j) ? j : [];
+    } catch {
+      continue;
+    }
+    for (const e of list) {
+      const lat = num(e['latitud']);
+      const lon = num(e['longitud']);
+      const dstr = String(e['fecha_utc'] ?? '').slice(0, 10);
+      const tstr = String(e['hora_utc'] ?? '').slice(11, 19);
+      const t = dstr ? parseUtcMs(`${dstr}T${tstr || '00:00:00'}Z`) : null;
+      if (lat == null || lon == null || t == null) continue;
+      // In a backfill window keep only in-range events, so overflow reflects the window, not the year.
+      if (window && (t < startMs - 60_000 || t > endMs + 60_000)) continue;
+      out.push({
+        provider: cfg.id, providerEventId: String(e['codigo'] ?? ''), eventTimeMs: t,
+        providerUpdatedMs: parseUtcMs(e['updatedAt'] as string), status: null, lat, lon, depth: num(e['profundidad']),
+        mag: num(e['magnitud']), magType: (e['tipomagnitud'] as string) || null, place: (e['referencia'] as string) || null,
+        knownAliasIds: [], fields: flattenScalars(e),
+      });
+    }
   }
   return out.filter((o) => o.providerEventId);
 };
@@ -400,7 +412,10 @@ const imo: CustomAdapter = async (cfg, nowMs, window) => {
   const endMs = window ? window.endMs : nowMs;
   const start = new Date(startMs).toISOString().slice(0, 19);
   const end = new Date(endMs).toISOString().slice(0, 19);
-  const url = `${cfg.base}?start_time=${start}&end_time=${end}&size_min=-3&format=json`;
+  // Live keeps every micro-quake; backfill applies backfill.minmag (Iceland's M<1 swarm
+  // seismicity is enormous — an unfiltered 3-year backfill would dwarf the whole feed).
+  const sizeMin = window ? (cfg.backfill?.minmag ?? -3) : -3;
+  const url = `${cfg.base}?start_time=${start}&end_time=${end}&size_min=${sizeMin}&format=json`;
   const j = JSON.parse(await getText(url, { timeoutMs: 15_000, retries: 2 })) as {
     features?: { geometry?: { coordinates?: number[] }; properties?: Record<string, unknown> }[];
   };
@@ -556,11 +571,20 @@ const igepn: CustomAdapter = async (cfg) => {
 };
 
 // --- Chile: CSN per-UTC-day HTML catalog (td[1] is already UTC; id from the informe href) ---
-const csn: CustomAdapter = async (cfg, nowMs) => {
+const csn: CustomAdapter = async (cfg, nowMs, window) => {
   const out: RawObs[] = [];
   const seen = new Set<string>();
-  // Today's UTC-day page + yesterday's, to catch late/revised events near UTC midnight.
-  for (const dms of [nowMs, nowMs - 86_400_000]) {
+  const DAY = 86_400_000;
+  // Live: today + yesterday (catches late/revised events near UTC midnight). Backfill: every
+  // UTC day the window spans (each day is one page), newest-first, capped for safety.
+  const days: number[] = [];
+  if (window) {
+    for (let ms = Math.floor(window.endMs / DAY) * DAY; ms >= window.startMs - DAY; ms -= DAY) days.push(ms);
+    if (days.length > 40) days.length = 40;
+  } else {
+    days.push(nowMs, nowMs - DAY);
+  }
+  for (const dms of days) {
     const d = new Date(dms);
     const y = d.getUTCFullYear();
     const mm = String(d.getUTCMonth() + 1).padStart(2, '0');

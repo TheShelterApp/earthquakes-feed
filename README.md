@@ -1,6 +1,6 @@
 # earthquakes-feed
 
-An open, free earthquake feed. A GitHub Actions job aggregates earthquakes from 29
+An open, free earthquake feed. A GitHub Actions job aggregates earthquakes from 37
 seismic networks on a schedule, deduplicates them into one feed, and commits the
 result to Git — so the full history is queryable by both *when the quake happened*
 and *when the feed learned about it*. Served worldwide over a CDN, free to consume.
@@ -22,7 +22,7 @@ Start from the manifest; don't hardcode paths. **Full API reference: [APIs.md](A
 # Catalog: every summary + partition, with freshness and cache hints:
 curl -s https://earthquakes-feed.theshelter.app/v1/manifest.json
 
-# The current day, all 29 sources deduped (one CORS-open request):
+# The current day, all 37 sources deduped (one CORS-open request):
 curl -s https://earthquakes-feed.theshelter.app/v1/all_day.geojson
 
 # One recent day as a ready-to-render FeatureCollection (Pages, last 120 days):
@@ -106,7 +106,7 @@ WebSocket event that shares an alias or falls within ±60 s / ±10 km.
 
 ## Sources
 
-29 networks, configured in [`providers/registry.json`](providers/registry.json)
+37 networks, configured in [`providers/registry.json`](providers/registry.json)
 (add more — see [CONTRIBUTING.md](CONTRIBUTING.md)). A server runner has no CORS limit,
 so the feed carries national sources a browser can't reach directly, down to small
 local magnitudes. Full credits: [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
@@ -114,17 +114,18 @@ local magnitudes. Full credits: [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
 - **Global (FDSN):** USGS/ANSS, EMSC/CSEM, GEOFON, ISC (reviewed but months-delayed — backfill-only).
 - **Europe (FDSN):** INGV (Italy), RESIF + RéNaSS + IPGP (France), NOA (Greece), ETHZ (Switzerland), KNMI (Netherlands), LMU (Germany/Bavaria).
 - **Americas / Oceania (FDSN):** NCEDC + SCEDC (California), NRCan (Canada), GeoNet (New Zealand), AusPass (Australia), USP (Brazil).
-- **National APIs (custom adapters):** AFAD (Turkey, to ~M0.6), CENC (China), JMA (Japan), NCS (India), TMD (Thailand + Myanmar), KAGSR (Russia — Kamchatka/Kurils), SSN (Mexico), IPMA (Portugal + Azores), IGP (Peru), ENSN (Egypt), BGS (UK).
+- **National APIs (custom adapters):** AFAD (Turkey, to ~M0.6), CENC (China), JMA (Japan), NCS (India), TMD (Thailand + Myanmar), KAGSR (Russia — Kamchatka/Kurils), BMKG (Indonesia), IGN (Spain), IMO (Iceland), IPMA (Portugal + Azores), BGS (UK), ENSN (Egypt), SSN (Mexico), IGP (Peru), OVSICORI (Costa Rica), IG-EPN (Ecuador), CSN (Chile), INPRES (Argentina), GA (Australia).
 
 A monthly [`discover.yml`](.github/workflows/discover.yml) scans the FDSN datacenter
 registry and re-probes known-down endpoints, opening an issue with vetted candidates —
 new sources are reviewed and enabled by hand, then **auto-backfilled** into history.
 
-Kazakhstan, Kyrgyzstan, Uzbekistan, Tajikistan, Turkmenistan, Belarus, Ukraine, Iran,
-and Pakistan have no open real-time earthquake API (KNDC is CTBTO-restricted; others
-publish only delayed waveforms). Indonesia (BMKG) and Chile (CSN) publish openly but
-currently block server-side fetches. Those regions are covered via the global catalogs
-until an open, reachable source appears.
+Kazakhstan, Kyrgyzstan, Uzbekistan, Tajikistan, Turkmenistan, Belarus, Ukraine, and
+Pakistan have no open real-time earthquake API (KNDC is CTBTO-restricted; others publish
+only delayed waveforms); Iran (IRSC) geo-restricts to domestic IPs, the Philippines
+(PHIVOLCS) publishes an HTML bulletin with no machine API, and Romania (INFP) has no
+reachable event service. Those regions are covered via the global catalogs until an
+open, reachable source appears.
 
 ## Architecture
 
@@ -182,7 +183,7 @@ copyrightable expression) and honor removal requests reactively — see
 
 ## Status
 
-Live end-to-end: 29 sources, stateful field-level dedup (superset model — every source
+Live end-to-end: 37 sources, stateful field-level dedup (superset model — every source
 field preserved), bitemporal log, 20 rolling feeds, per-day partitions + Pages day
 files, manifest, CI, and Cloudflare Pages serving. `event_map` is sharded by day and
 pruned to a 45-day dedup horizon, with older identity preserved in the day partitions.

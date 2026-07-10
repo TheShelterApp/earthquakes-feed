@@ -28,6 +28,7 @@ each row carrying `license`, `attribution`, and `doi`.
 - **AusPass (Australia)** (`auspass`) — CC-BY-4.0 — AusPass — Australian Passive Seismic Server (ANU)
 - **AFAD (Turkey)** (`afad`) — unknown — AFAD — Republic of Türkiye, Disaster and Emergency Management Presidency (deprem.afad.gov.tr)
 - **CENC — China Earthquake Networks Center** (`cenc`) — unknown — China Earthquake Networks Center (CENC), China Earthquake Administration — www.ceic.ac.cn
+- **BMKG (Indonesia)** (`bmkg`) — restricted — Sumber: BMKG (Badan Meteorologi, Klimatologi, dan Geofisika)
 - **NCS — National Center for Seismology (India)** (`ncs`) — unknown — National Center for Seismology (NCS), Ministry of Earth Sciences, Government of India — riseq.seismo.gov.in
 - **SSN — Servicio Sismológico Nacional (Mexico)** (`mexico`) — SSN-UNAM, DOI [10.21766/SSNMX/EC/MX](https://doi.org/10.21766/SSNMX/EC/MX) — Servicio Sismológico Nacional (SSN), UNAM, Mexico
 - **IPMA (Portugal + Azores)** (`ipma`) — IPMA-open-data — Instituto Português do Mar e da Atmosfera (IPMA)
@@ -37,10 +38,16 @@ each row carrying `license`, `attribution`, and `doi`.
 - **IGP — Instituto Geofísico del Perú (Peru)** (`igp`) — IGP-Peru — Instituto Geofísico del Perú (IGP)
 - **ENSN — Egyptian National Seismic Network (NRIAG)** (`egypt`) — ENSN-NRIAG — Egyptian National Seismic Network (ENSN), NRIAG
 - **BGS — British Geological Survey (UK)** (`bgs`) — OGL-3.0 — British Geological Survey © UKRI (Open Government Licence v3.0)
+- **IGN — Instituto Geográfico Nacional (Spain)** (`ign`) — CC-BY-4.0 — © Instituto Geográfico Nacional de España (IGN)
+- **IMO — Icelandic Met Office (Veðurstofa Íslands)** (`imo`) — CC-BY-4.0 — Icelandic Meteorological Office (Veðurstofa Íslands)
+- **INPRES — Instituto Nacional de Prevención Sísmica (Argentina)** (`inpres`) — gov-open — INPRES — Instituto Nacional de Prevención Sísmica (Argentina)
+- **Geoscience Australia** (`ga`) — CC-BY-4.0 — © Commonwealth of Australia (Geoscience Australia)
+- **OVSICORI-UNA (Costa Rica)** (`ovsicori`) — gov-open — Observatorio Vulcanológico y Sismológico de Costa Rica, Universidad Nacional (OVSICORI-UNA)
+- **IG-EPN — Instituto Geofísico (Ecuador)** (`igepn`) — gov-open — Instituto Geofísico - Escuela Politécnica Nacional (IG-EPN), Ecuador
+- **CSN — Centro Sismológico Nacional (Chile)** (`csn`) — gov-open — Centro Sismológico Nacional, Universidad de Chile (CSN)
 
 ## Configured but inactive
 
-- **BMKG (Indonesia)** (`bmkg`) — restricted — Badan Meteorologi, Klimatologi, dan Geofisika (BMKG)
 - **Raspberry Shake** (`raspberryshake`) — CC-BY-4.0 — Raspberry Shake, S.A. citizen-science network
 
 ## The compilation

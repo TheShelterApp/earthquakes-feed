@@ -506,4 +506,93 @@ const ga: CustomAdapter = async (cfg) => {
   return out.filter((o) => o.providerEventId);
 };
 
-export const CUSTOM_ADAPTERS: Record<string, CustomAdapter> = { afad, cenc, tmd, kagsr, ncs, jma, mexico, ipma, igp, egypt, bgs, ign, imo, bmkg, inpres, ga };
+// --- Costa Rica: OVSICORI-UNA (Leaflet L.marker JS; "Fecha y Hora Local" is UTC-6, no DST) ---
+const ovsicori: CustomAdapter = async (cfg) => {
+  const html = await getText(cfg.base, { timeoutMs: 15_000, retries: 2 });
+  const out: RawObs[] = [];
+  const re = /L\.marker\(\[(-?\d+\.?\d*),(-?\d+\.?\d*)\],\{icon:\s*eq(\d+)\}\)\.bindPopup\('([\s\S]*?)',\{minWidth/g;
+  for (const m of html.matchAll(re)) {
+    const lat = num(m[1]);
+    const lon = num(m[2]); // already signed (west negative) in the marker array
+    const id = m[3]!;
+    const popup = m[4]!;
+    const local = /Fecha y Hora Local:<\/td>\s*<td[^>]*>([\d-]+ [\d:]+)</.exec(popup)?.[1];
+    const t = local ? shiftUtc(local, -6) : null;
+    if (lat == null || lon == null || t == null) continue;
+    out.push({
+      provider: cfg.id, providerEventId: id, eventTimeMs: t, providerUpdatedMs: null,
+      status: /Revisado:<\/td>\s*<td[^>]*>\s*y\s*</i.test(popup) ? 'reviewed' : 'automatic',
+      lat, lon, depth: num(/Prof\.\s*\[km\]:<\/td>\s*<td[^>]*>([\d.]+)</.exec(popup)?.[1]),
+      mag: num(/Magnitud:<\/td>\s*<td[^>]*>([\d.]+)</.exec(popup)?.[1]), magType: null,
+      place: htmlDecode((/Ubicacion:<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>/.exec(popup)?.[1] ?? '').trim()) || null,
+      knownAliasIds: [],
+      fields: flattenScalars({ eqid: id, fecha_local: local, autor: (/Autor:<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>/.exec(popup)?.[1] ?? '').trim() } as Record<string, unknown>),
+    });
+  }
+  return out.filter((o) => o.providerEventId);
+};
+
+// --- Ecuador: IG-EPN "Últimos 50 eventos" HTML table (13 cols; cell[11] = Fecha UTC) ---
+const igepn: CustomAdapter = async (cfg) => {
+  const html = await getText(cfg.base, { timeoutMs: 15_000, retries: 2 });
+  const out: RawObs[] = [];
+  for (const row of html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)) {
+    const c = [...row[1]!.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((x) => x[1]!.replace(/<[^>]+>/g, '').trim());
+    if (c.length < 13 || !/^\d+$/.test(c[0]!)) continue;
+    const t = parseUtcMs(c[11]!);
+    const latM = /([\d.]+)\D*([NS])/i.exec(c[5]!);
+    const lonM = /([\d.]+)\D*([EWO])/i.exec(c[6]!);
+    if (t == null || !latM || !lonM) continue;
+    const lat = num(latM[1])! * (latM[2]!.toUpperCase() === 'S' ? -1 : 1);
+    const lon = num(lonM[1])! * (/[WO]/i.test(lonM[2]!) ? -1 : 1);
+    out.push({
+      provider: cfg.id, providerEventId: c[1]!, eventTimeMs: t, providerUpdatedMs: null,
+      status: /revisad/i.test(c[10] ?? '') ? 'reviewed' : 'automatic', lat, lon, depth: num(c[7]),
+      mag: num(c[2]), magType: c[3] || null, place: c[8] || null, knownAliasIds: [],
+      fields: flattenScalars({ evento: c[1], tipo_magnitud: c[3], region: c[8], ciudad: c[9], estado: c[10] } as Record<string, unknown>),
+    });
+  }
+  return out.filter((o) => o.providerEventId);
+};
+
+// --- Chile: CSN per-UTC-day HTML catalog (td[1] is already UTC; id from the informe href) ---
+const csn: CustomAdapter = async (cfg, nowMs) => {
+  const out: RawObs[] = [];
+  const seen = new Set<string>();
+  // Today's UTC-day page + yesterday's, to catch late/revised events near UTC midnight.
+  for (const dms of [nowMs, nowMs - 86_400_000]) {
+    const d = new Date(dms);
+    const y = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    let html: string;
+    try {
+      html = await getText(`${cfg.base}${y}/${mm}/${y}${mm}${dd}.html`, { timeoutMs: 12_000, retries: 1 });
+    } catch {
+      continue;
+    }
+    for (const row of html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)) {
+      const c = [...row[1]!.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((x) => x[1]!);
+      if (c.length < 5) continue;
+      const id = /\/informes\/\d{4}\/\d{2}\/(\d+)\.html/.exec(c[0]!)?.[1];
+      if (!id || seen.has(id)) continue;
+      const t = parseUtcMs(c[1]!.replace(/<[^>]+>/g, '').trim()); // td[1] = Fecha UTC
+      const ll = c[2]!.replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]+>/g, ' ').trim().split(/\s+/);
+      const lat = num(ll[0]);
+      const lon = num(ll[1]);
+      if (t == null || lat == null || lon == null) continue;
+      seen.add(id);
+      const magTxt = c[4]!.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      out.push({
+        provider: cfg.id, providerEventId: id, eventTimeMs: t, providerUpdatedMs: null, status: null,
+        lat, lon, depth: num(c[3]!.replace(/[^\d.]/g, '')), mag: num(/^([\d.]+)/.exec(magTxt)?.[1]),
+        magType: magTxt.replace(/^[\d.]+\s*/, '') || null,
+        place: htmlDecode((c[0]!.split(/<br\s*\/?>/i)[1] ?? '').replace(/<[^>]+>/g, '').trim()) || null,
+        knownAliasIds: [], fields: {},
+      });
+    }
+  }
+  return out;
+};
+
+export const CUSTOM_ADAPTERS: Record<string, CustomAdapter> = { afad, cenc, tmd, kagsr, ncs, jma, mexico, ipma, igp, egypt, bgs, ign, imo, bmkg, inpres, ga, ovsicori, igepn, csn };

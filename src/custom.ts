@@ -1,4 +1,5 @@
 import { request as httpsRequest } from 'node:https';
+import { strFromU8, unzipSync } from 'fflate';
 import { QUERY_LOOKBACK_MS } from './config.js';
 import type { ProviderConfig, RawObs } from './types.js';
 import { flattenScalars, num, parseUtcMs } from './util.js';
@@ -56,6 +57,27 @@ async function getText(url: string, opts: GetOpts = {}): Promise<string> {
       return await once(url, timeoutMs, ua, insecure);
     } catch (e) {
       lastErr = e;
+    }
+    if (attempt < retries) await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+/** Fetch a binary body (for zip bundles). S3/CDN endpoints — valid TLS, no UA gating. */
+async function getBinary(url: string, opts: { timeoutMs?: number; retries?: number } = {}): Promise<Uint8Array> {
+  const { timeoutMs = 15_000, retries = 2 } = opts;
+  let lastErr: unknown = new Error('no attempt');
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'user-agent': BROWSER_UA, accept: '*/*' } });
+      if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}`);
+      return new Uint8Array(await res.arrayBuffer());
+    } catch (e) {
+      lastErr = e;
+    } finally {
+      clearTimeout(timer);
     }
     if (attempt < retries) await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
   }
@@ -619,4 +641,43 @@ const csn: CustomAdapter = async (cfg, nowMs, window) => {
   return out;
 };
 
-export const CUSTOM_ADAPTERS: Record<string, CustomAdapter> = { afad, cenc, tmd, kagsr, ncs, jma, mexico, ipma, igp, egypt, bgs, ign, imo, bmkg, inpres, ga, ovsicori, igepn, csn };
+// --- Taiwan: CWA (two S3 zip bundles of per-event XML; OriginTime carries +08:00) ---
+const cwa: CustomAdapter = async (cfg) => {
+  const out: RawObs[] = [];
+  const seen = new Set<string>();
+  // BOTH bundles: E-A0015 = significant/felt, E-A0016 = small-area minor (only place the
+  // frequent small quakes appear). Each is ~16 per-event XML files.
+  for (const file of ['E-A0015-001.zip', 'E-A0016-001.zip']) {
+    let files: Record<string, Uint8Array>;
+    try {
+      files = unzipSync(await getBinary(`${cfg.base}${file}`, { timeoutMs: 20_000, retries: 2 }));
+    } catch {
+      continue;
+    }
+    for (const name of Object.keys(files)) {
+      if (!/\.xml$/i.test(name)) continue;
+      const xml = strFromU8(files[name]!);
+      const tag = (n: string): string | null => {
+        const m = new RegExp(`<(?:\\w+:)?${n}>([\\s\\S]*?)</(?:\\w+:)?${n}>`).exec(xml);
+        return m ? m[1]!.trim() : null;
+      };
+      const t = parseUtcMs(tag('OriginTime')); // ISO with +08:00 → parseUtcMs converts to UTC
+      const lat = num(tag('EpicenterLatitude'));
+      const lon = num(tag('EpicenterLongitude'));
+      // Stable id = the 16-digit event id in the Web URL. <EarthquakeNo> is a constant
+      // placeholder (115000) for every E-A0016 report, so it can't be the id.
+      const id = /\/details\/(\d+)/.exec(tag('Web') ?? '')?.[1] ?? tag('identifier') ?? '';
+      if (t == null || lat == null || lon == null || !id || seen.has(id)) continue;
+      seen.add(id);
+      out.push({
+        provider: cfg.id, providerEventId: id, eventTimeMs: t, providerUpdatedMs: null, status: 'reviewed',
+        lat, lon, depth: num(tag('FocalDepth')), mag: num(tag('MagnitudeValue')), magType: 'ML',
+        place: tag('Location'), knownAliasIds: [],
+        fields: flattenScalars({ identifier: tag('identifier'), magnitudeType: tag('MagnitudeType'), location: tag('Location'), reportContent: tag('ReportContent'), web: tag('Web') } as Record<string, unknown>),
+      });
+    }
+  }
+  return out.filter((o) => o.providerEventId);
+};
+
+export const CUSTOM_ADAPTERS: Record<string, CustomAdapter> = { afad, cenc, tmd, kagsr, ncs, jma, mexico, ipma, igp, egypt, bgs, ign, imo, bmkg, inpres, ga, ovsicori, igepn, csn, cwa };

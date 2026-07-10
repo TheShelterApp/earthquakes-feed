@@ -1,6 +1,6 @@
 # earthquakes-feed
 
-An open, free earthquake feed. A GitHub Actions job aggregates earthquakes from 37
+An open, free earthquake feed. A GitHub Actions job aggregates earthquakes from 38
 seismic networks on a schedule, deduplicates them into one feed, and commits the
 result to Git — so the full history is queryable by both *when the quake happened*
 and *when the feed learned about it*. Served worldwide over a CDN, free to consume.
@@ -22,7 +22,7 @@ Start from the manifest; don't hardcode paths. **Full API reference: [APIs.md](A
 # Catalog: every summary + partition, with freshness and cache hints:
 curl -s https://earthquakes-feed.theshelter.app/v1/manifest.json
 
-# The current day, all 37 sources deduped (one CORS-open request):
+# The current day, all 38 sources deduped (one CORS-open request):
 curl -s https://earthquakes-feed.theshelter.app/v1/all_day.geojson
 
 # One recent day as a ready-to-render FeatureCollection (Pages, last 120 days):
@@ -106,7 +106,7 @@ WebSocket event that shares an alias or falls within ±60 s / ±10 km.
 
 ## Sources
 
-37 networks, configured in [`providers/registry.json`](providers/registry.json)
+38 networks, configured in [`providers/registry.json`](providers/registry.json)
 (add more — see [CONTRIBUTING.md](CONTRIBUTING.md)). A server runner has no CORS limit,
 so the feed carries national sources a browser can't reach directly, down to small
 local magnitudes. Full credits: [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
@@ -114,7 +114,7 @@ local magnitudes. Full credits: [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
 - **Global (FDSN):** USGS/ANSS, EMSC/CSEM, GEOFON, ISC (reviewed but months-delayed — backfill-only).
 - **Europe (FDSN):** INGV (Italy), RESIF + RéNaSS + IPGP (France), NOA (Greece), ETHZ (Switzerland), KNMI (Netherlands), LMU (Germany/Bavaria).
 - **Americas / Oceania (FDSN):** NCEDC + SCEDC (California), NRCan (Canada), GeoNet (New Zealand), AusPass (Australia), USP (Brazil).
-- **National APIs (custom adapters):** AFAD (Turkey, to ~M0.6), CENC (China), JMA (Japan), NCS (India), TMD (Thailand + Myanmar), KAGSR (Russia — Kamchatka/Kurils), BMKG (Indonesia), IGN (Spain), IMO (Iceland), IPMA (Portugal + Azores), BGS (UK), ENSN (Egypt), SSN (Mexico), IGP (Peru), OVSICORI (Costa Rica), IG-EPN (Ecuador), CSN (Chile), INPRES (Argentina), GA (Australia).
+- **National APIs (custom adapters):** AFAD (Turkey, to ~M0.6), CENC (China), JMA (Japan), NCS (India), TMD (Thailand + Myanmar), CWA (Taiwan), KAGSR (Russia — Kamchatka/Kurils), BMKG (Indonesia), IGN (Spain), IMO (Iceland), IPMA (Portugal + Azores), BGS (UK), ENSN (Egypt), SSN (Mexico), IGP (Peru), OVSICORI (Costa Rica), IG-EPN (Ecuador), CSN (Chile), INPRES (Argentina), GA (Australia).
 
 A monthly [`discover.yml`](.github/workflows/discover.yml) scans the FDSN datacenter
 registry and re-probes known-down endpoints, opening an issue with vetted candidates —
@@ -183,7 +183,7 @@ copyrightable expression) and honor removal requests reactively — see
 
 ## Status
 
-Live end-to-end: 37 sources, stateful field-level dedup (superset model — every source
+Live end-to-end: 38 sources, stateful field-level dedup (superset model — every source
 field preserved), bitemporal log, 20 rolling feeds, per-day partitions + Pages day
 files, manifest, CI, and Cloudflare Pages serving. `event_map` is sharded by day and
 pruned to a 45-day dedup horizon, with older identity preserved in the day partitions.

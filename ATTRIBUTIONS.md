@@ -45,6 +45,7 @@ each row carrying `license`, `attribution`, and `doi`.
 - **OVSICORI-UNA (Costa Rica)** (`ovsicori`) — gov-open — Observatorio Vulcanológico y Sismológico de Costa Rica, Universidad Nacional (OVSICORI-UNA)
 - **IG-EPN — Instituto Geofísico (Ecuador)** (`igepn`) — gov-open — Instituto Geofísico - Escuela Politécnica Nacional (IG-EPN), Ecuador
 - **CSN — Centro Sismológico Nacional (Chile)** (`csn`) — gov-open — Centro Sismológico Nacional, Universidad de Chile (CSN)
+- **CWA — Central Weather Administration (Taiwan)** (`cwa`) — OGDL-TW-1.0 — 資料來源：交通部中央氣象署 (Central Weather Administration, Taiwan)
 
 ## Configured but inactive
 

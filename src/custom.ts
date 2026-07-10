@@ -344,4 +344,166 @@ const bgs: CustomAdapter = async (cfg) => {
   return out;
 };
 
-export const CUSTOM_ADAPTERS: Record<string, CustomAdapter> = { afad, cenc, tmd, kagsr, ncs, jma, mexico, ipma, igp, egypt, bgs };
+/** Extract the first balanced {...} object after a marker (for JS-wrapped JSON, e.g. IGN). */
+function jsonObjectAfter(src: string, marker: string): string | null {
+  const at = src.indexOf(marker);
+  if (at < 0) return null;
+  const start = src.indexOf('{', at);
+  if (start < 0) return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < src.length; i++) {
+    const ch = src[i]!;
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+    } else if (ch === '"') inStr = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}' && --depth === 0) return src.slice(start, i + 1);
+  }
+  return null;
+}
+
+// --- Spain: IGN (JS-wrapped GeoJSON; `dias30` = 30-day superset; `fecha` is UTC) ---
+const ign: CustomAdapter = async (cfg) => {
+  const js = await getText(cfg.base, { timeoutMs: 15_000, retries: 2 });
+  const objText = jsonObjectAfter(js, 'dias30');
+  if (!objText) return [];
+  let fc: { features?: { geometry?: { coordinates?: number[] }; properties?: Record<string, unknown> }[] };
+  try {
+    fc = JSON.parse(objText);
+  } catch {
+    return [];
+  }
+  const out: RawObs[] = [];
+  for (const f of fc.features ?? []) {
+    const p = f.properties ?? {};
+    const c = f.geometry?.coordinates ?? [];
+    const lat = num(c[1]);
+    const lon = num(c[0]);
+    const t = parseUtcMs(p['fecha'] as string);
+    if (lat == null || lon == null || t == null) continue;
+    out.push({
+      provider: cfg.id, providerEventId: String(p['evid'] ?? ''), eventTimeMs: t, providerUpdatedMs: null,
+      status: null, lat, lon, depth: num(p['depth']), mag: num(p['mag']), magType: (p['magtype'] as string) || null,
+      place: (p['loc'] as string)?.trim() || null, knownAliasIds: [], fields: flattenScalars(p),
+    });
+  }
+  return out.filter((o) => o.providerEventId);
+};
+
+// --- Iceland: IMO "Quakes API" (clean GeoJSON, `time` already UTC, supports a time window) ---
+const imo: CustomAdapter = async (cfg, nowMs, window) => {
+  const startMs = window ? window.startMs : nowMs - QUERY_LOOKBACK_MS;
+  const endMs = window ? window.endMs : nowMs;
+  const start = new Date(startMs).toISOString().slice(0, 19);
+  const end = new Date(endMs).toISOString().slice(0, 19);
+  const url = `${cfg.base}?start_time=${start}&end_time=${end}&size_min=-3&format=json`;
+  const j = JSON.parse(await getText(url, { timeoutMs: 15_000, retries: 2 })) as {
+    features?: { geometry?: { coordinates?: number[] }; properties?: Record<string, unknown> }[];
+  };
+  const out: RawObs[] = [];
+  for (const f of j.features ?? []) {
+    const p = f.properties ?? {};
+    const c = f.geometry?.coordinates ?? [];
+    const lat = num(c[1]);
+    const lon = num(c[0]);
+    const t = parseUtcMs(p['time'] as string);
+    if (lat == null || lon == null || t == null) continue;
+    out.push({
+      provider: cfg.id, providerEventId: String(p['event_id'] ?? ''), eventTimeMs: t,
+      providerUpdatedMs: parseUtcMs(p['updated_time'] as string),
+      status: p['evaluation_mode'] === 'manual' ? 'reviewed' : 'automatic', lat, lon, depth: num(p['depth']),
+      mag: num(p['magnitude']), magType: (p['magnitude_type'] as string) || null, place: (p['region'] as string) || null,
+      knownAliasIds: [], fields: flattenScalars(p),
+    });
+  }
+  return out.filter((o) => o.providerEventId);
+};
+
+// --- Indonesia: BMKG (two latest-N JSON feeds; `DateTime` is UTC; needs a desktop UA) ---
+const bmkg: CustomAdapter = async (cfg) => {
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+  const out: RawObs[] = [];
+  const seen = new Set<string>();
+  for (const file of ['gempaterkini.json', 'gempadirasakan.json']) {
+    let list: Record<string, unknown>[] = [];
+    try {
+      const j = JSON.parse(await getText(`${cfg.base}${file}`, { timeoutMs: 12_000, retries: 2, ua: UA })) as { Infogempa?: { gempa?: unknown } };
+      const g = j.Infogempa?.gempa;
+      list = Array.isArray(g) ? (g as Record<string, unknown>[]) : g ? [g as Record<string, unknown>] : [];
+    } catch {
+      continue;
+    }
+    for (const e of list) {
+      const t = parseUtcMs(e['DateTime'] as string);
+      const ll = String(e['Coordinates'] ?? '').split(',');
+      const lat = num(ll[0]);
+      const lon = num(ll[1]);
+      if (t == null || lat == null || lon == null) continue;
+      // No native event id → derive a stable one from the UTC origin time (second resolution).
+      const id = `bmkg:${new Date(t).toISOString().slice(0, 19).replace(/[-:]/g, '')}Z`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push({
+        provider: cfg.id, providerEventId: id, eventTimeMs: t, providerUpdatedMs: null, status: null,
+        lat, lon, depth: num(String(e['Kedalaman'] ?? '').replace(/[^\d.]/g, '')), mag: num(e['Magnitude']),
+        magType: null, place: (e['Wilayah'] as string) || null, knownAliasIds: [], fields: flattenScalars(e),
+      });
+    }
+  }
+  return out;
+};
+
+// --- Argentina: INPRES (bespoke <lista><item> XML; `idSismo` is 14-digit UTC YYYYMMDDHHMMSS) ---
+const inpres: CustomAdapter = async (cfg) => {
+  const xml = await getText(cfg.base, { timeoutMs: 12_000, retries: 2 });
+  const out: RawObs[] = [];
+  for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
+    const it = m[1]!;
+    const tag = (n: string): string | null => (new RegExp(`<${n}>([^<]*)<`).exec(it)?.[1] ?? '').trim() || null;
+    const id = tag('idSismo') ?? '';
+    const lat = num(tag('latitud'));
+    const lon = num(tag('longitud'));
+    const t = /^\d{14}$/.test(id)
+      ? parseUtcMs(`${id.slice(0, 4)}-${id.slice(4, 6)}-${id.slice(6, 8)}T${id.slice(8, 10)}:${id.slice(10, 12)}:${id.slice(12, 14)}Z`)
+      : null;
+    if (lat == null || lon == null || t == null) continue;
+    out.push({
+      provider: cfg.id, providerEventId: id, eventTimeMs: t, providerUpdatedMs: null, status: null,
+      lat, lon, depth: num(tag('prof')), mag: num(tag('mg')), magType: null, place: tag('prov'), knownAliasIds: [],
+      fields: flattenScalars({ idSismo: id, prof: tag('prof'), mg: tag('mg'), prov: tag('prov'), fecha: tag('fecha'), hora: tag('hora') } as Record<string, unknown>),
+    });
+  }
+  return out.filter((o) => o.providerEventId);
+};
+
+// --- Australia: Geoscience Australia (RSS; times UTC; georss:point = "lat lon") ---
+const ga: CustomAdapter = async (cfg) => {
+  const xml = await getText(cfg.base, { timeoutMs: 12_000, retries: 2 });
+  const out: RawObs[] = [];
+  for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
+    const it = m[1]!;
+    const id = (/<link>([^<]+)</.exec(it)?.[1] ?? '').split('/').pop()?.trim() ?? '';
+    const pt = (/<georss:point>([^<]+)</.exec(it)?.[1] ?? '').trim().split(/\s+/);
+    const lat = num(pt[0]);
+    const lon = num(pt[1]);
+    const desc = (/<description>([^<]+)</.exec(it)?.[1] ?? '').replace(/\(UTC\)/i, '').trim();
+    const t = parseUtcMs(desc);
+    if (!id || lat == null || lon == null || t == null) continue;
+    const title = htmlDecode(/<title>([^<]+)</.exec(it)?.[1] ?? '');
+    const summary = htmlDecode(/<summary>([\s\S]*?)<\/summary>/.exec(it)?.[1] ?? '').trim();
+    out.push({
+      provider: cfg.id, providerEventId: id, eventTimeMs: t, providerUpdatedMs: null, status: null,
+      lat, lon, depth: num(/Depth\s*([\d.]+)\s*km/i.exec(summary)?.[1]),
+      mag: num(/Magnitude\s*([\d.]+)/i.exec(title)?.[1]), magType: null,
+      place: title.replace(/^Magnitude\s*[\d.]+,\s*/i, '').trim() || null, knownAliasIds: [],
+      fields: { title, description: desc, summary },
+    });
+  }
+  return out.filter((o) => o.providerEventId);
+};
+
+export const CUSTOM_ADAPTERS: Record<string, CustomAdapter> = { afad, cenc, tmd, kagsr, ncs, jma, mexico, ipma, igp, egypt, bgs, ign, imo, bmkg, inpres, ga };

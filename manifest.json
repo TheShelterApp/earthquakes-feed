@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "generated": 1784018304907,
-  "generated_iso": "2026-07-14T08:38:24.907Z",
-  "head_seq": 19730,
-  "event_count": 13355,
+  "generated": 1784018651833,
+  "generated_iso": "2026-07-14T08:44:11.833Z",
+  "head_seq": 19735,
+  "event_count": 13356,
   "freshness": {
     "expected_interval_seconds": 300,
     "stale_after_seconds": 1800
@@ -15,22 +15,22 @@
     "all_hour": {
       "path": "v1/all_hour.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/all_hour.geojson",
-      "count": 44
+      "count": 38
     },
     "1.0_hour": {
       "path": "v1/1.0_hour.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/1.0_hour.geojson",
-      "count": 38
+      "count": 32
     },
     "2.5_hour": {
       "path": "v1/2.5_hour.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/2.5_hour.geojson",
-      "count": 19
+      "count": 13
     },
     "4.5_hour": {
       "path": "v1/4.5_hour.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/4.5_hour.geojson",
-      "count": 10
+      "count": 7
     },
     "significant_hour": {
       "path": "v1/significant_hour.geojson",
@@ -40,12 +40,12 @@
     "all_day": {
       "path": "v1/all_day.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/all_day.geojson",
-      "count": 1181
+      "count": 1178
     },
     "1.0_day": {
       "path": "v1/1.0_day.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/1.0_day.geojson",
-      "count": 898
+      "count": 896
     },
     "2.5_day": {
       "path": "v1/2.5_day.geojson",
@@ -65,22 +65,22 @@
     "all_week": {
       "path": "v1/all_week.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/all_week.geojson",
-      "count": 8089
+      "count": 8086
     },
     "1.0_week": {
       "path": "v1/1.0_week.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/1.0_week.geojson",
-      "count": 6086
+      "count": 6084
     },
     "2.5_week": {
       "path": "v1/2.5_week.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/2.5_week.geojson",
-      "count": 2267
+      "count": 2266
     },
     "4.5_week": {
       "path": "v1/4.5_week.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/4.5_week.geojson",
-      "count": 299
+      "count": 298
     },
     "significant_week": {
       "path": "v1/significant_week.geojson",
@@ -114,6 +114,36 @@
     }
   },
   "partitions": [
+    {
+      "date": "2025-07-31",
+      "path": "events/2025/07/31.ndjson",
+      "url": "https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2025/07/31.ndjson",
+      "count": 1759,
+      "bytes": 3198309,
+      "min_mag": -0.88,
+      "max_mag": 6.7,
+      "frozen": true
+    },
+    {
+      "date": "2025-08-01",
+      "path": "events/2025/08/01.ndjson",
+      "url": "https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2025/08/01.ndjson",
+      "count": 1589,
+      "bytes": 2885735,
+      "min_mag": -1.02,
+      "max_mag": 6.3,
+      "frozen": true
+    },
+    {
+      "date": "2025-08-02",
+      "path": "events/2025/08/02.ndjson",
+      "url": "https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2025/08/02.ndjson",
+      "count": 1304,
+      "bytes": 2343097,
+      "min_mag": -1.86,
+      "max_mag": 6.4,
+      "frozen": true
+    },
     {
       "date": "2026-03-01",
       "path": "events/2026/03/01.ndjson",
@@ -1485,10 +1515,10 @@
       "path": "events/2026/07/14.ndjson",
       "url": "https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2026/07/14.ndjson",
       "pages_url": "https://earthquakes-feed.theshelter.app/v1/events/2026-07-14.geojson",
-      "count": 375,
-      "bytes": 696739,
+      "count": 376,
+      "bytes": 699674,
       "min_mag": -0.21283,
-      "max_mag": 5.5,
+      "max_mag": 5.6,
       "frozen": false
     }
   ],
@@ -2548,7 +2578,7 @@
         "2025-07-30",
         "2025-07-31"
       ],
-      "needs_reroll": false
+      "needs_reroll": true
     },
     {
       "period": "2025-08",
@@ -2591,7 +2621,7 @@
         "2025-08-30",
         "2025-08-31"
       ],
-      "needs_reroll": false
+      "needs_reroll": true
     },
     {
       "period": "2025-09",

@@ -25,7 +25,8 @@ curl -s https://earthquakes-feed.theshelter.app/v1/manifest.json
 # The current day, all 38 sources deduped (one CORS-open request):
 curl -s https://earthquakes-feed.theshelter.app/v1/all_day.geojson
 
-# One recent day as a ready-to-render FeatureCollection (Pages, last 120 days):
+# One recent day as a ready-to-render full-detail FeatureCollection (Pages; days in the
+# live window — a partition's pages_url in manifest.json tells you it exists):
 curl -s https://earthquakes-feed.theshelter.app/v1/events/2026-07-04.geojson
 
 # Any historical day as NDJSON, straight from the data branch (full history):
@@ -46,11 +47,15 @@ partitions below.
 
 Same Features, two shapes per UTC day:
 
-- `/v1/events/YYYY-MM-DD.geojson` — FeatureCollection on Cloudflare Pages, last 120
-  days. Convenient for map time-sliders.
+- `/v1/events/YYYY-MM-DD.geojson` — FeatureCollection on Cloudflare Pages for the days
+  in the live window (~45 days); present **iff** the partition entry in `manifest.json`
+  carries `pages_url`. Convenient for map time-sliders.
 - `events/YYYY/MM/DD.ndjson` — one Feature per line, full history, on the `data`
   branch (via jsDelivr `@data`). Discover paths, counts, and `frozen`/`pages_url`
   through `manifest.json`.
+
+Both shapes are **full-fat** (complete `feed.provenance[]` with each provider's original
+`fields`) — only the rolling summaries are compact.
 
 For an **immutable, cache-forever** copy of a `frozen` partition, pin it to the
 manifest's `data_commit` (a git SHA) instead of the `@data` branch ref:

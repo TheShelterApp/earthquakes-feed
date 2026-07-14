@@ -52,8 +52,11 @@ curl -s https://earthquakes-feed.theshelter.app/v1/all_day.geojson
 
 ### `GET /v1/events/YYYY-MM-DD.geojson` — recent day (map time-slider)
 
-Ready-to-render `FeatureCollection` for one UTC day, last 120 days, live events only.
-Same Feature shape as the summaries.
+Ready-to-render `FeatureCollection` for one UTC day, live events only, **full-fat**
+(complete `feed.provenance[]` incl. `fields`). Exists for the days currently in the live
+event-map window (~45 days) — a partition's `pages_url` is present in `manifest.json`
+**iff** its day file is actually deployed; for any other day use the partition `url`
+(NDJSON, same full-fat Features, one per line).
 
 ### Historical day partitions (full history)
 

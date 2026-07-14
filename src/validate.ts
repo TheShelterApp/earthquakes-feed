@@ -63,17 +63,28 @@ try {
 }
 
 // 2. Published summaries (Pages artifact): schema + size gate + no future events.
+//    /v1/events/ day files are the documented FULL-detail Pages surface (the compact
+//    summaries point consumers there) — every feature must keep a non-empty
+//    feed.provenance[] (day files are live-only, so no tombstone exception applies).
 const nowMs = Date.now();
 for (const file of walk(publicV1, (f) => f.endsWith('.geojson'))) {
   const bytes = statSync(file).size;
   if (bytes > MAX_PUBLISHED_BYTES) fail(`${file}: ${bytes} bytes exceeds ${MAX_PUBLISHED_BYTES}`);
-  const fc = JSON.parse(readFileSync(file, 'utf8')) as { metadata?: { generated?: unknown }; features?: { properties?: { time?: number } }[] };
+  const fc = JSON.parse(readFileSync(file, 'utf8')) as { metadata?: { generated?: unknown }; features?: { properties?: { time?: number; feed?: { provenance?: unknown[] } } }[] };
   if (typeof fc.metadata?.generated !== 'number') fail(`${file}: metadata.generated must be ms-epoch int`);
-  for (const feat of (fc.features ?? []).slice(0, 200)) {
-    if (!vFeat(feat)) {
+  const isDayFile = file.includes(join(publicV1, 'events'));
+  for (const [i, feat] of (fc.features ?? []).entries()) {
+    if (i < 200 && !vFeat(feat)) {
       fail(`${file}: feature ${ajv.errorsText(vFeat.errors)}`);
       break;
     }
+    if (isDayFile) {
+      const prov = feat.properties?.feed?.provenance;
+      if (!Array.isArray(prov) || prov.length === 0) {
+        fail(`${file}: feature ${i} lost feed.provenance[] — day files must stay full-fat`);
+        break;
+      }
+    } else if (i >= 200) break;
     const t = feat.properties?.time;
     if (typeof t === 'number' && t > nowMs + 15 * 60_000) fail(`${file}: future-timestamped event (time=${t})`);
   }

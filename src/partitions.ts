@@ -101,8 +101,14 @@ export interface ManifestPartition {
 }
 
 /** Full partition catalog for the manifest — from the durable inventory, not the
- *  45-day event_map load, so deep-history (backfilled) days remain discoverable. */
-export function manifestPartitions(inv: Inventory, nowMs: number): ManifestPartition[] {
+ *  45-day event_map load, so deep-history (backfilled) days remain discoverable.
+ *
+ *  `pagesDays` = the days whose GeoJSON day file was actually written into public/ by
+ *  THIS run. Each Direct Upload deploy is a full snapshot — files not in it 404 — so
+ *  pages_url is advertised ONLY for those days (previously the whole 120-day window was
+ *  advertised while only the ~45-day event-map load existed on Pages: 104/121 were 404s).
+ *  Older days resolve through `url` (jsDelivr NDJSON, full-fat). */
+export function manifestPartitions(inv: Inventory, nowMs: number, pagesDays?: ReadonlySet<string>): ManifestPartition[] {
   const today = dayFromMs(nowMs);
   const pagesFloor = dayFromMs(nowMs - PAGES_DAY_WINDOW * 86_400_000);
   const frozenBefore = dayFromMs(nowMs - FROZEN_AFTER_DAYS * 86_400_000);
@@ -111,11 +117,12 @@ export function manifestPartitions(inv: Inventory, nowMs: number): ManifestParti
     .map((date) => {
       const s = inv[date]!;
       const p = dayToPath(date);
+      const onPages = pagesDays ? pagesDays.has(date) : date >= pagesFloor;
       return {
         date,
         path: `events/${p}.ndjson`,
         url: `${JSDELIVR_BASE}@data/events/${p}.ndjson`,
-        ...(date >= pagesFloor ? { pages_url: `${DOMAIN}/v1/events/${date}.geojson` } : {}),
+        ...(onPages && date >= pagesFloor ? { pages_url: `${DOMAIN}/v1/events/${date}.geojson` } : {}),
         count: s.count,
         bytes: s.bytes,
         min_mag: s.min_mag,

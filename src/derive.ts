@@ -125,6 +125,8 @@ function main(): void {
     inv[day] = stat;
   }
   saveInventory(DATA_DIR, inv);
+  // Days whose Pages day file exists in THIS deploy snapshot (drives truthful pages_url).
+  const pagesDays = new Set(byDay.keys());
 
   const manifest = JSON.stringify(
     {
@@ -140,7 +142,7 @@ function main(): void {
       // of any frozen partition: `${jsdelivr_base%@data}@<data_commit>/<partition.path>`.
       data_commit: null,
       summaries: summ,
-      partitions: manifestPartitions(inv, nowMs),
+      partitions: manifestPartitions(inv, nowMs, pagesDays),
       archives: loadArchives(),
     },
     null,

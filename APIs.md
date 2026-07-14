@@ -39,8 +39,12 @@ The catalog. Fields:
 
 `threshold ∈ {all, 1.0, 2.5, 4.5, significant}`, `window ∈ {hour, day, week, month}`
 (20 files, USGS-style). A `FeatureCollection` with `metadata` (`generated` ms,
-`age_seconds`, `count`, `attribution`). `all_month` is capped at M≥1.0; `significant`
-is `sig≥600 || mag≥6`.
+`age_seconds`, `count`, `attribution`, `min_mag` when a floor applies). Month files are
+floored at M≥2.5 to stay servable; `significant` is `sig≥600 || mag≥6`. Summary Features
+are **compact**: full top-level properties + `feed` core (`feed_id`, clocks, `state`,
+`aliases`, `chosen_provider`) but no `feed.provenance[]` — fetch the day files
+(`/v1/events/…`) or NDJSON partitions for each provider's full solution and original
+vocabulary.
 
 ```bash
 curl -s https://earthquakes-feed.theshelter.app/v1/all_day.geojson
@@ -90,7 +94,7 @@ under `properties.feed`:
 | `state` / `tombstone` | `live`\|`tombstoned`\|`superseded` (filter `state==='live'` for a map) |
 | `chosen_provider` | which provenance row won the top-level fields |
 | `aliases[]` | every `provider:native_id` for this event (for realtime dedup) |
-| `provenance[]` | every reporting provider with its solution + `license`/`attribution`/`doi`, and `fields` = that provider's **complete original vocabulary** (nothing dropped) |
+| `provenance[]` | every reporting provider with its solution + `license`/`attribution`/`doi`, and `fields` = that provider's **complete original vocabulary** (nothing dropped). Present in day files + partitions; omitted from the compact rolling summaries |
 
 ## Freshness contract
 

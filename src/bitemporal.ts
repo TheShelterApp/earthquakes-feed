@@ -147,8 +147,14 @@ const maxUpdated = (node: EventNode): number | null => {
   return m === -Infinity ? null : m;
 };
 
-/** Materialize an EventNode into a USGS-GeoJSON-superset Feature, losslessly. */
-export function nodeToFeature(node: EventNode): unknown {
+/** Materialize an EventNode into a USGS-GeoJSON-superset Feature, losslessly.
+ *
+ *  `compact` omits `feed.provenance[]` (each provider's full solution + original
+ *  vocabulary) — used for the ROLLING SUMMARIES only, whose saturated 30-day window at
+ *  38 sources cannot fit a single servable file full-fat (Pages hard limit 25 MiB).
+ *  Nothing is lost: day partitions and /v1/events day files stay full-fat, and the
+ *  summary keeps `aliases` + `chosen_provider` for realtime dedup. */
+export function nodeToFeature(node: EventNode, opts?: { compact?: boolean }): unknown {
   const updated = maxUpdated(node);
   // 2-element [lon, lat] when depth is unknown — never emit a null Z, so strictly
   // typed consumers (iOS `coordinates: [Double]`) can decode every Feature.
@@ -197,7 +203,8 @@ export function nodeToFeature(node: EventNode): unknown {
     aliases: node.aliases,
     // Every provider's COMPLETE original field vocabulary is retained here under `fields` —
     // nothing a source reported is ever dropped, even fields not surfaced at top level.
-    provenance: node.provenance.map((r) => ({
+    // (Omitted in compact summary features — full detail lives in the day files/partitions.)
+    ...(opts?.compact ? {} : { provenance: node.provenance.map((r) => ({
       provider: r.provider,
       native_id: r.nativeId,
       event_time: isoFromMs(r.eventTimeMs),
@@ -214,7 +221,7 @@ export function nodeToFeature(node: EventNode): unknown {
       attribution: r.attribution,
       doi: r.doi,
       ...(Object.keys(r.fields).length ? { fields: r.fields } : {}),
-    })),
+    })) }),
   };
 
   return {

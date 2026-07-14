@@ -3,89 +3,343 @@
   "$id": "https://earthquakes-feed.theshelter.app/schema/feature.schema.json",
   "title": "Feed Feature (USGS-GeoJSON superset)",
   "type": "object",
-  "required": ["type", "id", "geometry", "properties"],
+  "required": [
+    "type",
+    "id",
+    "geometry",
+    "properties"
+  ],
   "properties": {
-    "type": { "const": "Feature" },
-    "id": { "type": "string", "pattern": "^efd_[0-9A-HJKMNP-TV-Z]{26}$" },
-    "source": { "type": "string", "description": "Chosen network (mirrors properties.net). Always emitted going forward; absent on partitions written before v1.1 — read `source ?? net`." },
+    "type": {
+      "const": "Feature"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^efd_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "source": {
+      "type": "string",
+      "description": "Chosen network (mirrors properties.net). Always emitted going forward; absent on partitions written before v1.1 — read `source ?? net`."
+    },
     "geometry": {
       "type": "object",
-      "required": ["type", "coordinates"],
+      "required": [
+        "type",
+        "coordinates"
+      ],
       "properties": {
-        "type": { "const": "Point" },
+        "type": {
+          "const": "Point"
+        },
         "coordinates": {
           "type": "array",
           "minItems": 2,
           "maxItems": 3,
-          "items": { "type": ["number", "null"] },
+          "items": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
           "description": "[lon, lat] or [lon, lat, depthKm]. New writes omit the depth slot when unknown; legacy partitions may carry a null Z."
         }
       }
     },
     "properties": {
       "type": "object",
-      "required": ["time", "status", "feed"],
+      "required": [
+        "time",
+        "status",
+        "feed"
+      ],
       "properties": {
-        "mag": { "type": ["number", "null"] },
-        "magType": { "type": ["string", "null"] },
-        "place": { "type": ["string", "null"] },
-        "time": { "type": "integer" },
-        "updated": { "type": ["integer", "null"] },
-        "status": { "type": ["string", "null"] },
-        "net": { "type": ["string", "null"] },
-        "tsunami": { "type": ["integer", "null"] },
-        "sig": { "type": ["integer", "null"] },
-        "nst": { "type": ["integer", "null"] },
-        "dmin": { "type": ["number", "null"] },
-        "rms": { "type": ["number", "null"] },
-        "gap": { "type": ["number", "null"] },
-        "tz": { "type": ["number", "null"] },
-        "url": { "type": ["string", "null"] },
-        "detail": { "type": ["string", "null"] },
-        "felt": { "type": ["number", "null"] },
-        "cdi": { "type": ["number", "null"] },
-        "mmi": { "type": ["number", "null"] },
-        "alert": { "type": ["string", "null"] },
-        "code": { "type": ["string", "null"] },
-        "ids": { "type": ["string", "null"] },
-        "sources": { "type": ["string", "null"] },
-        "types": { "type": ["string", "null"] },
-        "title": { "type": ["string", "null"] },
-        "type": { "type": ["string", "null"] },
-        "author": { "type": ["string", "null"], "description": "Cross-source: solution author/agency (present when a source provides it)." },
-        "magAuthor": { "type": ["string", "null"] },
-        "catalog": { "type": ["string", "null"] },
-        "contributor": { "type": ["string", "null"] },
-        "contributorId": { "type": ["string", "null"] },
-        "country": { "type": ["string", "null"] },
-        "province": { "type": ["string", "null"] },
-        "district": { "type": ["string", "null"] },
-        "neighborhood": { "type": ["string", "null"] },
-        "region": { "type": ["string", "null"] },
+        "mag": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "magType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "place": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "time": {
+          "type": "integer"
+        },
+        "updated": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "net": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tsunami": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sig": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "nst": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "dmin": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "rms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "gap": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "tz": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "felt": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cdi": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mmi": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "alert": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ids": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sources": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "types": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "author": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Cross-source: solution author/agency (present when a source provides it)."
+        },
+        "magAuthor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "catalog": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contributor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contributorId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "country": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "province": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "district": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "neighborhood": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "region": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "feed": {
           "type": "object",
-          "required": ["schema_version", "feed_id", "event_time", "ingest_time", "revision", "chosen_provider", "provenance"],
+          "required": [
+            "schema_version",
+            "feed_id",
+            "event_time",
+            "ingest_time",
+            "revision",
+            "chosen_provider"
+          ],
           "properties": {
-            "schema_version": { "type": "integer" },
-            "feed_id": { "type": "string" },
-            "event_time": { "type": "string", "format": "date-time" },
-            "ingest_time": { "type": "string", "format": "date-time" },
-            "first_ingest_time": { "type": "string", "format": "date-time" },
-            "first_seen_seq": { "type": "integer" },
-            "ingest_seq": { "type": "integer" },
-            "revision": { "type": "integer" },
-            "state": { "enum": ["live", "tombstoned", "superseded"] },
-            "tombstone": { "type": "boolean" },
-            "superseded_by": { "type": "string" },
-            "chosen_provider": { "type": "string" },
-            "aliases": { "type": "array", "items": { "type": "string" } },
+            "schema_version": {
+              "type": "integer"
+            },
+            "feed_id": {
+              "type": "string"
+            },
+            "event_time": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "ingest_time": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "first_ingest_time": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "first_seen_seq": {
+              "type": "integer"
+            },
+            "ingest_seq": {
+              "type": "integer"
+            },
+            "revision": {
+              "type": "integer"
+            },
+            "state": {
+              "enum": [
+                "live",
+                "tombstoned",
+                "superseded"
+              ]
+            },
+            "tombstone": {
+              "type": "boolean"
+            },
+            "superseded_by": {
+              "type": "string"
+            },
+            "chosen_provider": {
+              "type": "string"
+            },
+            "aliases": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
             "provenance": {
               "type": "array",
               "items": {
                 "type": "object",
-                "required": ["provider", "native_id"],
+                "required": [
+                  "provider",
+                  "native_id"
+                ],
                 "properties": {
-                  "fields": { "type": "object", "description": "This provider's COMPLETE original field vocabulary — every field it reported, verbatim." }
+                  "fields": {
+                    "type": "object",
+                    "description": "This provider's COMPLETE original field vocabulary — every field it reported, verbatim."
+                  }
                 }
               }
             }

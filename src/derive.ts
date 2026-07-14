@@ -35,9 +35,9 @@ const DOMAIN = 'https://earthquakes-feed.theshelter.app';
 const FUTURE_LEEWAY_MS = 10 * 60_000;
 
 const NOTICE =
-  'Aggregated by earthquakes-feed (https://earthquakes-feed.theshelter.app). Per-source attribution in each feature properties.feed.provenance[]. Sources include USGS/ANSS (public domain), EMSC/CSEM and FDSN networks (CC-BY-4.0).';
+  'Aggregated by earthquakes-feed (https://earthquakes-feed.theshelter.app). Per-source attribution and each provider\'s full solution are in properties.feed.provenance[] of the day files (/v1/events/) and NDJSON partitions; summaries are compact. Sources include USGS/ANSS (public domain), EMSC/CSEM and FDSN networks (CC-BY-4.0).';
 
-function collectionJson(name: string, feats: Feat[], nowMs: number, headIngestTime: string): string {
+function collectionJson(name: string, feats: Feat[], nowMs: number, headIngestTime: string, minMag?: number | null): string {
   const ageSeconds = headIngestTime ? Math.max(0, Math.round((nowMs - Date.parse(headIngestTime)) / 1000)) : null;
   return JSON.stringify({
     type: 'FeatureCollection',
@@ -50,6 +50,9 @@ function collectionJson(name: string, feats: Feat[], nowMs: number, headIngestTi
       count: feats.length,
       age_seconds: ageSeconds,
       schema_version: SCHEMA_VERSION,
+      // Effective magnitude floor of THIS file (may exceed the name's threshold — month
+      // files are floored at M≥2.5 to stay servable). Absent = no floor.
+      ...(minMag != null ? { min_mag: minMag } : {}),
       attribution: NOTICE,
     },
     features: feats.map((f) => f.feature),
@@ -63,15 +66,17 @@ function summaries(feats: Feat[], nowMs: number, publicV1: string, headIngestTim
   for (const [wKey, wMs] of Object.entries(SUMMARY_WINDOWS)) {
     for (const [tKey, tVal] of Object.entries(SUMMARY_THRESHOLDS)) {
       const name = `${tKey}_${wKey}`;
-      // Cap the sub-M1 monthly firehose (design §4.5) so files stay servable.
-      const minMag = tKey === 'all' && wKey === 'month' ? 1.0 : tVal;
+      // Month-window floor (design §4.5): at 38 sources a saturated 30-day M≥1.0 window is
+      // ~25 MB even compact — past the Pages 25 MiB hard limit. Floor month files at M≥2.5
+      // (mirrored in metadata.min_mag); denser slices live in the per-day files/partitions.
+      const minMag = wKey === 'month' && tKey !== 'significant' ? Math.max(tVal ?? 2.5, 2.5) : tVal;
       const picked = feats.filter(
         (f) =>
           nowMs - f.timeMs <= wMs &&
           (tKey === 'significant' ? isSignificant(f) : minMag == null || (f.mag != null && f.mag >= minMag)),
       );
       picked.sort((a, b) => b.timeMs - a.timeMs);
-      writeIfChanged(join(publicV1, `${name}.geojson`), collectionJson(name, picked, nowMs, headIngestTime));
+      writeIfChanged(join(publicV1, `${name}.geojson`), collectionJson(name, picked, nowMs, headIngestTime, tKey === 'significant' ? null : minMag));
       out[name] = { path: `v1/${name}.geojson`, url: `${DOMAIN}/v1/${name}.geojson`, count: picked.length };
     }
   }
@@ -99,11 +104,12 @@ function main(): void {
   const publicV1 = join(PUBLIC_DIR, 'v1');
   const allNodes = [...state.eventMap.values()];
 
-  // Summaries: live events only, no future timestamps.
+  // Summaries: live events only, no future timestamps. Compact features (no provenance[])
+  // — the full superset stays in the day files/partitions written below.
   const liveFeats: Feat[] = allNodes
     .filter((n: EventNode) => n.state === 'live' && n.eventTimeMs <= nowMs + FUTURE_LEEWAY_MS)
     .map((n) => {
-      const feature = nodeToFeature(n) as { properties: { mag: number | null; sig: number | null } };
+      const feature = nodeToFeature(n, { compact: true }) as { properties: { mag: number | null; sig: number | null } };
       return { feature, timeMs: n.eventTimeMs, mag: feature.properties.mag, sig: feature.properties.sig };
     });
   const summ = summaries(liveFeats, nowMs, publicV1, state.head.ingest_time);

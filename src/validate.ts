@@ -80,13 +80,24 @@ for (const file of walk(publicV1, (f) => f.endsWith('.geojson'))) {
 }
 
 // 3. Committed day partitions: plain NDJSON, size gate, first lines parse as Features.
+//    Full-fat invariant on EVERY line: partitions are the archival surface, so each
+//    feature must carry a non-empty feed.provenance[] (the schema allows its absence only
+//    because summaries are compact). Sole exception: a tombstoned event may have an empty
+//    provenance — op:tombstone withdraws the deleting provider's row by design, and the
+//    original observations stay in the append-only log.
 for (const file of walk(p.eventsDir, (f) => f.endsWith('.ndjson'))) {
   const bytes = statSync(file).size;
   if (bytes > MAX_PUBLISHED_BYTES) fail(`${file}: ${bytes} bytes exceeds ${MAX_PUBLISHED_BYTES}`);
   const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean);
-  for (const line of lines.slice(0, 3)) {
-    if (!vFeat(JSON.parse(line))) {
+  for (const [i, line] of lines.entries()) {
+    const feat = JSON.parse(line) as { properties?: { feed?: { state?: string; provenance?: unknown[] } } };
+    if (i < 3 && !vFeat(feat)) {
       fail(`${file}: partition line ${ajv.errorsText(vFeat.errors)}`);
+      break;
+    }
+    const feed = feat.properties?.feed;
+    if (!Array.isArray(feed?.provenance) || (feed.provenance.length === 0 && feed.state !== 'tombstoned')) {
+      fail(`${file}:${i + 1} partition feature lost feed.provenance[] (state=${feed?.state}) — partitions must stay full-fat`);
       break;
     }
   }

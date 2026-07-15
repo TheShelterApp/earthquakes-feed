@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "generated": 1784119062101,
-  "generated_iso": "2026-07-15T12:37:42.101Z",
-  "head_seq": 22268,
-  "event_count": 14753,
+  "generated": 1784119448152,
+  "generated_iso": "2026-07-15T12:44:08.152Z",
+  "head_seq": 22275,
+  "event_count": 14759,
   "freshness": {
     "expected_interval_seconds": 300,
     "stale_after_seconds": 1800
@@ -15,7 +15,7 @@
     "all_hour": {
       "path": "v1/all_hour.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/all_hour.geojson",
-      "count": 21
+      "count": 22
     },
     "1.0_hour": {
       "path": "v1/1.0_hour.geojson",
@@ -40,17 +40,17 @@
     "all_day": {
       "path": "v1/all_day.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/all_day.geojson",
-      "count": 1071
+      "count": 1075
     },
     "1.0_day": {
       "path": "v1/1.0_day.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/1.0_day.geojson",
-      "count": 826
+      "count": 829
     },
     "2.5_day": {
       "path": "v1/2.5_day.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/2.5_day.geojson",
-      "count": 332
+      "count": 333
     },
     "4.5_day": {
       "path": "v1/4.5_day.geojson",
@@ -65,7 +65,7 @@
     "all_week": {
       "path": "v1/all_week.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/all_week.geojson",
-      "count": 8092
+      "count": 8094
     },
     "1.0_week": {
       "path": "v1/1.0_week.geojson",
@@ -90,17 +90,17 @@
     "all_month": {
       "path": "v1/all_month.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/all_month.geojson",
-      "count": 4609
+      "count": 4610
     },
     "1.0_month": {
       "path": "v1/1.0_month.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/1.0_month.geojson",
-      "count": 4609
+      "count": 4610
     },
     "2.5_month": {
       "path": "v1/2.5_month.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/2.5_month.geojson",
-      "count": 4609
+      "count": 4610
     },
     "4.5_month": {
       "path": "v1/4.5_month.geojson",
@@ -114,6 +114,26 @@
     }
   },
   "partitions": [
+    {
+      "date": "2025-04-30",
+      "path": "events/2025/04/30.ndjson",
+      "url": "https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2025/04/30.ndjson",
+      "count": 1212,
+      "bytes": 2169134,
+      "min_mag": -0.78,
+      "max_mag": 5.4,
+      "frozen": true
+    },
+    {
+      "date": "2025-05-01",
+      "path": "events/2025/05/01.ndjson",
+      "url": "https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2025/05/01.ndjson",
+      "count": 1158,
+      "bytes": 2044369,
+      "min_mag": -1.38,
+      "max_mag": 5.8,
+      "frozen": true
+    },
     {
       "date": "2025-05-02",
       "path": "events/2025/05/02.ndjson",
@@ -1746,8 +1766,8 @@
       "path": "events/2026/07/15.ndjson",
       "url": "https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2026/07/15.ndjson",
       "pages_url": "https://earthquakes-feed.theshelter.app/v1/events/2026-07-15.geojson",
-      "count": 515,
-      "bytes": 992231,
+      "count": 521,
+      "bytes": 1001028,
       "min_mag": -0.693126,
       "max_mag": 5.7,
       "frozen": false
@@ -2681,7 +2701,7 @@
         "2025-04-29",
         "2025-04-30"
       ],
-      "needs_reroll": false
+      "needs_reroll": true
     },
     {
       "period": "2025-05",

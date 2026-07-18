@@ -61,12 +61,14 @@ function ghRetry(args: string[], attempts = 5): string {
     } catch (e) {
       lastErr = e;
       const msg = String((e as { stderr?: string }).stderr ?? (e as Error)?.message ?? '');
-      // Transient = GitHub eventual consistency / rate / network. `Not Found` (case-
-      // insensitive) already covers "release/asset not found"; the crucial addition is the
-      // gh-specific "no assets to download" — an `upload --clobber`'s freshly-uploaded asset
-      // isn't listed yet when the verify-download runs microseconds later.
+      // Transient = GitHub eventual consistency / rate / plain network flakiness. `Not Found`
+      // (case-insensitive) covers "release/asset not found"; "no assets to download" covers an
+      // `upload --clobber`'s freshly-uploaded asset not yet listed at verify time; and the
+      // TCP-level errors (connection reset/refused, broken pipe, dial/read tcp, i/o timeout)
+      // cover the release-assets CDN dropping a download mid-flight (2024-09 verify: "read tcp
+      // …: connection reset by peer") — all worth retrying, none classified transient before.
       const transient =
-        /HTTP (404|429|5\d\d)|rate limit|abuse|timed? ?out|EOF|ECONN|ETIMEDOUT|TLS|handshake|Not Found|no assets? to download|could not find|temporar/i.test(
+        /HTTP (404|429|5\d\d)|rate limit|abuse|timed? ?out|i\/o timeout|EOF|ECONN|ETIMEDOUT|TLS|handshake|Not Found|no assets? to download|could not find|temporar|connection reset|reset by peer|connection refused|broken pipe|(dial|read) tcp|network is unreachable|no such host/i.test(
           msg,
         );
       if (!transient || i === attempts - 1) break;

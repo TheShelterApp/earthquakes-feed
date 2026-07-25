@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "generated": 1784968846397,
-  "generated_iso": "2026-07-25T08:40:46.397Z",
-  "head_seq": 43610,
-  "event_count": 27216,
+  "generated": 1784969093970,
+  "generated_iso": "2026-07-25T08:44:53.970Z",
+  "head_seq": 43611,
+  "event_count": 27217,
   "freshness": {
     "expected_interval_seconds": 300,
     "stale_after_seconds": 1800
@@ -15,17 +15,17 @@
     "all_hour": {
       "path": "v1/all_hour.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/all_hour.geojson",
-      "count": 23
+      "count": 21
     },
     "1.0_hour": {
       "path": "v1/1.0_hour.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/1.0_hour.geojson",
-      "count": 16
+      "count": 14
     },
     "2.5_hour": {
       "path": "v1/2.5_hour.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/2.5_hour.geojson",
-      "count": 7
+      "count": 6
     },
     "4.5_hour": {
       "path": "v1/4.5_hour.geojson",
@@ -40,17 +40,17 @@
     "all_day": {
       "path": "v1/all_day.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/all_day.geojson",
-      "count": 1193
+      "count": 1189
     },
     "1.0_day": {
       "path": "v1/1.0_day.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/1.0_day.geojson",
-      "count": 979
+      "count": 976
     },
     "2.5_day": {
       "path": "v1/2.5_day.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/2.5_day.geojson",
-      "count": 384
+      "count": 383
     },
     "4.5_day": {
       "path": "v1/4.5_day.geojson",
@@ -65,12 +65,12 @@
     "all_week": {
       "path": "v1/all_week.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/all_week.geojson",
-      "count": 8482
+      "count": 8481
     },
     "1.0_week": {
       "path": "v1/1.0_week.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/1.0_week.geojson",
-      "count": 6517
+      "count": 6516
     },
     "2.5_week": {
       "path": "v1/2.5_week.geojson",
@@ -90,17 +90,17 @@
     "all_month": {
       "path": "v1/all_month.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/all_month.geojson",
-      "count": 8538
+      "count": 8539
     },
     "1.0_month": {
       "path": "v1/1.0_month.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/1.0_month.geojson",
-      "count": 8538
+      "count": 8539
     },
     "2.5_month": {
       "path": "v1/2.5_month.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/2.5_month.geojson",
-      "count": 8538
+      "count": 8539
     },
     "4.5_month": {
       "path": "v1/4.5_month.geojson",
@@ -114,6 +114,36 @@
     }
   },
   "partitions": [
+    {
+      "date": "2023-07-18",
+      "path": "events/2023/07/18.ndjson",
+      "url": "https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2023/07/18.ndjson",
+      "count": 1004,
+      "bytes": 1826371,
+      "min_mag": -0.9812360971,
+      "max_mag": 5.6,
+      "frozen": true
+    },
+    {
+      "date": "2023-07-19",
+      "path": "events/2023/07/19.ndjson",
+      "url": "https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2023/07/19.ndjson",
+      "count": 1275,
+      "bytes": 2322215,
+      "min_mag": -1.06984428,
+      "max_mag": 6.5,
+      "frozen": true
+    },
+    {
+      "date": "2023-07-20",
+      "path": "events/2023/07/20.ndjson",
+      "url": "https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2023/07/20.ndjson",
+      "count": 1099,
+      "bytes": 1996118,
+      "min_mag": -0.84,
+      "max_mag": 5.2,
+      "frozen": true
+    },
     {
       "date": "2026-03-01",
       "path": "events/2026/03/01.ndjson",
@@ -1606,8 +1636,8 @@
       "path": "events/2026/07/25.ndjson",
       "url": "https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2026/07/25.ndjson",
       "pages_url": "https://earthquakes-feed.theshelter.app/v1/events/2026-07-25.geojson",
-      "count": 348,
-      "bytes": 624741,
+      "count": 349,
+      "bytes": 626398,
       "min_mag": -0.917363,
       "max_mag": 5.1,
       "frozen": false
@@ -1650,7 +1680,7 @@
         "2023-07-30",
         "2023-07-31"
       ],
-      "needs_reroll": false
+      "needs_reroll": true
     },
     {
       "period": "2023-08",

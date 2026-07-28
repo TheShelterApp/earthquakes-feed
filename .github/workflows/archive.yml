@@ -50,6 +50,20 @@ jobs:
           for i in 1 2 3; do
             git push origin HEAD:data && exit 0
             git fetch origin data
-            git rebase origin/data || { git rebase --abort; echo '::error::rebase conflict'; exit 1; }
+            # `|| true`: with no rebase started --abort exits 128 and bash -e would kill the step
+            # before the annotation is emitted, losing the reason the push died.
+            git rebase origin/data || { git rebase --abort || true; echo '::error::rebase conflict'; exit 1; }
           done
           echo '::error::push failed after 3 attempts'; exit 1
+      # LAST, and `always()`: a blocked month must not stop the commit above from landing. The
+      # script deliberately exits 0 and leaves a marker instead, so the durable state (index
+      # entries for uploaded assets, pruned tree) is safe on the data branch before the job goes
+      # red. Failing earlier would skip the commit and make every later run repeat the same work.
+      - name: Fail if any month was blocked
+        if: always()
+        run: |
+          if [ -f archive-blocked.txt ]; then
+            cat archive-blocked.txt
+            echo '::error::archive: one or more months blocked (see above) — check whether the commit step above ran, it is skipped if the script itself threw'
+            exit 1
+          fi

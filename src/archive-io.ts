@@ -4,9 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { REPO } from './config.js';
 import { featureToNode } from './bitemporal.js';
+import { ghRetry } from './gh.js';
 import type { EventNode } from './types.js';
-
-const gh = (args: string[]): string => execFileSync('gh', args, { encoding: 'utf8' });
 
 /** Extract an archive asset (.tar.zst or .tar.gz) into a directory. */
 function extractTarball(file: string, intoDir: string): void {
@@ -29,12 +28,17 @@ export interface ArchiveRef {
 /**
  * Fetch cold months back from GitHub Releases and reconstruct EventNodes for the requested
  * archived day keys. Lets backfill dedup a NEW source against — and merge it into — history
- * that has already been rolled out of the tree. Best-effort: a month whose download/extract
- * fails yields no nodes (that day is left untouched, logged upstream). Requires gh + zstd.
+ * that has already been rolled out of the tree. Requires gh + zstd.
+ *
+ * A month whose download/extract fails yields no nodes AND is reported in `failedMonths`: its
+ * history is simply unknown to this process. The caller MUST treat every day of such a month as
+ * untouchable — writing one from the rows it happens to hold replaces the month's full history
+ * with a fragment (2026-07: −34.5k events across four months, all runs green).
  */
-export function readArchivedDays(entries: ArchiveRef[], dayKeys: Set<string>): Map<string, EventNode[]> {
+export function readArchivedDays(entries: ArchiveRef[], dayKeys: Set<string>): { days: Map<string, EventNode[]>; failedMonths: Set<string> } {
   const out = new Map<string, EventNode[]>();
-  if (!dayKeys.size) return out;
+  const failedMonths = new Set<string>();
+  if (!dayKeys.size) return { days: out, failedMonths };
   const byMonth = new Map<string, ArchiveRef>();
   for (const e of entries) byMonth.set(e.period, e);
   const monthsNeeded = new Set([...dayKeys].map((d) => d.slice(0, 7)));
@@ -46,11 +50,12 @@ export function readArchivedDays(entries: ArchiveRef[], dayKeys: Set<string>): M
       const dir = join(staging, month);
       const asset = join(staging, e.asset);
       try {
-        gh(['release', 'download', e.tag, '-R', REPO, '-p', e.asset, '-O', asset, '--clobber']);
+        ghRetry(['release', 'download', e.tag, '-R', REPO, '-p', e.asset, '-O', asset, '--clobber']);
         mkdirSync(dir, { recursive: true });
         extractTarball(asset, dir);
       } catch (err) {
-        console.error(`backfill: could not fetch archive ${e.tag}/${e.asset}: ${String(err).slice(0, 140)}`);
+        failedMonths.add(month);
+        console.error(`::error::backfill: could not fetch archive ${e.tag}/${e.asset}: ${String(err).replace(/\s+/g, ' ')}`);
         continue;
       }
       for (const f of readdirSync(dir)) {
@@ -67,5 +72,5 @@ export function readArchivedDays(entries: ArchiveRef[], dayKeys: Set<string>): M
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
-  return out;
+  return { days: out, failedMonths };
 }

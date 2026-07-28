@@ -122,10 +122,16 @@ async function main(): Promise<void> {
   const minStart = Math.min(...jobs.map((j) => j.startMs));
   const maxEnd = Math.max(...jobs.map((j) => j.endMs));
   const transient = new Map<string, EventNode>();
+  // Which days still have an in-tree partition (readDayPartitionNodes returns [] when the file
+  // is absent). Such a day is fully in `transient`, so it stays writable even if its month's
+  // archive is unreadable — see the write-back skip below.
+  const inTreeDays = new Set<string>();
   for (let ms = dayStartMs(eventDayKey(minStart)); ms <= maxEnd; ms += DAY) {
     const day = eventDayKey(ms);
     if (day >= liveDay) continue; // never touch live-owned days
-    for (const node of readDayPartitionNodes(root, day)) transient.set(node.feedId, node);
+    const nodes = readDayPartitionNodes(root, day);
+    if (nodes.length) inTreeDays.add(day);
+    for (const node of nodes) transient.set(node.feedId, node);
   }
   // Pull the archived days this run's fetch actually lands on (from their Release tarballs)
   // into the transient BEFORE the Resolver is built, so their existing events are in its
@@ -138,11 +144,31 @@ async function main(): Promise<void> {
       if (day < liveDay && archivedDays.has(day)) archivedTouched.add(day);
     }
   }
+  // Months we could not read back: their archived, no-longer-in-tree days stay untouchable below —
+  // `transient` holds only this run's fresh rows for those, so writing one truncates the day
+  // (2026-07: −34.5k events).
+  const failedMonths = new Set<string>();
   if (archivedTouched.size) {
     const arch = readArchivedDays(archives.list, archivedTouched);
-    for (const nodes of arch.values()) for (const n of nodes) transient.set(n.feedId, n);
-    console.log(`backfill: pulled ${arch.size}/${archivedTouched.size} archived day(s) for merge`);
+    for (const nodes of arch.days.values()) for (const n of nodes) transient.set(n.feedId, n);
+    for (const m of arch.failedMonths) failedMonths.add(m);
+    console.log(`backfill: pulled ${arch.days.size}/${archivedTouched.size} archived day(s) for merge`);
   }
+  // Days whose only copy sits inside an archive we could not read: month failed, day is archived,
+  // nothing in-tree to rebuild from. Only these are left unwritten below — every other day of a
+  // failed month is complete in `transient` and safe to write.
+  const untouchableDays = new Set(
+    [...archivedTouched].filter((d) => failedMonths.has(d.slice(0, 7)) && !inTreeDays.has(d)),
+  );
+  // Does a fetch window actually CONTAIN one? Freezing a cursor on mere month-overlap stalls a
+  // provider whose every day was written safely — zero progress, red every hour, nothing lost.
+  const windowHasUntouchable = (startMs: number, endMs: number): boolean => {
+    if (!untouchableDays.size) return false;
+    for (let ms = dayStartMs(eventDayKey(startMs)); ms <= endMs; ms += DAY) {
+      if (untouchableDays.has(eventDayKey(ms))) return true;
+    }
+    return false;
+  };
   const resolver = new Resolver(transient, priorityMap(all), configMap(all), nowMs, { hotFloorMs: 0 });
 
   // 4) Ingest (deterministic order). Overflowed windows are dropped + retried narrower.
@@ -182,11 +208,17 @@ async function main(): Promise<void> {
     if (cur) {
       cur.failures = 0;
       cur.lastCount = res.obs.length;
-      // Advance + adapt the window: reset after a saturated day, else grow when sparse.
-      cur.filledBackTo = eventDayKey(j.startMs);
-      if (saturated) cur.windowDays = j.cfg.initialWindowDays;
-      else if (res.obs.length < 0.3 * 5000) cur.windowDays = Math.min(j.cfg.maxWindowDays, Math.ceil(cur.windowDays * 1.5));
-      if (dayStartMs(cur.filledBackTo) <= Math.max(targetMs, j.cfg.earliestMs)) cur.done = true;
+      // Window contains a day we must leave unwritten below: advancing would walk the cursor past
+      // it and it would never be revisited — a silent skip of history, the same failure mode as
+      // the 2026-07 truncation. Freeze this provider (window size included) so the identical
+      // window is retried once Releases are reachable; every other provider keeps advancing.
+      if (!windowHasUntouchable(j.startMs, j.endMs)) {
+        // Advance + adapt the window: reset after a saturated day, else grow when sparse.
+        cur.filledBackTo = eventDayKey(j.startMs);
+        if (saturated) cur.windowDays = j.cfg.initialWindowDays;
+        else if (res.obs.length < 0.3 * 5000) cur.windowDays = Math.min(j.cfg.maxWindowDays, Math.ceil(cur.windowDays * 1.5));
+        if (dayStartMs(cur.filledBackTo) <= Math.max(targetMs, j.cfg.earliestMs)) cur.done = true;
+      }
     }
   }
 
@@ -226,7 +258,18 @@ async function main(): Promise<void> {
   let rewritten = 0;
   let rematerialized = 0;
   const writtenDays = new Set<string>();
+  let skippedDays = 0;
   for (const [day, nodes] of byDay) {
+    // Untouchable ONLY when the day's history lives SOLELY in the unreadable tarball: month
+    // failed AND the day is archived AND nothing in-tree to rebuild from. Then skip it entirely —
+    // no partition, no inventory, and (via writtenDays) no needs_reroll — so archive.ts can't
+    // promote a fragment to authoritative. A day the archive never covered (2024-05 went cold
+    // holding only days 20-31) or one already re-materialized in-tree is complete in `transient`,
+    // so writing it is loss-free; skipping it would discard rows that can't be truncated.
+    if (untouchableDays.has(day)) {
+      skippedDays++;
+      continue;
+    }
     // An archived day is in `transient` only because we pulled it to merge a new source —
     // re-materialize it to the tree ONLY if it actually changed (else a needless re-roll).
     const isArchived = archivedDays.has(day);
@@ -258,6 +301,19 @@ async function main(): Promise<void> {
     `backfill: jobs=${jobs.length} fetched=${raws.length} changed=${changedCount} days_written=${rewritten} ` +
       `rematerialized=${rematerialized} overflow=${overflowCount} saturated=${saturatedCount} providers_remaining=${remaining}`,
   );
+  // The rest of the run is honest work and stays written (cursor included), but the run must go
+  // RED: a silently-green skip is exactly how the 2026-07 truncation went unnoticed for months.
+  if (failedMonths.size) {
+    const msg =
+      `backfill: archive unreadable for ${[...failedMonths].sort().join(', ')} — left ${skippedDays} archived day(s) whose history exists only in those tarballs untouched ` +
+      `rather than rewrite them from fresh rows alone, and held back the cursor of every provider whose window overlapped them; re-run once Releases are reachable`;
+    console.error(`::error::${msg}`);
+    // Marker + exit 0, NOT process.exitCode = 1: a non-zero tool step makes Actions skip every
+    // later step lacking `if:`, so the commit never lands and each run redoes and re-discards the
+    // same work. The workflow's final always()-step reads this and goes red AFTER the push.
+    // Workspace root, never .data — a marker under .data would be committed to the data branch.
+    writeFileSync('backfill-blocked.txt', msg + '\n');
+  }
 }
 
 main().catch((err) => {

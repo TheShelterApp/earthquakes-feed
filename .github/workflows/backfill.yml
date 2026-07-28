@@ -71,6 +71,19 @@ jobs:
           for i in 1 2 3; do
             git push origin HEAD:data && exit 0
             git fetch origin data
-            git rebase origin/data || { git rebase --abort; echo '::error::rebase conflict'; exit 1; }
+            # `|| true`: with no rebase started --abort exits 128 and bash -e would kill the step
+            # before the annotation is emitted, losing the reason the push died.
+            git rebase origin/data || { git rebase --abort || true; echo '::error::rebase conflict'; exit 1; }
           done
           echo '::error::push failed after 3 attempts'; exit 1
+      # Red signal AFTER the durable work: backfill exits 0 and drops a marker instead of failing
+      # its own step, because a failed step skips every later step without `if:` — the commit
+      # would never land and each run would repeat and re-discard identical work.
+      - name: Fail if any archived month was unreadable
+        if: always()
+        run: |
+          if [ -f backfill-blocked.txt ]; then
+            cat backfill-blocked.txt
+            echo '::error::backfill: an archived month was unreadable (see above); this run'"'"'s other work was still committed'
+            exit 1
+          fi

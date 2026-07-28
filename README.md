@@ -37,11 +37,15 @@ curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2
 
 `/v1/{threshold}_{window}.geojson`, `threshold ∈ {all, 1.0, 2.5, 4.5, significant}`,
 `window ∈ {hour, day, week, month}` — e.g. `4.5_week.geojson`, `all_hour.geojson`.
-Month files are floored at M≥2.5 to stay servable (`metadata.min_mag` states the
-effective floor); `significant` is `sig≥600` or `mag≥6`. Summaries carry **compact**
-Features — full top-level properties + `feed` core (`aliases`, `chosen_provider`, …) but
-no `feed.provenance[]`; the full per-provider detail lives in the day files and
-partitions below.
+The threshold in the name is a *minimum*, not a promise: a file that would blow the size
+budget is republished one magnitude rung higher (up to M≥5.0) — month files start at
+M≥2.5, but a dense week escalates too. Read `metadata.min_mag` for the effective floor
+instead of inferring it from the name. If even that doesn't fit, the **oldest** features
+are dropped and `metadata.truncated: true` says so — the file then covers a shorter span
+than its window name implies. `significant` is `sig≥600` or `mag≥6` (a predicate, so no
+floor applies to it). Summaries carry **compact** Features — full top-level properties +
+`feed` core (`aliases`, `chosen_provider`, …) but no `feed.provenance[]`; the full
+per-provider detail lives in the day files and partitions below.
 
 ### Historical day slices
 

@@ -69,7 +69,13 @@ try {
 const nowMs = Date.now();
 for (const file of walk(publicV1, (f) => f.endsWith('.geojson'))) {
   const bytes = statSync(file).size;
+  // The hard gate stays the invariant — derive's own budget guard is a producer-side courtesy,
+  // this is the backstop. Warn at 75% too: on 2026-07-14 the month files crossed the cap with
+  // no prior signal and 51 consecutive derive runs failed for ~4h before anyone noticed.
   if (bytes > MAX_PUBLISHED_BYTES) fail(`${file}: ${bytes} bytes exceeds ${MAX_PUBLISHED_BYTES}`);
+  else if (bytes > MAX_PUBLISHED_BYTES * 0.75) {
+    console.warn(`::warning::${file}: ${bytes} bytes — ${((bytes / MAX_PUBLISHED_BYTES) * 100).toFixed(1)}% of the ${MAX_PUBLISHED_BYTES}-byte budget`);
+  }
   const fc = JSON.parse(readFileSync(file, 'utf8')) as { metadata?: { generated?: unknown }; features?: { properties?: { time?: number; feed?: { provenance?: unknown[] } } }[] };
   if (typeof fc.metadata?.generated !== 'number') fail(`${file}: metadata.generated must be ms-epoch int`);
   const isDayFile = file.includes(join(publicV1, 'events'));

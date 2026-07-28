@@ -39,12 +39,18 @@ The catalog. Fields:
 
 `threshold ∈ {all, 1.0, 2.5, 4.5, significant}`, `window ∈ {hour, day, week, month}`
 (20 files, USGS-style). A `FeatureCollection` with `metadata` (`generated` ms,
-`age_seconds`, `count`, `attribution`, `min_mag` when a floor applies). Month files are
-floored at M≥2.5 to stay servable; `significant` is `sig≥600 || mag≥6`. Summary Features
-are **compact**: full top-level properties + `feed` core (`feed_id`, clocks, `state`,
-`aliases`, `chosen_provider`) but no `feed.provenance[]` — fetch the day files
-(`/v1/events/…`) or NDJSON partitions for each provider's full solution and original
-vocabulary.
+`age_seconds`, `count`, `attribution`, `min_mag` when a floor applies, `truncated` when
+features were dropped). The threshold in the name is a **minimum**: any summary may be
+published with a higher floor when it would otherwise exceed the size budget — month
+files start at M≥2.5, and a dense week or day escalates one magnitude rung at a time (up
+to M≥5.0). **`metadata.min_mag` is the effective floor — read it, don't infer it from the
+name.** If a file still doesn't fit, its **oldest** features are dropped and
+`metadata.truncated: true` is set: the file covers a shorter span than its window name.
+`significant` is `sig≥600 || mag≥6` — a predicate, not a floor, so it carries no
+`min_mag` (it can still be truncated). Summary Features are **compact**: full top-level
+properties + `feed` core (`feed_id`, clocks, `state`, `aliases`, `chosen_provider`) but no
+`feed.provenance[]` — fetch the day files (`/v1/events/…`) or NDJSON partitions for each
+provider's full solution and original vocabulary.
 
 ```bash
 curl -s https://earthquakes-feed.theshelter.app/v1/all_day.geojson

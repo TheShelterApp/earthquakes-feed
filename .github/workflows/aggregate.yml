@@ -3,9 +3,17 @@ name: aggregate
 # Phase 1: fetch every source, dedup, append to the observation log, commit to `data`.
 # Public repo => Actions is free & unlimited. Cron is offset off :00; GitHub delivers
 # scheduled runs best-effort (often sparser than 5 min) — freshness contract is 30 min.
+#
+# FALLBACK ONLY, every 15 min. The external Cloudflare-Worker heartbeat already dispatches
+# this workflow every 5 min, so a 5-min cron on top of it put ~2 arrivals per 5 min into the
+# serialized `earthquakes-feed-writer` group while each run takes 1-3 min. Any slowdown then
+# cascades: with `cancel-in-progress: false` each new arrival supersedes the pending one, so
+# nothing completes at all (2026-07-27 23:50-00:13 — every cycle cancelled, manifest 26 min
+# stale; same shape as the 48 cancelled aggregates on 2026-07-09). This cron now only covers
+# the heartbeat being down, which the 30-min contract tolerates.
 on:
   schedule:
-    - cron: '4,9,14,19,24,29,34,39,44,49,54,59 * * * *'
+    - cron: '9,24,39,54 * * * *'
   workflow_dispatch:
 
 concurrency:

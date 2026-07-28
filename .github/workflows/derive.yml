@@ -25,7 +25,9 @@ jobs:
     # Never derive on top of a failed/cancelled aggregate (M6).
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    # 12, not 6: three Pages deploy attempts + backoff cannot fit in 6 min (a failing
+    # deploy alone runs ~3 min before erroring out).
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v5
         with:
@@ -63,16 +65,29 @@ jobs:
         run: |
           git config user.name  "earthquakes-feed-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add events manifest.json
+          # -A, not `events manifest.json`: derive also rewrites knowledge/index/partitions.json
+          # (saveInventory) and deletes pruned knowledge/index/event_map shards, both tracked.
+          # Staging only events+manifest froze the inventory 30 partitions behind the manifest,
+          # never landed a single shard prune, and left the tree dirty on every run — which then
+          # turned any push retry into `cannot rebase: You have unstaged changes` (run 30301900011).
+          git add -A
           git commit -m "derive: views @ $(date -u +%FT%TZ)" || echo 'no data-branch changes'
           # Fail-loud push loop (H3) — but only if we actually committed.
           if ! git diff --quiet origin/data..HEAD 2>/dev/null; then
             for i in 1 2 3; do
-              git push origin HEAD:data && break
+              git push origin HEAD:data && exit 0
+              sleep $((i * 5))
               git fetch origin data
-              git rebase origin/data || { git rebase --abort; echo '::error::rebase conflict pushing to data'; exit 1; }
-              [ "$i" = "3" ] && { echo '::error::push to data failed after 3 attempts'; exit 1; }
+              if ! git rebase origin/data; then
+                # `|| true`: with no rebase started --abort exits 128 and bash -e would kill the
+                # step before the annotation below is ever emitted.
+                git rebase --abort || true
+                echo '::error::rebase conflict pushing to data'
+                exit 1
+              fi
             done
+            echo '::error::push to data failed after 3 attempts'
+            exit 1
           fi
       - name: Pin manifest to the data commit (@sha immutable URLs)
         run: |
@@ -82,4 +97,15 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-        run: npx --no-install wrangler pages deploy public --project-name=earthquakes-feed --branch=main --commit-dirty=true
+        run: |
+          # Three deploys failed in 15 days, all control-plane-side and all after the upload
+          # succeeded (2026-07-12 'malformed response from the API'; runs 29588370032 /
+          # 30256024198 'Failed to publish your Function ... Unknown internal error'). Retrying
+          # is idempotent — assets are content-addressed and Direct Upload never touches the
+          # 500-builds/month Pages cap. Still exits red on a sustained outage so health.yml fires.
+          for i in 1 2 3; do
+            npx --no-install wrangler pages deploy public --project-name=earthquakes-feed --branch=main --commit-dirty=true && exit 0
+            [ "$i" = "3" ] || sleep 20
+          done
+          echo '::error::Cloudflare Pages deploy failed after 3 attempts'
+          exit 1

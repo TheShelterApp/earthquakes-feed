@@ -11,38 +11,77 @@ on:
 permissions:
   contents: read
   issues: write
+  # reads this run's own created_at, to measure how long it sat in the runner queue
+  actions: read
 
 jobs:
   health:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # 10, not 5: the queue-stall branch below can spend ~260s on retries plus its deliberate
+    # 60s re-read, and a step killed mid-flight never writes GITHUB_OUTPUT — which would skip
+    # both issue steps, leaving an open health issue neither refreshed nor closed.
+    timeout-minutes: 10
     steps:
       - name: Check live feed freshness + providers
         id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
           # Fetch to files, not shell vars: the manifest is >128 KB and passing it as an
           # argv element trips MAX_ARG_STRLEN → `exec: Argument list too long` (E2BIG).
-          curl -sf --max-time 20 "https://earthquakes-feed.theshelter.app/v1/manifest.json" -o manifest.json \
+          # Retried like the others: this is the ONE fetch whose failure alone raises the alarm, so
+          # a single edge 502 or TCP reset would open "[health] feed unhealthy" on a healthy feed.
+          curl -sf --retry-all-errors --retry 3 --retry-delay 3 --max-time 20 "https://earthquakes-feed.theshelter.app/v1/manifest.json" -o manifest.json \
             || { echo "problem=manifest unreachable" >> "$GITHUB_OUTPUT"; exit 0; }
-          curl -sf --max-time 20 "https://earthquakes-feed.theshelter.app/v1/status.json" -o status.json || true
-          node -e '
+          # --retry-all-errors + atomic swap: plain --retry covers only timeouts and 408/429/5xx,
+          # so a connection reset made exactly ONE attempt — and -o had already truncated the file,
+          # so JSON.parse threw, s stayed null, and the watchdog opened "[health] feed unhealthy"
+          # on a perfectly healthy feed. Stage to .new; the real file changes only on curl exit 0.
+          curl -sf --retry-all-errors --retry 3 --retry-delay 3 --max-time 20 "https://earthquakes-feed.theshelter.app/v1/status.json" -o status.json.new \
+            && mv status.json.new status.json || rm -f status.json.new
+          # timeout-minutes bounds execution, not queue wait: on 2026-07-25 the hosted-runner
+          # queue stalled 1h54m, derive starved, and the second watchdog run double-reported the
+          # same incident off a manifest published before the backlog drained. Re-read once after
+          # a long queue so publishing has a chance to catch up before we judge staleness.
+          # Every step degrades to queued=0 rather than dying: a watchdog that kills itself on a
+          # bad timestamp takes its own alarm down with it, which is the failure class we're fixing.
+          CREATED=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" --jq .created_at || true)
+          CREATED_S=$(date -u -d "$CREATED" +%s 2>/dev/null || echo 0)
+          QUEUED=0
+          if [ "$CREATED_S" -gt 0 ]; then QUEUED=$(( $(date -u +%s) - CREATED_S )); fi
+          if [ "$QUEUED" -gt 600 ]; then
+            sleep 60
+            # Same atomic swap, and it matters more here: a mid-transfer abort used to truncate the
+            # already-good manifest, the node script then died on JSON.parse under `bash -e` before
+            # writing GITHUB_OUTPUT, and both issue steps were skipped — an open health issue would
+            # never be refreshed or closed. A failed re-fetch now just keeps the first fetch's copy.
+            curl -sf --retry-all-errors --retry 3 --retry-delay 3 --max-time 20 "https://earthquakes-feed.theshelter.app/v1/manifest.json" -o manifest.json.new \
+              && mv manifest.json.new manifest.json || rm -f manifest.json.new
+          fi
+          QUEUED_S="$QUEUED" node -e '
             const fs = require("fs");
             const m = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
-            let s = {};
+            // null, not {}: an unfetchable status.json used to yield total=1 / degraded=[], so the
+            // provider check passed trivially — a missed alarm, not a false one.
+            let s = null;
             try { const raw = fs.readFileSync("status.json", "utf8"); if (raw.trim()) s = JSON.parse(raw); } catch {}
+            const queuedS = Number(process.env.QUEUED_S || 0);
             const ageS = (Date.now() - m.generated) / 1000;
             const staleAfter = (m.freshness && m.freshness.stale_after_seconds) || 1800;
-            const degraded = s.degraded || [];
-            const total = Object.keys(s.providers || {}).length || 1;
+            const degraded = (s && s.degraded) || [];
+            const total = Object.keys((s && s.providers) || {}).length || 1;
             // Scale with the roster: a handful of slow national FDSN nodes flap constantly and
             // the feed stays fully covered by the global catalogs — only a systemic share down
             // (~30%, floor 8) signals a real problem. Manifest staleness is the primary signal.
             const degLimit = Math.max(8, Math.ceil(total * 0.3));
-            console.log(`age=${Math.round(ageS)}s (stale_after=${staleAfter}) head_seq=${m.head_seq} events=${m.event_count} degraded=${degraded.length}/${total} limit=${degLimit} [${degraded.join(",")}]`);
+            console.log(`age=${Math.round(ageS)}s (stale_after=${staleAfter}) head_seq=${m.head_seq} events=${m.event_count} degraded=${degraded.length}/${total} limit=${degLimit} [${degraded.join(",")}] queued=${queuedS}s`);
             const problems = [];
-            if (ageS > staleAfter) problems.push(`live manifest is ${Math.round(ageS / 60)} min stale (contract: ${staleAfter / 60} min)`);
-            if (degraded.length >= degLimit) problems.push(`${degraded.length}/${total} providers degraded: ${degraded.join(", ")}`);
+            // Name the queue in the alarm: a stall upstream of us reads as broken publishing.
+            const queueNote = queuedS > 600 ? ` — this run itself waited ${Math.round(queuedS / 60)} min in the runner queue` : "";
+            if (ageS > staleAfter) problems.push(`live manifest is ${Math.round(ageS / 60)} min stale (contract: ${staleAfter / 60} min)${queueNote}`);
+            if (!s) problems.push("status.json unreachable — provider health unknown");
+            else if (degraded.length >= degLimit) problems.push(`${degraded.length}/${total} providers degraded: ${degraded.join(", ")}`);
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `problem=${problems.join("; ")}\n`);
           '
       - name: Open/refresh health issue and fail

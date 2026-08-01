@@ -3,8 +3,10 @@ main = "src/worker.js"
 compatibility_date = "2024-11-01"
 
 # GitHub throttles/delays low-activity scheduled workflows, so this external tick
-# drives them reliably: aggregate every 5 min, backfill hourly.
+# drives them reliably: aggregate every 5 min, backfill hourly, health every 15 min.
+# health's own hourly GitHub cron was delivered ~20x per 48h with 2-4.5h gaps, so a
+# 28-minute Pages outage went entirely unreported (see src/worker.js).
 # Needs a secret GH_PAT (fine-grained token, repo earthquakes-feed, Actions: write):
 #   cd heartbeat && wrangler secret put GH_PAT
 [triggers]
-crons = ["*/5 * * * *", "41 * * * *"]
+crons = ["*/5 * * * *", "41 * * * *", "7,22,37,52 * * * *"]

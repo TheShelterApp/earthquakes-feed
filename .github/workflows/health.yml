@@ -94,9 +94,18 @@ jobs:
           BODY="Automated watchdog: ${PROBLEM}
 
           Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} ($(date -u +%FT%TZ))"
-          EXISTING=$(gh issue list --repo "${{ github.repository }}" --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
-          if [ -n "$EXISTING" ]; then
-            gh issue comment "$EXISTING" --repo "${{ github.repository }}" --body "$BODY"
+          EXISTING=$(gh issue list --repo "${{ github.repository }}" --state open --search "$TITLE in:title" --json number,updatedAt --jq '.[0] | "\(.number // "") \(.updatedAt // "")"')
+          NUM="${EXISTING%% *}"; UPD="${EXISTING##* }"
+          if [ -n "$NUM" ]; then
+            # The heartbeat drives this every 15 min, so a multi-hour outage would otherwise
+            # leave 4 identical comments an hour on the same issue. Re-comment at most hourly;
+            # the run still goes red below either way, so nothing is hidden.
+            AGE=$(( $(date -u +%s) - $(date -u -d "$UPD" +%s 2>/dev/null || echo 0) ))
+            if [ "$AGE" -gt 3600 ] || [ "$AGE" -lt 0 ]; then
+              gh issue comment "$NUM" --repo "${{ github.repository }}" --body "$BODY"
+            else
+              echo "issue #$NUM already refreshed ${AGE}s ago — not commenting again"
+            fi
           else
             gh issue create --repo "${{ github.repository }}" --title "$TITLE" --body "$BODY" --label bug
           fi

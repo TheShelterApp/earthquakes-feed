@@ -229,27 +229,80 @@ const ncs: CustomAdapter = async (cfg) => {
 };
 
 // --- Japan: JMA official hypocenter/intensity list (times carry +09:00 offset; `cod`
-//     encodes "+lat+lon-depth(m)/") ---
-const jma: CustomAdapter = async (cfg) => {
-  const list = JSON.parse(await getText(cfg.base, { timeoutMs: 12_000, retries: 2 })) as Record<string, unknown>[];
+//     encodes "±lat±lon±depth(m)/" in ISO 6709) ---
+
+/** One ISO 6709 angular component ("+36.0", "+3559.9", "+14005.7"). `degDigits` is the
+ *  fixed width of the degrees field: 2 for latitude, 3 for longitude. ISO 6709 is
+ *  self-describing by integer width: degDigits ⇒ decimal degrees; degDigits+2 ⇒
+ *  degrees+minutes (DDMM.m); degDigits+4 ⇒ degrees+minutes+seconds. */
+function iso6709(component: string, degDigits: number): number | null {
+  const m = /^([+-])(\d+)(\.\d+)?$/.exec(component);
+  if (!m) return num(component);
+  const sign = m[1] === '-' ? -1 : 1;
+  const int = m[2]!;
+  const frac = m[3] ?? '';
+  if (int.length <= degDigits) return sign * Number(int + frac);
+  if (int.length === degDigits + 2) {
+    return sign * (Number(int.slice(0, degDigits)) + Number(int.slice(degDigits) + frac) / 60);
+  }
+  if (int.length === degDigits + 4) {
+    return (
+      sign *
+      (Number(int.slice(0, degDigits)) +
+        Number(int.slice(degDigits, degDigits + 2)) / 60 +
+        Number(int.slice(degDigits + 2) + frac) / 3600)
+    );
+  }
+  return sign * Number(int + frac);
+}
+
+/** Parse a JMA `cod` hypocenter string. Routine bulletins give decimal degrees
+ *  (`+36.0+140.1-70000/`); the VXSE61 "顕著な地震の震源要素更新" hypocenter-element update
+ *  gives sexagesimal degrees+minutes (`+3559.9+14005.7-68000/` = 35°59.9′N 140°05.7′E).
+ *  Both are ISO 6709 — reading either as a raw decimal put lat/lon out of range and
+ *  red-lined derive's validate gate for the whole feed (2026-08-22). Depth is metres. */
+export function parseJmaCod(cod: string): { lat: number; lon: number; depthKm: number | null } | null {
+  const m = /([+-][\d.]+)([+-][\d.]+)([+-]\d+)?/.exec(cod ?? '');
+  if (!m) return null;
+  const lat = iso6709(m[1]!, 2);
+  const lon = iso6709(m[2]!, 3);
+  if (lat == null || lon == null) return null;
+  const depthM = m[3] != null ? num(m[3]) : null;
+  return { lat, lon, depthKm: depthM != null ? Math.abs(depthM) / 1000 : null };
+}
+
+/** Build JMA observations from a decoded list.json. JMA publishes several bulletins per
+ *  quake under ONE `eid` — 震度速報 (intensity only, no hypocenter), 震源に関する情報,
+ *  震源・震度情報, then a refined 顕著な地震の震源要素更新 for notable events — each a
+ *  separate entry with its own `cod`. Emitting every bulletin made one feed flip-flop
+ *  between differing solutions and churn a fresh revision every cycle (2026-08-22).
+ *  Collapse to one observation per eid: the latest-issued (`ctt`, a sortable
+ *  YYYYMMDDHHMMSS stamp) bulletin that actually carries a hypocenter. */
+export function parseJmaList(list: unknown, providerId: string): RawObs[] {
+  const best = new Map<string, Record<string, unknown>>();
+  for (const e of Array.isArray(list) ? (list as Record<string, unknown>[]) : []) {
+    const eid = String(e['eid'] ?? '');
+    if (!eid || !parseJmaCod(String(e['cod'] ?? ''))) continue; // skip 震度速報 (empty cod)
+    const cur = best.get(eid);
+    if (!cur || String(e['ctt'] ?? '') > String(cur['ctt'] ?? '')) best.set(eid, e);
+  }
   const out: RawObs[] = [];
-  for (const e of Array.isArray(list) ? list : []) {
-    const m = String(e['cod'] ?? '').match(/([+-][\d.]+)([+-][\d.]+)([+-]\d+)?/);
-    if (!m) continue;
-    const lat = num(m[1]);
-    const lon = num(m[2]);
+  for (const e of best.values()) {
+    const c = parseJmaCod(String(e['cod'] ?? ''))!;
     const t = parseUtcMs((e['at'] as string) ?? (e['rdt'] as string));
-    if (lat == null || lon == null || t == null) continue;
-    const depthM = m[3] != null ? num(m[3]) : null;
+    if (t == null) continue;
     out.push({
-      provider: cfg.id, providerEventId: String(e['eid'] ?? ''), eventTimeMs: t,
-      providerUpdatedMs: parseUtcMs(e['rdt'] as string), status: null, lat, lon,
-      depth: depthM != null ? Math.abs(depthM) / 1000 : null, mag: num(e['mag']), magType: 'Mj',
+      provider: providerId, providerEventId: String(e['eid']), eventTimeMs: t,
+      providerUpdatedMs: parseUtcMs(e['rdt'] as string), status: null, lat: c.lat, lon: c.lon,
+      depth: c.depthKm, mag: num(e['mag']), magType: 'Mj',
       place: (e['en_anm'] as string) || (e['anm'] as string) || null, knownAliasIds: [], fields: flattenScalars(e),
     });
   }
-  return out.filter((o) => o.providerEventId);
-};
+  return out;
+}
+
+const jma: CustomAdapter = async (cfg) =>
+  parseJmaList(JSON.parse(await getText(cfg.base, { timeoutMs: 12_000, retries: 2 })), cfg.id);
 
 // --- Mexico: SSN/UNAM (RSS; local time America/Mexico_City = UTC-6, no DST) ---
 const mexico: CustomAdapter = async (cfg) => {

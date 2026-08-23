@@ -46,6 +46,12 @@ function assertHeadMatchesLog(root: string, headSeq: number): void {
   }
 }
 
+/** A lat/lon that physics and the schema (±90 / ±180) forbid. A single provider
+ *  emitting such coordinates would otherwise red-line derive's validate gate for the
+ *  entire feed (JMA's DDMM.m `cod`, 2026-08-22), so the log drops them at the door. */
+const hasBadCoords = (r: RawObs): boolean =>
+  !Number.isFinite(r.lat) || !Number.isFinite(r.lon) || Math.abs(r.lat) > 90 || Math.abs(r.lon) > 180;
+
 function makeObservation(raw: RawObs, r: IngestResult, seq: number, ingestTime: string, op: Op = 'observe'): Observation {
   return {
     seq,
@@ -97,8 +103,20 @@ async function main(): Promise<void> {
   // would bypass dedup outside it (C2) — drop them; backfill owns history.
   const hotFloor = nowMs - HOT_WINDOW_DAYS * 86_400_000;
   const futureCeil = nowMs + FUTURE_LEEWAY_MS;
-  const raws = fetched.filter((r) => r.eventTimeMs >= hotFloor && r.eventTimeMs <= futureCeil);
-  const staleDropped = fetched.length - raws.length;
+  const inWindow = fetched.filter((r) => r.eventTimeMs >= hotFloor && r.eventTimeMs <= futureCeil);
+  const staleDropped = fetched.length - inWindow.length;
+  // Coordinate backstop across all three ingest paths — never silent: a nonzero
+  // bad_coords_dropped in status names the scale so a provider regression is visible.
+  let badCoordsDropped = 0;
+  const badCoordsByProvider: Record<string, number> = {};
+  const dropBadCoords = <T extends RawObs>(arr: T[]): T[] =>
+    arr.filter((r) => {
+      if (!hasBadCoords(r)) return true;
+      badCoordsDropped++;
+      badCoordsByProvider[r.provider] = (badCoordsByProvider[r.provider] ?? 0) + 1;
+      return false;
+    });
+  const raws = dropBadCoords(inWindow);
   // Deterministic ingest order (idempotency, design §8.10).
   raws.sort(
     (a, b) =>
@@ -124,9 +142,7 @@ async function main(): Promise<void> {
 
   // Revision sweep (H2): updatedafter results revise KNOWN events only (reviseExisting
   // never mints), so revisions to events outside the hot index are skipped, not duped.
-  const updates = updateOutcomes
-    .flatMap((o) => o.obs)
-    .filter((r) => r.eventTimeMs <= futureCeil);
+  const updates = dropBadCoords(updateOutcomes.flatMap((o) => o.obs).filter((r) => r.eventTimeMs <= futureCeil));
   updates.sort(
     (a, b) =>
       a.eventTimeMs - b.eventTimeMs ||
@@ -149,7 +165,7 @@ async function main(): Promise<void> {
   }
 
   // Delete sweep: tombstone events retracted upstream (op:tombstone; never mints).
-  const deletes = deleteOutcomes.flatMap((o) => o.obs);
+  const deletes = dropBadCoords(deleteOutcomes.flatMap((o) => o.obs));
   let tombstoned = 0;
   for (const raw of deletes) {
     const r = resolver.tombstoneProvider(raw, ingestTime);
@@ -159,6 +175,12 @@ async function main(): Promise<void> {
       newObs.push(makeObservation(raw, r, seq, ingestTime, 'tombstone'));
       tombstoned++;
     }
+  }
+
+  if (badCoordsDropped) {
+    console.warn(
+      `::warning::aggregate: dropped ${badCoordsDropped} obs with out-of-range coordinates: ${JSON.stringify(badCoordsByProvider)}`,
+    );
   }
 
   if (newObs.length) appendObservations(DATA_DIR, newObs);
@@ -176,6 +198,7 @@ async function main(): Promise<void> {
     events_indexed: state.eventMap.size,
     observations_returned: fetched.length,
     stale_dropped: staleDropped,
+    bad_coords_dropped: badCoordsDropped,
     new_observations: newObs.length,
     revisions,
     tombstoned,
@@ -200,6 +223,7 @@ async function main(): Promise<void> {
   console.log(
     `aggregate: seq=${seq} indexed=${state.eventMap.size} fetched=${fetched.length} stale_dropped=${staleDropped} new=${newObs.length} revisions=${revisions} tombstoned=${tombstoned} ` +
       `providers=${outcomes.filter((o) => o.status.ok).length}/${outcomes.length}` +
+      (badCoordsDropped ? ` bad_coords_dropped=${badCoordsDropped}` : '') +
       (degraded.length ? ` degraded=[${degraded.join(',')}]` : ''),
   );
 }

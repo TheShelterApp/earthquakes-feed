@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { parseJmaCod, parseJmaList } from '../src/custom.js';
 import { parseFdsnText, parseGeoJSON } from '../src/fdsn.js';
 
 test('FDSN text: standard pipe-delimited row', () => {
@@ -91,6 +92,53 @@ test('GeoJSON: EMSC format (ISO time string, lowercase magtype, flynn_region)', 
   assert.equal(o!.place, 'WESTERN GREECE');
   assert.equal(o!.depth, 12);
   assert.equal(o!.providerUpdatedMs, Date.parse('2026-07-04T12:39:58.0Z'));
+});
+
+test('JMA cod: routine bulletin — decimal degrees', () => {
+  const c = parseJmaCod('+36.0+140.1-70000/');
+  assert.equal(c!.lat, 36.0);
+  assert.equal(c!.lon, 140.1);
+  assert.equal(c!.depthKm, 70, 'depth metres -> km, sign dropped');
+});
+
+test('JMA cod: VXSE61 hypocenter update — sexagesimal DDMM.m stays in range', () => {
+  // +3559.9+14005.7 = 35°59.9′N 140°05.7′E ≈ 36.0N 140.1E (Southern Ibaraki, the
+  // 2026-08-22 M5.9 that read as lat 3559.9 / lon 14005.7 and red-lined derive).
+  const c = parseJmaCod('+3559.9+14005.7-68000/');
+  assert.ok(Math.abs(c!.lat) <= 90 && Math.abs(c!.lon) <= 180, 'in schema range');
+  assert.ok(Math.abs(c!.lat - 35.998333) < 1e-5, `lat ${c!.lat}`);
+  assert.ok(Math.abs(c!.lon - 140.095) < 1e-5, `lon ${c!.lon}`);
+  assert.equal(c!.depthKm, 68);
+});
+
+test('JMA cod: southern/western signs and zero depth', () => {
+  const c = parseJmaCod('-3330.0-07045.5+0/');
+  assert.ok(Math.abs(c!.lat - -33.5) < 1e-9, `lat ${c!.lat}`);
+  assert.ok(Math.abs(c!.lon - -70.758333) < 1e-5, `lon ${c!.lon}`);
+  assert.equal(c!.depthKm, 0);
+});
+
+test('JMA cod: missing/empty cod yields null (record skipped)', () => {
+  assert.equal(parseJmaCod(''), null);
+  assert.equal(parseJmaCod('garbage'), null);
+});
+
+test('JMA list: multiple bulletins per eid collapse to one obs (latest ctt, no churn)', () => {
+  // Real shape from 2026-08-22 M5.9 Ibaraki: 震度速報 (no cod), routine 震源・震度情報,
+  // and the refined VXSE61 update — all under one eid. Emitting all made the feed churn
+  // a revision every cycle; we keep only the latest-issued cod-bearing bulletin.
+  const list = [
+    { eid: 'E1', ctt: '20260823040012', ttl: '顕著な地震の震源要素更新のお知らせ', at: '2026-08-23T02:00:00+09:00', rdt: '2026-08-23T04:00:00+09:00', cod: '+3559.9+14005.7-68000/', mag: '5.9', anm: '茨城県南部' },
+    { eid: 'E1', ctt: '20260823021215', ttl: '震源・震度情報', at: '2026-08-23T02:00:00+09:00', rdt: '2026-08-23T02:12:00+09:00', cod: '+36.0+140.1-70000/', mag: '5.9', anm: '茨城県南部' },
+    { eid: 'E1', ctt: '20260823020221', ttl: '震度速報', at: '2026-08-23T02:00:00+09:00', rdt: '2026-08-23T02:02:00+09:00', cod: '', mag: '' },
+    { eid: 'E2', ctt: '20260823010000', ttl: '震源・震度情報', at: '2026-08-23T01:00:00+09:00', rdt: '2026-08-23T01:05:00+09:00', cod: '+43.0+145.4-50000/', mag: '2.9', anm: '釧路沖' },
+  ];
+  const obs = parseJmaList(list, 'jma');
+  assert.equal(obs.length, 2, 'one observation per eid');
+  const e1 = obs.find((o) => o.providerEventId === 'E1')!;
+  assert.equal(e1.fields['ttl'], '顕著な地震の震源要素更新のお知らせ', 'latest ctt wins (refined VXSE61)');
+  assert.ok(Math.abs(e1.lat - 35.998333) < 1e-5 && Math.abs(e1.lon - 140.095) < 1e-5, 'in-range coords');
+  assert.equal(e1.depth, 68);
 });
 
 test('GeoJSON: features missing coordinates or time are skipped', () => {

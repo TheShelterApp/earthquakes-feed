@@ -1,6 +1,6 @@
 # earthquakes-feed
 
-An open, free earthquake feed. A GitHub Actions job aggregates earthquakes from 38
+An open, free earthquake feed. A GitHub Actions job aggregates earthquakes from 41
 seismic networks on a schedule, deduplicates them into one feed, and commits the
 result to Git — so the full history is queryable by both *when the quake happened*
 and *when the feed learned about it*. Served worldwide over a CDN, free to consume.
@@ -22,7 +22,7 @@ Start from the manifest; don't hardcode paths. **Full API reference: [APIs.md](A
 # Catalog: every summary + partition, with freshness and cache hints:
 curl -s https://earthquakes-feed.theshelter.app/v1/manifest.json
 
-# The current day, all 38 sources deduped (one CORS-open request):
+# The current day, all 41 sources deduped (one CORS-open request):
 curl -s https://earthquakes-feed.theshelter.app/v1/all_day.geojson
 
 # One recent day as a ready-to-render full-detail FeatureCollection (Pages; days in the
@@ -119,7 +119,7 @@ WebSocket event that shares an alias or falls within ±60 s / ±10 km.
 
 ## Sources
 
-38 networks, configured in [`providers/registry.json`](providers/registry.json)
+41 networks, configured in [`providers/registry.json`](providers/registry.json)
 (add more — see [CONTRIBUTING.md](CONTRIBUTING.md)). A server runner has no CORS limit,
 so the feed carries national sources a browser can't reach directly, down to small
 local magnitudes. Full credits: [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
@@ -196,7 +196,7 @@ copyrightable expression) and honor removal requests reactively — see
 
 ## Status
 
-Live end-to-end: 38 sources, stateful field-level dedup (superset model — every source
+Live end-to-end: 41 sources, stateful field-level dedup (superset model — every source
 field preserved), bitemporal log, 20 rolling feeds, per-day partitions + Pages day
 files, manifest, CI, and Cloudflare Pages serving. `event_map` is sharded by day and
 pruned to a 45-day dedup horizon, with older identity preserved in the day partitions.

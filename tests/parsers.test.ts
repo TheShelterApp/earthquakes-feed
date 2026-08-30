@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseJmaCod, parseJmaList } from '../src/custom.js';
+import { parseGeosphere, parseJmaCod, parseJmaList, parseKoeri, parsePhivolcs } from '../src/custom.js';
 import { parseFdsnText, parseGeoJSON } from '../src/fdsn.js';
 
 test('FDSN text: standard pipe-delimited row', () => {
@@ -139,6 +139,55 @@ test('JMA list: multiple bulletins per eid collapse to one obs (latest ctt, no c
   assert.equal(e1.fields['ttl'], '顕著な地震の震源要素更新のお知らせ', 'latest ctt wins (refined VXSE61)');
   assert.ok(Math.abs(e1.lat - 35.998333) < 1e-5 && Math.abs(e1.lon - 140.095) < 1e-5, 'in-range coords');
   assert.equal(e1.depth, 68);
+});
+
+test('GeoSphere Austria: keeps only own solutions; naive-UTC + [mag,type]', () => {
+  const list = [
+    { author: 'GeoSphere Austria', event_id: 111, datetime_utc: '2026-08-29T22:07:14.511540', lat: 47.82, lon: 16.14, depth: 3.17, reference_magnitude: [1.2, 'ml'], region: 'Wr. Neustadt', is_verified: true },
+    { author: 'EMSC', event_id: 222, datetime_utc: '2026-08-29T00:00:00.000000', lat: 40.1, lon: 19.8, depth: 5, reference_magnitude: [4.5, 'mb'], region: 'Albania', is_verified: false },
+  ];
+  const o = parseGeosphere(list, 'geosphere');
+  assert.equal(o.length, 1, 're-served EMSC row is dropped (arrives from emsc directly)');
+  assert.equal(o[0]!.providerEventId, '111');
+  assert.equal(o[0]!.eventTimeMs, Date.parse('2026-08-29T22:07:14.511Z'), 'naive-UTC + Z, µs trimmed');
+  assert.equal(o[0]!.mag, 1.2);
+  assert.equal(o[0]!.magType, 'ml');
+  assert.equal(o[0]!.depth, 3.17, 'depth already km');
+  assert.equal(o[0]!.status, 'reviewed', 'is_verified -> reviewed');
+});
+
+test('KOERI: fixed-width UTC list, Mw>ML>MD, synthesised id', () => {
+  const pre =
+    '<pre>\nDate       Time      Latit(N)  Long(E)   Depth(km)     MD   ML   Mw    Region\n' +
+    '2026.08.30 08:04:16  39.2787   28.9977       16.1      -.-  1.0  -.-   YESILDERE-SIMAV (KUTAHYA)                         Quick\n</pre>';
+  const o = parseKoeri(pre, 'koeri');
+  assert.equal(o.length, 1, 'header line skipped, one data row');
+  assert.equal(o[0]!.lat, 39.2787);
+  assert.equal(o[0]!.lon, 28.9977);
+  assert.equal(o[0]!.depth, 16.1);
+  assert.equal(o[0]!.mag, 1.0);
+  assert.equal(o[0]!.magType, 'ML', 'Mw absent (-.-), falls to ML');
+  assert.equal(o[0]!.eventTimeMs, Date.parse('2026-08-30T08:04:16Z'));
+  assert.equal(o[0]!.providerEventId, 'koeri-20260830080416', 'time-only id folds revisions');
+  assert.match(o[0]!.place ?? '', /YESILDERE-SIMAV/);
+});
+
+test('PHIVOLCS: UTC from bulletin filename; backslash href; B1/B2 fold to one id', () => {
+  const row = (bulletin: string, mag: string) =>
+    `<tr><td><a href="2026_Earthquake_Information\\August\\${bulletin}.html">30 August 2026 - 04:42 PM</a></td>` +
+    `<td>19.43</td><td>121.78</td><td>006</td><td>${mag}</td><td>017 km S 57 deg W of Babuyan Island (Cagayan)</td></tr>`;
+  // Same event re-issued as B1 then B2F — must collapse to one observation (first seen wins).
+  const html = `<table>${row('2026_0830_0842_B1', '2.0')}${row('2026_0830_0842_B2F', '2.1')}</table>`;
+  const o = parsePhivolcs(html, 'phivolcs');
+  assert.equal(o.length, 1, 'bulletin revisions share the UTC-minute id');
+  assert.equal(o[0]!.providerEventId, '2026_0830_0842');
+  assert.equal(o[0]!.eventTimeMs, Date.parse('2026-08-30T08:42:00Z'), 'UTC read from filename, not the PST cell');
+  assert.equal(o[0]!.lat, 19.43);
+  assert.equal(o[0]!.lon, 121.78);
+  assert.equal(o[0]!.depth, 6, 'zero-padded "006" -> 6');
+  assert.equal(o[0]!.mag, 2.0);
+  assert.equal(o[0]!.magType, null, 'magType only in sub-bulletins');
+  assert.match(o[0]!.place ?? '', /Babuyan/);
 });
 
 test('GeoJSON: features missing coordinates or time are skipped', () => {

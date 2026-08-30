@@ -336,23 +336,6 @@
       "notes": "Official bosai list.json; `at` carries +09:00, `cod` encodes +lat+lon-depth(m)."
     },
     {
-      "id": "raspberryshake",
-      "name": "Raspberry Shake",
-      "priority": 30,
-      "active": false,
-      "adapter": "fdsn",
-      "parse": "text",
-      "queryFormat": "text",
-      "base": "https://fdsnws.raspberryshakedata.com/fdsnws/event/1/query",
-      "supportsTimeRange": true,
-      "refreshSeconds": 900,
-      "license": "CC-BY-4.0",
-      "attribution": "Raspberry Shake, S.A. citizen-science network",
-      "doi": null,
-      "contact": "https://raspberryshake.org",
-      "notes": "TODO enable on the heavy 15-min sub-schedule (firehose of M0.5+ globally)."
-    },
-    {
       "id": "renass",
       "name": "RéNaSS / BCSF (France)",
       "priority": 10,
@@ -671,6 +654,57 @@
       "attribution": "資料來源：交通部中央氣象署 (Central Weather Administration, Taiwan)",
       "doi": null,
       "contact": "https://opendata.cwa.gov.tw"
+    },
+    {
+      "id": "geosphere",
+      "name": "GeoSphere Austria (formerly ZAMG)",
+      "priority": 39,
+      "active": true,
+      "adapter": "custom",
+      "parse": "custom",
+      "queryFormat": "json",
+      "base": "https://www.geosphere.at/data/earthquakes",
+      "supportsTimeRange": false,
+      "refreshSeconds": 600,
+      "license": "CC-BY-4.0",
+      "attribution": "GeoSphere Austria (Creative Commons Attribution 4.0)",
+      "doi": null,
+      "contact": "https://www.geosphere.at",
+      "notes": "Rolling ~14-day worldwide JSON; adapter keeps only GeoSphere-authored solutions (others arrive from their own sources)."
+    },
+    {
+      "id": "koeri",
+      "name": "KOERI — Kandilli Observatory (Turkey)",
+      "priority": 40,
+      "active": true,
+      "adapter": "custom",
+      "parse": "custom",
+      "queryFormat": "html",
+      "base": "http://www.koeri.boun.edu.tr/scripts/lasteq.asp",
+      "supportsTimeRange": false,
+      "refreshSeconds": 600,
+      "license": "KOERI-NC",
+      "attribution": "Kandilli Observatory and Earthquake Research Institute (KOERI/RETMC), Boğaziçi University — non-commercial use with citation",
+      "doi": null,
+      "contact": "http://www.koeri.boun.edu.tr",
+      "notes": "lasteq.asp English quick determinations, times in UTC. NON-COMMERCIAL license — flagged for governance review; hypocenter parameters carried as facts with per-record license."
+    },
+    {
+      "id": "phivolcs",
+      "name": "PHIVOLCS (Philippines)",
+      "priority": 41,
+      "active": true,
+      "adapter": "custom",
+      "parse": "custom",
+      "queryFormat": "html",
+      "base": "https://earthquake.phivolcs.dost.gov.ph/",
+      "supportsTimeRange": false,
+      "refreshSeconds": 600,
+      "license": "PHIVOLCS-terms",
+      "attribution": "DOST-PHIVOLCS (Philippine Institute of Volcanology and Seismology) — © all rights reserved, attribution requested",
+      "doi": null,
+      "contact": "https://earthquake.phivolcs.dost.gov.ph",
+      "notes": "Scraped from the public bulletin table (hypocenter parameters only; magType absent without a per-event fetch). No open redistribution grant — flagged for governance review."
     }
   ]
 }

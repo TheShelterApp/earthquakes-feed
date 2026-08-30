@@ -46,10 +46,13 @@ each row carrying `license`, `attribution`, and `doi`.
 - **IG-EPN — Instituto Geofísico (Ecuador)** (`igepn`) — gov-open — Instituto Geofísico - Escuela Politécnica Nacional (IG-EPN), Ecuador
 - **CSN — Centro Sismológico Nacional (Chile)** (`csn`) — gov-open — Centro Sismológico Nacional, Universidad de Chile (CSN)
 - **CWA — Central Weather Administration (Taiwan)** (`cwa`) — OGDL-TW-1.0 — 資料來源：交通部中央氣象署 (Central Weather Administration, Taiwan)
+- **GeoSphere Austria (formerly ZAMG)** (`geosphere`) — CC-BY-4.0 — GeoSphere Austria (Creative Commons Attribution 4.0)
+- **KOERI — Kandilli Observatory (Turkey)** (`koeri`) — KOERI-NC — Kandilli Observatory and Earthquake Research Institute (KOERI/RETMC), Boğaziçi University — non-commercial use with citation
+- **PHIVOLCS (Philippines)** (`phivolcs`) — PHIVOLCS-terms — DOST-PHIVOLCS (Philippine Institute of Volcanology and Seismology) — © all rights reserved, attribution requested
 
 ## Configured but inactive
 
-- **Raspberry Shake** (`raspberryshake`) — CC-BY-4.0 — Raspberry Shake, S.A. citizen-science network
+
 
 ## The compilation
 

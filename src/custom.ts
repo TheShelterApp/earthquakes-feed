@@ -1,5 +1,5 @@
 import { request as httpsRequest } from 'node:https';
-import { strFromU8, unzipSync } from 'fflate';
+import { gunzipSync, strFromU8, unzipSync, unzlibSync } from 'fflate';
 import { QUERY_LOOKBACK_MS } from './config.js';
 import type { ProviderConfig, RawObs } from './types.js';
 import { flattenScalars, num, parseUtcMs } from './util.js';
@@ -33,12 +33,22 @@ function once(url: string, timeoutMs: number, ua: string, insecure: boolean): Pr
     const req = httpsRequest(
       { hostname: u.hostname, port: 443, path: u.pathname + u.search, method: 'GET', headers: { 'user-agent': ua, accept: '*/*' }, rejectUnauthorized: false, timeout: timeoutMs },
       (res) => {
-        let data = '';
-        res.setEncoding('utf8');
-        res.on('data', (c) => (data += c));
+        // Collect raw bytes — some gov CDNs (e.g. PHIVOLCS) return content-encoding: gzip
+        // regardless of Accept-Encoding, so decode by the header rather than assuming utf8.
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
         res.on('end', () => {
           const sc = res.statusCode ?? 0;
-          sc >= 200 && sc < 300 ? resolve(data) : reject(new Error(`HTTP ${sc}`));
+          if (sc < 200 || sc >= 300) return reject(new Error(`HTTP ${sc}`));
+          try {
+            let buf: Uint8Array = Buffer.concat(chunks);
+            const enc = String(res.headers['content-encoding'] ?? '').toLowerCase();
+            if (enc.includes('gzip')) buf = gunzipSync(buf);
+            else if (enc.includes('deflate')) buf = unzlibSync(buf);
+            resolve(strFromU8(buf));
+          } catch (e) {
+            reject(e instanceof Error ? e : new Error(String(e)));
+          }
         });
       },
     );
@@ -733,4 +743,103 @@ const cwa: CustomAdapter = async (cfg) => {
   return out.filter((o) => o.providerEventId);
 };
 
-export const CUSTOM_ADAPTERS: Record<string, CustomAdapter> = { afad, cenc, tmd, kagsr, ncs, jma, mexico, ipma, igp, egypt, bgs, ign, imo, bmkg, inpres, ga, ovsicori, igepn, csn, cwa };
+// --- Austria: GeoSphere Austria (ex-ZAMG). A flat JSON array of the last ~14 days
+//     WORLDWIDE; we keep only GeoSphere's own solutions (author === 'GeoSphere Austria')
+//     — the re-served USGS/EMSC/INGV/GFZ rows already arrive from those sources direct.
+//     `datetime_utc` is naive-UTC ISO (append 'Z'); reference_magnitude is [value, type]. ---
+export function parseGeosphere(list: unknown, providerId: string): RawObs[] {
+  const arr = Array.isArray(list) ? (list as Record<string, unknown>[]) : [];
+  const out: RawObs[] = [];
+  for (const e of arr) {
+    if (String(e['author'] ?? '') !== 'GeoSphere Austria') continue;
+    const t = parseUtcMs(`${e['datetime_utc']}Z`);
+    const lat = num(e['lat']);
+    const lon = num(e['lon']);
+    if (t == null || lat == null || lon == null) continue;
+    const refMag = Array.isArray(e['reference_magnitude']) ? (e['reference_magnitude'] as unknown[]) : [];
+    out.push({
+      provider: providerId, providerEventId: String(e['event_id'] ?? ''), eventTimeMs: t,
+      providerUpdatedMs: null, status: e['is_verified'] === true ? 'reviewed' : 'automatic',
+      lat, lon, depth: num(e['depth']), mag: num(refMag[0]), magType: (refMag[1] as string) || null,
+      place: (e['region'] as string) || (e['epicenter'] as string) || null, knownAliasIds: [], fields: flattenScalars(e),
+    });
+  }
+  return out.filter((o) => o.providerEventId);
+}
+
+const geosphere: CustomAdapter = async (cfg) =>
+  parseGeosphere(JSON.parse(await getText(cfg.base, { timeoutMs: 12_000, retries: 2 })), cfg.id);
+
+// --- Turkey: KOERI / Kandilli quick determinations (lasteq.asp = English list, times
+//     already in UTC, pure ASCII). Fixed-width text inside a single <pre>. No native
+//     event id — synthesise one from the UTC origin second so re-issued rows fold as a
+//     revision. `-.-` marks an absent magnitude; prefer Mw > ML > MD. ---
+export function parseKoeri(html: string, providerId: string): RawObs[] {
+  const pre = /<pre[^>]*>([\s\S]*?)<\/pre>/i.exec(html)?.[1] ?? '';
+  const out: RawObs[] = [];
+  for (const l of pre.split('\n')) {
+    if (!/^\d{4}\.\d{2}\.\d{2} /.test(l)) continue;
+    const s = (a: number, b?: number): string => l.slice(a, b).trim();
+    const lat = num(s(21, 28));
+    const lon = num(s(31, 38));
+    const t = parseUtcMs(`${s(0, 10).replace(/\./g, '-')}T${s(11, 19)}Z`);
+    if (lat == null || lon == null || t == null) continue;
+    const md = s(55, 58), ml = s(60, 63), mw = s(65, 68);
+    let mag: number | null = null;
+    let magType: string | null = null;
+    for (const [v, ty] of [[mw, 'Mw'], [ml, 'ML'], [md, 'MD']] as const) {
+      const n = num(v);
+      if (n != null) { mag = n; magType = ty; break; }
+    }
+    const sol = s(121);
+    out.push({
+      provider: providerId, providerEventId: `koeri-${s(0, 10).replace(/\./g, '')}${s(11, 19).replace(/:/g, '')}`,
+      eventTimeMs: t, providerUpdatedMs: null, status: /revise|reviz/i.test(sol) ? 'reviewed' : 'automatic',
+      lat, lon, depth: num(s(44, 49)), mag, magType,
+      place: s(71, 113) || null, knownAliasIds: [], fields: { region: s(71, 113), solution: sol, MD: md, ML: ml, Mw: mw },
+    });
+  }
+  return out;
+}
+
+const koeri: CustomAdapter = async (cfg) =>
+  parseKoeri(await getText(cfg.base, { timeoutMs: 12_000, retries: 2 }), cfg.id);
+
+// --- Philippines: PHIVOLCS. Hand-authored HTML whose data rows link to per-event
+//     bulletins; the bulletin FILENAME encodes the origin time in UTC (YYYY_MMDD_HHMM),
+//     used for both the timestamp and the dedup id (trailing _B1/_B2F = a bulletin
+//     revision of the same event). Cells: [PST datetime] [lat°N] [lon°E] [depth km]
+//     [mag] [place]. magType lives only in the sub-bulletins, so it is left null. ---
+export function parsePhivolcs(html: string, providerId: string): RawObs[] {
+  const out: RawObs[] = [];
+  const seen = new Set<string>();
+  for (const row of html.split(/<tr[ >]/i)) {
+    const href = /href="([^"]*_Earthquake_Information[^"]*?(\d{4})_(\d{4})_(\d{4})_[^"]*\.html)"/i.exec(row);
+    if (!href) continue;
+    const [, file, yyyy, mmdd, hhmm] = href;
+    const id = `${yyyy}_${mmdd}_${hhmm}`; // UTC origin-minute; folds B1/B2 revisions
+    if (seen.has(id)) continue;
+    const tds = [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map((m) =>
+      htmlDecode(m[1]!.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim(),
+    );
+    if (tds.length < 6) continue;
+    const lat = num(tds[1]);
+    const lon = num(tds[2]);
+    const t = parseUtcMs(`${yyyy}-${mmdd!.slice(0, 2)}-${mmdd!.slice(2)}T${hhmm!.slice(0, 2)}:${hhmm!.slice(2)}:00Z`);
+    if (lat == null || lon == null || t == null) continue;
+    seen.add(id);
+    out.push({
+      provider: providerId, providerEventId: id, eventTimeMs: t, providerUpdatedMs: null, status: null,
+      lat, lon, depth: num(tds[3]), mag: num(tds[4]), magType: null,
+      place: tds[5] || null, knownAliasIds: [],
+      fields: { datetime_local: tds[0]!, place: tds[5]!, bulletin: file!.split(/[\\/]/).pop() ?? '' },
+    });
+  }
+  return out;
+}
+
+const phivolcs: CustomAdapter = async (cfg) =>
+  // dost.gov.ph serves an incomplete TLS chain (UNABLE_TO_VERIFY_LEAF_SIGNATURE) — scoped insecure fetch.
+  parsePhivolcs(await getText(cfg.base, { timeoutMs: 20_000, retries: 2, insecure: true }), cfg.id);
+
+export const CUSTOM_ADAPTERS: Record<string, CustomAdapter> = { afad, cenc, tmd, kagsr, ncs, jma, mexico, ipma, igp, egypt, bgs, ign, imo, bmkg, inpres, ga, ovsicori, igepn, csn, cwa, geosphere, koeri, phivolcs };

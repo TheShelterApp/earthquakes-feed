@@ -61,6 +61,12 @@ forward with the same names, plus:
 | `partitions[]` | v1 entries plus `sha256`; `frozen: true` means the bytes never change again |
 | `tiles` | the offline region bundle `{version, url, sizeBytes, sha256}` (from `region-tiles/regions-db.json`), or `null` |
 
+Current signing keys (raw Ed25519 public key, base64):
+
+| `kid` | public key | since |
+|---|---|---|
+| `feed-2026a` | `d3VM4u2RaSbJ7BC3HPI8PX9XCS7xTlUHA5hRKID9hKo=` | 2026-09-06 |
+
 A `sha256` that does not match the bytes you fetched means the origin is stale or lying —
 try the next origin. Signing is done by the `derive` workflow after the data commit exists
 (`src/sign-manifest.ts`); the private key never leaves the Actions secret. Verification

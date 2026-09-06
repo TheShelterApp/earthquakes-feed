@@ -103,9 +103,22 @@ jobs:
           FEED_SIGNING_KEY: ${{ secrets.FEED_SIGNING_KEY }}
           FEED_SIGNING_KID: ${{ vars.FEED_SIGNING_KID }}
           TILES_POINTER: .tiles-pointer.json
+          R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
         run: |
           curl -fsSL --max-time 20 https://raw.githubusercontent.com/TheShelterApp/region-tiles/main/regions-db.json -o .tiles-pointer.json || echo '::warning::regions-db.json fetch failed — tiles: null'
           DATA_COMMIT=$(git -C .data rev-parse HEAD) npx --no-install tsx src/sign-manifest.ts
+      - name: Publish artifacts to R2 (data origin, S3 API)
+        # Idempotent (skip-by-sha); self-skips with a warning until the R2 keys exist. The R2
+        # origin is additive — never a gate on the Pages publish below.
+        env:
+          DATA_DIR: .data
+          PUBLIC_DIR: public
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_S3_ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+        run: npx --no-install tsx src/publish-r2.ts
+
       - name: Publish live feed to Cloudflare Pages (Direct Upload)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}

@@ -77,6 +77,8 @@ export interface BuildInput {
   dataCommit: string;
   read: ArtifactReader;
   tiles?: TilesPointer | null;
+  /** The R2 custom-domain base (e.g. https://data-staging.theshelter.app/) — the preferred origin. */
+  r2PublicBase?: string;
   /**
    * The iOS DataFreshness offline threshold (STOP-4: thresholds live only here). Twice the
    * stale window unless overridden — `stale_after` says "delayed", this says "offline".
@@ -89,9 +91,11 @@ export const PAGES_BASE = `https://${DOMAIN}/`;
 
 export const sha256Hex = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
 
-/** Origin templates for a given data commit; `data` (R2, data.theshelter.app) joins in SD-E2. */
-export function originsFor(dataCommit: string): OriginTemplate[] {
+/** Origin templates for a given data commit. When `r2Base` is set (SD-E2) the R2 custom domain is
+ *  the preferred `cdn` origin, ahead of Pages and the GitHub mirrors. */
+export function originsFor(dataCommit: string, r2Base?: string): OriginTemplate[] {
   return [
+    ...(r2Base ? [{ id: 'cdn', base: r2Base.endsWith('/') ? r2Base : `${r2Base}/` }] : []),
     { id: 'pages', base: PAGES_BASE },
     { id: 'jsdelivr-sha', base: `${JSDELIVR_BASE}@${dataCommit}/`, max_object_bytes: 20_000_000 },
     { id: 'raw-sha', base: `https://raw.githubusercontent.com/${REPO}/${dataCommit}/` },
@@ -131,7 +135,7 @@ export function buildManifestV2(input: BuildInput): ManifestV2 {
     },
     data_repo: v1.data_repo,
     data_commit: dataCommit,
-    origins: originsFor(dataCommit),
+    origins: originsFor(dataCommit, input.r2PublicBase),
     status_url: `${PAGES_BASE}v1/status.json`,
     summaries,
     partitions,

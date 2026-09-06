@@ -21,12 +21,14 @@
     "validate": "tsx src/validate.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
-    "sign-manifest": "tsx src/sign-manifest.ts"
+    "sign-manifest": "tsx src/sign-manifest.ts",
+    "publish-r2": "tsx src/publish-r2.ts"
   },
   "dependencies": {
     "@theshelter/signing": "^0.1.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
+    "aws4fetch": "^1.0.20",
     "fflate": "^0.8.3"
   },
   "devDependencies": {

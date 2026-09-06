@@ -35,6 +35,8 @@ const manifest = buildManifestV2({
   v1,
   dataCommit,
   tiles,
+  // When R2 is the data origin (SD-E2) the manifest advertises it first; absent → Pages/mirrors only.
+  ...(process.env.R2_PUBLIC_BASE ? { r2PublicBase: process.env.R2_PUBLIC_BASE } : {}),
   // partitions live in the data checkout, summaries only on Pages (public/)
   read: (path, kind) => new Uint8Array(readFileSync(join(kind === 'partition' ? DATA_DIR : PUBLIC_DIR, path))),
 });

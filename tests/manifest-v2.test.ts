@@ -65,6 +65,13 @@ test('v2 carries v1 forward and adds origins, sha256s, expires, status_url, tile
   assert.equal(build({ offlineAfterSeconds: 7200 }).freshness.offline_after_seconds, 7200);
 });
 
+test('advertises the R2 cdn origin first when r2PublicBase is set', () => {
+  const m = build({ r2PublicBase: 'https://data-staging.theshelter.app' });
+  assert.deepEqual(m.origins.map((o) => o.id), ['cdn', 'pages', 'jsdelivr-sha', 'raw-sha', 'raw-data', 'release']);
+  assert.equal(m.origins[0]!.base, 'https://data-staging.theshelter.app/');
+  assert.equal(build().origins[0]!.id, 'pages', 'no r2PublicBase → no cdn origin');
+});
+
 test('payload bytes are reproducible across runs and independent of input key order', () => {
   const a = manifestV2Bytes(build());
   const b = manifestV2Bytes(build());

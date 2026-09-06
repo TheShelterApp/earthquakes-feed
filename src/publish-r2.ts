@@ -15,6 +15,7 @@ import { R2Publisher, cacheControlFor, contentTypeFor, type PutObject } from './
 interface V2Manifest {
   summaries: Record<string, { path: string }>;
   partitions: Array<{ path: string; frozen: boolean }>;
+  changes: { path: string } | null;
 }
 
 const { R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_S3_ENDPOINT, R2_BUCKET } = process.env;
@@ -45,6 +46,7 @@ function plan(manifest: V2Manifest): Array<{ key: string; local: string; frozen?
   ];
   for (const s of Object.values(manifest.summaries)) items.push({ key: s.path, local: join(publicDir, s.path) });
   for (const p of manifest.partitions) items.push({ key: p.path, local: join(DATA_DIR, p.path), frozen: p.frozen });
+  if (manifest.changes) items.push({ key: manifest.changes.path, local: join(publicDir, manifest.changes.path) });
   return items;
 }
 

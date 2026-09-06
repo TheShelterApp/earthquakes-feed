@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   DATA_DIR,
@@ -23,6 +23,9 @@ import {
 import type { EventNode } from './types.js';
 import { eventDayKey } from './bitemporal.js';
 import { isoFromMs } from './util.js';
+import { enrichStatusV2, updateProviderHealth, type AggregateStatus, type ProviderHealth } from './status-v2.js';
+import { appendChanges } from './changes.js';
+import { FRESHNESS_EXPECTED_INTERVAL_SECONDS, FRESHNESS_STALE_AFTER_SECONDS } from './freshness.js';
 
 interface Feat {
   feature: unknown;
@@ -140,6 +143,10 @@ function headers(todayKey: string): string {
     '/v2/*',
     '  Cache-Control: public, max-age=0, s-maxage=60, stale-while-revalidate=120, stale-if-error=86400',
     '  Access-Control-Allow-Origin: *',
+    // change-log: tailed with Range from the last byte offset; short edge cache, Range-friendly.
+    '/v1/changes/*',
+    '  Cache-Control: public, max-age=0, s-maxage=60, stale-while-revalidate=300, stale-if-error=86400',
+    '  Access-Control-Allow-Origin: *',
     '',
   ].join('\n');
 }
@@ -201,8 +208,36 @@ function main(): void {
   // Publish the last aggregate's per-provider health onto Pages so /v1/status.json is a
   // real endpoint (documented in APIs.md, read by the health watchdog). It's written to
   // DATA_DIR by aggregate; without this copy it only lived on the data branch → 404.
-  const statusSrc = dataPaths(DATA_DIR).status;
-  if (existsSync(statusSrc)) writeIfChanged(join(publicV1, 'status.json'), readFileSync(statusSrc, 'utf8'));
+  const paths = dataPaths(DATA_DIR);
+  if (existsSync(paths.status)) {
+    const raw = JSON.parse(readFileSync(paths.status, 'utf8')) as AggregateStatus;
+    const generatedMs = Date.parse(raw.generated) || nowMs;
+    // SD-E3: per-provider last-success history lives here (derive-owned), so lag is real.
+    const prevHealth: ProviderHealth = existsSync(paths.providerHealth) ? (JSON.parse(readFileSync(paths.providerHealth, 'utf8')) as ProviderHealth) : {};
+    const health = updateProviderHealth(prevHealth, raw.providers, generatedMs);
+    writeIfChanged(paths.providerHealth, JSON.stringify(health) + '\n');
+    const v2 = enrichStatusV2(raw, {
+      generatedMs,
+      expectedIntervalSeconds: FRESHNESS_EXPECTED_INTERVAL_SECONDS,
+      staleAfterSeconds: FRESHNESS_STALE_AFTER_SECONDS,
+      health,
+      ...(process.env.RUN_ID ? { runId: process.env.RUN_ID } : {}),
+    });
+    writeIfChanged(join(publicV1, 'status.json'), JSON.stringify(v2, null, 2));
+  }
+
+  // SD-E3: append the idempotent change-log for this run (fan-out reads this, not state).
+  const changesDay = isoFromMs(nowMs).slice(0, 10);
+  const cursor = existsSync(paths.changesCursor) ? (JSON.parse(readFileSync(paths.changesCursor, 'utf8')) as { seq: number }).seq : 0;
+  const changesFile = join(paths.changesDir, `${changesDay}.ndjson`);
+  const changed = appendChanges(changesFile, allNodes, cursor);
+  if (changed.appended > 0) {
+    writeIfChanged(paths.changesCursor, JSON.stringify({ seq: changed.cursor, day: changesDay }) + '\n');
+    // Mirror the day's change-log to Pages/R2 for hot tailing (Range from the last byte).
+    mkdirSync(join(publicV1, 'changes'), { recursive: true });
+    writeFileSync(join(publicV1, 'changes', `${changesDay}.ndjson`), readFileSync(changesFile));
+  }
+  console.log(`derive: status v2 + changes appended=${changed.appended} (seq→${changed.cursor})`);
 
   const pruned = pruneEventMapShards(DATA_DIR, nowMs - EVENT_MAP_HORIZON_DAYS * 86_400_000);
 

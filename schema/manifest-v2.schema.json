@@ -2,53 +2,136 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://earthquakes-feed.theshelter.app/schema/manifest-v2.schema.json",
   "title": "Feed catalog manifest v2 (signed envelope payload)",
-  "description": "The decoded `payload` of /v2/manifest.json — an Ed25519 envelope {payload, sig, kid}; payload bytes are RFC 8785 canonical JSON of this object.",
+  "description": "The decoded `payload` of /v2/manifest.json \u2014 an Ed25519 envelope {payload, sig, kid}; payload bytes are RFC 8785 canonical JSON of this object.",
   "type": "object",
-  "required": ["schema_version", "generated", "generated_iso", "expires", "head_seq", "event_count", "freshness", "data_repo", "data_commit", "origins", "status_url", "summaries", "partitions", "tiles", "archives"],
+  "required": [
+    "schema_version",
+    "generated",
+    "generated_iso",
+    "expires",
+    "head_seq",
+    "event_count",
+    "freshness",
+    "data_repo",
+    "data_commit",
+    "origins",
+    "status_url",
+    "summaries",
+    "partitions",
+    "tiles",
+    "archives",
+    "changes"
+  ],
   "properties": {
-    "schema_version": { "const": 2 },
-    "generated": { "type": "integer", "description": "ms epoch" },
-    "generated_iso": { "type": "string", "format": "date-time" },
-    "expires": { "type": "integer", "description": "generated + stale_after_seconds*1000" },
-    "head_seq": { "type": "integer" },
-    "event_count": { "type": "integer" },
+    "schema_version": {
+      "const": 2
+    },
+    "generated": {
+      "type": "integer",
+      "description": "ms epoch"
+    },
+    "generated_iso": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires": {
+      "type": "integer",
+      "description": "generated + stale_after_seconds*1000"
+    },
+    "head_seq": {
+      "type": "integer"
+    },
+    "event_count": {
+      "type": "integer"
+    },
     "freshness": {
       "type": "object",
-      "required": ["expected_interval_seconds", "stale_after_seconds", "offline_after_seconds"],
+      "required": [
+        "expected_interval_seconds",
+        "stale_after_seconds",
+        "offline_after_seconds"
+      ],
       "properties": {
-        "expected_interval_seconds": { "type": "integer", "minimum": 1 },
-        "stale_after_seconds": { "type": "integer", "minimum": 1 },
-        "offline_after_seconds": { "type": "integer", "minimum": 1 }
+        "expected_interval_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stale_after_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "offline_after_seconds": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
-    "data_repo": { "type": "string" },
-    "data_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "data_repo": {
+      "type": "string"
+    },
+    "data_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
     "origins": {
       "type": "array",
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["id", "base"],
+        "required": [
+          "id",
+          "base"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "base": { "type": "string", "format": "uri" },
-          "max_object_bytes": { "type": "integer" },
-          "mutable_only": { "type": "boolean" }
+          "id": {
+            "type": "string"
+          },
+          "base": {
+            "type": "string",
+            "format": "uri"
+          },
+          "max_object_bytes": {
+            "type": "integer"
+          },
+          "mutable_only": {
+            "type": "boolean"
+          }
         }
       }
     },
-    "status_url": { "type": "string", "format": "uri" },
+    "status_url": {
+      "type": "string",
+      "format": "uri"
+    },
     "summaries": {
       "type": "object",
       "additionalProperties": {
         "type": "object",
-        "required": ["path", "url", "count", "bytes", "sha256"],
+        "required": [
+          "path",
+          "url",
+          "count",
+          "bytes",
+          "sha256"
+        ],
         "properties": {
-          "path": { "type": "string" },
-          "url": { "type": "string", "format": "uri" },
-          "count": { "type": "integer" },
-          "bytes": { "type": "integer" },
-          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          "path": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "bytes": {
+            "type": "integer"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
         }
       }
     },
@@ -56,36 +139,139 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["date", "path", "url", "count", "bytes", "frozen", "sha256"],
+        "required": [
+          "date",
+          "path",
+          "url",
+          "count",
+          "bytes",
+          "frozen",
+          "sha256"
+        ],
         "properties": {
-          "date": { "type": "string" },
-          "path": { "type": "string" },
-          "url": { "type": "string", "format": "uri" },
-          "pages_url": { "type": "string", "format": "uri" },
-          "count": { "type": "integer" },
-          "bytes": { "type": "integer" },
-          "min_mag": { "type": ["number", "null"] },
-          "max_mag": { "type": ["number", "null"] },
-          "frozen": { "type": "boolean", "description": "true = immutable, never rewritten" },
-          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          "date": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "pages_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "bytes": {
+            "type": "integer"
+          },
+          "min_mag": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "max_mag": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "frozen": {
+            "type": "boolean",
+            "description": "true = immutable, never rewritten"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
         }
       }
     },
     "tiles": {
       "oneOf": [
-        { "type": "null" },
+        {
+          "type": "null"
+        },
         {
           "type": "object",
-          "required": ["version", "url", "sizeBytes", "sha256"],
+          "required": [
+            "version",
+            "url",
+            "sizeBytes",
+            "sha256"
+          ],
           "properties": {
-            "version": { "type": "string" },
-            "url": { "type": "string", "format": "uri" },
-            "sizeBytes": { "type": "integer" },
-            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            "version": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string",
+              "format": "uri"
+            },
+            "sizeBytes": {
+              "type": "integer"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
           }
         }
       ]
     },
-    "archives": { "type": "array", "items": { "type": "object" } }
+    "archives": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "changes": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "path",
+            "sha256",
+            "size",
+            "firstSeq",
+            "lastSeq",
+            "urls"
+          ],
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "size": {
+              "type": "integer"
+            },
+            "firstSeq": {
+              "type": "integer"
+            },
+            "lastSeq": {
+              "type": "integer"
+            },
+            "urls": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "uri"
+              }
+            }
+          }
+        }
+      ]
+    }
   }
 }

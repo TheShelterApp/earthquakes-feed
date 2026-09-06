@@ -31,10 +31,17 @@ const tilesFile = process.env.TILES_POINTER;
 const tiles: TilesPointer | null = tilesFile && existsSync(tilesFile) ? (JSON.parse(readFileSync(tilesFile, 'utf8')) as TilesPointer) : null;
 if (tilesFile && !tiles) console.warn(`::warning::TILES_POINTER ${tilesFile} not found — tiles: null`);
 
+// SD-E3: the current UTC day's change-log, if derive wrote one (v1/changes/<day>.ndjson).
+const changesDay = new Date(v1.generated).toISOString().slice(0, 10);
+const changesPath = `v1/changes/${changesDay}.ndjson`;
+const changesLocal = join(PUBLIC_DIR, changesPath);
+const changes = existsSync(changesLocal) ? { path: changesPath, bytes: new Uint8Array(readFileSync(changesLocal)) } : undefined;
+
 const manifest = buildManifestV2({
   v1,
   dataCommit,
   tiles,
+  ...(changes ? { changes } : {}),
   // When R2 is the data origin (SD-E2) the manifest advertises it first; absent → Pages/mirrors only.
   ...(process.env.R2_PUBLIC_BASE ? { r2PublicBase: process.env.R2_PUBLIC_BASE } : {}),
   // partitions live in the data checkout, summaries only on Pages (public/)

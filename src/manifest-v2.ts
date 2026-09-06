@@ -48,6 +48,15 @@ export interface OriginTemplate {
   mutable_only?: boolean;
 }
 
+export interface ChangesRef {
+  path: string;
+  sha256: string;
+  size: number;
+  firstSeq: number;
+  lastSeq: number;
+  urls: string[];
+}
+
 export interface ManifestV2 {
   schema_version: 2;
   generated: number;
@@ -65,6 +74,8 @@ export interface ManifestV2 {
   summaries: Record<string, { path: string; url: string; count: number; bytes: number; sha256: string }>;
   /** `frozen` doubles as the immutability flag: a frozen partition is never rewritten. */
   partitions: Array<ManifestPartition & { sha256: string; bytes: number }>;
+  /** The current UTC day's append-only change-log (SD-E3), tailed with Range; null before the first change. */
+  changes: ChangesRef | null;
   tiles: TilesPointer | null;
   archives: unknown[];
 }
@@ -79,6 +90,8 @@ export interface BuildInput {
   tiles?: TilesPointer | null;
   /** The R2 custom-domain base (e.g. https://data-staging.theshelter.app/) — the preferred origin. */
   r2PublicBase?: string;
+  /** The current day's change-log bytes + its key (v1/changes/<day>.ndjson), when one exists. */
+  changes?: { path: string; bytes: Uint8Array };
   /**
    * The iOS DataFreshness offline threshold (STOP-4: thresholds live only here). Twice the
    * stale window unless overridden — `stale_after` says "delayed", this says "offline".
@@ -90,6 +103,19 @@ export const DEFAULT_KID = 'feed-2026a';
 export const PAGES_BASE = `https://${DOMAIN}/`;
 
 export const sha256Hex = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
+
+function changesRef(c: { path: string; bytes: Uint8Array }): ChangesRef {
+  const lines = new TextDecoder().decode(c.bytes).trimEnd().split('\n').filter(Boolean);
+  const seqOf = (line: string): number => (JSON.parse(line) as { seq: number }).seq;
+  return {
+    path: c.path,
+    sha256: sha256Hex(c.bytes),
+    size: c.bytes.byteLength,
+    firstSeq: lines.length ? seqOf(lines[0]!) : 0,
+    lastSeq: lines.length ? seqOf(lines[lines.length - 1]!) : 0,
+    urls: [`${PAGES_BASE}${c.path}`],
+  };
+}
 
 /** Origin templates for a given data commit. When `r2Base` is set (SD-E2) the R2 custom domain is
  *  the preferred `cdn` origin, ahead of Pages and the GitHub mirrors. */
@@ -139,6 +165,7 @@ export function buildManifestV2(input: BuildInput): ManifestV2 {
     status_url: `${PAGES_BASE}v1/status.json`,
     summaries,
     partitions,
+    changes: input.changes ? changesRef(input.changes) : null,
     tiles: input.tiles ?? null,
     archives: v1.archives,
   };

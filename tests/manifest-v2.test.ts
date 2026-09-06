@@ -97,6 +97,17 @@ test('signs with Ed25519 and verifies; a tampered payload or signature is reject
   await assert.rejects(verifyManifestV2(env, other.verifier), (e: { code?: string }) => e.code === 'UnknownKid');
 });
 
+test('carries the SD-E3 changes ref when provided; null otherwise', () => {
+  const bytes = new TextEncoder().encode('{"id":"efd_1","seq":8809002}\n{"id":"efd_2","seq":8812345}\n');
+  const m = build({ changes: { path: 'v1/changes/2026-09-05.ndjson', bytes } });
+  assert.equal(m.changes?.path, 'v1/changes/2026-09-05.ndjson');
+  assert.equal(m.changes?.firstSeq, 8809002);
+  assert.equal(m.changes?.lastSeq, 8812345);
+  assert.equal(m.changes?.size, bytes.byteLength);
+  assert.match(m.changes!.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(build().changes, null, 'no changes input → changes: null');
+});
+
 test('the payload validates against schema/manifest-v2.schema.json; a bad data_commit does not', () => {
   const ajv = new Ajv2020({ allErrors: true, strict: false });
   addFormats(ajv);

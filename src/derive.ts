@@ -136,6 +136,10 @@ function headers(todayKey: string): string {
     `/v1/events/${todayKey}.geojson`,
     '  Cache-Control: public, max-age=300, stale-while-revalidate=600',
     '  Access-Control-Allow-Origin: *',
+    // v2 manifest (signed envelope, ~KBs): clients revalidate with ETag, the edge absorbs it.
+    '/v2/*',
+    '  Cache-Control: public, max-age=0, s-maxage=60, stale-while-revalidate=120, stale-if-error=86400',
+    '  Access-Control-Allow-Origin: *',
     '',
   ].join('\n');
 }

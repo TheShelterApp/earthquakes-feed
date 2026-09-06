@@ -93,6 +93,19 @@ jobs:
         run: |
           SHA=$(git -C .data rev-parse HEAD)
           node -e "const f='public/v1/manifest.json',fs=require('fs');const m=JSON.parse(fs.readFileSync(f));m.data_commit='$SHA';fs.writeFileSync(f,JSON.stringify(m,null,2));console.log('data_commit='+'$SHA'.slice(0,8))"
+      - name: Sign v2 manifest (Ed25519 envelope pinned to the data commit)
+        # Skips with a warning until FEED_SIGNING_KEY exists — v1 keeps publishing either way.
+        # The tiles pointer is fetched so the manifest can vouch for the offline bundle; if the
+        # fetch fails the manifest says tiles: null rather than failing the run.
+        env:
+          DATA_DIR: .data
+          PUBLIC_DIR: public
+          FEED_SIGNING_KEY: ${{ secrets.FEED_SIGNING_KEY }}
+          FEED_SIGNING_KID: ${{ vars.FEED_SIGNING_KID }}
+          TILES_POINTER: .tiles-pointer.json
+        run: |
+          curl -fsSL --max-time 20 https://raw.githubusercontent.com/TheShelterApp/region-tiles/main/regions-db.json -o .tiles-pointer.json || echo '::warning::regions-db.json fetch failed — tiles: null'
+          DATA_COMMIT=$(git -C .data rev-parse HEAD) npx --no-install tsx src/sign-manifest.ts
       - name: Publish live feed to Cloudflare Pages (Direct Upload)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}

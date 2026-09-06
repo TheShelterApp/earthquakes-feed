@@ -35,6 +35,39 @@ The catalog. Fields:
 
 `partitions[]` overrides `archives[]` for any day present in both.
 
+### `GET /v2/manifest.json` — signed catalog
+
+The same catalog, wrapped so a client can trust it from **any** origin (Pages, jsDelivr,
+raw.githubusercontent, a mirror):
+
+```json
+{ "payload": "<base64>", "sig": "<base64>", "kid": "feed-2026a" }
+```
+
+`payload` is the exact bytes that were signed — RFC 8785 canonical JSON of the object below —
+and `sig` is Ed25519 over those bytes. Verify **before** parsing; embed the public key for
+each `kid` (rotation = a second `kid` in the app, then a swap). Everything v1 has is carried
+forward with the same names, plus:
+
+| Field | Meaning |
+|---|---|
+| `schema_version` | `2` |
+| `expires` | `generated + freshness.stale_after_seconds·1000` — past this, show "data may be delayed" |
+| `freshness.offline_after_seconds` | past this since the last successful fetch, treat the client as offline (default 2× stale) |
+| `data_commit` | always set (the data-branch commit every URL below is pinned to) |
+| `origins[]` | `{id, base, max_object_bytes?, mutable_only?}` — prefixes a `path` is appended to: `pages`, `jsdelivr-sha`, `raw-sha`, `raw-data` (head only), `release` |
+| `status_url` | where `/v1/status.json` lives |
+| `summaries` | v1 entries plus `bytes` and `sha256` of the file |
+| `partitions[]` | v1 entries plus `sha256`; `frozen: true` means the bytes never change again |
+| `tiles` | the offline region bundle `{version, url, sizeBytes, sha256}` (from `region-tiles/regions-db.json`), or `null` |
+
+A `sha256` that does not match the bytes you fetched means the origin is stale or lying —
+try the next origin. Signing is done by the `derive` workflow after the data commit exists
+(`src/sign-manifest.ts`); the private key never leaves the Actions secret. Verification
+helpers: [`@theshelter/signing`](https://www.npmjs.com/package/@theshelter/signing)
+(`openBytes` + `decodeJsonPayload`), or CryptoKit `Curve25519.Signing.PublicKey` on Apple
+platforms. Schema: `schema/manifest-v2.schema.json`.
+
 ### `GET /v1/{threshold}_{window}.geojson` — rolling summaries
 
 `threshold ∈ {all, 1.0, 2.5, 4.5, significant}`, `window ∈ {hour, day, week, month}`
@@ -111,6 +144,9 @@ Scheduled runs are best-effort. A consumer should compute
 `age = (Date.now() - metadata.generated) / 1000` and, if it exceeds
 `manifest.freshness.stale_after_seconds`, mark the layer **degraded** and fall back to
 its own realtime source (e.g. the EMSC WebSocket) if it has one.
+The v2 manifest adds `freshness.offline_after_seconds`: if a consumer's **own last successful
+fetch** (of any origin) is older than that, it is offline, not merely behind — a stronger state
+than degraded, and the two are shown differently.
 
 ## Realtime + client dedup
 

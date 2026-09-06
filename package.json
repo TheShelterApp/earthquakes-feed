@@ -20,9 +20,11 @@
     "archive": "tsx src/archive.ts",
     "validate": "tsx src/validate.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test tests/*.test.ts"
+    "test": "node --import tsx --test tests/*.test.ts",
+    "sign-manifest": "tsx src/sign-manifest.ts"
   },
   "dependencies": {
+    "@theshelter/signing": "file:vendor/theshelter-signing-0.1.0.tgz",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
     "fflate": "^0.8.3"

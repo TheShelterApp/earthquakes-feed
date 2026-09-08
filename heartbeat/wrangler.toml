@@ -6,7 +6,10 @@ compatibility_date = "2024-11-01"
 # drives them reliably: aggregate every 5 min, backfill hourly, health every 15 min.
 # health's own hourly GitHub cron was delivered ~20x per 48h with 2-4.5h gaps, so a
 # 28-minute Pages outage went entirely unreported (see src/worker.js).
+# ONE per-minute cron (not three): the account is capped at 5 cron triggers on the
+# Workers free tier, so src/worker.js fans out by the scheduled minute instead — the
+# three schedules never share a minute, so behaviour is identical.
 # Needs a secret GH_PAT (fine-grained token, repo earthquakes-feed, Actions: write):
 #   cd heartbeat && wrangler secret put GH_PAT
 [triggers]
-crons = ["*/5 * * * *", "41 * * * *", "7,22,37,52 * * * *"]
+crons = ["* * * * *"]

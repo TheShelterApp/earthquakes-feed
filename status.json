@@ -1,15 +1,17 @@
 {
-  "generated": "2026-09-11T05:17:15.512Z",
-  "head_seq": 148513,
-  "events_indexed": 13343,
-  "observations_returned": 8747,
+  "generated": "2026-09-11T05:22:08.203Z",
+  "head_seq": 148517,
+  "events_indexed": 13347,
+  "observations_returned": 8412,
   "stale_dropped": 4528,
   "bad_coords_dropped": 0,
-  "new_observations": 9,
+  "new_observations": 4,
   "revisions": 0,
   "tombstoned": 0,
-  "duration_ms": 34947,
+  "duration_ms": 37628,
   "degraded": [
+    "resif",
+    "noa",
     "scedc",
     "tmd",
     "usp"
@@ -18,62 +20,58 @@
     "usgs": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 170,
-      "events_returned": 585
+      "latency_ms": 762,
+      "events_returned": 586
     },
     "emsc": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 2060,
-      "events_returned": 822
+      "latency_ms": 2307,
+      "events_returned": 824
     },
     "geofon": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 1082,
+      "latency_ms": 1699,
       "events_returned": 25
     },
     "ingv": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 2050,
+      "latency_ms": 1696,
       "events_returned": 63
     },
     "geonet": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 1748,
+      "latency_ms": 2340,
       "events_returned": 131
     },
     "resif": {
-      "ok": true,
-      "http_status": 200,
-      "latency_ms": 12620,
-      "events_returned": 58
+      "ok": false,
+      "error": "fetch failed"
     },
     "noa": {
-      "ok": true,
-      "http_status": 200,
-      "latency_ms": 8569,
-      "events_returned": 279
+      "ok": false,
+      "error": "This operation was aborted"
     },
     "ethz": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 2660,
+      "latency_ms": 2809,
       "events_returned": 9
     },
     "nrcan": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 2766,
+      "latency_ms": 2811,
       "events_returned": 9
     },
     "ncedc": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 2672,
-      "events_returned": 206
+      "latency_ms": 3504,
+      "events_returned": 207
     },
     "scedc": {
       "ok": false,
@@ -82,60 +80,60 @@
     "knmi": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 2941,
+      "latency_ms": 3690,
       "events_returned": 2
     },
     "auspass": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 3055,
+      "latency_ms": 4293,
       "events_returned": 4
     },
     "afad": {
       "ok": true,
-      "latency_ms": 3385,
-      "events_returned": 223
+      "latency_ms": 4350,
+      "events_returned": 222
     },
     "cenc": {
       "ok": true,
-      "latency_ms": 4075,
+      "latency_ms": 4699,
       "events_returned": 834
     },
     "ncs": {
       "ok": true,
-      "latency_ms": 4802,
+      "latency_ms": 6190,
       "events_returned": 150
     },
     "tmd": {
       "ok": false,
-      "latency_ms": 34659,
+      "latency_ms": 37328,
       "error": "getaddrinfo EAI_AGAIN eq.tmd.go.th"
     },
     "kagsr": {
       "ok": true,
-      "latency_ms": 5537,
+      "latency_ms": 7097,
       "events_returned": 10
     },
     "bmkg": {
       "ok": true,
-      "latency_ms": 4580,
+      "latency_ms": 5745,
       "events_returned": 28
     },
     "jma": {
       "ok": true,
-      "latency_ms": 4662,
+      "latency_ms": 5754,
       "events_returned": 259
     },
     "renass": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 5710,
+      "latency_ms": 6698,
       "events_returned": 58
     },
     "ipgp": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 6040,
+      "latency_ms": 6816,
       "events_returned": 7
     },
     "usp": {
@@ -145,7 +143,7 @@
     "lmu": {
       "ok": true,
       "http_status": 204,
-      "latency_ms": 7156,
+      "latency_ms": 8019,
       "events_returned": 0
     },
     "isc": {
@@ -154,82 +152,82 @@
     },
     "mexico": {
       "ok": true,
-      "latency_ms": 12143,
+      "latency_ms": 7754,
       "events_returned": 15
     },
     "ipma": {
       "ok": true,
-      "latency_ms": 7791,
+      "latency_ms": 8271,
       "events_returned": 158
     },
     "igp": {
       "ok": true,
-      "latency_ms": 7785,
+      "latency_ms": 8411,
       "events_returned": 652
     },
     "egypt": {
       "ok": true,
-      "latency_ms": 9901,
+      "latency_ms": 9214,
       "events_returned": 0
     },
     "bgs": {
       "ok": true,
-      "latency_ms": 8522,
+      "latency_ms": 8923,
       "events_returned": 43
     },
     "ign": {
       "ok": true,
-      "latency_ms": 11697,
+      "latency_ms": 8792,
       "events_returned": 2402
     },
     "imo": {
       "ok": true,
-      "latency_ms": 9440,
+      "latency_ms": 15668,
       "events_returned": 132
     },
     "inpres": {
       "ok": true,
-      "latency_ms": 10351,
+      "latency_ms": 15872,
       "events_returned": 30
     },
     "ga": {
       "ok": true,
-      "latency_ms": 10541,
+      "latency_ms": 15751,
       "events_returned": 0
     },
     "ovsicori": {
       "ok": true,
-      "latency_ms": 13260,
-      "events_returned": 218
+      "latency_ms": 16675,
+      "events_returned": 217
     },
     "igepn": {
       "ok": true,
-      "latency_ms": 12825,
+      "latency_ms": 16342,
       "events_returned": 50
     },
     "csn": {
       "ok": true,
-      "latency_ms": 13292,
+      "latency_ms": 15851,
       "events_returned": 39
     },
     "cwa": {
       "ok": true,
-      "latency_ms": 13863,
+      "latency_ms": 18370,
       "events_returned": 32
     },
     "geosphere": {
       "ok": true,
-      "latency_ms": 13598,
+      "latency_ms": 16734,
       "events_returned": 122
     },
     "koeri": {
       "ok": true,
-      "latency_ms": 13415,
+      "latency_ms": 16500,
       "events_returned": 500
     },
     "phivolcs": {
       "ok": true,
-      "latency_ms": 12693,
+      "latency_ms": 15516,
       "events_returned": 592
     }
   }

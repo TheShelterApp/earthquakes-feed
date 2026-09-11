@@ -1,142 +1,140 @@
 {
-  "generated": "2026-09-11T19:26:46.146Z",
-  "head_seq": 149815,
-  "events_indexed": 14140,
-  "observations_returned": 7942,
-  "stale_dropped": 3767,
+  "generated": "2026-09-11T19:32:04.253Z",
+  "head_seq": 149822,
+  "events_indexed": 14146,
+  "observations_returned": 8579,
+  "stale_dropped": 4586,
   "bad_coords_dropped": 0,
-  "new_observations": 5,
+  "new_observations": 7,
   "revisions": 0,
   "tombstoned": 0,
-  "duration_ms": 21746,
+  "duration_ms": 18756,
   "degraded": [
-    "resif",
-    "cenc",
+    "noa",
+    "ipgp",
     "usp"
   ],
   "providers": {
     "usgs": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 937,
-      "events_returned": 588
+      "latency_ms": 368,
+      "events_returned": 589
     },
     "emsc": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 2327,
+      "latency_ms": 1832,
       "events_returned": 776
     },
     "geofon": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 982,
+      "latency_ms": 999,
       "events_returned": 23
     },
     "ingv": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 2000,
-      "events_returned": 79
+      "latency_ms": 1746,
+      "events_returned": 80
     },
     "geonet": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 2289,
-      "events_returned": 120
+      "latency_ms": 2013,
+      "events_returned": 119
     },
     "resif": {
-      "ok": false,
-      "error": "fetch failed"
-    },
-    "noa": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 7760,
-      "events_returned": 256
+      "latency_ms": 11417,
+      "events_returned": 66
+    },
+    "noa": {
+      "ok": false,
+      "error": "This operation was aborted"
     },
     "ethz": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 3153,
+      "latency_ms": 2839,
       "events_returned": 10
     },
     "nrcan": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 3498,
-      "events_returned": 14
+      "latency_ms": 3260,
+      "events_returned": 15
     },
     "ncedc": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 3735,
-      "events_returned": 169
+      "latency_ms": 3632,
+      "events_returned": 170
     },
     "scedc": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 3629,
-      "events_returned": 121
+      "latency_ms": 3698,
+      "events_returned": 120
     },
     "knmi": {
       "ok": true,
       "http_status": 204,
-      "latency_ms": 4048,
+      "latency_ms": 3740,
       "events_returned": 0
     },
     "auspass": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 4548,
+      "latency_ms": 4308,
       "events_returned": 4
     },
     "afad": {
       "ok": true,
-      "latency_ms": 4922,
+      "latency_ms": 4611,
       "events_returned": 229
     },
     "cenc": {
-      "ok": false,
-      "latency_ms": 21461,
-      "error": "fetch failed"
+      "ok": true,
+      "latency_ms": 18429,
+      "events_returned": 837
     },
     "ncs": {
       "ok": true,
-      "latency_ms": 9867,
+      "latency_ms": 6645,
       "events_returned": 150
     },
     "tmd": {
       "ok": true,
-      "latency_ms": 6625,
+      "latency_ms": 6190,
       "events_returned": 0
     },
     "kagsr": {
       "ok": true,
-      "latency_ms": 7615,
+      "latency_ms": 7508,
       "events_returned": 6
     },
     "bmkg": {
       "ok": true,
-      "latency_ms": 6637,
+      "latency_ms": 5676,
       "events_returned": 28
     },
     "jma": {
       "ok": true,
-      "latency_ms": 6653,
+      "latency_ms": 5583,
       "events_returned": 257
     },
     "renass": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 8035,
+      "latency_ms": 6675,
       "events_returned": 66
     },
     "ipgp": {
-      "ok": true,
-      "http_status": 200,
-      "latency_ms": 8359,
-      "events_returned": 11
+      "ok": false,
+      "error": "This operation was aborted"
     },
     "usp": {
       "ok": false,
@@ -145,7 +143,7 @@
     "lmu": {
       "ok": true,
       "http_status": 204,
-      "latency_ms": 8877,
+      "latency_ms": 7514,
       "events_returned": 0
     },
     "isc": {
@@ -154,82 +152,82 @@
     },
     "mexico": {
       "ok": true,
-      "latency_ms": 8455,
+      "latency_ms": 7078,
       "events_returned": 15
     },
     "ipma": {
       "ok": true,
-      "latency_ms": 9216,
+      "latency_ms": 7868,
       "events_returned": 154
     },
     "igp": {
       "ok": true,
-      "latency_ms": 9202,
+      "latency_ms": 7695,
       "events_returned": 654
     },
     "egypt": {
       "ok": true,
-      "latency_ms": 11351,
+      "latency_ms": 8426,
       "events_returned": 0
     },
     "bgs": {
       "ok": true,
-      "latency_ms": 9852,
+      "latency_ms": 7931,
       "events_returned": 42
     },
     "ign": {
       "ok": true,
-      "latency_ms": 9343,
+      "latency_ms": 7747,
       "events_returned": 2405
     },
     "imo": {
       "ok": true,
-      "latency_ms": 10587,
-      "events_returned": 135
+      "latency_ms": 9196,
+      "events_returned": 134
     },
     "inpres": {
       "ok": true,
-      "latency_ms": 14568,
+      "latency_ms": 8821,
       "events_returned": 30
     },
     "ga": {
       "ok": true,
-      "latency_ms": 10888,
+      "latency_ms": 9232,
       "events_returned": 0
     },
     "ovsicori": {
       "ok": true,
-      "latency_ms": 15205,
+      "latency_ms": 9684,
       "events_returned": 197
     },
     "igepn": {
       "ok": true,
-      "latency_ms": 15139,
+      "latency_ms": 9472,
       "events_returned": 50
     },
     "csn": {
       "ok": true,
-      "latency_ms": 15096,
+      "latency_ms": 9045,
       "events_returned": 61
     },
     "cwa": {
       "ok": true,
-      "latency_ms": 15649,
+      "latency_ms": 11505,
       "events_returned": 32
     },
     "geosphere": {
       "ok": true,
-      "latency_ms": 16016,
+      "latency_ms": 10322,
       "events_returned": 126
     },
     "koeri": {
       "ok": true,
-      "latency_ms": 15756,
+      "latency_ms": 10191,
       "events_returned": 500
     },
     "phivolcs": {
       "ok": true,
-      "latency_ms": 14159,
+      "latency_ms": 11925,
       "events_returned": 634
     }
   }

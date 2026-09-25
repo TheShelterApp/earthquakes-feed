@@ -124,6 +124,87 @@ test('apns-dry fixture: apns.configured == false fails', () => {
   assert.match(v.problems[0]!, /APNs is NOT configured/);
 });
 
+// --- round-3 gateway: per-environment APNs keys (apns.mode/production/sandbox/problems) + the fanout block ---
+
+test('healthy-r3 fixture (legacy key, clean counters) passes with no warning and summarizes the new blocks', () => {
+  const v = evaluateStatus(statusFixture('healthy-r3'), { nowMs: NOW });
+  assert.deepEqual(v.problems, []);
+  assert.deepEqual(v.warnings, []);
+  assert.match(v.summary, /apns=configured\/legacy/);
+  assert.match(v.summary, /fanout=jobs:3,sent:41,no_key:0,dropped_budget:0/);
+});
+
+test('apns-split-no-production fixture: split keys without a production key fail (every production device is skipped)', () => {
+  const v = evaluateStatus(statusFixture('apns-split-no-production'), { nowMs: NOW });
+  assert.equal(v.problems.length, 1);
+  assert.match(v.problems[0]!, /split per-environment keys but holds NO production key/);
+  assert.match(v.problems[0]!, /App Store and TestFlight/);
+  assert.match(v.summary, /apns=configured\/split\/production=NO/);
+  // The skipped devices are also surfaced as a (non-failing) counter warning.
+  assert.equal(v.warnings.length, 1);
+  assert.match(v.warnings[0]!, /12 device push\(es\) skipped today \(UTC 2026-09-25\).*skipped_no_key/);
+});
+
+test('split mode fails unless apns.production is exactly true', () => {
+  for (const production of [false, undefined, null, 'true', 1]) {
+    const doc = statusFixture('healthy-r3');
+    doc.apns = { configured: true, mode: 'split', production, sandbox: true, problems: [] };
+    if (production === undefined) delete doc.apns.production;
+    assert.equal(evaluateStatus(doc, { nowMs: NOW }).problems.length, 1, String(production));
+  }
+  const ok = statusFixture('healthy-r3');
+  ok.apns = { configured: true, mode: 'split', production: true, sandbox: true, problems: [] };
+  assert.deepEqual(evaluateStatus(ok, { nowMs: NOW }).problems, []);
+});
+
+test('apns-key-problems fixture: a non-empty apns.problems fails and names the key', () => {
+  const v = evaluateStatus(statusFixture('apns-key-problems'), { nowMs: NOW });
+  assert.equal(v.problems.length, 1);
+  assert.match(v.problems[0]!, /APNs key configuration has 1 problem\(s\): APNS_KEY_ID_SANDBOX set without APNS_P8_SANDBOX/);
+  assert.equal(v.warnings.length, 1);
+  assert.match(v.warnings[0]!, /2 device push\(es\) skipped today/);
+});
+
+test('the reviewed outage (split, APNS_P8 gone, skipped_no_key=12) fails twice and is no longer "healthy"', () => {
+  const doc = structuredClone(HEALTHY);
+  doc.apns = { configured: true, mode: 'split', production: false, sandbox: true, problems: ['APNS_KEY_ID set without APNS_P8'] };
+  doc.fanout = { ...statusFixture('healthy-r3').fanout, skipped_no_key: 12 };
+  const v = evaluateStatus(doc, { nowMs: NOW });
+  assert.equal(v.problems.length, 2);
+  assert.match(v.problems.join(' | '), /APNS_KEY_ID set without APNS_P8.*NO production key/);
+  assert.equal(v.warnings.length, 1);
+});
+
+test('fanout-warnings fixture: skipped_no_key > 0 and retry_dropped_budget > 0 warn, never fail', () => {
+  const v = evaluateStatus(statusFixture('fanout-warnings'), { nowMs: NOW });
+  assert.deepEqual(v.problems, []);
+  assert.equal(v.warnings.length, 2);
+  assert.match(v.warnings[0]!, /3 device push\(es\) skipped today \(UTC 2026-09-25\) because the gateway holds no APNs key/);
+  assert.match(v.warnings[1]!, /40 transient push failure\(s\) today \(UTC 2026-09-25\) were dropped without a retry.*retry_dropped_budget/);
+  assert.match(v.summary, /fanout=jobs:3,sent:41,no_key:3,dropped_budget:40/);
+});
+
+test('older gateways: missing mode/production/problems/fanout (or odd shapes) never fail or warn', () => {
+  // The live capture predates round 3: apns is just {configured:true} and there is no fanout block.
+  const legacyDoc = evaluateStatus(HEALTHY, { nowMs: NOW });
+  assert.deepEqual(legacyDoc.problems, []);
+  assert.deepEqual(legacyDoc.warnings, []);
+  assert.match(legacyDoc.summary, /apns=configured fanout=n\/a/);
+
+  const nullFanout = statusFixture('healthy-r3');
+  nullFanout.fanout = null;
+  const vn = evaluateStatus(nullFanout, { nowMs: NOW });
+  assert.deepEqual([vn.problems, vn.warnings], [[], []]);
+  assert.match(vn.summary, /fanout=none/);
+
+  const odd = statusFixture('healthy-r3');
+  odd.apns = { configured: true, mode: 'legacy', problems: 'not-an-array' };
+  odd.fanout = { day: '2026-09-25' };
+  const vo = evaluateStatus(odd, { nowMs: NOW });
+  assert.deepEqual([vo.problems, vo.warnings], [[], []]);
+  assert.match(vo.summary, /fanout=jobs:\?,sent:\?,no_key:\?,dropped_budget:\?/);
+});
+
 test('missing optional blocks warn instead of failing; missing required fields fail', () => {
   const partial = structuredClone(HEALTHY);
   delete partial.apns;
@@ -151,6 +232,8 @@ test('every failing condition at once is reported, one problem each', () => {
   doc.budget.headroomPct = 5;
   doc.apns = { configured: false };
   assert.equal(evaluateStatus(doc, { nowMs: NOW }).problems.length, 6);
+  doc.apns = { configured: true, mode: 'split', production: false, sandbox: true, problems: ['APNS_KEY_ID set without APNS_P8'] };
+  assert.equal(evaluateStatus(doc, { nowMs: NOW }).problems.length, 7);
 });
 
 test('thresholds can be overridden (the selftest path)', () => {
@@ -287,10 +370,31 @@ test('main: healthy document, no token -> exit 0 and the usage API is never call
 });
 
 test('main: every failing fixture exits 1 with an "Alert pipeline unhealthy" error', async () => {
-  for (const name of ['stale', 'provider-down', 'policy-fallback', 'degraded', 'low-headroom', 'apns-dry']) {
+  for (const name of ['stale', 'provider-down', 'policy-fallback', 'degraded', 'low-headroom', 'apns-dry', 'apns-split-no-production', 'apns-key-problems']) {
     const r = await run({ routes: { [STATUS_URL]: [jsonResponse(statusFixture(name))] } });
     assert.equal(r.code, 1, name);
     assert.match(r.out, /::error title=Alert pipeline unhealthy::/, name);
+  }
+});
+
+test('main: fan-out counter warnings are annotated and listed in the summary but keep exit 0', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'alerts-watchdog-'));
+  try {
+    const summary = join(dir, 'summary.md');
+    const lines: string[] = [];
+    const f = fakeFetch({ [STATUS_URL]: [jsonResponse(statusFixture('fanout-warnings'))] });
+    const code = await main({ argv: [], env: { GITHUB_STEP_SUMMARY: summary }, fetchImpl: f.impl, now: () => NOW, log: (l) => void lines.push(l), sleep: noSleep });
+    assert.equal(code, 0);
+    const out = lines.join('\n');
+    assert.doesNotMatch(out, /::error/);
+    assert.equal(lines.filter((l) => l.startsWith('::warning title=Alert pipeline::')).length, 2);
+    assert.match(out, /alert pipeline healthy/);
+    const md = readFileSync(summary, 'utf8');
+    assert.match(md, /status\.json: healthy/);
+    assert.match(md, /  - warning: 3 device push\(es\) skipped today/);
+    assert.match(md, /  - warning: 40 transient push failure\(s\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

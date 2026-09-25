@@ -210,6 +210,12 @@ as a fallback). It runs two independent jobs; either one failing turns the run r
   | `degraded.active == true` | the free-tier degradation ladder is shedding alert tiers |
   | `budget.headroomPct < 20` (when present) | the gateway is close to a Workers Free daily cap |
   | `apns.configured == false` | fan-outs run dry: no push reaches a device |
+  | `apns.problems` is a non-empty list | an APNs key is half set: devices in that environment get no push |
+  | `apns.mode == "split"` and `apns.production != true` | no production key: every App Store and TestFlight device is skipped |
+
+  It only **warns** (the run stays green) when today's `fanout.skipped_no_key` or
+  `fanout.retry_dropped_budget` is above 0. Fields an older gateway does not publish
+  (`apns.mode`, `apns.production`, `apns.problems`, `fanout`) are never treated as a problem.
 
   The fetch is retried twice (2 s, then 5 s backoff) before it gives up. A document it cannot
   read is reported as **"could not read status.json"** (state unknown: network, edge or a

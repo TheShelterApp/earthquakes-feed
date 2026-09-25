@@ -10,7 +10,11 @@
 //   - policy.fallback is true (the restrictive compiled policy runs instead of the signed one),
 //   - degraded.active is true (the free-tier degradation ladder is shedding alert tiers),
 //   - budget.headroomPct is below 20 (checked only when present),
-//   - apns.configured is false (fan-outs run DRY: nothing reaches a phone).
+//   - apns.configured is false (fan-outs run DRY: nothing reaches a phone),
+//   - apns.problems is a non-empty array (a half-set APNs key: that environment's devices get nothing),
+//   - apns.mode is 'split' and apns.production is not true (every production device is skipped).
+// It only warns (exit stays 0) when today's fanout.skipped_no_key or fanout.retry_dropped_budget is above 0.
+// Fields an older gateway does not publish (apns.mode/production/problems, fanout) are never a problem.
 // Optional usage half: when CF_ANALYTICS_TOKEN (Account Analytics: Read) is set, it also reads today's
 // (UTC) account-wide Workers requests and D1 rows written from the GraphQL Analytics API and fails at 80 %
 // of the Workers Free daily caps (100,000 each; at 100 % every Worker on the account fails closed until
@@ -159,15 +163,45 @@ export function evaluateStatus(doc, { nowMs, thresholds = DEFAULT_THRESHOLDS } =
   }
 
   // 6. APNs: configured:false means DRY mode; every fan-out "succeeds" and nothing is delivered.
+  //    Round-3 gateways add the per-environment key state (mode/production/sandbox/problems). configured stays
+  //    true in 'split' mode even when the production key is missing, and then every production device (every
+  //    App Store and TestFlight install) is skipped as skipped_no_key, so both are judged here. Older gateways
+  //    omit these fields, and an absent field is never a problem.
   const apns = doc.apns;
+  const splitNoProduction = isObject(apns) && apns.mode === 'split' && apns.production !== true;
   if (isObject(apns) && typeof apns.configured === 'boolean') {
-    parts.push(`apns=${apns.configured ? 'configured' : 'DRY'}`);
+    const mode = typeof apns.mode === 'string' ? `/${apns.mode}` : '';
+    parts.push(`apns=${apns.configured ? 'configured' : 'DRY'}${mode}${splitNoProduction ? '/production=NO' : ''}`);
     if (!apns.configured) {
       problems.push('APNs is NOT configured on the gateway: fan-outs run DRY and no push reaches a device');
     }
   } else {
     parts.push('apns=?');
     warnings.push('apns.configured is absent: cannot tell whether real pushes are being sent');
+  }
+  if (isObject(apns) && Array.isArray(apns.problems) && apns.problems.length > 0) {
+    problems.push(`the gateway's APNs key configuration has ${apns.problems.length} problem(s): ${apns.problems.map(String).join('; ')}. Devices in an APNs environment without a complete key get no push`);
+  }
+  if (splitNoProduction) {
+    problems.push(`the gateway runs split per-environment keys but holds NO production key (apns.production is ${JSON.stringify(apns.production) ?? 'absent'}): every App Store and TestFlight device (push_env=production) is skipped and receives no alert`);
+  }
+
+  // 7. Fan-out counters for the current UTC day (round-3 gateways; absent or null on older ones or before the
+  //    first job). Warnings only: a few skipped or dropped pushes are worth a look, not a page; the key faults
+  //    that skip every production device already fail above.
+  const fanout = doc.fanout;
+  if (isObject(fanout)) {
+    const n = (v) => (isNum(v) ? v : '?');
+    parts.push(`fanout=jobs:${n(fanout.jobs)},sent:${n(fanout.sent)},no_key:${n(fanout.skipped_no_key)},dropped_budget:${n(fanout.retry_dropped_budget)}`);
+    const day = typeof fanout.day === 'string' ? ` (UTC ${fanout.day})` : '';
+    if (isNum(fanout.skipped_no_key) && fanout.skipped_no_key > 0) {
+      warnings.push(`${fanout.skipped_no_key} device push(es) skipped today${day} because the gateway holds no APNs key for their push environment (fanout.skipped_no_key): those devices received no alert`);
+    }
+    if (isNum(fanout.retry_dropped_budget) && fanout.retry_dropped_budget > 0) {
+      warnings.push(`${fanout.retry_dropped_budget} transient push failure(s) today${day} were dropped without a retry because the fan-out job's retry budget was spent (fanout.retry_dropped_budget)`);
+    }
+  } else {
+    parts.push(fanout === null ? 'fanout=none' : 'fanout=n/a');
   }
 
   if (isObject(doc.budget) && typeof doc.budget.day === 'string') parts.push(`budget-day=${doc.budget.day}`);
@@ -446,6 +480,7 @@ export async function main({ argv = process.argv.slice(2), env = process.env, fe
     if (verdict.problems.length > 0) unhealthy = true;
     summaryLines.push(`- status.json: ${verdict.problems.length > 0 ? `**UNHEALTHY** (${verdict.problems.length} problem(s))` : 'healthy'} · \`${verdict.summary}\``);
     for (const p of verdict.problems) summaryLines.push(`  - ${p}`);
+    for (const w of verdict.warnings) summaryLines.push(`  - warning: ${w}`);
   }
 
   // --- optional account usage ---

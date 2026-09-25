@@ -1,0 +1,82 @@
+{
+  "schema": "alerts-status/1",
+  "service": "alerts-gateway",
+  "generatedAtMs": 1790365625218,
+  "detector": {
+    "lastTickMs": 1790365625218,
+    "staleSec": 0,
+    "providers": [
+      {
+        "id": "usgs",
+        "lastPollMs": 1790365625218,
+        "ok": true,
+        "watermarkMs": 1790365133040,
+        "httpStatus": 200,
+        "latencyMs": 270,
+        "consecutiveFailures": 0
+      },
+      {
+        "id": "feed",
+        "lastPollMs": 1790365625218,
+        "ok": true,
+        "watermarkMs": 1790362841909,
+        "httpStatus": 200,
+        "latencyMs": 229,
+        "consecutiveFailures": 0
+      },
+      {
+        "id": "emsc",
+        "lastPollMs": 1790365625218,
+        "ok": true,
+        "watermarkMs": 1790365353311,
+        "httpStatus": 200,
+        "latencyMs": 227,
+        "consecutiveFailures": 0
+      },
+      {
+        "id": "gfz",
+        "lastPollMs": 1790365625218,
+        "ok": true,
+        "watermarkMs": 1790350149240,
+        "httpStatus": 200,
+        "latencyMs": 166,
+        "consecutiveFailures": 0
+      }
+    ],
+    "recentEvents": 319
+  },
+  "lastEvent": {
+    "eventId": "ae_c6efc112c610a386",
+    "rev": 1,
+    "mag": 4,
+    "placeEn": "MINDANAO, PHILIPPINES",
+    "atMs": 1790365369738,
+    "seqKind": "new"
+  },
+  "policy": {
+    "source": "signed",
+    "sha": "ps_6de2c26499dc1c05",
+    "fallback": false,
+    "version": 19
+  },
+  "channelsTracked": 0,
+  "apns": {
+    "configured": false
+  },
+  "budget": {
+    "day": "2026-09-25",
+    "doRequests": 5906,
+    "d1Reads": 6400,
+    "pushes": 0,
+    "doRowsRead": 170988,
+    "doRowsWritten": 8394,
+    "doGbSec": 538,
+    "headroomPct": 92
+  },
+  "degraded": {
+    "level": "none",
+    "active": false,
+    "forced": false,
+    "reason": null
+  }
+}

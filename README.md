@@ -187,6 +187,64 @@ DATA_DIR=.data PUBLIC_DIR=public npm run validate
    own cron fallback. Because GitHub throttles low-activity schedules, an external
    5-minute heartbeat (`workflow_dispatch`) is recommended for tight freshness.
 
+## Health watchdogs (`.github/workflows/health.yml`)
+
+The heartbeat Worker dispatches `health.yml` every 15 minutes (plus an hourly GitHub cron
+as a fallback). It runs two independent jobs; either one failing turns the run red.
+
+- **`health` (the feed):** reads the live Pages `v1/manifest.json` and `v1/status.json` and
+  fails when the manifest is older than its `stale_after_seconds` contract or a systemic
+  share of providers is degraded. It opens (and on recovery closes) the
+  `[health] feed unhealthy` issue.
+- **`alerts` (The Shelter's alert pipeline):** runs
+  [`scripts/alerts-watchdog.mjs`](scripts/alerts-watchdog.mjs) (dependency-free Node 22)
+  against the alerts-gateway's public `https://data.theshelter.app/alerts/status.json`. It
+  runs from GitHub on purpose, so it keeps working when Cloudflare is the thing that broke.
+  It fails when:
+
+  | Condition in `status.json` | Meaning |
+  |---|---|
+  | `generatedAtMs` older than 300 s | the detector stopped ticking or publishing (it publishes every 60 s) |
+  | a `detector.providers[]` entry with `ok: false` and `consecutiveFailures >= 3` | an alert source is down (a single failed poll is only logged) |
+  | `policy.fallback == true` | the restrictive compiled alerts policy runs instead of the signed one |
+  | `degraded.active == true` | the free-tier degradation ladder is shedding alert tiers |
+  | `budget.headroomPct < 20` (when present) | the gateway is close to a Workers Free daily cap |
+  | `apns.configured == false` | fan-outs run dry: no push reaches a device |
+  | `apns.problems` is a non-empty list | an APNs key is half set: devices in that environment get no push |
+  | `apns.mode == "split"` and `apns.production != true` | no production key: every App Store and TestFlight device is skipped |
+
+  It only **warns** (the run stays green) when today's `fanout.skipped_no_key` or
+  `fanout.retry_dropped_budget` is above 0. Fields an older gateway does not publish
+  (`apns.mode`, `apns.production`, `apns.problems`, `fanout`) are never treated as a problem.
+
+  The fetch is retried twice (2 s, then 5 s backoff) before it gives up. A document it cannot
+  read is reported as **"could not read status.json"** (state unknown: network, edge or a
+  missing object), never as "Alert pipeline unhealthy", which is reserved for a document that
+  was read and failed a check. Exit codes: `0` healthy, `1` unhealthy, `2` unreadable after
+  retries, `3` watchdog misconfigured.
+
+  **Optional usage half.** When the repository secret `CF_ANALYTICS_TOKEN` exists (a read-only
+  Cloudflare API token with *Account Analytics: Read*), the job also reads today's (UTC)
+  account-wide Workers requests and D1 rows written from the GraphQL Analytics API and fails at
+  80 % of the Workers Free daily caps (100,000 requests; 100,000 D1 rows written). The account
+  is the `CF_ANALYTICS_ACCOUNT_ID` repository variable when set, else the `CF_ACCOUNT_ID`
+  secret. Without the token this half is skipped silently; a token that is rejected or cannot
+  see the account fails the job as misconfigured; a transient analytics error only warns.
+  Only account totals are logged: this repository's run logs are public.
+
+  **Alarm channel.** No issue is opened for the alert pipeline: the red run itself is the
+  alarm, delivered by GitHub's failed-workflow email (Settings → Notifications → Actions →
+  "Only notify for failed workflows"). For runs dispatched by the heartbeat the email goes to
+  the account that owns the heartbeat's `GH_PAT`; for the hourly cron, to the last person who
+  edited the cron line.
+
+  **Selftest.** `gh workflow run health.yml -f watchdog_selftest=true` forces an impossible
+  headroom limit (101 %), so the `alerts` job must fail: use it once after changing the
+  watchdog or the notification settings to prove the red path and the email end to end.
+  Locally: `node scripts/alerts-watchdog.mjs` (or `--selftest`, `--status-file <doc.json>`,
+  `--max-age-sec <n>`, `--min-headroom-pct <n>`, ...); `npm test` covers every condition with
+  fixtures in `tests/fixtures/` and never calls the network.
+
 ## Licensing & takedowns
 
 The compilation is [CDLA-Permissive-2.0](LICENSE); each record carries its source's

@@ -1,12 +1,22 @@
 name: health
 
-# Hourly watchdog. Checks the LIVE Pages manifest (the only check that catches every
-# stale mode: dead cron, failed derive, failed deploy) and per-provider degradation.
-# On failure: opens/refreshes a pinned issue and fails the run (visible red).
+# Watchdogs, run every 15 min by the heartbeat Worker (workflow_dispatch at :07/:22/:37/:52)
+# plus this file's own hourly cron as a fallback. Two independent jobs:
+#   health — the FEED: checks the LIVE Pages manifest (the only check that catches every
+#            stale mode: dead cron, failed derive, failed deploy) and per-provider degradation.
+#            On failure: opens/refreshes the "[health] feed unhealthy" issue and fails the run.
+#   alerts — The Shelter's ALERT PIPELINE (alerts-gateway on Cloudflare): scripts/alerts-watchdog.mjs
+#            reads data.theshelter.app/alerts/status.json (+ optional account usage) and fails the
+#            run; GitHub's failed-workflow email is its alarm (no issue). See README "Health watchdogs".
 on:
   schedule:
     - cron: '25 * * * *'
   workflow_dispatch:
+    inputs:
+      watchdog_selftest:
+        description: 'Alert watchdog selftest: force an impossible headroom limit so the alerts job MUST fail (proves the red path + email)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -121,3 +131,35 @@ jobs:
             gh issue comment "$NUM" --repo "${{ github.repository }}" --body "Recovered — live feed healthy again as of $(date -u +%FT%TZ) (run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
             gh issue close "$NUM" --repo "${{ github.repository }}"
           fi
+
+  alerts:
+    # The alert-pipeline watchdog. A separate job on purpose: it runs in parallel with the feed
+    # check, never touches the feed's health issue, and a red here is attributable at a glance.
+    # It lives in GitHub (not on Cloudflare) so it still fires when Cloudflare is the problem.
+    name: alert pipeline
+    runs-on: ubuntu-latest
+    # The script bounds itself: 3 attempts x 15 s + 7 s backoff for status.json, the same for the
+    # optional usage query (20 s per attempt). 5 min leaves room for checkout + setup-node.
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Check alert pipeline (status.json + optional free-tier usage)
+        env:
+          # Optional (owner): a read-only Cloudflare token with Account Analytics: Read. Unset -> the
+          # usage half is skipped silently. The account queried is the CF_ANALYTICS_ACCOUNT_ID variable
+          # when set, else the repo's CF_ACCOUNT_ID secret (the one the Pages deploy uses). A token that
+          # cannot see that account fails the job as "misconfigured" instead of passing silently.
+          CF_ANALYTICS_TOKEN: ${{ secrets.CF_ANALYTICS_TOKEN }}
+          CF_ACCOUNT_ID: ${{ vars.CF_ANALYTICS_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+          WATCHDOG_SELFTEST: ${{ inputs.watchdog_selftest && '1' || '' }}
+        # Exit 0 healthy, 1 unhealthy, 2 status.json unreadable after retries (state unknown),
+        # 3 watchdog misconfigured. Any non-zero exit fails the run; the ::error:: annotations say which.
+        run: node scripts/alerts-watchdog.mjs

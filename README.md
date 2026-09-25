@@ -224,6 +224,7 @@ as a fallback). It runs two independent jobs; either one failing turns the run r
   is the `CF_ANALYTICS_ACCOUNT_ID` repository variable when set, else the `CF_ACCOUNT_ID`
   secret. Without the token this half is skipped silently; a token that is rejected or cannot
   see the account fails the job as misconfigured; a transient analytics error only warns.
+  Only account totals are logged: this repository's run logs are public.
 
   **Alarm channel.** No issue is opened for the alert pipeline: the red run itself is the
   alarm, delivered by GitHub's failed-workflow email (Settings → Notifications → Actions →

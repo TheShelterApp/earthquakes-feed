@@ -45,11 +45,11 @@ export function buildUsageRequest(
 ): { query: string; variables: { accountTag: string; datetimeStart: string; datetimeEnd: string; date: string } };
 
 export type UsageResult =
-  | { ok: true; workersRequests: number; d1RowsWritten: number; topScripts: { name: string; requests: number }[] }
+  | { ok: true; workersRequests: number; d1RowsWritten: number }
   | { ok: false; kind: 'auth' | 'graphql' | 'shape'; message: string };
 export function parseUsageResponse(json: unknown): UsageResult;
 export function evaluateUsage(
-  usage: { workersRequests: number; d1RowsWritten: number; topScripts: { name: string; requests: number }[] },
+  usage: { workersRequests: number; d1RowsWritten: number },
   opts: { dayFraction: number; failPct?: number; caps?: { workersRequests: number; d1RowsWritten: number } },
 ): { problems: string[]; summary: string };
 export function fetchUsage(opts: {

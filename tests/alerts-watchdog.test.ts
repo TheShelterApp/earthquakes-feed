@@ -216,14 +216,8 @@ test('buildUsageRequest asks for Workers requests and D1 rows written of one acc
   assert.deepEqual(req.variables, { accountTag: 'acct123', datetimeStart: '2026-09-26T00:00:00.000Z', datetimeEnd: '2026-09-26T12:00:00.000Z', date: '2026-09-26' });
 });
 
-test('parseUsageResponse sums every group and ranks scripts', () => {
-  const u = parseUsageResponse(cfFixture('usage-ok'));
-  assert.equal(u.ok, true);
-  if (u.ok) {
-    assert.equal(u.workersRequests, 16150);
-    assert.equal(u.d1RowsWritten, 5944);
-    assert.deepEqual(u.topScripts[0], { name: 'shelter-api-prod', requests: 11520 });
-  }
+test('parseUsageResponse sums every group into account totals (no per-script names leave the parser)', () => {
+  assert.deepEqual(parseUsageResponse(cfFixture('usage-ok')), { ok: true, workersRequests: 16150, d1RowsWritten: 5944 });
 });
 
 test('parseUsageResponse classifies authz errors and an invisible account as auth, others as graphql/shape', () => {
@@ -250,7 +244,7 @@ test('evaluateUsage fails at 80 % of either Free cap and not below', () => {
   assert.equal(v.problems.length, 2);
   assert.match(v.problems[0]!, /Workers requests today: 80440 = 80\.4 % of the Workers Free cap \(100000\/day; limit 80 %\)/);
   assert.match(v.problems[1]!, /D1 rows written today: 85000 = 85\.0 %/);
-  const edge = evaluateUsage({ workersRequests: 79_999, d1RowsWritten: 80_000, topScripts: [] }, { dayFraction: 1 });
+  const edge = evaluateUsage({ workersRequests: 79_999, d1RowsWritten: 80_000 }, { dayFraction: 1 });
   assert.equal(edge.problems.length, 1);
   assert.match(edge.problems[0]!, /D1 rows written/);
   assert.match(evaluateUsage(ok, { dayFraction: 0.5 }).summary, /projected 32300\/day/);
@@ -326,6 +320,7 @@ test('main: usage half runs only with a token, sends it only to the GraphQL API,
   const ok = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)], [GRAPHQL_URL]: [jsonResponse(cfFixture('usage-ok'))] }, env });
   assert.equal(ok.code, 0);
   assert.match(ok.out, /account usage today \(UTC\): Workers requests 16150\/100000/);
+  assert.doesNotMatch(ok.out, /shelter-api-prod|00000000-0000/, 'no Worker or database names in the public run log');
   const statusCall = ok.calls.find((c) => c.url === STATUS_URL)!;
   const gqlCall = ok.calls.find((c) => c.url === GRAPHQL_URL)!;
   assert.equal(new Headers(statusCall.init?.headers).get('authorization'), null);

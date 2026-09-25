@@ -252,7 +252,8 @@ const AUTH_RE = /authz|authn|not authori[sz]ed|unauthori[sz]ed|forbidden|permiss
 
 /**
  * Parse a GraphQL Analytics response for USAGE_QUERY.
- * @returns {{ ok: true, workersRequests: number, d1RowsWritten: number, topScripts: { name: string, requests: number }[] }
+ * Only account totals come out: the run logs of this public repository must not list Worker or database names.
+ * @returns {{ ok: true, workersRequests: number, d1RowsWritten: number }
  *   | { ok: false, kind: 'auth' | 'graphql' | 'shape', message: string }}
  */
 export function parseUsageResponse(json) {
@@ -274,13 +275,10 @@ export function parseUsageResponse(json) {
     return { ok: false, kind: 'shape', message: 'the account has no workers/d1 groups in the response' };
   }
   let workersRequests = 0;
-  const topScripts = [];
   for (const g of account.workers) {
     const n = isObject(g) && isObject(g.sum) ? g.sum.requests : undefined;
     if (!isNum(n)) return { ok: false, kind: 'shape', message: 'a workers group has no numeric sum.requests' };
     workersRequests += n;
-    const name = isObject(g.dimensions) && typeof g.dimensions.scriptName === 'string' ? g.dimensions.scriptName : '?';
-    topScripts.push({ name, requests: n });
   }
   let d1RowsWritten = 0;
   for (const g of account.d1) {
@@ -288,8 +286,7 @@ export function parseUsageResponse(json) {
     if (!isNum(n)) return { ok: false, kind: 'shape', message: 'a d1 group has no numeric sum.rowsWritten' };
     d1RowsWritten += n;
   }
-  topScripts.sort((a, b) => b.requests - a.requests);
-  return { ok: true, workersRequests, d1RowsWritten, topScripts: topScripts.slice(0, 5) };
+  return { ok: true, workersRequests, d1RowsWritten };
 }
 
 /**
@@ -311,8 +308,7 @@ export function evaluateUsage(usage, { dayFraction, failPct = DEFAULT_THRESHOLDS
       problems.push(`account ${label} today: ${used} = ${share.toFixed(1)} % of the Workers Free cap (${cap}/day; limit ${failPct} %). At 100 % ${consequence} until 00:00 UTC`);
     }
   }
-  const top = usage.topScripts.map((s) => `${s.name}=${s.requests}`).join(', ');
-  return { problems, summary: `${parts.join(' · ')}${top ? ` · top Workers: ${top}` : ''}` };
+  return { problems, summary: parts.join(' · ') };
 }
 
 /**

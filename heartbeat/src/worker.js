@@ -49,13 +49,11 @@ export default {
     const workflow = workflowFor(new Date(event.scheduledTime).getUTCMinutes());
     if (workflow) ctx.waitUntil(dispatch(env, workflow));
   },
-  // Manual trigger for testing: GET the worker URL dispatches aggregate.
-  async fetch(_req, env) {
-    try {
-      await dispatch(env, 'aggregate.yml');
-      return new Response('aggregate dispatched\n');
-    } catch (e) {
-      return new Response(`error: ${e.message}\n`, { status: 502 });
-    }
+  // No HTTP surface. The old "GET dispatches aggregate" test hook was reachable on the public workers.dev URL
+  // with no auth: every GET spent a GitHub API call, burned a Worker request against the account-wide free-tier
+  // cap, and — because aggregate/derive/backfill/archive share one concurrency group — a loop of GETs kept
+  // cancelling the pending feed runs. Manual dispatch is `gh workflow run aggregate.yml`.
+  async fetch() {
+    return new Response('not found\n', { status: 404 });
   },
 };

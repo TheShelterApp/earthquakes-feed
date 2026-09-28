@@ -570,6 +570,28 @@ export class Resolver {
     loser.revision += 1;
     loser.lastIngestTime = ingestTime;
     merges.push({ survivor, loser, reason });
+    this.repointRetired(loser, survivor, ingestTime, merges);
     return survivor;
+  }
+
+  /** `superseded_by` always names the event that is live when the line is written. When an
+   *  earlier survivor retires in its turn, every node folded into it follows to the new
+   *  survivor: one retired in this same ingest just has its pending op:merge re-aimed (no
+   *  second revision); one retired in an earlier run moves a revision and gets its own
+   *  op:merge line, so its partition line and the change-log say where it went. */
+  private repointRetired(retired: EventNode, survivor: EventNode, ingestTime: string, merges: MergeRecord[]): void {
+    for (const n of this.eventMap.values()) {
+      if (n.state !== 'superseded' || n.supersededBy !== retired.feedId) continue;
+      n.supersededBy = survivor.feedId;
+      const pending = merges.find((m) => m.loser === n);
+      if (pending) {
+        pending.survivor = survivor;
+        pending.reason += `; then ${retired.feedId} folded into ${survivor.feedId}`;
+        continue;
+      }
+      n.revision += 1;
+      n.lastIngestTime = ingestTime;
+      merges.push({ survivor, loser: n, reason: `re-point: ${retired.feedId} folded into ${survivor.feedId}` });
+    }
   }
 }

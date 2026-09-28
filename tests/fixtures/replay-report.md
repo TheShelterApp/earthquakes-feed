@@ -35,6 +35,14 @@ npm run replay-dedup -- --logs /tmp/obs-7d.ndjson --baseline /tmp/dedup-baseline
   first sight under the widened window (the six logged ids of the diagnosis collapse to two mints); only
   RéNaSS's 114-km-deep M5.8 preliminary, 62 km out and |ΔM| > 1, minted a second id, and it folded on
   its first Mwp revision (12 km, ΔM 0.75, window 19 km).
+- The same event as production holds it today: the six live ids the feed published under the old rules
+  (`loyalty-2026-09-25-published.ndjson`, the six partition lines of `events/2026/09/25.ndjson` at
+  c6ed8a01c9) are not rewritten by this change — they fold on the next revision of any of them: five
+  `op:merge` lines, one live survivor with the 12 ids, five superseded ids pointing at it
+  (`tests/merge.test.ts`, *upgrade*). Which id survives depends on which one revises first (most providers
+  leads the survivor rule): the USGS id when USGS or GeoNet revises, the EMSC/GEOFON/RESIF id otherwise.
+- No fold chain in the 7 days: every `op:merge` retired a node that was never itself a survivor, so no
+  `superseded_by` had to be re-pointed (81 op:merge lines = 81 superseded nodes).
 - The three groups the new rules "split" are re-groupings, not regressions:
   - Chile M5.2, 09-21 11:48 — the baseline had four live nodes for one event (csn+usp, inpres, geofon,
     emsc+usgs); after: two (emsc+geofon+csn+usgs+inpres, and usp alone). USP's solution is 21.8 km from

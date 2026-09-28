@@ -126,7 +126,8 @@ function summaries(feats: Feat[], nowMs: number, publicV1: string, headIngestTim
         console.warn(`::warning::v1/${name}.geojson is ${bytes} bytes — ${((bytes / MAX_PUBLISHED_BYTES) * 100).toFixed(1)}% of the ${MAX_PUBLISHED_BYTES}-byte budget`);
       }
       writeIfChanged(join(publicV1, `${name}.geojson`), json);
-      out[name] = { path: `v1/${name}.geojson`, url: `${DOMAIN}/v1/${name}.geojson`, count: picked.length };
+      // Live events only, like metadata.count — the retired markers ride along uncounted.
+      out[name] = { path: `v1/${name}.geojson`, url: `${DOMAIN}/v1/${name}.geojson`, count: picked.filter((f) => f.live).length };
     }
   }
   return out;

@@ -142,6 +142,74 @@ test('fixture: every first-sighting order yields the same event, rows and repres
   assert.ok(survivors.size >= 1);
 });
 
+/** The six live partition lines the feed published for the event under the pre-change rules
+ *  (`origin/data` c6ed8a01c9, events/2026/09/25.ndjson) — the event_map this change inherits. */
+const publishedLines = readFileSync(here('fixtures/loyalty-2026-09-25-published.ndjson'), 'utf8').split('\n').filter(Boolean);
+
+test('upgrade: the six live ids the feed published fold into one survivor on the next revision of any of them', () => {
+  assert.equal(publishedLines.length, 6);
+  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  addFormats(ajv);
+  const vObs = ajv.compile(JSON.parse(readFileSync(here('../schema/observation.schema.json'), 'utf8')) as object);
+  // Which of the six revises first decides only the survivor's id: most providers leads the
+  // survivor rule, so the first fold's winner keeps winning (EMSC's node holds three
+  // providers, the USGS one two plus the reviewed status).
+  const expected: Record<string, string> = {
+    efd_01M3D76ES08HGFRSA05T71J8ZF: 'efd_01M3D76ES08HGFRSA05T71J8ZF',
+    efd_01M3D76ES08SQ06R47AQB0V0RJ: 'efd_01M3D76ES08HGFRSA05T71J8ZF',
+    efd_01M3D76ES01WZVMZ9XT5M0D1X0: 'efd_01M3D76ES01WZVMZ9XT5M0D1X0',
+    efd_01M3D77C2GZTT65JP6GD75YXXD: 'efd_01M3D76ES01WZVMZ9XT5M0D1X0',
+    efd_01M3D76ES0A4G81787WNDQ948D: 'efd_01M3D76ES01WZVMZ9XT5M0D1X0',
+    efd_01M3D76ES09MMEA9RBS6BG60Y1: 'efd_01M3D76ES01WZVMZ9XT5M0D1X0',
+  };
+  for (const line of publishedLines) {
+    const map = new Map<string, EventNode>();
+    for (const l of publishedLines) {
+      const n = featureToNode(JSON.parse(l));
+      map.set(n.feedId, n);
+    }
+    assert.equal([...map.values()].filter((n) => n.state === 'live').length, 6, 'six live ids before');
+    const r = new Resolver(map, prio, cfg, NOW);
+    const moving = map.get((JSON.parse(line) as { id: string }).id)!;
+    // The `updatedafter` sweep brings the leading row's next revision: ~110 m north.
+    const row = moving.provenance.find((p) => p.chosen)!;
+    const res = r.reviseExisting(
+      obs(row.provider, row.nativeId, {
+        eventTimeMs: row.eventTimeMs,
+        providerUpdatedMs: (row.providerUpdatedMs ?? T0) + 3600_000,
+        status: row.status,
+        lat: row.lat + 0.001,
+        lon: row.lon,
+        depth: row.depth,
+        mag: row.mag,
+        magType: row.magType,
+        place: row.place,
+        fields: row.fields,
+      }),
+      '2026-09-28T01:00:00.000Z',
+    );
+    const label = `${moving.feedId} (${row.provider}) revises`;
+    assert.ok(res, `${label}: a revision of a known event`);
+    assert.equal(res.merges.length, 5, `${label}: five op:merge folds`);
+    const survivor = assertOneEvent(map, label);
+    assert.equal(survivor.feedId, expected[moving.feedId], `${label}: survivor`);
+    assert.equal(res.node, survivor, `${label}: the report lands on the survivor`);
+    const superseded = [...map.values()].filter((n) => n.state === 'superseded');
+    assert.equal(superseded.length, 5, `${label}: five superseded nodes`);
+    for (const [i, m] of res.merges.entries()) {
+      const line = mergeLine(m, 200_000 + i, '2026-09-28T01:00:00.000Z');
+      assert.ok(vObs(line), ajv.errorsText(vObs.errors));
+      assert.equal(line.superseded_by, survivor.feedId, `${label}: every op:merge names the final survivor`);
+    }
+    // Every retired id now resolves to the survivor: a re-report of any of the 12 ids is a no-op there.
+    for (const l of fixture) {
+      const again = r.ingest(observationToRaw(l), '2026-09-28T01:05:00.000Z');
+      assert.equal(again.node, survivor, `${label}: ${l.provider}:${l.provider_event_id} resolves to the survivor`);
+    }
+    assert.equal(map.size, 6, `${label}: nothing minted`);
+  }
+});
+
 test('same-provider DISTINCT reports within the window still mint separately', () => {
   // 5 s apart / 1 km / same magnitude: a provider's own two ids for two events.
   let map = new Map<string, EventNode>();
@@ -282,6 +350,37 @@ test('op:merge survivor: most providers beats status; status beats priority; the
   res = r.ingest(obs('emsc', 'e1', { mag: 6.5, lat: north(-21.3, 3) }), '2026-09-25T21:31:00Z');
   assert.equal(res.node, a3, 'lower priority number survives');
   assert.equal(b3.state, 'superseded');
+});
+
+test('op:merge: when a survivor retires in its turn, the nodes folded into it follow to the new survivor', () => {
+  // Run 1: B (emsc) folds into A (usgs reviewed) — moveScenario.
+  const { map, r, a, b } = moveScenario();
+  assert.equal(b.supersededBy, a.feedId);
+  const bRevision = b.revision;
+  // Run 2: C (three providers) 40 km south, then its revision lands 3 km from A. C holds
+  // more providers, so C survives and A retires; B must now point at C, not at retired A.
+  const c = r.ingest(obs('geofon', 'g1', { lat: north(-21.3, -40) }), '2026-09-25T22:00:00Z').node;
+  r.ingest(obs('geonet', 'n1', { lat: north(-21.3, -40.5) }), '2026-09-25T22:00:00Z');
+  r.ingest(obs('ingv', 'i1', { lat: north(-21.3, -39.5) }), '2026-09-25T22:00:00Z');
+  assert.equal([...map.values()].filter((n) => n.state === 'live').length, 2, 'A and C live');
+  const res = r.ingest(obs('geofon', 'g1', { lat: north(-21.3, -3) }), '2026-09-25T22:10:00Z');
+  assert.equal(res.node, c, 'C survives (three providers against two)');
+  assert.equal(a.state, 'superseded');
+  assert.equal(a.supersededBy, c.feedId);
+  assert.equal(b.supersededBy, c.feedId, 'B follows to the live survivor');
+  assert.equal(b.revision, bRevision + 1, 'a node retired in an earlier run moves a revision');
+  assert.equal(b.lastIngestTime, '2026-09-25T22:10:00Z');
+  assert.deepEqual(
+    res.merges.map((m) => [m.loser.feedId, m.survivor.feedId]),
+    [
+      [a.feedId, c.feedId],
+      [b.feedId, c.feedId],
+    ],
+    'one op:merge for the fold, one for the re-point',
+  );
+  assert.match(res.merges[1]!.reason, /^re-point: /);
+  assert.deepEqual([...c.aliases].sort(), ['emsc:e1', 'geofon:g1', 'geonet:n1', 'ingv:i1', 'usgs:u1']);
+  assert.equal(r.ingest(obs('emsc', 'e1', { mag: 6.5, lat: north(-21.3, 5) }), '2026-09-25T22:15:00Z').node, c, "B's id resolves to C");
 });
 
 test('op:merge never crosses the same-provider-distinct or reviewed guards', () => {

@@ -29,7 +29,7 @@ The catalog. Fields:
 | `event_count` | live events in the rolling window |
 | `freshness.stale_after_seconds` | treat the feed as degraded past this age (default 1800) |
 | `data_commit` | git SHA for building immutable partition URLs |
-| `summaries` | map of `{name: {path, url, count}}` for the 20 rolling feeds |
+| `summaries` | map of `{name: {path, url, count}}` for the 20 rolling feeds (`count` = live events in that file) |
 | `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}` |
 | `archives[]` | rolled-up cold months: `{period, tag, asset, url, bytes, sha256, count, days[]}` |
 
@@ -180,6 +180,10 @@ partitions (full-fat, every state). Consumers must drop every feature whose
 `feed.state !== "live"`; `metadata.count` counts live features only. The survivor of a
 merge keeps the loser's `aliases[]` and provenance rows, so the loser's provider ids
 resolve to it, and its `first_ingest_time` / `first_seen_seq` become the earlier of the two.
+`superseded_by` names the event that was live when the line was written: if that survivor
+later folds into another event in its turn, every event folded into it follows (a new
+revision and its own `op:merge` line). Events the feed split before a rule change heal on
+their next revision; historical partitions are never rewritten.
 
 ## Recipes
 

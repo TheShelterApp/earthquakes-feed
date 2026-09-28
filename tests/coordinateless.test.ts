@@ -137,19 +137,32 @@ test('retraction lines: op:tombstone with a reason, schema-valid, and a replay o
   assert.deepEqual(shape(again.map), shape(map));
 });
 
-test('retracted events leave the live surfaces at once: summaries and the Pages day file; the tree partition keeps them', () => {
+test('retracted events leave the live set at once: summaries and the Pages day file carry them only as a non-live tombstone for 48 h; the tree partition keeps them', () => {
   const { map, lone, joined, other } = publishedBeforeTheRule();
   new Resolver(map, prio, cfg, NOW).retractCoordinateless('2026-09-28T14:00:00.000Z');
-  const ids = summaryFeats(map.values(), NOW).map((f) => (f.feature as { id: string }).id);
+  const feats = summaryFeats(map.values(), NOW);
+  const ids = feats.filter((f) => f.live).map((f) => (f.feature as { id: string }).id);
   assert.deepEqual(ids.sort(), [joined.feedId, other.feedId].sort());
+  const marker = feats.find((f) => (f.feature as { id: string }).id === lone.feedId);
+  assert.equal(marker?.live, false, 'the retracted placeholder rides along as a removal, not an event');
+  assert.equal((marker!.feature as { properties: { feed: { state: string } } }).properties.feed.state, 'tombstoned');
+  assert.deepEqual(
+    summaryFeats(map.values(), NOW + 49 * 3600_000).map((f) => (f.feature as { id: string }).id).sort(),
+    [joined.feedId, other.feedId].sort(),
+    'gone from the summaries 48 h after the retraction',
+  );
   const root = mkdtempSync(join(tmpdir(), 'efd-coordless-'));
   try {
     const publicV1 = join(root, 'public', 'v1');
     writeDayPartition(root, '2026-09-27', [...map.values()], { publicV1, nowMs: NOW, headIngestTime: '2026-09-28T14:00:00.000Z' });
-    const day = JSON.parse(readFileSync(join(publicV1, 'events', '2026-09-27.geojson'), 'utf8')) as { features: { id: string; geometry: { coordinates: number[] } }[]; metadata: { count: number } };
-    assert.ok(!day.features.some((f) => f.id === lone.feedId), 'not on the Pages day file');
-    assert.ok(!day.features.some((f) => f.geometry.coordinates[0] === 0 && f.geometry.coordinates[1] === 0));
+    type Day = { features: { id: string; geometry: { coordinates: number[] }; properties: { feed: { state: string } } }[]; metadata: { count: number } };
+    const day = JSON.parse(readFileSync(join(publicV1, 'events', '2026-09-27.geojson'), 'utf8')) as Day;
+    assert.equal(day.features.find((f) => f.id === lone.feedId)?.properties.feed.state, 'tombstoned', 'a non-live marker on the Pages day file');
+    assert.ok(!day.features.some((f) => f.properties.feed.state === 'live' && f.geometry.coordinates[0] === 0 && f.geometry.coordinates[1] === 0), 'no live feature at 0,0');
     assert.equal(day.metadata.count, 2);
+    writeDayPartition(root, '2026-09-27', [...map.values()], { publicV1, nowMs: NOW + 49 * 3600_000, headIngestTime: '2026-09-28T14:00:00.000Z' });
+    const later = JSON.parse(readFileSync(join(publicV1, 'events', '2026-09-27.geojson'), 'utf8')) as Day;
+    assert.ok(!later.features.some((f) => f.id === lone.feedId), 'off the Pages day file 48 h later');
     const tree = readFileSync(join(root, 'events', '2026', '09', '27.ndjson'), 'utf8');
     assert.match(tree, new RegExp(`"id":"${lone.feedId}".*"state":"tombstoned"`), 'the archive keeps it, tombstoned');
   } finally {
@@ -219,7 +232,12 @@ test('a zeroed report of a known id withdraws it: the event is tombstoned with o
   assert.deepEqual(log.lines.map((l) => [l.seq, l.op, l.feed_id, l.provider_event_id, l.reason]), [[201, 'tombstone', node.feedId, '75437217', ZEROED_REASON]]);
   for (const l of log.lines) assert.ok(vObs(l), ajv.errorsText(vObs.errors));
   assert.equal(node.lastSeq, 201);
-  assert.deepEqual(summaryFeats(map.values(), NOW), [], 'gone from the rolling summaries');
+  assert.deepEqual(summaryFeats(map.values(), NOW).filter((f) => f.live), [], 'gone from the live set of the rolling summaries');
+  assert.deepEqual(
+    summaryFeats(map.values(), NOW).map((f) => (f.feature as { geometry: { coordinates: number[] }; properties: { feed: { state: string } } })).map((f) => [f.properties.feed.state, f.geometry.coordinates[1]]),
+    [['tombstoned', 39.2945]],
+    'only a non-live tombstone at its old location, for 48 h',
+  );
   // The provider keeps publishing the zeroed id for as long as it is in the query window:
   // nothing more happens, in the same run or the next one.
   assert.equal(new Resolver(map, prio, cfg, NOW).withdrawZeroed(zeroed75437217(), '2026-09-27T13:15:00.000Z'), null);

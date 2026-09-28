@@ -496,13 +496,13 @@ export class Resolver {
   /** The feed's own retraction of coordinate-less rows (quality.ts `isCoordinateless`: exactly
    *  lat 0 / lon 0 with magnitude 0 or none — NCEDC's unlocated placeholders), through the same
    *  path as an upstream delete: the row leaves its live node, a node left with no row is
-   *  tombstoned (off the summaries and the Pages day files at once), one with other rows
-   *  re-derives its solution. Ingest drops such reports at the door (a zeroed report of a KNOWN
-   *  id withdraws that row through withdrawZeroed instead of replacing it), so this only clears
-   *  what was published before the rule; it is idempotent (a retired node is never revisited).
-   *  Deterministic order (event time, feed id, then row), so the log lines replay. Each entry's
-   *  `raw` is the withdrawn row as a report — what the op:tombstone line records and what a
-   *  replay feeds back to tombstoneProvider. */
+   *  tombstoned (the summaries and the Pages day files carry it only as a non-live marker, for
+   *  48 h), one with other rows re-derives its solution. Ingest drops such reports at the door
+   *  (a zeroed report of a KNOWN id withdraws that row through withdrawZeroed instead of
+   *  replacing it), so this only clears what was published before the rule; it is idempotent
+   *  (a retired node is never revisited). Deterministic order (event time, feed id, then row),
+   *  so the log lines replay. Each entry's `raw` is the withdrawn row as a report — what the
+   *  op:tombstone line records and what a replay feeds back to tombstoneProvider. */
   retractCoordinateless(ingestTime: string): { raw: RawObs; result: IngestResult }[] {
     const out: { raw: RawObs; result: IngestResult }[] = [];
     const nodes = [...this.eventMap.values()]

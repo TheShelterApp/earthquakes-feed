@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { SUPERSEDED_VISIBLE_MS } from '../src/config.js';
+import { RETIRED_VISIBLE_MS } from '../src/config.js';
 import { Resolver } from '../src/dedup.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import { summaries, summaryFeats } from '../src/summaries.js';
@@ -39,8 +39,9 @@ function obs(provider: string, id: string, over: Partial<RawObs> = {}): RawObs {
 }
 
 /** live (the survivor), superseded an hour ago, superseded long ago, tombstoned an hour ago,
- *  a live event in the future (an adapter clock bug) — each a real Resolver outcome. */
-function scenario(): Record<'live' | 'superseded' | 'oldSuperseded' | 'tombstoned' | 'future', EventNode> {
+ *  tombstoned long ago, a live event in the future (an adapter clock bug) — each a real
+ *  Resolver outcome. */
+function scenario(): Record<'live' | 'superseded' | 'oldSuperseded' | 'tombstoned' | 'oldTombstoned' | 'future', EventNode> {
   const map = new Map<string, EventNode>();
   const r = new Resolver(map, priorityMap(registry), configMap(registry), NOW);
   const at = iso(NOW - 3600_000);
@@ -53,21 +54,22 @@ function scenario(): Record<'live' | 'superseded' | 'oldSuperseded' | 'tombstone
     ...superseded,
     feedId: 'efd_01M3D76ES0OLDLOSER0000000001',
     provenance: superseded.provenance.map((p) => ({ ...p })),
-    lastIngestTime: iso(NOW - SUPERSEDED_VISIBLE_MS - 3600_000),
+    lastIngestTime: iso(NOW - RETIRED_VISIBLE_MS - 3600_000),
   };
   const tomb = obs('geofon', 'g1', { mag: 5.1, lat: 10, lon: 120, place: 'Philippines' });
   const tombstoned = r.ingest(tomb, iso(T + 60_000)).node;
   r.tombstoneProvider(tomb, at);
   assert.equal(tombstoned.state, 'tombstoned');
+  const oldTombstoned: EventNode = { ...tombstoned, feedId: 'efd_01M3D76ES0OLDTOMBSTONE00001', lastIngestTime: iso(NOW - RETIRED_VISIBLE_MS - 3600_000) };
   const future = r.ingest(obs('usgs', 'u9', { eventTimeMs: NOW + 3600_000, lat: 38, lon: 22, mag: 4.8, place: 'Greece' }), at).node;
-  return { live, superseded, oldSuperseded, tombstoned, future };
+  return { live, superseded, oldSuperseded, tombstoned, oldTombstoned, future };
 }
 
-test('summaryFeats: live events full count, superseded ones for 48 h flagged non-live, tombstones and future events never', () => {
+test('summaryFeats: live events full count, superseded and tombstoned ones for 48 h flagged non-live, future events never', () => {
   const s = scenario();
   const feats = summaryFeats(Object.values(s), NOW);
   const ids = feats.map((f) => (f.feature as { id: string }).id);
-  assert.deepEqual(ids.sort(), [s.live.feedId, s.superseded.feedId].sort());
+  assert.deepEqual(ids.sort(), [s.live.feedId, s.superseded.feedId, s.tombstoned.feedId].sort());
   const byId = new Map(feats.map((f) => [(f.feature as { id: string }).id, f]));
   assert.equal(byId.get(s.live.feedId)!.live, true);
   const marker = byId.get(s.superseded.feedId)!;
@@ -76,18 +78,26 @@ test('summaryFeats: live events full count, superseded ones for 48 h flagged non
   assert.equal(feed['state'], 'superseded');
   assert.equal(feed['superseded_by'], s.live.feedId);
   assert.ok(!('provenance' in feed), 'compact');
+  const deleted = byId.get(s.tombstoned.feedId)!;
+  assert.equal(deleted.live, false, 'a tombstone marker is not counted');
+  const deletedFeed = (deleted.feature as { properties: { feed: Record<string, unknown> } }).properties.feed;
+  assert.equal(deletedFeed['state'], 'tombstoned');
+  assert.equal(deletedFeed['tombstone'], true);
+  assert.ok(!('provenance' in deletedFeed), 'compact');
   // The manifest's event_count is this live count (derive.ts).
   assert.equal(feats.filter((f) => f.live).length, 1);
-  // 48 h after the fold the marker is gone from the summaries too.
-  const later = summaryFeats(Object.values(s), Date.parse(s.superseded.lastIngestTime) + SUPERSEDED_VISIBLE_MS + 1);
+  // 48 h after the fold / the delete the markers are gone from the summaries too.
+  const later = summaryFeats(Object.values(s), Date.parse(s.superseded.lastIngestTime) + RETIRED_VISIBLE_MS + 1);
   assert.ok(!later.some((f) => (f.feature as { id: string }).id === s.superseded.feedId));
+  assert.ok(!later.some((f) => (f.feature as { id: string }).id === s.tombstoned.feedId));
 });
 
-test('summaries: files carry the superseded marker, metadata.count and summaries[].count count live features only', () => {
+test('summaries: files carry the retired markers, metadata.count and summaries[].count count live features only', () => {
   const s = scenario();
   const root = mkdtempSync(join(tmpdir(), 'efd-summ-'));
   try {
     const out = summaries(summaryFeats(Object.values(s), NOW), NOW, root, iso(NOW - 3600_000));
+    // The tombstoned event is an M5.1: under significant's M6 / sig 600 predicate.
     for (const name of ['all_day', 'all_week', 'all_month', '4.5_week', 'significant_week']) {
       const fc = JSON.parse(readFileSync(join(root, `${name}.geojson`), 'utf8')) as {
         metadata: { count: number };
@@ -98,8 +108,9 @@ test('summaries: files carry the superseded marker, metadata.count and summaries
         [
           [s.live.feedId, 'live'],
           [s.superseded.feedId, 'superseded'],
+          ...(name === 'significant_week' ? [] : [[s.tombstoned.feedId, 'tombstoned']]),
         ].sort(),
-        `${name}: the live event and the fresh superseded marker, nothing else`,
+        `${name}: the live event and the fresh retired markers, nothing else`,
       );
       assert.equal(fc.metadata.count, 1, `${name}: metadata.count is live-only`);
       assert.equal(out[name]!.count, 1, `${name}: the manifest's summaries[].count is live-only`);

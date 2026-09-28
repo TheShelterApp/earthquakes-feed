@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { MAX_PUBLISHED_BYTES, SCHEMA_VERSION, SUMMARY_THRESHOLDS, SUMMARY_WINDOWS } from './config.js';
 import { nodeToFeature, writeIfChanged } from './bitemporal.js';
-import { publishesSuperseded } from './partitions.js';
+import { publishesRetired } from './partitions.js';
 import type { EventNode } from './types.js';
 import { isoFromMs } from './util.js';
 
@@ -12,7 +12,7 @@ export interface Feat {
   timeMs: number;
   mag: number | null;
   sig: number | null;
-  /** false = a superseded marker published non-live (publishesSuperseded), not counted. */
+  /** false = a retired marker (superseded or tombstoned) published non-live (publishesRetired), not counted. */
   live: boolean;
 }
 
@@ -40,7 +40,7 @@ function collectionJson(name: string, feats: Feat[], nowMs: number, headIngestTi
       generated_iso: isoFromMs(nowMs),
       title: `earthquakes-feed ${name}`,
       api: '1',
-      // Live events only — the superseded markers in `features` are not counted.
+      // Live events only — the retired markers in `features` are not counted.
       count: feats.filter((f) => f.live).length,
       age_seconds: ageSeconds,
       schema_version: SCHEMA_VERSION,
@@ -56,13 +56,13 @@ function collectionJson(name: string, feats: Feat[], nowMs: number, headIngestTi
   });
 }
 
-/** The rolling summaries' candidates: every live event plus, flagged non-live, the ones
- *  superseded by an op:merge in the last SUPERSEDED_VISIBLE_MS (publishesSuperseded), with no
- *  future timestamps. Compact features (no provenance[]). A tombstoned event leaves at once. */
+/** The rolling summaries' candidates: every live event plus, flagged non-live, the ones retired
+ *  (superseded by an op:merge, or tombstoned) in the last RETIRED_VISIBLE_MS (publishesRetired),
+ *  with no future timestamps. Compact features (no provenance[]). */
 export function summaryFeats(nodes: Iterable<EventNode>, nowMs: number): Feat[] {
   const out: Feat[] = [];
   for (const n of nodes) {
-    if (!(n.state === 'live' || publishesSuperseded(n, nowMs)) || n.eventTimeMs > nowMs + FUTURE_LEEWAY_MS) continue;
+    if (!(n.state === 'live' || publishesRetired(n, nowMs)) || n.eventTimeMs > nowMs + FUTURE_LEEWAY_MS) continue;
     const feature = nodeToFeature(n, { compact: true }) as { properties: { mag: number | null; sig: number | null } };
     out.push({ feature, timeMs: n.eventTimeMs, mag: feature.properties.mag, sig: feature.properties.sig, live: n.state === 'live' });
   }
@@ -118,7 +118,7 @@ export function summaries(feats: Feat[], nowMs: number, publicV1: string, headIn
         console.warn(`::warning::v1/${name}.geojson is ${bytes} bytes — ${((bytes / MAX_PUBLISHED_BYTES) * 100).toFixed(1)}% of the ${MAX_PUBLISHED_BYTES}-byte budget`);
       }
       writeIfChanged(join(publicV1, `${name}.geojson`), json);
-      // Live events only, like metadata.count — the superseded markers ride along uncounted.
+      // Live events only, like metadata.count — the retired markers ride along uncounted.
       out[name] = { path: `v1/${name}.geojson`, url: `${DOMAIN}/v1/${name}.geojson`, count: picked.filter((f) => f.live).length };
     }
   }

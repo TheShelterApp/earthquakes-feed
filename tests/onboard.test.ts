@@ -92,7 +92,7 @@ test('onboard: a NEW source fills its recent window into the event_map (merges +
 test('onboard never folds two live events: no log line on this path, so no op:merge either', async () => {
   const root = mkdtempSync(join(tmpdir(), 'efd-onb-'));
   try {
-    // Two live events 35 km apart (separate at first sight: both M6.5+, window 29 km):
+    // Two live events 48 km apart (separate at first sight: both M6.5+, window 38.8 km):
     // A = usgs, B = geofon to the north. emsc is the newly-added source.
     const all = [...ALL, cfg('geofon', 2)];
     const prio = new Map(all.map((p) => [p.id, p.priority]));
@@ -101,21 +101,21 @@ test('onboard never folds two live events: no log line on this path, so no op:me
     const t = Date.parse('2026-06-30T10:00:00Z');
     const kmNorth = (km: number): number => 38.1 + km / 111.195;
     r.ingest(raw({ provider: 'usgs', providerEventId: 'us1', eventTimeMs: t, status: 'automatic', mag: 6.6, magType: 'mww' }), '2026-06-30T10:05:00Z');
-    r.ingest(raw({ provider: 'geofon', providerEventId: 'gf1', eventTimeMs: t, status: 'automatic', mag: 6.5, magType: 'mw', lat: kmNorth(35) }), '2026-06-30T10:06:00Z');
+    r.ingest(raw({ provider: 'geofon', providerEventId: 'gf1', eventTimeMs: t, status: 'automatic', mag: 6.5, magType: 'mw', lat: kmNorth(48) }), '2026-06-30T10:06:00Z');
     assert.equal(map.size, 2);
     saveEventMap(root, map);
     mkdirSync(dataPaths(root).indexDir, { recursive: true });
     writeFileSync(dataPaths(root).head, JSON.stringify({ seq: 100, ingest_time: '2026-06-30T10:06:00Z' }) + '\n');
     writeFileSync(dataPaths(root).onboardCursor, JSON.stringify({ onboarded: ['usgs', 'geofon'], pending: {} }) + '\n');
 
-    // emsc's reviewed solution sits 8 km from B and joins it; as B's new representative it
-    // moves B to 27 km from A — inside the window, so aggregate's merge pass would fold them.
+    // emsc's reviewed solution sits 12 km from B and joins it; as B's new representative it
+    // moves B to 36 km from A — inside the window, so aggregate's merge pass would fold them.
     const stub = async (): Promise<WindowOutcome> =>
       ({
         provider: 'emsc',
         status: { ok: true, events_returned: 1 },
         overflow: false,
-        obs: [raw({ provider: 'emsc', providerEventId: 'em1', eventTimeMs: t, status: 'reviewed', mag: 6.5, magType: 'mw', lat: kmNorth(27) })],
+        obs: [raw({ provider: 'emsc', providerEventId: 'em1', eventTimeMs: t, status: 'reviewed', mag: 6.5, magType: 'mw', lat: kmNorth(36) })],
       } satisfies WindowOutcome);
     const res = await onboardStep(root, all, all, '2026-06-30', NOW, '2026-07-05T12:00:00Z', stub);
     assert.equal(res.changed, 1);
@@ -126,6 +126,33 @@ test('onboard never folds two live events: no log line on this path, so no op:me
     assert.ok(b.aliases.includes('emsc:em1'), 'emsc joined B at first sight');
     assert.equal(b.chosenProvider, 'emsc', "B's representative moved to the reviewed row");
     assert.equal(new Resolver(new Map(after.map((n) => [n.feedId, n])), prio, new Map(all.map((p) => [p.id, p])), NOW).whyNotMerged(after[0]!, after[1]!), null, "aggregate's merge pass would fold them on the next logged revision");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('onboard screens reports like the live path: no coordinate-less or out-of-range row enters the map', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'efd-onb-'));
+  try {
+    seedEventMap(root);
+    writeFileSync(dataPaths(root).onboardCursor, JSON.stringify({ onboarded: ['usgs'], pending: {} }) + '\n');
+    const t = Date.parse('2026-07-01T05:00:00Z');
+    const stub = async (): Promise<WindowOutcome> =>
+      ({
+        provider: 'emsc',
+        status: { ok: true, events_returned: 3 },
+        overflow: false,
+        obs: [
+          raw({ provider: 'emsc', providerEventId: 'placeholder', eventTimeMs: t, lat: 0, lon: 0, depth: 0, mag: 0, magType: 'MU' }),
+          raw({ provider: 'emsc', providerEventId: 'bad', eventTimeMs: t, lat: 3512.3, lon: 13519.8 }),
+          raw({ provider: 'emsc', providerEventId: 'ok', eventTimeMs: t, lat: 40.0, lon: 25.0, mag: 3.2 }),
+        ],
+      } satisfies WindowOutcome);
+    const res = await onboardStep(root, ALL, ALL, earliestEventMapDay(root, NOW), NOW, '2026-07-05T12:00:00Z', stub);
+    assert.equal(res.changed, 1, 'only the located report');
+    const aliases = [...loadEventMap(root, {}).values()].flatMap((n) => n.aliases);
+    assert.ok(aliases.includes('emsc:ok'));
+    assert.ok(!aliases.includes('emsc:placeholder') && !aliases.includes('emsc:bad'));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

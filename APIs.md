@@ -11,7 +11,7 @@ archival, redaction).
 
 | Surface | Base | Use | Cache |
 |---|---|---|---|
-| Cloudflare Pages | `https://earthquakes-feed.theshelter.app/v1/` | live feed, recent day files, manifest | `max-age=30` + SWR |
+| Cloudflare Pages | `https://earthquakes-feed.theshelter.app/v1/` | live feed, recent day files, manifest | summaries + manifest `max-age=30` + SWR; day files `max-age=300` (today, yesterday) / `3600` (older) |
 | jsDelivr (branch) | `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/` | full-history partitions | ~12 h |
 | jsDelivr (`@sha`) | `…@<data_commit>/` | immutable frozen partitions | 1 year, immutable |
 | GitHub Releases | `archive-YYYY-MM` assets | very old months (bulk) | immutable, no CORS |
@@ -119,7 +119,9 @@ curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@<data_commit>
 
 ### `GET /v1/status.json`
 
-Last run's per-provider health, counts, timings, `degraded[]`.
+Last run's per-provider health, counts, timings, `degraded[]`. Counts include `merged`
+(`op:merge` lines), `bad_coords_dropped`, `coordinateless_dropped` (placeholders refused at
+ingest) and `coordinateless_retracted`; the heal run also carries `heal`.
 
 ## The Feature
 
@@ -162,12 +164,14 @@ than degraded, and the two are shown differently.
 The feed is a near-real-time *archive*, not a millisecond bus. Clients that also run
 the EMSC WebSocket should reconcile: index `feed.aliases[]`, and treat a WebSocket
 event as the same quake if it shares an alias or falls within **±60 s / ±10 km** — for a
-large quake (both magnitudes ≥ 5.5) the spatial window is `10 + 20·(min(M) − 5.5)` km,
-capped at 50 km (M6.0 → 20, M6.5 → 30, M7.0 → 40), and only while |ΔM| ≤ 1.0; both
+large quake (both magnitudes ≥ 5.5) the spatial window is `20 + 20·(min(M) − 5.5)` km,
+capped at 50 km (M5.5 → 20, M6.0 → 30, M6.5 → 40, M7.0 → 50), and only while |ΔM| ≤ 1.0; both
 windows shrink with the magnitude difference. Those are the feed's own identity rules
 (`src/dedup.ts`): agencies' preliminary epicentres of one M6–7 quake scatter by tens of
 km, and a provider re-publishing one solution under a second id (≤ 2 s, ≤ 2 km,
-|ΔM| ≤ 0.1) is the same event, not a new one.
+|ΔM| ≤ 0.1) is the same event, not a new one. When the feed folds two existing ids it
+folds a pair only when each is the other's best match (distance and time, relative to the
+pair's window), so a report is never welded to a neighbour while its own twin stays apart.
 
 ## Retired events
 
@@ -187,7 +191,16 @@ follows (a new revision and its own `op:merge` line). Folds happen only in the a
 (the one that writes the observation log — never in backfill or new-source onboarding) and
 only for events within 7 days of their origin time (the hot window): events the feed split
 before a rule change heal on their next revision if it comes within those 7 days, and stay
-split otherwise. Historical partitions are never rewritten.
+split otherwise. On 2026-09-28 a one-time heal ran the same pass over every live event in the
+hot window once (the Loyalty Islands M7.0 of 2026-09-25 was six ids): its folds are ordinary
+`op:merge` lines, and each survivor gets one `op:correction` line carrying its new revision
+(`reason` lists what it absorbed); `knowledge/index/heal.json` on the `data` branch records
+it. Historical partitions are never rewritten.
+
+A report with no location — exactly 0° N, 0° E with magnitude 0 or none (NCEDC publishes such
+placeholders, `MU 0.0`) — is never ingested. The ones published before that rule were
+retracted by the feed itself through the upstream-delete path: `state: "tombstoned"`, an
+`op:tombstone` line with a `reason`, gone from the rolling summaries and the Pages day files.
 
 ## Recipes
 

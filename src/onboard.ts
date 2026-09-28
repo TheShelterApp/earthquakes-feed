@@ -4,6 +4,7 @@ import { backfillCfg } from './backfill-cfg.js';
 import { eventDayKey, loadEventMap, saveEventMap } from './bitemporal.js';
 import { Resolver } from './dedup.js';
 import { configMap, fetchProviderWindow, priorityMap, type WindowOutcome } from './providers.js';
+import { emptyTally, screen } from './quality.js';
 import type { Head, ProviderConfig } from './types.js';
 
 const DAY = 86_400_000;
@@ -121,7 +122,8 @@ export async function onboardStep(
   const resolver = new Resolver(map, priorityMap(all), configMap(all), nowMs, { hotFloorMs: 0, merge: false });
   const head = JSON.parse(readFileSync(dataPaths(root).head, 'utf8')) as Head;
   const liveFloorMs = dayStartMs(liveDay);
-  const raws = res.obs
+  // The same door as the live path: no out-of-range or coordinate-less report enters the map.
+  const raws = screen(res.obs, emptyTally())
     .filter((o) => o.eventTimeMs >= liveFloorMs)
     .sort(
       (a, b) =>

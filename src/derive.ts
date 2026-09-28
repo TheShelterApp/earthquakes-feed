@@ -16,29 +16,7 @@ import { isoFromMs } from './util.js';
 import { enrichStatusV2, updateProviderHealth, type AggregateStatus, type ProviderHealth } from './status-v2.js';
 import { appendChanges } from './changes.js';
 import { FRESHNESS_EXPECTED_INTERVAL_SECONDS, FRESHNESS_STALE_AFTER_SECONDS } from './freshness.js';
-
-function headers(todayKey: string): string {
-  return [
-    '/v1/*',
-    '  Cache-Control: public, max-age=30, stale-while-revalidate=120',
-    '  Access-Control-Allow-Origin: *',
-    '/v1/events/*',
-    '  Cache-Control: public, max-age=3600',
-    '  Access-Control-Allow-Origin: *',
-    `/v1/events/${todayKey}.geojson`,
-    '  Cache-Control: public, max-age=300, stale-while-revalidate=600',
-    '  Access-Control-Allow-Origin: *',
-    // v2 manifest (signed envelope, ~KBs): clients revalidate with ETag, the edge absorbs it.
-    '/v2/*',
-    '  Cache-Control: public, max-age=0, s-maxage=60, stale-while-revalidate=120, stale-if-error=86400',
-    '  Access-Control-Allow-Origin: *',
-    // change-log: tailed with Range from the last byte offset; short edge cache, Range-friendly.
-    '/v1/changes/*',
-    '  Cache-Control: public, max-age=0, s-maxage=60, stale-while-revalidate=300, stale-if-error=86400',
-    '  Access-Control-Allow-Origin: *',
-    '',
-  ].join('\n');
-}
+import { pagesHeaders } from './pages-headers.js';
 
 function main(): void {
   const nowMs = Date.now();
@@ -88,7 +66,8 @@ function main(): void {
   );
   writeIfChanged(join(publicV1, 'manifest.json'), manifest);
   writeIfChanged(join(DATA_DIR, 'manifest.json'), manifest);
-  writeIfChanged(join(PUBLIC_DIR, '_headers'), headers(eventDayKey(nowMs)));
+  // One rule per published path (pages-headers.ts): Pages joins the headers of every matching rule.
+  writeIfChanged(join(PUBLIC_DIR, '_headers'), pagesHeaders(nowMs, pagesDays));
 
   // Publish the last aggregate's per-provider health onto Pages so /v1/status.json is a
   // real endpoint (documented in APIs.md, read by the health watchdog). It's written to

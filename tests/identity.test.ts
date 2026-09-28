@@ -99,3 +99,8 @@ test('a scattered large event clusters the same way under every first-sighting o
     for (const n of m.values()) if (n !== live[0]) assert.equal(n.supersededBy, live[0]!.feedId);
   }
 });
+
+// Still open: the surviving feed_id itself. op:merge makes the event, its rows and its
+// representative order-independent (above), not the id — that would need re-keying a node
+// after first sight, which the pinned-identity design (ulid.ts) rules out today.
+test.todo('feed_id is byte-identical under adversarial first-sighting reordering (needs re-keying beyond op:merge)');

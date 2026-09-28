@@ -61,17 +61,23 @@ export class Resolver {
   private readonly alias = new Map<string, string>();
   private readonly geo = new Map<string, Set<string>>();
   private readonly hotFloor: number;
+  private readonly mergePass: boolean;
 
   constructor(
     readonly eventMap: Map<string, EventNode>,
     private readonly priority: Map<string, number>,
     private readonly cfg: Map<string, ProviderConfig>,
     nowMs: number,
-    opts: { hotFloorMs?: number } = {},
+    opts: { hotFloorMs?: number; merge?: boolean } = {},
   ) {
     // Backfill passes hotFloorMs=0 to index events by event-time window (not wall-clock
     // recency), so historical reports dedup against the transient partition index (C2).
     this.hotFloor = opts.hotFloorMs ?? nowMs - HOT_WINDOW_DAYS * 86_400_000;
+    // Backfill and onboard pass merge=false: they never append to the observation log, so a
+    // fold there would retire a published event with no op:merge line (and, on a run that
+    // appended nothing, no change-log line either). Folds happen only on aggregate's logged
+    // path; a duplicate those paths leave heals on its next logged revision (hot window only).
+    this.mergePass = opts.merge ?? true;
     for (const node of eventMap.values()) {
       if (node.state === 'live') {
         this.alias.set(`${node.chosenProvider}:${node.provenance.find((r) => r.chosen)?.nativeId ?? ''}`, node.feedId);
@@ -510,8 +516,11 @@ export class Resolver {
    *  gates; a match folds the pair into one survivor and the chain continues from the
    *  survivor. Bounded: every round retires one node. Returns the node the caller's report
    *  now lives in. Identity is otherwise pinned at first sight, so this is the only place a
-   *  duplicate minted from scattered preliminary solutions is ever healed. */
+   *  duplicate minted from scattered preliminary solutions is ever healed — and only while
+   *  the node is inside the hot window (HOT_WINDOW_DAYS of event time, findMergeCandidate):
+   *  a duplicate whose next revision comes later stays two ids. Off when merge=false. */
   private mergeAround(node: EventNode, ingestTime: string, merges: MergeRecord[]): EventNode {
+    if (!this.mergePass) return node;
     let cur = node;
     for (let round = 0; round < MERGE_MAX_ROUNDS && cur.state === 'live'; round++) {
       const hit = this.findMergeCandidate(cur);

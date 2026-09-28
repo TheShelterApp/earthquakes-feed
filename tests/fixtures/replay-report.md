@@ -41,6 +41,10 @@ npm run replay-dedup -- --logs /tmp/obs-7d.ndjson --baseline /tmp/dedup-baseline
   `op:merge` lines, one live survivor with the 12 ids, five superseded ids pointing at it
   (`tests/merge.test.ts`, *upgrade*). Which id survives depends on which one revises first (most providers
   leads the survivor rule): the USGS id when USGS or GeoNet revises, the EMSC/GEOFON/RESIF id otherwise.
+  **Bounded by the hot window:** the merge pass only looks at events within `HOT_WINDOW_DAYS` (7) of their
+  origin time, so this heal needs the change deployed and one of the six revising before about
+  2026-10-02 21:23 UTC; a later revision leaves the six ids as they are (*the heal is bounded* test). This
+  replay indexes every event (`hotFloorMs = 0`), so it does not show that bound.
 - No fold chain in the 7 days: every `op:merge` retired a node that was never itself a survivor, so no
   `superseded_by` had to be re-pointed (81 op:merge lines = 81 superseded nodes).
 - The three groups the new rules "split" are re-groupings, not regressions:

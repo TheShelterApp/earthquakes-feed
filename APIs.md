@@ -98,8 +98,9 @@ curl -s https://earthquakes-feed.theshelter.app/v1/all_day.geojson
 ### `GET /v1/events/YYYY-MM-DD.geojson` — recent day (map time-slider)
 
 Ready-to-render `FeatureCollection` for one UTC day: the live events **full-fat**
-(complete `feed.provenance[]` incl. `fields`), plus — compact, flagged `feed.state !=
-"live"` — the events retired in the last 48 h (see *Retired events* below). Exists for the days currently in the live
+(complete `feed.provenance[]` incl. `fields`), plus — compact, flagged `feed.state:
+"superseded"` — the events folded into another one in the last 48 h (see *Retired events*
+below). Exists for the days currently in the live
 event-map window (~45 days) — a partition's `pages_url` is present in `manifest.json`
 **iff** its day file is actually deployed; for any other day use the partition `url`
 (NDJSON, same full-fat Features, one per line).
@@ -173,17 +174,20 @@ km, and a provider re-publishing one solution under a second id (≤ 2 s, ≤ 2 
 An event can leave the live set in two ways: an upstream delete (`state: "tombstoned"`,
 `tombstone: true`) or a fold into another event once revised solutions converge
 (`state: "superseded"`, `superseded_by: <feed_id>`, an `op:merge` line in the observation
-log). For **48 h after retirement** the retired feature is still published in the rolling
-summaries and the Pages day file — **compact and non-live** — so a poller that treats
-absence as "still there" sees the removal once; after that it lives only in the day
-partitions (full-fat, every state). Consumers must drop every feature whose
-`feed.state !== "live"`; `metadata.count` counts live features only. The survivor of a
-merge keeps the loser's `aliases[]` and provenance rows, so the loser's provider ids
-resolve to it, and its `first_ingest_time` / `first_seen_seq` become the earlier of the two.
-`superseded_by` names the event that was live when the line was written: if that survivor
-later folds into another event in its turn, every event folded into it follows (a new
-revision and its own `op:merge` line). Events the feed split before a rule change heal on
-their next revision; historical partitions are never rewritten.
+log). A tombstoned event leaves the rolling summaries and the Pages day file at once. A
+superseded one stays published there for **48 h after the fold** — **compact and
+non-live** — so a poller that treats absence as "still there" sees the removal once; after
+that it lives only in the day partitions (full-fat, every state). Consumers must drop every
+feature whose `feed.state !== "live"`; `metadata.count` counts live features only. The
+survivor of a merge keeps the loser's `aliases[]` and provenance rows, so the loser's
+provider ids resolve to it, and its `first_ingest_time` / `first_seen_seq` become the
+earlier of the two. `superseded_by` names the event that was live when the line was written:
+if that survivor later folds into another event in its turn, every event folded into it
+follows (a new revision and its own `op:merge` line). Folds happen only in the aggregate run
+(the one that writes the observation log — never in backfill or new-source onboarding) and
+only for events within 7 days of their origin time (the hot window): events the feed split
+before a rule change heal on their next revision if it comes within those 7 days, and stay
+split otherwise. Historical partitions are never rewritten.
 
 ## Recipes
 

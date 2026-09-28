@@ -40,9 +40,10 @@ export const REID_KM = 2;
 export const REID_MAG_DELTA = 0.1;
 /** Bound on the post-revision merge chain one ingest may trigger (each round retires a node). */
 export const MERGE_MAX_ROUNDS = 8;
-/** A retired (superseded / tombstoned) event stays published, flagged non-live, for this long
- *  after its last ingest, so a poller that treats absence as "still there" sees the removal. */
-export const RETIRED_VISIBLE_MS = 48 * 3600_000;
+/** An event superseded by an op:merge stays published, compact and flagged non-live, for this
+ *  long after its last ingest, so a poller that treats absence as "still there" sees the
+ *  removal. Tombstoned events are not republished (they leave the live surfaces at once). */
+export const SUPERSEDED_VISIBLE_MS = 48 * 3600_000;
 /** Only events within this many days are kept in the in-memory dedup index. */
 export const HOT_WINDOW_DAYS = 7;
 /** aggregate loads only this many days of event_map shards (fast hot path). */

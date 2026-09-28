@@ -65,8 +65,8 @@ try {
 // 2. Published summaries (Pages artifact): schema + size gate + no future events.
 //    /v1/events/ day files are the documented FULL-detail Pages surface (the compact
 //    summaries point consumers there) — every LIVE feature must keep a non-empty
-//    feed.provenance[]. A retired feature (state superseded / tombstoned) rides along
-//    compact and flagged non-live for RETIRED_VISIBLE_MS by contract, so it is exempt.
+//    feed.provenance[]. A superseded feature rides along compact and flagged non-live for
+//    SUPERSEDED_VISIBLE_MS by contract, so it is exempt; a tombstoned one never belongs here.
 const nowMs = Date.now();
 for (const file of walk(publicV1, (f) => f.endsWith('.geojson'))) {
   const bytes = statSync(file).size;
@@ -87,8 +87,8 @@ for (const file of walk(publicV1, (f) => f.endsWith('.geojson'))) {
     }
     if (isDayFile) {
       const prov = feat.properties?.feed?.provenance;
-      const live = (feat.properties?.feed?.state ?? 'live') === 'live';
-      if (live && (!Array.isArray(prov) || prov.length === 0)) {
+      const superseded = feat.properties?.feed?.state === 'superseded';
+      if (!superseded && (!Array.isArray(prov) || prov.length === 0)) {
         fail(`${file}: feature ${i} lost feed.provenance[] — day files must stay full-fat`);
         break;
       }

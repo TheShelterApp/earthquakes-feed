@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { JSDELIVR_BASE, RETIRED_VISIBLE_MS, SCHEMA_VERSION, dataPaths } from './config.js';
+import { JSDELIVR_BASE, SCHEMA_VERSION, SUPERSEDED_VISIBLE_MS, dataPaths } from './config.js';
 import { featureToNode, nodeToFeature, writeIfChanged } from './bitemporal.js';
 import type { EventNode } from './types.js';
 import { isoFromMs } from './util.js';
@@ -24,12 +24,16 @@ const dayFromMs = (ms: number): string => isoFromMs(ms).slice(0, 10);
 export const dayPartitionFile = (root: string, dayKey: string): string =>
   join(dataPaths(root).eventsDir, `${dayToPath(dayKey)}.ndjson`);
 
-/** A retired node (superseded by a merge, or tombstoned) the live surfaces still publish,
- *  flagged non-live: within RETIRED_VISIBLE_MS of its last ingest. A poller that treats
- *  absence as "still there" must see the removal once; after that the tree partition alone
- *  keeps it. */
-export const publishesRetired = (n: EventNode, nowMs: number): boolean =>
-  n.state !== 'live' && nowMs - Date.parse(n.lastIngestTime) <= RETIRED_VISIBLE_MS;
+/** A node superseded by an op:merge that the live surfaces (Pages day file, rolling summaries)
+ *  still publish, compact and flagged non-live: within SUPERSEDED_VISIBLE_MS of its last ingest.
+ *  A poller that treats absence as "still there" must see the removal once; after that the
+ *  tree partition alone keeps it. Superseded ONLY: a tombstoned event (an upstream delete)
+ *  leaves the live surfaces at once, as before — a consumer that reads those files without
+ *  checking `feed.state` (the alerts gateway's pages_url path until it filters) must never
+ *  see a deleted event again, while a superseded marker shows it no more than the live
+ *  duplicate it would have seen without the fold. */
+export const publishesSuperseded = (n: EventNode, nowMs: number): boolean =>
+  n.state === 'superseded' && nowMs - Date.parse(n.lastIngestTime) <= SUPERSEDED_VISIBLE_MS;
 
 /** Read an existing day partition back into nodes (the backfill transient index). */
 export function readDayPartitionNodes(root: string, dayKey: string): EventNode[] {
@@ -46,7 +50,7 @@ export function readDayPartitionNodes(root: string, dayKey: string): EventNode[]
  * byte-compare avoids churn) plus, for recent days, a ready-to-render GeoJSON on Pages.
  * Includes ALL node states (live/tombstoned/superseded) so the round-trip is lossless.
  * The Pages day file carries the live events full-fat plus, in compact form, the recently
- * retired ones flagged non-live (publishesRetired) — the summaries follow the same rule.
+ * superseded ones flagged non-live (publishesSuperseded) — the summaries follow the same rule.
  */
 export function writeDayPartition(
   root: string,
@@ -61,15 +65,16 @@ export function writeDayPartition(
 
   if (opts.publicV1 && dayKey >= dayFromMs(opts.nowMs - PAGES_DAY_WINDOW * 86_400_000)) {
     const ageSeconds = opts.headIngestTime ? Math.max(0, Math.round((opts.nowMs - Date.parse(opts.headIngestTime)) / 1000)) : null;
-    // Pages day file (map layer): live events full-fat; a recently retired one rides along
-    // compact and non-live so a poller sees the removal; older retired ones stay in the tree file.
+    // Pages day file (map layer): live events full-fat; a recently superseded one rides along
+    // compact and non-live so a poller sees the removal; tombstoned and older superseded ones
+    // stay in the tree file only.
     const published: unknown[] = [];
     let live = 0;
     sorted.forEach((n, i) => {
       if (n.state === 'live') {
         published.push(feats[i]);
         live++;
-      } else if (publishesRetired(n, opts.nowMs)) {
+      } else if (publishesSuperseded(n, opts.nowMs)) {
         published.push(nodeToFeature(n, { compact: true }));
       }
     });
@@ -80,7 +85,7 @@ export function writeDayPartition(
         generated_iso: isoFromMs(opts.nowMs),
         title: `earthquakes-feed events ${dayKey}`,
         api: '1',
-        // Live events only — the retired markers in `features` are not counted.
+        // Live events only — the superseded markers in `features` are not counted.
         count: live,
         age_seconds: ageSeconds,
         schema_version: SCHEMA_VERSION,

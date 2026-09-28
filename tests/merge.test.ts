@@ -7,10 +7,10 @@ import { test } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { featureToNode, nodeToFeature } from '../src/bitemporal.js';
-import { RETIRED_VISIBLE_MS } from '../src/config.js';
+import { HOT_WINDOW_DAYS, SUPERSEDED_VISIBLE_MS } from '../src/config.js';
 import { Resolver, type IngestResult } from '../src/dedup.js';
 import { mergeLine, observationToRaw, observeLine } from '../src/oplog.js';
-import { publishesRetired, readDayPartitionNodes, writeDayPartition } from '../src/partitions.js';
+import { publishesSuperseded, readDayPartitionNodes, writeDayPartition } from '../src/partitions.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import type { EventNode, Observation, ProviderConfig, RawObs } from '../src/types.js';
 
@@ -105,7 +105,7 @@ test('fixture: INGV re-publishing the identical solution under a second id folds
 
 /** A random interleaving that keeps every provider id's revisions in their real order (a
  *  report's revisions cannot arrive before the report) — "adversarial first-sighting
- *  reordering" in the words of the retired identity.test.ts todo. */
+ *  reordering" in the words of the identity.test.ts todo (still open for the id itself). */
 function interleave(rows: Observation[], seed: number): Observation[] {
   const groups = new Map<string, Observation[]>();
   for (const o of rows) {
@@ -146,6 +146,35 @@ test('fixture: every first-sighting order yields the same event, rows and repres
  *  (`origin/data` c6ed8a01c9, events/2026/09/25.ndjson) — the event_map this change inherits. */
 const publishedLines = readFileSync(here('fixtures/loyalty-2026-09-25-published.ndjson'), 'utf8').split('\n').filter(Boolean);
 
+/** The six published nodes as production's event_map holds them, and the `updatedafter`
+ *  sweep's next revision of `feedId`'s leading row (~110 m north), resolved at `nowMs`. */
+function reviseUpgrade(feedId: string, nowMs: number): { map: Map<string, EventNode>; r: Resolver; res: IngestResult | null; row: EventNode['provenance'][number] } {
+  const map = new Map<string, EventNode>();
+  for (const l of publishedLines) {
+    const n = featureToNode(JSON.parse(l));
+    map.set(n.feedId, n);
+  }
+  assert.equal([...map.values()].filter((n) => n.state === 'live').length, 6, 'six live ids before');
+  const r = new Resolver(map, prio, cfg, nowMs);
+  const row = map.get(feedId)!.provenance.find((p) => p.chosen)!;
+  const res = r.reviseExisting(
+    obs(row.provider, row.nativeId, {
+      eventTimeMs: row.eventTimeMs,
+      providerUpdatedMs: (row.providerUpdatedMs ?? T0) + 3600_000,
+      status: row.status,
+      lat: row.lat + 0.001,
+      lon: row.lon,
+      depth: row.depth,
+      mag: row.mag,
+      magType: row.magType,
+      place: row.place,
+      fields: row.fields,
+    }),
+    new Date(nowMs).toISOString(),
+  );
+  return { map, r, res, row };
+}
+
 test('upgrade: the six live ids the feed published fold into one survivor on the next revision of any of them', () => {
   assert.equal(publishedLines.length, 6);
   const ajv = new Ajv2020({ allErrors: true, strict: false });
@@ -163,36 +192,14 @@ test('upgrade: the six live ids the feed published fold into one survivor on the
     efd_01M3D76ES09MMEA9RBS6BG60Y1: 'efd_01M3D76ES01WZVMZ9XT5M0D1X0',
   };
   for (const line of publishedLines) {
-    const map = new Map<string, EventNode>();
-    for (const l of publishedLines) {
-      const n = featureToNode(JSON.parse(l));
-      map.set(n.feedId, n);
-    }
-    assert.equal([...map.values()].filter((n) => n.state === 'live').length, 6, 'six live ids before');
-    const r = new Resolver(map, prio, cfg, NOW);
-    const moving = map.get((JSON.parse(line) as { id: string }).id)!;
+    const movingId = (JSON.parse(line) as { id: string }).id;
     // The `updatedafter` sweep brings the leading row's next revision: ~110 m north.
-    const row = moving.provenance.find((p) => p.chosen)!;
-    const res = r.reviseExisting(
-      obs(row.provider, row.nativeId, {
-        eventTimeMs: row.eventTimeMs,
-        providerUpdatedMs: (row.providerUpdatedMs ?? T0) + 3600_000,
-        status: row.status,
-        lat: row.lat + 0.001,
-        lon: row.lon,
-        depth: row.depth,
-        mag: row.mag,
-        magType: row.magType,
-        place: row.place,
-        fields: row.fields,
-      }),
-      '2026-09-28T01:00:00.000Z',
-    );
-    const label = `${moving.feedId} (${row.provider}) revises`;
+    const { map, r, res, row } = reviseUpgrade(movingId, Date.parse('2026-09-28T01:00:00.000Z'));
+    const label = `${movingId} (${row.provider}) revises`;
     assert.ok(res, `${label}: a revision of a known event`);
     assert.equal(res.merges.length, 5, `${label}: five op:merge folds`);
     const survivor = assertOneEvent(map, label);
-    assert.equal(survivor.feedId, expected[moving.feedId], `${label}: survivor`);
+    assert.equal(survivor.feedId, expected[movingId], `${label}: survivor`);
     assert.equal(res.node, survivor, `${label}: the report lands on the survivor`);
     const superseded = [...map.values()].filter((n) => n.state === 'superseded');
     assert.equal(superseded.length, 5, `${label}: five superseded nodes`);
@@ -208,6 +215,18 @@ test('upgrade: the six live ids the feed published fold into one survivor on the
     }
     assert.equal(map.size, 6, `${label}: nothing minted`);
   }
+});
+
+test('upgrade: the heal is bounded by the hot window — a revision after event time + 7 d folds nothing', () => {
+  // The merge pass only looks at nodes inside the hot window (HOT_WINDOW_DAYS of event time),
+  // so the six published ids heal only if one of them revises before ~2026-10-02 21:23 UTC.
+  const usgs = 'efd_01M3D76ES08HGFRSA05T71J8ZF';
+  const inside = reviseUpgrade(usgs, T0 + HOT_WINDOW_DAYS * 86_400_000 - 3600_000);
+  assert.equal(inside.res?.merges.length, 5, 'an hour before the edge: five folds');
+  const outside = reviseUpgrade(usgs, T0 + HOT_WINDOW_DAYS * 86_400_000 + 3600_000);
+  assert.ok(outside.res?.changed, 'the revision itself still lands on its node');
+  assert.equal(outside.res?.merges.length, 0, 'an hour past the edge: no fold');
+  assert.equal([...outside.map.values()].filter((n) => n.state === 'live').length, 6, 'six live ids stay');
 });
 
 test('same-provider DISTINCT reports within the window still mint separately', () => {
@@ -320,6 +339,20 @@ test('op:merge: a node whose revision moves it next to a neighbour folds into it
   assert.equal(rev?.node, a);
   assert.equal(a.provenance.find((p) => p.nativeId === 'e1')!.mag, 6.4);
   assert.equal(b.provenance[0]!.mag, 6.5, 'the frozen copy does not move');
+});
+
+test('merge=false (backfill, onboard: paths with no log line) never folds', () => {
+  const map = new Map<string, EventNode>();
+  const r = new Resolver(map, prio, cfg, NOW, { merge: false });
+  const a = r.ingest(obs('usgs', 'u1', { status: 'reviewed', providerUpdatedMs: T0 + 60_000 }), '2026-09-25T21:25:00Z').node;
+  const b = r.ingest(obs('emsc', 'e1', { mag: 6.5, lat: north(-21.3, 40) }), '2026-09-25T21:26:00Z').node;
+  const res = r.ingest(obs('emsc', 'e1', { mag: 6.5, lat: north(-21.3, 5) }), '2026-09-25T21:31:00Z');
+  assert.equal(res.changed, true, 'the revision itself lands');
+  assert.equal(res.node, b);
+  assert.deepEqual(res.merges, []);
+  assert.equal(a.state, 'live');
+  assert.equal(b.state, 'live');
+  assert.equal(r.whyNotMerged(a, b), null, 'the same pair folds on the logged path');
 });
 
 test('op:merge survivor: most providers beats status; status beats priority; the moving side may win', () => {
@@ -442,15 +475,17 @@ test('state / superseded_by round-trip through nodeToFeature / featureToNode', (
   assert.ok(!('provenance' in compact.properties.feed));
 });
 
-test('visibility: a retired node is published non-live for 48 h after its last ingest, then only in the tree', () => {
+test('visibility: a superseded node is published non-live for 48 h after its last ingest, then only in the tree', () => {
   const { a, b } = moveScenario();
   const retiredAt = Date.parse(b.lastIngestTime);
-  assert.equal(publishesRetired(a, retiredAt), false, 'live nodes are not "retired"');
-  assert.equal(publishesRetired(b, retiredAt + 1000), true);
-  assert.equal(publishesRetired(b, retiredAt + RETIRED_VISIBLE_MS), true, 'inclusive at the edge');
-  assert.equal(publishesRetired(b, retiredAt + RETIRED_VISIBLE_MS + 1), false);
-  const tomb: EventNode = { ...a, feedId: 'efd_01M3D76ES0TOMBSTONE00000001', aliases: [], provenance: [], state: 'tombstoned' };
-  assert.equal(publishesRetired(tomb, retiredAt + 1000), true, 'a tombstone follows the same rule');
+  assert.equal(publishesSuperseded(a, retiredAt), false, 'live nodes are not "superseded"');
+  assert.equal(publishesSuperseded(b, retiredAt + 1000), true);
+  assert.equal(publishesSuperseded(b, retiredAt + SUPERSEDED_VISIBLE_MS), true, 'inclusive at the edge');
+  assert.equal(publishesSuperseded(b, retiredAt + SUPERSEDED_VISIBLE_MS + 1), false);
+  // A tombstone (upstream delete) leaves the live surfaces at once, as before this change: a
+  // consumer that reads them without checking feed.state must never see a deleted event again.
+  const tomb: EventNode = { ...a, feedId: 'efd_01M3D76ES0TOMBSTONE00000001', aliases: [], provenance: [], state: 'tombstoned', lastIngestTime: b.lastIngestTime };
+  assert.equal(publishesSuperseded(tomb, retiredAt + 1000), false, 'a fresh tombstone is not republished');
 
   const root = mkdtempSync(join(tmpdir(), 'efd-merge-'));
   try {
@@ -463,20 +498,21 @@ test('visibility: a retired node is published non-live for 48 h after its last i
     assert.deepEqual(tree.map((n) => n.state).sort(), ['live', 'superseded', 'superseded', 'tombstoned']);
     assert.equal(tree.find((n) => n.feedId === b.feedId)!.provenance.length, 1);
     assert.equal(tree.find((n) => n.feedId === b.feedId)!.supersededBy, a.feedId);
-    // Pages day file: the live one full-fat, the recently retired ones compact and non-live, the old one absent.
+    // Pages day file: the live one full-fat, the recently superseded one compact and non-live,
+    // the old superseded one and the tombstone absent.
     const pages = JSON.parse(readFileSync(join(publicV1, 'events', `${day}.geojson`), 'utf8')) as {
       metadata: { count: number };
       features: { id: string; properties: { feed: Record<string, unknown> } }[];
     };
-    assert.deepEqual(pages.features.map((f) => f.id).sort(), [a.feedId, b.feedId, tomb.feedId].sort());
+    assert.deepEqual(pages.features.map((f) => f.id).sort(), [a.feedId, b.feedId].sort());
     assert.equal(pages.metadata.count, 1, 'count = live features only');
     const liveFeat = pages.features.find((f) => f.id === a.feedId)!;
     const retired = pages.features.find((f) => f.id === b.feedId)!;
     assert.ok(Array.isArray(liveFeat.properties.feed['provenance']), 'live stays full-fat');
     assert.equal(retired.properties.feed['state'], 'superseded');
     assert.equal(retired.properties.feed['superseded_by'], a.feedId);
-    assert.ok(!('provenance' in retired.properties.feed), 'retired markers are compact');
-    assert.equal(pages.features.find((f) => f.id === tomb.feedId)!.properties.feed['tombstone'], true);
+    assert.ok(!('provenance' in retired.properties.feed), 'superseded markers are compact');
+    assert.ok(pages.features.every((f) => f.properties.feed['state'] !== 'tombstoned'), 'no tombstone in the Pages day file');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

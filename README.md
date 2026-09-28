@@ -118,9 +118,9 @@ WebSocket) if they have one. For live-map dedup, index `feed.aliases[]` and merg
 WebSocket event that shares an alias or falls within ±60 s / ±10 km (for a large quake,
 both ≥ M5.5, the window widens to `10 + 20·(min(M) − 5.5)` km, at most 50 km, while
 |ΔM| ≤ 1 — see [APIs.md](APIs.md#realtime--client-dedup)). Drop every feature whose
-`feed.state` is not `live`: a retired event (tombstoned upstream, or superseded by a
-merge once agencies' solutions converged) stays published, compact and non-live, for
-48 h so pollers see the removal ([APIs.md](APIs.md#retired-events)).
+`feed.state` is not `live`: an event superseded by a merge (once agencies' solutions
+converged) stays published, compact and non-live, for 48 h so pollers see the removal
+([APIs.md](APIs.md#retired-events)).
 
 ## Sources
 

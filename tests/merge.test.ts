@@ -180,17 +180,10 @@ test('upgrade: the six live ids the feed published fold into one survivor on the
   const ajv = new Ajv2020({ allErrors: true, strict: false });
   addFormats(ajv);
   const vObs = ajv.compile(JSON.parse(readFileSync(here('../schema/observation.schema.json'), 'utf8')) as object);
-  // Which of the six revises first decides only the survivor's id: most providers leads the
-  // survivor rule, so the first fold's winner keeps winning (EMSC's node holds three
-  // providers, the USGS one two plus the reviewed status).
-  const expected: Record<string, string> = {
-    efd_01M3D76ES08HGFRSA05T71J8ZF: 'efd_01M3D76ES08HGFRSA05T71J8ZF',
-    efd_01M3D76ES08SQ06R47AQB0V0RJ: 'efd_01M3D76ES08HGFRSA05T71J8ZF',
-    efd_01M3D76ES01WZVMZ9XT5M0D1X0: 'efd_01M3D76ES01WZVMZ9XT5M0D1X0',
-    efd_01M3D77C2GZTT65JP6GD75YXXD: 'efd_01M3D76ES01WZVMZ9XT5M0D1X0',
-    efd_01M3D76ES0A4G81787WNDQ948D: 'efd_01M3D76ES01WZVMZ9XT5M0D1X0',
-    efd_01M3D76ES09MMEA9RBS6BG60Y1: 'efd_01M3D76ES01WZVMZ9XT5M0D1X0',
-  };
+  // Only mutual best matches fold, and a neighbour pair that is its own best match folds
+  // first (USGS + GeoNet at 0.02 km, the two INGV ids at 0 km), so whichever of the six
+  // revises, the folds build the same survivor: the USGS id, the one the app already shows.
+  const USGS_ID = 'efd_01M3D76ES08HGFRSA05T71J8ZF';
   for (const line of publishedLines) {
     const movingId = (JSON.parse(line) as { id: string }).id;
     // The `updatedafter` sweep brings the leading row's next revision: ~110 m north.
@@ -199,7 +192,7 @@ test('upgrade: the six live ids the feed published fold into one survivor on the
     assert.ok(res, `${label}: a revision of a known event`);
     assert.equal(res.merges.length, 5, `${label}: five op:merge folds`);
     const survivor = assertOneEvent(map, label);
-    assert.equal(survivor.feedId, expected[movingId], `${label}: survivor`);
+    assert.equal(survivor.feedId, USGS_ID, `${label}: survivor`);
     assert.equal(res.node, survivor, `${label}: the report lands on the survivor`);
     const superseded = [...map.values()].filter((n) => n.state === 'superseded');
     assert.equal(superseded.length, 5, `${label}: five superseded nodes`);
@@ -277,15 +270,18 @@ test('large-event window: widens with the smaller magnitude, shrinks with ΔM, c
     r.ingest(obs('emsc', 'e', { eventTimeMs: T0 + 2_000, ...b }), '2026-09-25T21:25:00Z');
     return map.size;
   };
-  // Both large: base 10 + 20·(6.4 − 5.5) = 28 km, ×(1 − 0.3·0.2) = 26.3 km → 25 km joins.
-  assert.equal(pair({ mag: 6.6 }, { mag: 6.4, lat: north(-21.3, 25) }), 1, 'M6.6 / M6.4 at 25 km is one event');
+  // Both large: base 20 + 20·(6.4 − 5.5) = 38 km, ×(1 − 0.3·0.2) = 35.7 km → 35 km joins.
+  assert.equal(pair({ mag: 6.6 }, { mag: 6.4, lat: north(-21.3, 35) }), 1, 'M6.6 / M6.4 at 35 km is one event');
+  // The base at M5.5 is 20 km: the Loyalty aftershock (M5.5, USGS vs EMSC 16.5 km) is one event.
+  assert.equal(pair({ mag: 5.5 }, { mag: 5.5, lat: north(-21.3, 16.5) }), 1, 'M5.5 / M5.5 at 16.5 km is one event');
+  assert.equal(pair({ mag: 5.5 }, { mag: 5.5, lat: north(-21.3, 21) }), 2, 'M5.5 / M5.5 at 21 km is not');
   // Without the widening the same pair would be split (10 km × 0.94).
   assert.equal(pair({ mag: 5.4 }, { mag: 5.4, lat: north(-21.3, 15) }), 2, 'below M5.5 the plain 10 km window applies');
-  // Base 10 + 20·0.1 = 12 km, ×(1 − 0.3) = 8.4 km → 15 km stays split.
-  assert.equal(pair({ mag: 6.6 }, { mag: 5.6, lat: north(-21.3, 15) }), 2, 'ΔM 1.0 shrinks the widened window');
-  // Hard cap: M7.0 / M5.9 → base 18 km × 0.67 = 12.1 km would take 11 km; |ΔM| 1.1 > 1.0 refuses.
+  // Base 20 + 20·0.1 = 22 km, ×(1 − 0.3) = 15.4 km → 17 km stays split.
+  assert.equal(pair({ mag: 6.6 }, { mag: 5.6, lat: north(-21.3, 17) }), 2, 'ΔM 1.0 shrinks the widened window');
+  // Hard cap: M7.0 / M5.9 → base 28 km × 0.67 = 18.8 km would take 11 km; |ΔM| 1.1 > 1.0 refuses.
   assert.equal(pair({ mag: 7.0 }, { mag: 5.9, lat: north(-21.3, 11) }), 2, '|ΔM| > 1 never merges on the widened path');
-  // Cap: M7.5 / M7.5 → 10 + 40 = 50 km (not 50 + …) → 45 km joins, 55 km does not.
+  // Cap: M7.5 / M7.5 → 20 + 40 = 60 → 50 km → 45 km joins, 55 km does not.
   assert.equal(pair({ mag: 7.5 }, { mag: 7.5, lat: north(-21.3, 45) }), 1, 'capped at 50 km');
   assert.equal(pair({ mag: 7.5 }, { mag: 7.5, lat: north(-21.3, 55) }), 2, 'nothing beyond the cap');
 });
@@ -390,11 +386,12 @@ test('op:merge: when a survivor retires in its turn, the nodes folded into it fo
   const { map, r, a, b } = moveScenario();
   assert.equal(b.supersededBy, a.feedId);
   const bRevision = b.revision;
-  // Run 2: C (three providers) 40 km south, then its revision lands 3 km from A. C holds
-  // more providers, so C survives and A retires; B must now point at C, not at retired A.
-  const c = r.ingest(obs('geofon', 'g1', { lat: north(-21.3, -40) }), '2026-09-25T22:00:00Z').node;
-  r.ingest(obs('geonet', 'n1', { lat: north(-21.3, -40.5) }), '2026-09-25T22:00:00Z');
-  r.ingest(obs('ingv', 'i1', { lat: north(-21.3, -39.5) }), '2026-09-25T22:00:00Z');
+  // Run 2: C (three providers) 60 km south (past the 50 km cap), then its revision lands 3 km
+  // from A. C holds more providers, so C survives and A retires; B must now point at C, not
+  // at retired A.
+  const c = r.ingest(obs('geofon', 'g1', { lat: north(-21.3, -60) }), '2026-09-25T22:00:00Z').node;
+  r.ingest(obs('geonet', 'n1', { lat: north(-21.3, -60.5) }), '2026-09-25T22:00:00Z');
+  r.ingest(obs('ingv', 'i1', { lat: north(-21.3, -59.5) }), '2026-09-25T22:00:00Z');
   assert.equal([...map.values()].filter((n) => n.state === 'live').length, 2, 'A and C live');
   const res = r.ingest(obs('geofon', 'g1', { lat: north(-21.3, -3) }), '2026-09-25T22:10:00Z');
   assert.equal(res.node, c, 'C survives (three providers against two)');

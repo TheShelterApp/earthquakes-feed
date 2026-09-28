@@ -12,6 +12,7 @@ import {
   type Inventory,
 } from './partitions.js';
 import { activeProviders, fetchProviderWindow, loadRegistry, priorityMap, configMap } from './providers.js';
+import { emptyTally, screen } from './quality.js';
 import type { EventNode, Head, ProviderConfig, RawObs } from './types.js';
 import { isoFromMs } from './util.js';
 
@@ -174,6 +175,7 @@ async function main(): Promise<void> {
 
   // 4) Ingest (deterministic order). Overflowed windows are dropped + retried narrower.
   const raws: RawObs[] = [];
+  const screened = emptyTally();
   let overflowCount = 0;
   let saturatedCount = 0;
   for (let i = 0; i < jobs.length; i++) {
@@ -201,7 +203,8 @@ async function main(): Promise<void> {
       if (cur.saturatedDays.length > 100) cur.saturatedDays.shift();
       saturatedCount++;
     }
-    for (const o of res.obs) {
+    // The same door as the live path: no out-of-range or coordinate-less report enters history.
+    for (const o of screen(res.obs, screened)) {
       const day = eventDayKey(o.eventTimeMs);
       // Archived days are now pulled into the transient above, so they can be ingested too.
       if (day < liveDay) raws.push(o);
@@ -300,7 +303,9 @@ async function main(): Promise<void> {
   const remaining = Object.values(cursor.providers).filter((c) => !c.done).length;
   console.log(
     `backfill: jobs=${jobs.length} fetched=${raws.length} changed=${changedCount} days_written=${rewritten} ` +
-      `rematerialized=${rematerialized} overflow=${overflowCount} saturated=${saturatedCount} providers_remaining=${remaining}`,
+      `rematerialized=${rematerialized} overflow=${overflowCount} saturated=${saturatedCount} providers_remaining=${remaining}` +
+      (screened.bad_coords ? ` bad_coords_dropped=${screened.bad_coords}` : '') +
+      (screened.coordinateless ? ` coordinateless_dropped=${screened.coordinateless}` : ''),
   );
   // The rest of the run is honest work and stays written (cursor included), but the run must go
   // RED: a silently-green skip is exactly how the 2026-07 truncation went unnoticed for months.

@@ -1,12 +1,13 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { DATA_DIR, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS, dataPaths } from './config.js';
+import { DATA_DIR, EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS, dataPaths } from './config.js';
 import { appendObservations, earliestEventMapDay, loadState, saveEventMap, saveMeta } from './bitemporal.js';
 import { onboardStep } from './onboard.js';
-import { Resolver, type IngestResult } from './dedup.js';
-import { mergeLine, observeLine } from './oplog.js';
+import { Resolver } from './dedup.js';
+import { healedEpoch, runFeedSideSteps } from './heal.js';
+import { LogBuffer } from './oplog.js';
 import { activeProviders, configMap, fetchProvider, fetchProviderDeleted, fetchProviderUpdated, loadRegistry, priorityMap } from './providers.js';
-import type { Observation, Op, RawObs } from './types.js';
+import { emptyTally, screen } from './quality.js';
 
 /** FDSN nodes that support the `includedeleted` delete query (extensible). */
 const DELETE_PROVIDERS = new Set(['usgs']);
@@ -47,18 +48,17 @@ function assertHeadMatchesLog(root: string, headSeq: number): void {
   }
 }
 
-/** A lat/lon that physics and the schema (±90 / ±180) forbid. A single provider
- *  emitting such coordinates would otherwise red-line derive's validate gate for the
- *  entire feed (JMA's DDMM.m `cod`, 2026-08-22), so the log drops them at the door. */
-const hasBadCoords = (r: RawObs): boolean =>
-  !Number.isFinite(r.lat) || !Number.isFinite(r.lon) || Math.abs(r.lat) > 90 || Math.abs(r.lon) > 180;
-
 async function main(): Promise<void> {
   const nowMs = Date.now();
   const ingestTime = process.env.RUN_INGEST_TIME ?? isoFromMs(nowMs);
   const all = loadRegistry();
   const active = activeProviders(all);
-  const state = loadState(DATA_DIR, { sinceDays: LIVE_INDEX_DAYS, nowMs });
+  // The one-time heal (config HEAL_EPOCH) loads the whole event-map horizon, so its
+  // coordinate-less retraction reaches every day file derive publishes; other runs keep the
+  // fast LIVE_INDEX_DAYS load.
+  const healDue = healedEpoch(DATA_DIR) < HEAL_EPOCH;
+  const loadDays = healDue ? Math.max(LIVE_INDEX_DAYS, EVENT_MAP_HORIZON_DAYS) : LIVE_INDEX_DAYS;
+  const state = loadState(DATA_DIR, { sinceDays: loadDays, nowMs });
   assertHeadMatchesLog(DATA_DIR, state.head.seq);
   const resolver = new Resolver(state.eventMap, priorityMap(all), configMap(all), nowMs);
 
@@ -86,16 +86,10 @@ async function main(): Promise<void> {
   const staleDropped = fetched.length - inWindow.length;
   // Coordinate backstop across all three ingest paths — never silent: a nonzero
   // bad_coords_dropped in status names the scale so a provider regression is visible.
-  let badCoordsDropped = 0;
-  const badCoordsByProvider: Record<string, number> = {};
-  const dropBadCoords = <T extends RawObs>(arr: T[]): T[] =>
-    arr.filter((r) => {
-      if (!hasBadCoords(r)) return true;
-      badCoordsDropped++;
-      badCoordsByProvider[r.provider] = (badCoordsByProvider[r.provider] ?? 0) + 1;
-      return false;
-    });
-  const raws = dropBadCoords(inWindow);
+  // Coordinate-less placeholders (quality.ts isCoordinateless: NCEDC's 0,0 / M0) are dropped
+  // at the door too, counted as coordinateless_dropped; the delete sweep keeps them.
+  const tally = emptyTally();
+  const raws = screen(inWindow, tally);
   // Deterministic ingest order (idempotency, design §8.10).
   raws.sort(
     (a, b) =>
@@ -104,35 +98,20 @@ async function main(): Promise<void> {
       (a.providerEventId < b.providerEventId ? -1 : a.providerEventId > b.providerEventId ? 1 : 0),
   );
 
-  let seq = state.head.seq;
-  const newObs: Observation[] = [];
-  let merged = 0;
-  // Log one ingest: the op:merge lines it caused (each the loser's retiring revision) before
-  // the report's own line, so seq order reads cause → effect and the survivor's ingest_seq
-  // is the last one written.
-  const record = (raw: RawObs, r: IngestResult, op: Op = 'observe'): void => {
-    for (const m of r.merges) {
-      seq += 1;
-      m.loser.lastSeq = seq;
-      newObs.push(mergeLine(m, seq, ingestTime));
-      merged++;
-    }
-    seq += 1;
-    r.node.lastSeq = seq;
-    if (r.node.firstSeenSeq < 0) r.node.firstSeenSeq = seq;
-    newObs.push(observeLine(raw, r, seq, ingestTime, op));
-  };
+  // Every line this run appends, and the seq clock (LogBuffer.record: the op:merge lines an
+  // ingest caused before the report's own line, so seq order reads cause → effect).
+  const log = new LogBuffer(state.head.seq, ingestTime);
   for (const raw of raws) {
     const r = resolver.ingest(raw, ingestTime);
     if (raw.providerUpdatedMs != null) {
       state.watermarks[raw.provider] = Math.max(state.watermarks[raw.provider] ?? 0, raw.providerUpdatedMs);
     }
-    if (r.changed) record(raw, r);
+    if (r.changed) log.record(raw, r);
   }
 
   // Revision sweep (H2): updatedafter results revise KNOWN events only (reviseExisting
   // never mints), so revisions to events outside the hot index are skipped, not duped.
-  const updates = dropBadCoords(updateOutcomes.flatMap((o) => o.obs).filter((r) => r.eventTimeMs <= futureCeil));
+  const updates = screen(updateOutcomes.flatMap((o) => o.obs).filter((r) => r.eventTimeMs <= futureCeil), tally);
   updates.sort(
     (a, b) =>
       a.eventTimeMs - b.eventTimeMs ||
@@ -146,28 +125,40 @@ async function main(): Promise<void> {
     }
     const r = resolver.reviseExisting(raw, ingestTime);
     if (r?.changed) {
-      record(raw, r);
+      log.record(raw, r);
       revisions++;
     }
   }
 
   // Delete sweep: tombstone events retracted upstream (op:tombstone; never mints).
-  const deletes = dropBadCoords(deleteOutcomes.flatMap((o) => o.obs));
+  const deletes = screen(deleteOutcomes.flatMap((o) => o.obs), tally, new Set(['coordinateless']));
   let tombstoned = 0;
   for (const raw of deletes) {
     const r = resolver.tombstoneProvider(raw, ingestTime);
     if (r?.changed) {
-      record(raw, r, 'tombstone');
+      log.record(raw, r, 'tombstone');
       tombstoned++;
     }
   }
 
-  if (badCoordsDropped) {
+  // Feed-side steps (heal.ts): the coordinate-less retraction of rows published before the ingest
+  // rule (the upstream-delete path, op:tombstone with a reason; a no-op once nothing is left)
+  // and, once, the heal — the op:merge pass over every live node in the hot window — with its
+  // marker, in the same commit as its lines, so it runs exactly once.
+  const feedSide = runFeedSideSteps(DATA_DIR, resolver, log, { healDue, loadDays, ingestTime });
+  const heal = feedSide.heal;
+  if (heal) console.log(`aggregate: heal epoch ${heal.epoch}: ${JSON.stringify(heal)}`);
+  for (const l of log.lines) if (l.op === 'merge' && heal && l.seq >= (heal.first_seq ?? Infinity)) console.log(`  heal op:merge ${l.feed_id} -> ${l.superseded_by} (${l.reason})`);
+
+  if (tally.bad_coords) {
     console.warn(
-      `::warning::aggregate: dropped ${badCoordsDropped} obs with out-of-range coordinates: ${JSON.stringify(badCoordsByProvider)}`,
+      `::warning::aggregate: dropped ${tally.bad_coords} obs with out-of-range coordinates: ${JSON.stringify(tally.byProvider.bad_coords)}`,
     );
   }
+  if (feedSide.retracted) console.log(`aggregate: retracted ${feedSide.retracted} coordinate-less rows: ${JSON.stringify(feedSide.retractedByProvider)}`);
 
+  const seq = log.seq;
+  const newObs = log.lines;
   if (newObs.length) appendObservations(DATA_DIR, newObs);
   state.head = { seq, ingest_time: ingestTime };
 
@@ -183,11 +174,14 @@ async function main(): Promise<void> {
     events_indexed: state.eventMap.size,
     observations_returned: fetched.length,
     stale_dropped: staleDropped,
-    bad_coords_dropped: badCoordsDropped,
+    bad_coords_dropped: tally.bad_coords,
+    coordinateless_dropped: tally.coordinateless,
+    coordinateless_retracted: feedSide.retracted,
     new_observations: newObs.length,
     revisions,
     tombstoned,
-    merged,
+    merged: log.merged,
+    ...(heal ? { heal } : {}),
     duration_ms: Math.round(Date.now() - nowMs),
     degraded,
     providers,
@@ -207,9 +201,12 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `aggregate: seq=${seq} indexed=${state.eventMap.size} fetched=${fetched.length} stale_dropped=${staleDropped} new=${newObs.length} revisions=${revisions} tombstoned=${tombstoned} merged=${merged} ` +
+    `aggregate: seq=${seq} indexed=${state.eventMap.size} fetched=${fetched.length} stale_dropped=${staleDropped} new=${newObs.length} revisions=${revisions} tombstoned=${tombstoned} merged=${log.merged} ` +
       `providers=${outcomes.filter((o) => o.status.ok).length}/${outcomes.length}` +
-      (badCoordsDropped ? ` bad_coords_dropped=${badCoordsDropped}` : '') +
+      (tally.bad_coords ? ` bad_coords_dropped=${tally.bad_coords}` : '') +
+      (tally.coordinateless ? ` coordinateless_dropped=${tally.coordinateless}` : '') +
+      (feedSide.retracted ? ` coordinateless_retracted=${feedSide.retracted}` : '') +
+      (heal ? ` heal_epoch=${heal.epoch} heal_merged=${heal.merged}` : '') +
       (degraded.length ? ` degraded=[${degraded.join(',')}]` : ''),
   );
 }

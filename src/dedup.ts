@@ -1,6 +1,7 @@
 import {
   GRID_CELL_DEG,
   HOT_WINDOW_DAYS,
+  LARGE_EVENT_BASE_KM,
   LARGE_EVENT_KM_PER_MAG,
   LARGE_EVENT_MAG,
   LARGE_EVENT_MAX_DELTA,
@@ -16,11 +17,15 @@ import {
 } from './config.js';
 import { qualityCount } from './canonical.js';
 import { gatherCellKeys, gridKey, haversineKm } from './geo.js';
+import { isCoordinateless } from './quality.js';
 import type { EventNode, ProvenanceRow, ProviderConfig, RawObs } from './types.js';
 import { deterministicFeedId } from './ulid.js';
 import { knownAliasIdsOf, statusRank } from './util.js';
 
 const REVIEWED_DT_HARD_MS = 30_000;
+/** Bound on Resolver.heal's passes over the hot window (each pass after the first only picks up
+ *  pairs whose mutual best formed during the previous one). */
+const HEAL_MAX_PASSES = 4;
 const clamp = (n: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, n));
 
 function richness(r: ProvenanceRow): number {
@@ -166,7 +171,7 @@ export class Resolver {
     if (a.mag != null && b.mag != null) {
       if (a.mag >= LARGE_EVENT_MAG && b.mag >= LARGE_EVENT_MAG) {
         widened = true;
-        km = clamp(SPATIAL_KM + LARGE_EVENT_KM_PER_MAG * (Math.min(a.mag, b.mag) - LARGE_EVENT_MAG), SPATIAL_KM, LARGE_EVENT_MAX_KM);
+        km = Resolver.largeEventKm(Math.min(a.mag, b.mag));
       }
       const dM = Math.abs(a.mag - b.mag);
       km *= clamp(1 - 0.3 * dM, 0.3, 1);
@@ -182,7 +187,12 @@ export class Resolver {
   /** The widest spatial window `s` can get against any neighbour — the candidate gather radius. */
   private static maxWindowKm(s: Solution): number {
     if (s.mag == null || s.mag < LARGE_EVENT_MAG) return SPATIAL_KM;
-    return clamp(SPATIAL_KM + LARGE_EVENT_KM_PER_MAG * (s.mag - LARGE_EVENT_MAG), SPATIAL_KM, LARGE_EVENT_MAX_KM);
+    return Resolver.largeEventKm(s.mag);
+  }
+
+  /** The widened spatial base for a pair whose smaller magnitude is `minMag` (≥ LARGE_EVENT_MAG). */
+  private static largeEventKm(minMag: number): number {
+    return clamp(LARGE_EVENT_BASE_KM + LARGE_EVENT_KM_PER_MAG * (minMag - LARGE_EVENT_MAG), LARGE_EVENT_BASE_KM, LARGE_EVENT_MAX_KM);
   }
 
   private magGuardBlocks(a: Solution, b: Solution): boolean {
@@ -457,6 +467,57 @@ export class Resolver {
     if (!node || node.state !== 'live') return null;
     const idx = node.provenance.findIndex((r) => r.provider === raw.provider && r.nativeId === raw.providerEventId);
     if (idx < 0) return null;
+    return this.withdrawRow(node, idx, ingestTime);
+  }
+
+  /** The feed's own retraction of coordinate-less rows (quality.ts `isCoordinateless`: exactly
+   *  lat 0 / lon 0 with magnitude 0 or none — NCEDC's unlocated placeholders), through the same
+   *  path as an upstream delete: the row leaves its live node, a node left with no row is
+   *  tombstoned (off the summaries and the Pages day files at once), one with other rows
+   *  re-derives its solution. Ingest drops such reports at the door, so this only clears what
+   *  was published before the rule; it is idempotent (a retired node is never revisited).
+   *  Deterministic order (event time, feed id, then row), so the log lines replay. Each entry's
+   *  `raw` is the withdrawn row as a report — what the op:tombstone line records and what a
+   *  replay feeds back to tombstoneProvider. */
+  retractCoordinateless(ingestTime: string): { raw: RawObs; result: IngestResult }[] {
+    const out: { raw: RawObs; result: IngestResult }[] = [];
+    const nodes = [...this.eventMap.values()]
+      .filter((n) => n.state === 'live' && n.provenance.some(isCoordinateless))
+      .sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : a.feedId > b.feedId ? 1 : 0));
+    for (const node of nodes) {
+      const rows = node.provenance
+        .filter(isCoordinateless)
+        .sort((a, b) => (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0) || (a.nativeId < b.nativeId ? -1 : a.nativeId > b.nativeId ? 1 : 0));
+      for (const row of rows) {
+        // A fold triggered by an earlier withdrawal can retire this node; its rows then live on
+        // the survivor, which the next retraction pass (the next run) clears.
+        if (node.state !== 'live') break;
+        const idx = node.provenance.indexOf(row);
+        if (idx < 0) continue;
+        const raw: RawObs = {
+          provider: row.provider,
+          providerEventId: row.nativeId,
+          eventTimeMs: row.eventTimeMs,
+          providerUpdatedMs: row.providerUpdatedMs,
+          status: row.status,
+          lat: row.lat,
+          lon: row.lon,
+          depth: row.depth,
+          mag: row.mag,
+          magType: row.magType,
+          place: row.place,
+          knownAliasIds: knownAliasIdsOf(row.provider, row.nativeId, row.fields),
+          fields: row.fields,
+        };
+        out.push({ raw, result: this.withdrawRow(node, idx, ingestTime) });
+      }
+    }
+    return out;
+  }
+
+  /** Drop one provenance row from a live node: tombstone it when none is left, else re-derive
+   *  the representative and run the merge pass (the solution may have moved). */
+  private withdrawRow(node: EventNode, idx: number, ingestTime: string): IngestResult {
     node.provenance.splice(idx, 1);
     node.revision += 1;
     node.lastIngestTime = ingestTime;
@@ -474,10 +535,14 @@ export class Resolver {
 
   // --- op:merge — post-revision re-evaluation (design §8.6) ---
 
-  /** Diagnostic: why two live nodes are not one event, or null when the merge pass folds them. */
+  /** Diagnostic: why two live nodes are not one event, or null when the merge pass may fold
+   *  them. Symmetric, so the mutual-best check reads the same pair the same way from both
+   *  sides: the dense-cell rule applies when BOTH nodes sit in dense cells (never stricter than
+   *  judging from the non-dense side — an M6.8 mainshock's second id must still fold after its
+   *  own aftershocks filled the cell, Kumamoto 2026-07-28). */
   whyNotMerged(a: EventNode, b: EventNode): string | null {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
-    const dense = this.isDense(a.lat, a.lon);
+    const dense = this.pairDense(a, b);
     const gate = this.reject(a, b, d, dense);
     if (gate) return gate;
     if (Resolver.nodesDistinct(a, b)) return 'same provider under distinct native ids';
@@ -485,31 +550,56 @@ export class Resolver {
     return null;
   }
 
-  /** The nearest live neighbour the first-sight gates accept for `node`, with the reason
-   *  string the op:merge line carries. */
-  private findMergeCandidate(node: EventNode): { node: EventNode; reason: string } | null {
-    if (node.eventTimeMs < this.hotFloor) return null;
-    let best: EventNode | null = null;
-    let bestKm = Infinity;
+  private pairDense(a: EventNode, b: EventNode): boolean {
+    return this.isDense(a.lat, a.lon) && this.isDense(b.lat, b.lon);
+  }
+
+  /** How far apart two solutions are relative to the windows their pair gets: d/km + |dt|/ms
+   *  (0 = one solution, < 2 inside both windows). It ranks a neighbour that matches in space AND
+   *  time ahead of one that is merely near. */
+  private score(a: EventNode, b: EventNode): number {
+    const { km, ms } = this.windows(a, b, this.pairDense(a, b));
+    return haversineKm(a.lat, a.lon, b.lat, b.lon) / km + Math.abs(a.eventTimeMs - b.eventTimeMs) / ms;
+  }
+
+  /** Every live neighbour `node` may fold with (whyNotMerged passes), best score first, ties
+   *  by feed id. Empty outside the hot window. */
+  private mergeableNeighbours(node: EventNode): { node: EventNode; score: number }[] {
+    if (node.eventTimeMs < this.hotFloor) return [];
+    const out: { node: EventNode; score: number }[] = [];
     for (const fid of this.candidates(node)) {
       if (fid === node.feedId) continue;
       const other = this.eventMap.get(fid);
       if (!other || other.state !== 'live') continue;
       if (this.whyNotMerged(node, other)) continue;
-      const d = haversineKm(node.lat, node.lon, other.lat, other.lon);
-      if (d < bestKm) {
-        bestKm = d;
-        best = other;
-      }
+      out.push({ node: other, score: this.score(node, other) });
     }
-    if (!best) return null;
-    const { km, ms } = this.windows(node, best, this.isDense(node.lat, node.lon));
-    const dt = Math.abs(node.eventTimeMs - best.eventTimeMs) / 1000;
-    const dM = node.mag != null && best.mag != null ? Math.abs(node.mag - best.mag).toFixed(2) : 'n/a';
-    return {
-      node: best,
-      reason: `proximity: d=${bestKm.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} window=${km.toFixed(1)} km/${(ms / 1000).toFixed(0)} s`,
-    };
+    return out.sort((x, y) => x.score - y.score || (x.node.feedId < y.node.feedId ? -1 : x.node.feedId > y.node.feedId ? 1 : 0));
+  }
+
+  /** The next fold the merge pass around `node` makes, with the reason string its op:merge
+   *  line carries. Only mutual best matches fold: `node` with a mergeable neighbour whose own
+   *  best partner is `node`; or, when that neighbour's best is a third node that returns the
+   *  favour, that neighbour pair first (they are one event; `node` is looked at again against
+   *  the result). A neighbour with a better partner is never folded into `node`: that would weld
+   *  two events together while the twin stays apart (Puerto Rico, 2026-09-27: EMSC's M2.0 at
+   *  06:06:03 is USGS pr71534788 to the millisecond, yet it was also the nearest node to USGS's
+   *  M1.2 22.6 s earlier, and the nearest-only rule folded it there). */
+  private nextFold(node: EventNode): { a: EventNode; b: EventNode; reason: string } | null {
+    for (const { node: other } of this.mergeableNeighbours(node)) {
+      const best = this.mergeableNeighbours(other)[0]?.node;
+      if (best === node) return { a: node, b: other, reason: this.foldReason(node, other) };
+      if (best && this.mergeableNeighbours(best)[0]?.node === other) return { a: other, b: best, reason: this.foldReason(other, best) };
+    }
+    return null;
+  }
+
+  private foldReason(a: EventNode, b: EventNode): string {
+    const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
+    const { km, ms } = this.windows(a, b, this.pairDense(a, b));
+    const dt = Math.abs(a.eventTimeMs - b.eventTimeMs) / 1000;
+    const dM = a.mag != null && b.mag != null ? Math.abs(a.mag - b.mag).toFixed(2) : 'n/a';
+    return `proximity: d=${d.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} window=${km.toFixed(1)} km/${(ms / 1000).toFixed(0)} s`;
   }
 
   /** After a live node changed, match it against its live neighbours with the first-sight
@@ -517,17 +607,43 @@ export class Resolver {
    *  survivor. Bounded: every round retires one node. Returns the node the caller's report
    *  now lives in. Identity is otherwise pinned at first sight, so this is the only place a
    *  duplicate minted from scattered preliminary solutions is ever healed — and only while
-   *  the node is inside the hot window (HOT_WINDOW_DAYS of event time, findMergeCandidate):
+   *  the node is inside the hot window (HOT_WINDOW_DAYS of event time, mergeableNeighbours):
    *  a duplicate whose next revision comes later stays two ids. Off when merge=false. */
   private mergeAround(node: EventNode, ingestTime: string, merges: MergeRecord[]): EventNode {
     if (!this.mergePass) return node;
     let cur = node;
     for (let round = 0; round < MERGE_MAX_ROUNDS && cur.state === 'live'; round++) {
-      const hit = this.findMergeCandidate(cur);
-      if (!hit) break;
-      cur = this.mergeNodes(cur, hit.node, hit.reason, ingestTime, merges);
+      const fold = this.nextFold(cur);
+      if (!fold) break;
+      const survivor = this.mergeNodes(fold.a, fold.b, fold.reason, ingestTime, merges);
+      if (fold.a === cur || fold.b === cur) cur = survivor;
     }
     return cur;
+  }
+
+  /** The one-time heal (aggregate, `HEAL_EPOCH`): the op:merge pass over EVERY live node inside
+   *  the hot window, not only the one a report just moved. Events split under the pre-PF-1
+   *  rules otherwise heal only on a revision that may never come (the Loyalty Islands M7.0,
+   *  2026-09-25: six live ids). Same gates, survivor rule and bounded chain as after a report;
+   *  nodes in event-time order (then feed id), so the pass is deterministic. One `merges` list
+   *  for the whole pass, so a node folded early whose survivor folds later has its pending
+   *  op:merge re-aimed instead of logged twice. Returns the folds (in order) and the live
+   *  survivors whose revision moved, in event-time order. A no-op when merge=false. */
+  heal(ingestTime: string): { merges: MergeRecord[]; survivors: EventNode[] } {
+    const merges: MergeRecord[] = [];
+    if (!this.mergePass) return { merges, survivors: [] };
+    const byTimeThenId = (a: EventNode, b: EventNode): number =>
+      a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : a.feedId > b.feedId ? 1 : 0);
+    // Passes until one folds nothing: a node visited before its mutual partner formed (that
+    // partner was still paired with a better match) gets another look. Bounded.
+    for (let pass = 0; pass < HEAL_MAX_PASSES; pass++) {
+      const before = merges.length;
+      const nodes = [...this.eventMap.values()].filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor).sort(byTimeThenId);
+      for (const node of nodes) if (node.state === 'live') this.mergeAround(node, ingestTime, merges);
+      if (merges.length === before) break;
+    }
+    const survivors = [...new Set(merges.map((m) => m.survivor))].filter((n) => n.state === 'live').sort(byTimeThenId);
+    return { merges, survivors };
   }
 
   /** Survivor = most providers → higher status → richer chosen solution → lower priority

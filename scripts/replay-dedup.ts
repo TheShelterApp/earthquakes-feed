@@ -3,7 +3,7 @@
  * rules make of it — the review surface for a rule change (PF-1, 2026-09-28).
  *
  * Usage:
- *   npx tsx scripts/replay-dedup.ts --logs <lines.ndjson>... [--baseline <dedup.ts>] [--out <report.md>]
+ *   npx tsx scripts/replay-dedup.ts --logs <lines.ndjson>... [--baseline <dedup.ts>] [--heal] [--out <report.md>]
  *
  * Input: observation-log lines (op observe / tombstone), e.g. exported from the data branch:
  *   for h in $(git ls-tree --name-only origin/data:knowledge/observations/ingest=2026/09/25); do
@@ -15,6 +15,9 @@
  * --baseline <module> additionally replays another dedup module exporting `Resolver` (e.g.
  * `git show <sha>:src/dedup.ts` with its relative imports pointed at this checkout) over the
  * same lines, as a second "before" that rules out cross-window effects.
+ * --heal runs the one-time heal pass (Resolver.heal, when the module has it) at the end of
+ * each replay, so the report also shows what it would fold on top of the replayed state.
+ * op:merge / op:correction lines are not replayed: the rules under test make their own folds.
  *
  * The report lists: node counts, every logged group the new rules fold together (with each
  * member's solution, its distance / Δt to the survivor and whether it joined at first sight
@@ -35,6 +38,7 @@ interface ResolverLike {
   ingest(raw: ReturnType<typeof observationToRaw>, ingestTime: string): { node: EventNode; changed: boolean; merges?: { survivor: EventNode; loser: EventNode; reason: string }[] };
   tombstoneProvider(raw: ReturnType<typeof observationToRaw>, ingestTime: string): { node: EventNode } | null;
   whyNotMerged?(a: EventNode, b: EventNode): string | null;
+  heal?(ingestTime: string): { merges: { survivor: EventNode; loser: EventNode; reason: string }[] };
 }
 type ResolverCtor = new (map: Map<string, EventNode>, prio: Map<string, number>, cfg: Map<string, unknown>, nowMs: number, opts: { hotFloorMs?: number }) => ResolverLike;
 
@@ -50,6 +54,7 @@ if (!logFiles.length) {
   process.exit(2);
 }
 const baselinePath = opt('--baseline');
+const healFlag = args.includes('--heal');
 const outPath = opt('--out');
 
 const lines: Observation[] = logFiles
@@ -62,7 +67,7 @@ const registryPath = resolve(new URL('../providers/registry.json', import.meta.u
 const registry = loadRegistry(registryPath);
 const prio = priorityMap(registry);
 const cfg = configMap(registry);
-const lastIngestMs = Math.max(...lines.map((o) => Date.parse(o.ingest_time)));
+const lastIngestMs = lines.reduce((m, o) => Math.max(m, Date.parse(o.ingest_time)), -Infinity);
 const nowMs = lastIngestMs + 3600_000;
 
 interface Run {
@@ -94,6 +99,9 @@ function replay(Ctor: ResolverCtor): Run {
     const r = resolver.ingest(raw, o.ingest_time);
     if (fresh && map.size === before) firstSightJoins++;
     for (const m of r.merges ?? []) merges.push({ loser: m.loser.feedId, survivor: m.survivor.feedId, reason: m.reason, seq: o.seq });
+  }
+  if (healFlag && resolver.heal) {
+    for (const m of resolver.heal(isoFromMs(lastIngestMs)).merges) merges.push({ loser: m.loser.feedId, survivor: m.survivor.feedId, reason: `heal: ${m.reason}`, seq: -1 });
   }
   // Final home of every key: the live node whose aliases carry it.
   for (const n of map.values()) if (n.state === 'live') for (const a of n.aliases) keyToNode.set(a, n.feedId);
@@ -140,7 +148,8 @@ const live = [...after.map.values()].filter((n) => n.state === 'live');
 const superseded = [...after.map.values()].filter((n) => n.state === 'superseded');
 md.push(`# Dedup replay report`);
 md.push('');
-md.push(`Lines: ${lines.length} (${lines.filter((o) => o.op === 'observe').length} observe, ${lines.filter((o) => o.op === 'tombstone').length} tombstone), ingest ${lines[0]!.ingest_time} → ${lines[lines.length - 1]!.ingest_time}, ${keyToLogged.size} provider ids.`);
+const opCount = (op: string): number => lines.filter((o) => o.op === op).length;
+md.push(`Lines: ${lines.length} (${opCount('observe')} observe, ${opCount('tombstone')} tombstone, ${opCount('merge')} merge and ${opCount('correction')} correction not replayed), ingest ${lines[0]!.ingest_time} → ${lines[lines.length - 1]!.ingest_time}, ${keyToLogged.size} provider ids${healFlag ? '; each replay ends with the heal pass' : ''}.`);
 md.push('');
 md.push(`| | nodes | live | superseded | op:merge | new ids that joined an existing node at first sight |`);
 md.push(`|---|---|---|---|---|---|`);

@@ -25,11 +25,16 @@ export const MAG_MERGE_MAX_DELTA = 0.8;
 /** Large-event proximity. Preliminary epicentres of one M6–7 quake scatter by tens of km
  *  across agencies (Loyalty Islands M7.0, 2026-09-25: 22–62 km, six feed ids), so when BOTH
  *  solutions are ≥ LARGE_EVENT_MAG the spatial window is
- *  clamp(SPATIAL_KM + LARGE_EVENT_KM_PER_MAG · (min(mag) − LARGE_EVENT_MAG), SPATIAL_KM, LARGE_EVENT_MAX_KM)
- *  (M6.0 → 20 km, M6.5 → 30, M7.0 → 40; the cap is the alerts gateway's own fold window)
- *  before the usual ΔM shrink. On that widened path a hard |ΔM| ≤ LARGE_EVENT_MAX_DELTA keeps a
- *  large aftershock out of the mainshock's window. */
+ *  clamp(LARGE_EVENT_BASE_KM + LARGE_EVENT_KM_PER_MAG · (min(mag) − LARGE_EVENT_MAG), LARGE_EVENT_BASE_KM, LARGE_EVENT_MAX_KM)
+ *  (M5.5 → 20 km, M6.0 → 30, M6.5 → 40, M7.0 → 50; the cap is the alerts gateway's own fold
+ *  window) before the usual ΔM shrink. On that widened path a hard |ΔM| ≤ LARGE_EVENT_MAX_DELTA
+ *  keeps a large aftershock out of the mainshock's window.
+ *  The base was 10 km (= SPATIAL_KM) until 2026-09-28; agencies scatter by 15–35 km at M5.5–5.8
+ *  (the Loyalty aftershock M5.5, USGS vs EMSC 16.5 km; Tonga M5.7, 18.7 km). 20 km was measured
+ *  by replaying the whole observation log (2026-07-05 … 09-28, 184,629 lines): 57 more groups
+ *  folded, 55 fewer live duplicates, no false merge (tests/fixtures/replay-report-pf2.md). */
 export const LARGE_EVENT_MAG = 5.5;
+export const LARGE_EVENT_BASE_KM = 20;
 export const LARGE_EVENT_KM_PER_MAG = 20;
 export const LARGE_EVENT_MAX_KM = 50;
 export const LARGE_EVENT_MAX_DELTA = 1.0;
@@ -44,6 +49,12 @@ export const MERGE_MAX_ROUNDS = 8;
  *  long after its last ingest, so a poller that treats absence as "still there" sees the
  *  removal. Tombstoned events are not republished (they leave the live surfaces at once). */
 export const SUPERSEDED_VISIBLE_MS = 48 * 3600_000;
+/** The one-time heal (src/heal.ts). aggregate runs it once when the data branch's
+ *  knowledge/index/heal.json holds a lower epoch (or none): the op:merge pass over every live
+ *  node in the hot window (Resolver.heal) and the coordinate-less retraction over the whole
+ *  event-map horizon, logged like any other change, then the marker records this epoch in the
+ *  same commit. Bump it only to run a new heal on purpose. */
+export const HEAL_EPOCH = 1;
 /** Only events within this many days are kept in the in-memory dedup index. */
 export const HOT_WINDOW_DAYS = 7;
 /** aggregate loads only this many days of event_map shards (fast hot path). */
@@ -89,6 +100,7 @@ export function dataPaths(root = DATA_DIR) {
     watermarks: join(root, 'knowledge', 'index', 'watermarks.json'),
     backfillCursor: join(root, 'knowledge', 'index', 'backfill.json'),
     onboardCursor: join(root, 'knowledge', 'index', 'onboard.json'),
+    healMarker: join(root, 'knowledge', 'index', 'heal.json'),
     archivesIndex: join(root, 'knowledge', 'index', 'archives.json'),
     partitionsIndex: join(root, 'knowledge', 'index', 'partitions.json'),
     providerHealth: join(root, 'knowledge', 'index', 'provider_health.json'),

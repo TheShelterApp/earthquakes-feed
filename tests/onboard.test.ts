@@ -150,6 +150,7 @@ test('onboard screens reports like the live path: no coordinate-less or out-of-r
       } satisfies WindowOutcome);
     const res = await onboardStep(root, ALL, ALL, earliestEventMapDay(root, NOW), NOW, '2026-07-05T12:00:00Z', stub);
     assert.equal(res.changed, 1, 'only the located report');
+    assert.deepEqual(res.screened, { bad_coords: 1, coordinateless: 1 }, 'the drops are counted in the result aggregate prints');
     const aliases = [...loadEventMap(root, {}).values()].flatMap((n) => n.aliases);
     assert.ok(aliases.includes('emsc:ok'));
     assert.ok(!aliases.includes('emsc:placeholder') && !aliases.includes('emsc:bad'));

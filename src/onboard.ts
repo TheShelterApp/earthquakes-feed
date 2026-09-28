@@ -4,7 +4,7 @@ import { backfillCfg } from './backfill-cfg.js';
 import { eventDayKey, loadEventMap, saveEventMap } from './bitemporal.js';
 import { Resolver } from './dedup.js';
 import { configMap, fetchProviderWindow, priorityMap, type WindowOutcome } from './providers.js';
-import { emptyTally, screen } from './quality.js';
+import { byIngestOrder, emptyTally, screen } from './quality.js';
 import type { Head, ProviderConfig } from './types.js';
 
 const DAY = 86_400_000;
@@ -31,6 +31,9 @@ export interface OnboardResult {
   done?: boolean;
   overflow?: boolean;
   note?: string;
+  /** What the ingest screen kept out of this chunk (the live path's door) — reported, never
+   *  silent. */
+  screened?: { bad_coords: number; coordinateless: number };
 }
 
 /**
@@ -122,15 +125,15 @@ export async function onboardStep(
   const resolver = new Resolver(map, priorityMap(all), configMap(all), nowMs, { hotFloorMs: 0, merge: false });
   const head = JSON.parse(readFileSync(dataPaths(root).head, 'utf8')) as Head;
   const liveFloorMs = dayStartMs(liveDay);
-  // The same door as the live path: no out-of-range or coordinate-less report enters the map.
-  const raws = screen(res.obs, emptyTally())
+  // The same door as the live path: no out-of-range or coordinate-less report enters the map;
+  // the counts are part of the result (aggregate prints it). A coordinate-less report of an id
+  // the map already holds is NOT withdrawn here: that retires a published event, which only
+  // aggregate's logged path does (Resolver.withdrawZeroed there, an op:tombstone line) — the
+  // same reason this path never folds.
+  const tally = emptyTally();
+  const raws = screen(res.obs, tally)
     .filter((o) => o.eventTimeMs >= liveFloorMs)
-    .sort(
-      (a, b) =>
-        a.eventTimeMs - b.eventTimeMs ||
-        (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0) ||
-        (a.providerEventId < b.providerEventId ? -1 : a.providerEventId > b.providerEventId ? 1 : 0),
-    );
+    .sort(byIngestOrder);
   let changed = 0;
   for (const raw of raws) {
     const r = resolver.ingest(raw, ingestTime);
@@ -147,5 +150,11 @@ export async function onboardStep(
   if (res.overflow) cur.windowDays = cfg.initialWindowDays;
   else if (res.obs.length < 0.3 * FETCH_LIMIT) cur.windowDays = Math.min(cfg.maxWindowDays, Math.ceil(cur.windowDays * 1.5));
   save();
-  return { provider: id, filledFrom: cur.recentBackTo, changed, overflow: res.overflow };
+  return {
+    provider: id,
+    filledFrom: cur.recentBackTo,
+    changed,
+    overflow: res.overflow,
+    screened: { bad_coords: tally.bad_coords, coordinateless: tally.coordinateless },
+  };
 }

@@ -97,16 +97,17 @@ curl -s https://earthquakes-feed.theshelter.app/v1/all_day.geojson
 
 ### `GET /v1/events/YYYY-MM-DD.geojson` — recent day (map time-slider)
 
-Ready-to-render `FeatureCollection` for one UTC day, live events only, **full-fat**
-(complete `feed.provenance[]` incl. `fields`). Exists for the days currently in the live
+Ready-to-render `FeatureCollection` for one UTC day: the live events **full-fat**
+(complete `feed.provenance[]` incl. `fields`), plus — compact, flagged `feed.state !=
+"live"` — the events retired in the last 48 h (see *Retired events* below). Exists for the days currently in the live
 event-map window (~45 days) — a partition's `pages_url` is present in `manifest.json`
 **iff** its day file is actually deployed; for any other day use the partition `url`
 (NDJSON, same full-fat Features, one per line).
 
 ### Historical day partitions (full history)
 
-One Feature per line (NDJSON), all states (`live`/`tombstoned`). Resolve the path and
-freshness from `manifest.partitions[]`:
+One Feature per line (NDJSON), all states (`live`/`tombstoned`/`superseded`), every
+line full-fat. Resolve the path and freshness from `manifest.partitions[]`:
 
 ```bash
 # via branch (12 h cache):
@@ -139,7 +140,8 @@ under `properties.feed`:
 | `feed_id` | stable id (`efd_<ULID>`), never churns |
 | `event_time` / `ingest_time` | the two clocks (origin time / when we learned it) |
 | `first_seen_seq` / `ingest_seq` / `revision` | knowledge-clock scalars |
-| `state` / `tombstone` | `live`\|`tombstoned`\|`superseded` (filter `state==='live'` for a map) |
+| `state` / `tombstone` | `live`\|`tombstoned`\|`superseded` (filter `state==='live'` for a map; see *Retired events*) |
+| `superseded_by` | on a `superseded` feature: the feed id it folded into (`op:merge`); the survivor carries this feature's `aliases[]` |
 | `chosen_provider` | which provenance row won the top-level fields |
 | `aliases[]` | every `provider:native_id` for this event (for realtime dedup) |
 | `provenance[]` | every reporting provider with its solution + `license`/`attribution`/`doi`, and `fields` = that provider's **complete original vocabulary** (nothing dropped). Present in day files + partitions; omitted from the compact rolling summaries |
@@ -158,7 +160,26 @@ than degraded, and the two are shown differently.
 
 The feed is a near-real-time *archive*, not a millisecond bus. Clients that also run
 the EMSC WebSocket should reconcile: index `feed.aliases[]`, and treat a WebSocket
-event as the same quake if it shares an alias or falls within **±60 s / ±10 km**.
+event as the same quake if it shares an alias or falls within **±60 s / ±10 km** — for a
+large quake (both magnitudes ≥ 5.5) the spatial window is `10 + 20·(min(M) − 5.5)` km,
+capped at 50 km (M6.0 → 20, M6.5 → 30, M7.0 → 40), and only while |ΔM| ≤ 1.0; both
+windows shrink with the magnitude difference. Those are the feed's own identity rules
+(`src/dedup.ts`): agencies' preliminary epicentres of one M6–7 quake scatter by tens of
+km, and a provider re-publishing one solution under a second id (≤ 2 s, ≤ 2 km,
+|ΔM| ≤ 0.1) is the same event, not a new one.
+
+## Retired events
+
+An event can leave the live set in two ways: an upstream delete (`state: "tombstoned"`,
+`tombstone: true`) or a fold into another event once revised solutions converge
+(`state: "superseded"`, `superseded_by: <feed_id>`, an `op:merge` line in the observation
+log). For **48 h after retirement** the retired feature is still published in the rolling
+summaries and the Pages day file — **compact and non-live** — so a poller that treats
+absence as "still there" sees the removal once; after that it lives only in the day
+partitions (full-fat, every state). Consumers must drop every feature whose
+`feed.state !== "live"`; `metadata.count` counts live features only. The survivor of a
+merge keeps the loser's `aliases[]` and provenance rows, so the loser's provider ids
+resolve to it, and its `first_ingest_time` / `first_seen_seq` become the earlier of the two.
 
 ## Recipes
 

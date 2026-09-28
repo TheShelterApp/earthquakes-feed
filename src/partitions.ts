@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { JSDELIVR_BASE, SCHEMA_VERSION, dataPaths } from './config.js';
+import { JSDELIVR_BASE, RETIRED_VISIBLE_MS, SCHEMA_VERSION, dataPaths } from './config.js';
 import { featureToNode, nodeToFeature, writeIfChanged } from './bitemporal.js';
 import type { EventNode } from './types.js';
 import { isoFromMs } from './util.js';
@@ -24,6 +24,13 @@ const dayFromMs = (ms: number): string => isoFromMs(ms).slice(0, 10);
 export const dayPartitionFile = (root: string, dayKey: string): string =>
   join(dataPaths(root).eventsDir, `${dayToPath(dayKey)}.ndjson`);
 
+/** A retired node (superseded by a merge, or tombstoned) the live surfaces still publish,
+ *  flagged non-live: within RETIRED_VISIBLE_MS of its last ingest. A poller that treats
+ *  absence as "still there" must see the removal once; after that the tree partition alone
+ *  keeps it. */
+export const publishesRetired = (n: EventNode, nowMs: number): boolean =>
+  n.state !== 'live' && nowMs - Date.parse(n.lastIngestTime) <= RETIRED_VISIBLE_MS;
+
 /** Read an existing day partition back into nodes (the backfill transient index). */
 export function readDayPartitionNodes(root: string, dayKey: string): EventNode[] {
   const file = dayPartitionFile(root, dayKey);
@@ -37,8 +44,9 @@ export function readDayPartitionNodes(root: string, dayKey: string): EventNode[]
 /**
  * Write one UTC day's partition: plain NDJSON in the tree (git delta-compresses text,
  * byte-compare avoids churn) plus, for recent days, a ready-to-render GeoJSON on Pages.
- * Includes ALL node states (live/tombstoned/superseded) so the round-trip is lossless;
- * summaries filter to live elsewhere.
+ * Includes ALL node states (live/tombstoned/superseded) so the round-trip is lossless.
+ * The Pages day file carries the live events full-fat plus, in compact form, the recently
+ * retired ones flagged non-live (publishesRetired) — the summaries follow the same rule.
  */
 export function writeDayPartition(
   root: string,
@@ -53,6 +61,18 @@ export function writeDayPartition(
 
   if (opts.publicV1 && dayKey >= dayFromMs(opts.nowMs - PAGES_DAY_WINDOW * 86_400_000)) {
     const ageSeconds = opts.headIngestTime ? Math.max(0, Math.round((opts.nowMs - Date.parse(opts.headIngestTime)) / 1000)) : null;
+    // Pages day file (map layer): live events full-fat; a recently retired one rides along
+    // compact and non-live so a poller sees the removal; older retired ones stay in the tree file.
+    const published: unknown[] = [];
+    let live = 0;
+    sorted.forEach((n, i) => {
+      if (n.state === 'live') {
+        published.push(feats[i]);
+        live++;
+      } else if (publishesRetired(n, opts.nowMs)) {
+        published.push(nodeToFeature(n, { compact: true }));
+      }
+    });
     const fc = JSON.stringify({
       type: 'FeatureCollection',
       metadata: {
@@ -60,12 +80,12 @@ export function writeDayPartition(
         generated_iso: isoFromMs(opts.nowMs),
         title: `earthquakes-feed events ${dayKey}`,
         api: '1',
-        count: feats.filter((f) => (f as { properties: { feed: { state: string } } }).properties.feed.state === 'live').length,
+        // Live events only — the retired markers in `features` are not counted.
+        count: live,
         age_seconds: ageSeconds,
         schema_version: SCHEMA_VERSION,
       },
-      // Pages day file shows live events only (map layer); tombstoned live in the tree file.
-      features: feats.filter((f) => (f as { properties: { feed: { state: string } } }).properties.feed.state === 'live'),
+      features: published,
     });
     writeIfChanged(join(opts.publicV1, 'events', `${dayKey}.geojson`), fc);
   }

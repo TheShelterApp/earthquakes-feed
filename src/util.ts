@@ -88,6 +88,21 @@ export async function fetchText(url: string, timeoutMs: number): Promise<FetchRe
   }
 }
 
+/** Same-provider alias ids carried in a report's own vocabulary: USGS lists every contributing
+ *  catalog id in `ids` (",us7000abc,ci12345,"). Registering them as `provider:id` aliases
+ *  survives USGS preferred-id churn and gives the dense-cell guard real id-level linkage
+ *  (design §8.3/§8.4). The same parse serves the adapters and the node-to-node merge pass. */
+export function knownAliasIdsOf(provider: string, providerEventId: string, fields: Record<string, unknown> | null | undefined): string[] {
+  const ids = fields?.['ids'];
+  if (typeof ids !== 'string') return [];
+  const out: string[] = [];
+  for (const t of ids.split(',')) {
+    const id = t.trim();
+    if (id && id !== providerEventId) out.push(`${provider}:${id}`);
+  }
+  return out;
+}
+
 /** reviewed > provisional > automatic > unknown. */
 export function statusRank(status: string | null): number {
   if (!status) return 0;

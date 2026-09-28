@@ -243,6 +243,11 @@ async function main(): Promise<void> {
       r.node.lastSeq = seqMarker;
       if (r.node.firstSeenSeq < 0) r.node.firstSeenSeq = seqMarker;
       changedDays.add(eventDayKey(r.node.eventTimeMs));
+      // A fold retires a second node: its day partition must be rewritten too.
+      for (const m of r.merges) {
+        m.loser.lastSeq = seqMarker;
+        changedDays.add(eventDayKey(m.loser.eventTimeMs));
+      }
       changedCount++;
     }
   }

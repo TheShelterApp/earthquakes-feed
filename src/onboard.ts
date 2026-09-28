@@ -134,6 +134,7 @@ export async function onboardStep(
     if (r.changed) {
       r.node.lastSeq = head.seq;
       if (r.node.firstSeenSeq < 0) r.node.firstSeenSeq = head.seq;
+      for (const m of r.merges) m.loser.lastSeq = head.seq;
       changed++;
     }
   }

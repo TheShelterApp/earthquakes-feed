@@ -22,6 +22,27 @@ export const GRID_CELL_DEG = 0.2;
 /** Swarm guard: a grid cell holding this many live events disables proximity-merge. */
 export const SWARM_CELL_ABSOLUTE = 50;
 export const MAG_MERGE_MAX_DELTA = 0.8;
+/** Large-event proximity. Preliminary epicentres of one M6–7 quake scatter by tens of km
+ *  across agencies (Loyalty Islands M7.0, 2026-09-25: 22–62 km, six feed ids), so when BOTH
+ *  solutions are ≥ LARGE_EVENT_MAG the spatial window is
+ *  clamp(SPATIAL_KM + LARGE_EVENT_KM_PER_MAG · (min(mag) − LARGE_EVENT_MAG), SPATIAL_KM, LARGE_EVENT_MAX_KM)
+ *  (M6.0 → 20 km, M6.5 → 30, M7.0 → 40; the cap is the alerts gateway's own fold window)
+ *  before the usual ΔM shrink. On that widened path a hard |ΔM| ≤ LARGE_EVENT_MAX_DELTA keeps a
+ *  large aftershock out of the mainshock's window. */
+export const LARGE_EVENT_MAG = 5.5;
+export const LARGE_EVENT_KM_PER_MAG = 20;
+export const LARGE_EVENT_MAX_KM = 50;
+export const LARGE_EVENT_MAX_DELTA = 1.0;
+/** A provider re-publishing ONE solution under a second native id (INGV 46714321 / 47246702,
+ *  2026-09-25) is a re-id, not a distinct event: rows this close fold instead of minting. */
+export const REID_DT_MS = 2_000;
+export const REID_KM = 2;
+export const REID_MAG_DELTA = 0.1;
+/** Bound on the post-revision merge chain one ingest may trigger (each round retires a node). */
+export const MERGE_MAX_ROUNDS = 8;
+/** A retired (superseded / tombstoned) event stays published, flagged non-live, for this long
+ *  after its last ingest, so a poller that treats absence as "still there" sees the removal. */
+export const RETIRED_VISIBLE_MS = 48 * 3600_000;
 /** Only events within this many days are kept in the in-memory dedup index. */
 export const HOT_WINDOW_DAYS = 7;
 /** aggregate loads only this many days of event_map shards (fast hot path). */

@@ -1,5 +1,5 @@
 import type { Extra, RawObs } from './types.js';
-import { flattenScalars, num, parseUtcMs } from './util.js';
+import { flattenScalars, knownAliasIdsOf, num, parseUtcMs } from './util.js';
 
 /** Tolerant parser for USGS-GeoJSON and EMSC seismicportal `format=json` (a GeoJSON superset). */
 export function parseGeoJSON(body: string, provider: string): RawObs[] {
@@ -17,16 +17,8 @@ export function parseGeoJSON(body: string, provider: string): RawObs[] {
     if (eventTimeMs == null) continue;
     const providerEventId = String(feat.id ?? p['unid'] ?? p['source_id'] ?? p['eventid'] ?? '').trim();
     if (!providerEventId) continue;
-    // USGS lists every contributing catalog id in `ids` (",us7000abc,ci12345,").
-    // Registering them as same-provider aliases survives USGS preferred-id churn
-    // and gives the dense-cell guard real id-level linkage (design §8.3/§8.4).
-    const knownAliasIds: string[] = [];
-    if (typeof p['ids'] === 'string') {
-      for (const t of (p['ids'] as string).split(',')) {
-        const id = t.trim();
-        if (id && id !== providerEventId) knownAliasIds.push(`${provider}:${id}`);
-      }
-    }
+    // USGS lists every contributing catalog id in `ids` — same-provider aliases (see knownAliasIdsOf).
+    const knownAliasIds = knownAliasIdsOf(provider, providerEventId, p);
     out.push({
       provider,
       providerEventId,

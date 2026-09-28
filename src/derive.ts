@@ -16,6 +16,7 @@ import { loadState, nodeToFeature, pruneEventMapShards, writeIfChanged } from '.
 import {
   loadInventory,
   manifestPartitions,
+  publishesRetired,
   saveInventory,
   writeDayPartition,
   type Inventory,
@@ -32,6 +33,8 @@ interface Feat {
   timeMs: number;
   mag: number | null;
   sig: number | null;
+  /** false = a retired (superseded / tombstoned) marker published non-live, not counted. */
+  live: boolean;
 }
 
 const DOMAIN = 'https://earthquakes-feed.theshelter.app';
@@ -58,7 +61,8 @@ function collectionJson(name: string, feats: Feat[], nowMs: number, headIngestTi
       generated_iso: isoFromMs(nowMs),
       title: `earthquakes-feed ${name}`,
       api: '1',
-      count: feats.length,
+      // Live events only — the retired markers in `features` are not counted.
+      count: feats.filter((f) => f.live).length,
       age_seconds: ageSeconds,
       schema_version: SCHEMA_VERSION,
       // Effective magnitude floor of THIS file (may exceed the name's threshold — month
@@ -157,15 +161,18 @@ function main(): void {
   const publicV1 = join(PUBLIC_DIR, 'v1');
   const allNodes = [...state.eventMap.values()];
 
-  // Summaries: live events only, no future timestamps. Compact features (no provenance[])
-  // — the full superset stays in the day files/partitions written below.
-  const liveFeats: Feat[] = allNodes
-    .filter((n: EventNode) => n.state === 'live' && n.eventTimeMs <= nowMs + FUTURE_LEEWAY_MS)
+  // Summaries: live events plus the recently retired ones flagged non-live (publishesRetired —
+  // a poller that treats absence as "still there" must see the removal once), no future
+  // timestamps. Compact features (no provenance[]) — the full superset stays in the day
+  // files/partitions written below.
+  const feats: Feat[] = allNodes
+    .filter((n: EventNode) => (n.state === 'live' || publishesRetired(n, nowMs)) && n.eventTimeMs <= nowMs + FUTURE_LEEWAY_MS)
     .map((n) => {
       const feature = nodeToFeature(n, { compact: true }) as { properties: { mag: number | null; sig: number | null } };
-      return { feature, timeMs: n.eventTimeMs, mag: feature.properties.mag, sig: feature.properties.sig };
+      return { feature, timeMs: n.eventTimeMs, mag: feature.properties.mag, sig: feature.properties.sig, live: n.state === 'live' };
     });
-  const summ = summaries(liveFeats, nowMs, publicV1, state.head.ingest_time);
+  const liveCount = feats.filter((f) => f.live).length;
+  const summ = summaries(feats, nowMs, publicV1, state.head.ingest_time);
 
   // Partitions: every state, one file per event-day, only for the days we loaded.
   const byDay = new Map<string, EventNode[]>();
@@ -187,7 +194,7 @@ function main(): void {
       generated: nowMs,
       generated_iso: isoFromMs(nowMs),
       head_seq: state.head.seq,
-      event_count: liveFeats.length,
+      event_count: liveCount,
       freshness: { expected_interval_seconds: 300, stale_after_seconds: 1800 },
       data_repo: REPO,
       jsdelivr_base: `${JSDELIVR_BASE}@data`,
@@ -242,7 +249,7 @@ function main(): void {
   const pruned = pruneEventMapShards(DATA_DIR, nowMs - EVENT_MAP_HORIZON_DAYS * 86_400_000);
 
   console.log(
-    `derive: live=${liveFeats.length} summaries=${Object.keys(summ).length} partitions=${byDay.size} rewritten=${rewritten}` +
+    `derive: live=${liveCount} summaries=${Object.keys(summ).length} partitions=${byDay.size} rewritten=${rewritten}` +
       (pruned.length ? ` pruned_shards=${pruned.length}` : ''),
   );
 }

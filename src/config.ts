@@ -45,10 +45,12 @@ export const REID_KM = 2;
 export const REID_MAG_DELTA = 0.1;
 /** Bound on the post-revision merge chain one ingest may trigger (each round retires a node). */
 export const MERGE_MAX_ROUNDS = 8;
-/** An event superseded by an op:merge stays published, compact and flagged non-live, for this
- *  long after its last ingest, so a poller that treats absence as "still there" sees the
- *  removal. Tombstoned events are not republished (they leave the live surfaces at once). */
-export const SUPERSEDED_VISIBLE_MS = 48 * 3600_000;
+/** A retired event (superseded by an op:merge, or tombstoned: an upstream delete, a provider's
+ *  zeroed withdrawal or the feed's own retraction) stays published, compact and flagged
+ *  non-live, for this long after its last ingest, so a poller that treats absence as "still
+ *  there" sees the removal. Tombstones joined on 2026-09-28, once every consumer that reads the
+ *  Pages files without the state filter was fixed (the alerts gateway's pages_url path). */
+export const RETIRED_VISIBLE_MS = 48 * 3600_000;
 /** The one-time heal (src/heal.ts). aggregate runs it once when the data branch's
  *  knowledge/index/heal.json holds a lower epoch (or none): the op:merge pass over every live
  *  node in the hot window (Resolver.heal) and the coordinate-less retraction over the whole

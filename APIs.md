@@ -99,8 +99,8 @@ curl -s https://earthquakes-feed.theshelter.app/v1/all_day.geojson
 
 Ready-to-render `FeatureCollection` for one UTC day: the live events **full-fat**
 (complete `feed.provenance[]` incl. `fields`), plus — compact, flagged `feed.state:
-"superseded"` — the events folded into another one in the last 48 h (see *Retired events*
-below). Exists for the days currently in the live
+"superseded"` or `"tombstoned"` — the events folded into another one or deleted in the last
+48 h (see *Retired events* below). Exists for the days currently in the live
 event-map window (~45 days) — a partition's `pages_url` is present in `manifest.json`
 **iff** its day file is actually deployed; for any other day use the partition `url`
 (NDJSON, same full-fat Features, one per line).
@@ -179,11 +179,14 @@ pair's window), so a report is never welded to a neighbour while its own twin st
 An event can leave the live set in two ways: an upstream delete (`state: "tombstoned"`,
 `tombstone: true`) or a fold into another event once revised solutions converge
 (`state: "superseded"`, `superseded_by: <feed_id>`, an `op:merge` line in the observation
-log). A tombstoned event leaves the rolling summaries and the Pages day file at once. A
-superseded one stays published there for **48 h after the fold** — **compact and
-non-live** — so a poller that treats absence as "still there" sees the removal once; after
-that it lives only in the day partitions (full-fat, every state). Consumers must drop every
-feature whose `feed.state !== "live"`; `metadata.count` counts live features only. The
+log). Either way the event stays published in the rolling summaries and the Pages day file
+for **48 h after it retired** (the fold or the delete) — **compact and non-live** — so a
+poller that treats absence as "still there" sees the removal once; after that it lives only
+in the day partitions (full-fat, every state). Tombstoned events joined that 48 h
+republication on 2026-09-28 (until then they left those files at once). Consumers must drop
+every feature whose `feed.state !== "live"` (or whose `tombstone` is true) — never plot one:
+a tombstoned marker keeps its last solution, which for a retracted placeholder is 0, 0;
+`metadata.count` counts live features only. The
 survivor of a merge keeps the loser's `aliases[]` and provenance rows, so the loser's
 provider ids resolve to it, and its `first_ingest_time` / `first_seen_seq` become the
 earlier of the two. `superseded_by` names the event that was live when the line was written:
@@ -205,8 +208,9 @@ that way, magType `un` / `MU`): the feed withdraws that provider's row exactly l
 delete — an `op:tombstone` line with `reason` "withdrawn by the provider: …", and the event is
 `tombstoned` when no other provider reports it (a later located report of the id brings it
 back). The ones published before that rule were retracted by the feed itself through the same
-path: `state: "tombstoned"`, an `op:tombstone` line with a `reason`, gone from the rolling
-summaries and the Pages day files. That retraction covered the 45-day event map (event days
+path: `state: "tombstoned"`, an `op:tombstone` line with a `reason`, off the live set of the
+rolling summaries and the Pages day files (published there only as non-live tombstones for
+48 h, like every retired event). That retraction covered the 45-day event map (event days
 from 2026-08-14); older history is never rewritten, so the day partitions before 2026-08-14
 (1,909 such features in 2026-05-01…08-13) and the monthly Release archives still carry these
 placeholders as `live`. A consumer of that history should drop every feature at exactly 0, 0

@@ -7,10 +7,10 @@ import { test } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { featureToNode, nodeToFeature } from '../src/bitemporal.js';
-import { HOT_WINDOW_DAYS, SUPERSEDED_VISIBLE_MS } from '../src/config.js';
+import { HOT_WINDOW_DAYS, RETIRED_VISIBLE_MS } from '../src/config.js';
 import { Resolver, type IngestResult } from '../src/dedup.js';
 import { mergeLine, observationToRaw, observeLine } from '../src/oplog.js';
-import { publishesSuperseded, readDayPartitionNodes, writeDayPartition } from '../src/partitions.js';
+import { publishesRetired, readDayPartitionNodes, writeDayPartition } from '../src/partitions.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import type { EventNode, Observation, ProviderConfig, RawObs } from '../src/types.js';
 
@@ -472,36 +472,38 @@ test('state / superseded_by round-trip through nodeToFeature / featureToNode', (
   assert.ok(!('provenance' in compact.properties.feed));
 });
 
-test('visibility: a superseded node is published non-live for 48 h after its last ingest, then only in the tree', () => {
+test('visibility: a retired node (superseded or tombstoned) is published non-live for 48 h after its last ingest, then only in the tree', () => {
   const { a, b } = moveScenario();
   const retiredAt = Date.parse(b.lastIngestTime);
-  assert.equal(publishesSuperseded(a, retiredAt), false, 'live nodes are not "superseded"');
-  assert.equal(publishesSuperseded(b, retiredAt + 1000), true);
-  assert.equal(publishesSuperseded(b, retiredAt + SUPERSEDED_VISIBLE_MS), true, 'inclusive at the edge');
-  assert.equal(publishesSuperseded(b, retiredAt + SUPERSEDED_VISIBLE_MS + 1), false);
-  // A tombstone (upstream delete) leaves the live surfaces at once, as before this change: a
-  // consumer that reads them without checking feed.state must never see a deleted event again.
+  assert.equal(publishesRetired(a, retiredAt), false, 'live nodes are not "retired"');
+  assert.equal(publishesRetired(b, retiredAt + 1000), true);
+  assert.equal(publishesRetired(b, retiredAt + RETIRED_VISIBLE_MS), true, 'inclusive at the edge');
+  assert.equal(publishesRetired(b, retiredAt + RETIRED_VISIBLE_MS + 1), false);
+  // A tombstone (upstream delete) follows the same 48 h rule since every consumer of the Pages
+  // files filters feed.state (the alerts gateway's pages_url path since platform d321b76).
   const tomb: EventNode = { ...a, feedId: 'efd_01M3D76ES0TOMBSTONE00000001', aliases: [], provenance: [], state: 'tombstoned', lastIngestTime: b.lastIngestTime };
-  assert.equal(publishesSuperseded(tomb, retiredAt + 1000), false, 'a fresh tombstone is not republished');
+  assert.equal(publishesRetired(tomb, retiredAt + 1000), true, 'a fresh tombstone is republished');
+  assert.equal(publishesRetired(tomb, retiredAt + RETIRED_VISIBLE_MS + 1), false, '48 h later it is not');
+  const oldTomb: EventNode = { ...tomb, feedId: 'efd_01M3D76ES0OLDTOMBSTONE00001', lastIngestTime: '2026-09-20T00:00:00.000Z' };
 
   const root = mkdtempSync(join(tmpdir(), 'efd-merge-'));
   try {
     const old: EventNode = { ...b, feedId: 'efd_01M3D76ES0OLDLOSER0000000001', provenance: b.provenance.map((r) => ({ ...r })), lastIngestTime: '2026-09-20T00:00:00.000Z' };
     const day = '2026-09-25';
     const publicV1 = join(root, 'public');
-    writeDayPartition(root, day, [a, b, old, tomb], { publicV1, nowMs: retiredAt + 3600_000, headIngestTime: b.lastIngestTime });
+    writeDayPartition(root, day, [a, b, old, tomb, oldTomb], { publicV1, nowMs: retiredAt + 3600_000, headIngestTime: b.lastIngestTime });
     // Tree partition: every state, full-fat (the loser's frozen copy keeps its line self-describing).
     const tree = readDayPartitionNodes(root, day);
-    assert.deepEqual(tree.map((n) => n.state).sort(), ['live', 'superseded', 'superseded', 'tombstoned']);
+    assert.deepEqual(tree.map((n) => n.state).sort(), ['live', 'superseded', 'superseded', 'tombstoned', 'tombstoned']);
     assert.equal(tree.find((n) => n.feedId === b.feedId)!.provenance.length, 1);
     assert.equal(tree.find((n) => n.feedId === b.feedId)!.supersededBy, a.feedId);
-    // Pages day file: the live one full-fat, the recently superseded one compact and non-live,
-    // the old superseded one and the tombstone absent.
+    // Pages day file: the live one full-fat, the recently superseded one and the fresh tombstone
+    // compact and non-live, the old superseded one and the old tombstone absent.
     const pages = JSON.parse(readFileSync(join(publicV1, 'events', `${day}.geojson`), 'utf8')) as {
       metadata: { count: number };
       features: { id: string; properties: { feed: Record<string, unknown> } }[];
     };
-    assert.deepEqual(pages.features.map((f) => f.id).sort(), [a.feedId, b.feedId].sort());
+    assert.deepEqual(pages.features.map((f) => f.id).sort(), [a.feedId, b.feedId, tomb.feedId].sort());
     assert.equal(pages.metadata.count, 1, 'count = live features only');
     const liveFeat = pages.features.find((f) => f.id === a.feedId)!;
     const retired = pages.features.find((f) => f.id === b.feedId)!;
@@ -509,7 +511,10 @@ test('visibility: a superseded node is published non-live for 48 h after its las
     assert.equal(retired.properties.feed['state'], 'superseded');
     assert.equal(retired.properties.feed['superseded_by'], a.feedId);
     assert.ok(!('provenance' in retired.properties.feed), 'superseded markers are compact');
-    assert.ok(pages.features.every((f) => f.properties.feed['state'] !== 'tombstoned'), 'no tombstone in the Pages day file');
+    const deleted = pages.features.find((f) => f.id === tomb.feedId)!;
+    assert.equal(deleted.properties.feed['state'], 'tombstoned');
+    assert.equal(deleted.properties.feed['tombstone'], true);
+    assert.ok(!('provenance' in deleted.properties.feed), 'tombstone markers are compact');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

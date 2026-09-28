@@ -169,7 +169,8 @@ async function main(): Promise<void> {
     }
     return false;
   };
-  const resolver = new Resolver(transient, priorityMap(all), configMap(all), nowMs, { hotFloorMs: 0 });
+  // merge=false: backfill never logs, so it never folds (op:merge) — see Resolver.
+  const resolver = new Resolver(transient, priorityMap(all), configMap(all), nowMs, { hotFloorMs: 0, merge: false });
 
   // 4) Ingest (deterministic order). Overflowed windows are dropped + retried narrower.
   const raws: RawObs[] = [];

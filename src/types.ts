@@ -88,6 +88,9 @@ export interface Observation {
   backfilled?: boolean;
   /** The reporting provider's COMPLETE original field vocabulary. */
   fields: Extra;
+  /** op:merge only — why the loser (this line's feed_id) folded, and the survivor it folded into. */
+  reason?: string;
+  superseded_by?: string;
 }
 
 export interface ProviderConfig {

@@ -64,8 +64,9 @@ try {
 
 // 2. Published summaries (Pages artifact): schema + size gate + no future events.
 //    /v1/events/ day files are the documented FULL-detail Pages surface (the compact
-//    summaries point consumers there) — every feature must keep a non-empty
-//    feed.provenance[] (day files are live-only, so no tombstone exception applies).
+//    summaries point consumers there) — every LIVE feature must keep a non-empty
+//    feed.provenance[]. A superseded feature rides along compact and flagged non-live for
+//    SUPERSEDED_VISIBLE_MS by contract, so it is exempt; a tombstoned one never belongs here.
 const nowMs = Date.now();
 for (const file of walk(publicV1, (f) => f.endsWith('.geojson'))) {
   const bytes = statSync(file).size;
@@ -76,7 +77,7 @@ for (const file of walk(publicV1, (f) => f.endsWith('.geojson'))) {
   else if (bytes > MAX_PUBLISHED_BYTES * 0.75) {
     console.warn(`::warning::${file}: ${bytes} bytes — ${((bytes / MAX_PUBLISHED_BYTES) * 100).toFixed(1)}% of the ${MAX_PUBLISHED_BYTES}-byte budget`);
   }
-  const fc = JSON.parse(readFileSync(file, 'utf8')) as { metadata?: { generated?: unknown }; features?: { properties?: { time?: number; feed?: { provenance?: unknown[] } } }[] };
+  const fc = JSON.parse(readFileSync(file, 'utf8')) as { metadata?: { generated?: unknown }; features?: { properties?: { time?: number; feed?: { state?: string; provenance?: unknown[] } } }[] };
   if (typeof fc.metadata?.generated !== 'number') fail(`${file}: metadata.generated must be ms-epoch int`);
   const isDayFile = file.includes(join(publicV1, 'events'));
   for (const [i, feat] of (fc.features ?? []).entries()) {
@@ -86,7 +87,8 @@ for (const file of walk(publicV1, (f) => f.endsWith('.geojson'))) {
     }
     if (isDayFile) {
       const prov = feat.properties?.feed?.provenance;
-      if (!Array.isArray(prov) || prov.length === 0) {
+      const superseded = feat.properties?.feed?.state === 'superseded';
+      if (!superseded && (!Array.isArray(prov) || prov.length === 0)) {
         fail(`${file}: feature ${i} lost feed.provenance[] — day files must stay full-fat`);
         break;
       }

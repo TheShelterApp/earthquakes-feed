@@ -115,7 +115,12 @@ guaranteed real-time bus. Every FeatureCollection and the manifest carry
 `freshness.stale_after_seconds` (default 1800). Consumers should mark the layer
 degraded past that and fall back to their own real-time source (e.g. the EMSC
 WebSocket) if they have one. For live-map dedup, index `feed.aliases[]` and merge a
-WebSocket event that shares an alias or falls within ±60 s / ±10 km.
+WebSocket event that shares an alias or falls within ±60 s / ±10 km (for a large quake,
+both ≥ M5.5, the window widens to `10 + 20·(min(M) − 5.5)` km, at most 50 km, while
+|ΔM| ≤ 1 — see [APIs.md](APIs.md#realtime--client-dedup)). Drop every feature whose
+`feed.state` is not `live`: an event superseded by a merge (once agencies' solutions
+converged) stays published, compact and non-live, for 48 h so pollers see the removal
+([APIs.md](APIs.md#retired-events)).
 
 ## Sources
 
@@ -260,10 +265,12 @@ files, manifest, CI, and Cloudflare Pages serving. `event_map` is sharded by day
 pruned to a 45-day dedup horizon, with older identity preserved in the day partitions.
 
 Running in production: `updatedafter` revision + `includedeleted` tombstone sweeps,
-`@sha` immutable partition URLs, paced historical **backfill** (~3-yr target) with
+`op:merge` survivor selection (a large quake whose preliminary epicentres scattered across
+agencies folds into one feed id once the solutions converge; the loser is published
+superseded), `@sha` immutable partition URLs, paced historical **backfill** (~3-yr target) with
 monthly **Release archival** of cold months (and re-roll when a new source backfills
 into one), automatic **new-source onboarding** of the recent window, an external
 5-minute Cloudflare-Worker **heartbeat**, and a monthly source **discovery-assist**.
 
-**Roadmap:** `op:merge` survivor selection (heals residual cross-provider duplicates);
-knowledge-time snapshots; empirical swarm-guard calibration. Contributions welcome.
+**Roadmap:** knowledge-time snapshots; empirical swarm-guard calibration. Contributions
+welcome.

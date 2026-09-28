@@ -117,7 +117,8 @@ export async function onboardStep(
   // Load the event_map shards spanning the chunk, merge the source in, save (load-merge-save).
   const sinceDays = Math.ceil((nowMs - startMs) / DAY) + 2;
   const map = loadEventMap(root, { sinceDays, nowMs });
-  const resolver = new Resolver(map, priorityMap(all), configMap(all), nowMs, { hotFloorMs: 0 });
+  // merge=false: no log line on this path, so no op:merge fold either (see Resolver).
+  const resolver = new Resolver(map, priorityMap(all), configMap(all), nowMs, { hotFloorMs: 0, merge: false });
   const head = JSON.parse(readFileSync(dataPaths(root).head, 'utf8')) as Head;
   const liveFloorMs = dayStartMs(liveDay);
   const raws = res.obs

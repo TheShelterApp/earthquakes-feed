@@ -71,7 +71,36 @@ test('clustering is order-independent: same event count + provenance membership 
   assert.deepEqual(run(set), ['emsc+usgs']); // one event, both providers
 });
 
-// Byte-identical feed_id under adversarial first-sighting reordering needs the
-// op:merge survivor-selection machinery (design §8.6). In real operation the log
-// replays in seq order, so rebuilds are already deterministic; this is a v1 item.
-test.todo('feed_id is byte-identical under adversarial first-sighting reordering (needs op:merge)');
+// Adversarial first-sighting reordering of a scattered large event: the event count, the
+// provider membership and the representative solution are order-independent — the merge
+// pass (op:merge, tests/merge.test.ts) heals whatever the arrival order split. The feed_id
+// itself is content-seeded by the FIRST report's bucket and pinned (ulid.ts), so it is the
+// one thing another order can change; the log replays in seq order, so rebuilds stay
+// byte-identical.
+test('a scattered large event clusters the same way under every first-sighting order', () => {
+  const big = (provider: string, id: string, lat: number, lon: number, mag: number): RawObs =>
+    obs(provider, id, { lat, lon, mag, magType: 'mw', place: 'offshore' });
+  // Three preliminary epicentres 20–27 km apart (different id buckets), all ≥ M6.
+  const set = [big('usgs', 'u1', -21.246, 168.453, 7.0), big('geofon', 'g1', -21.215, 168.663, 6.4), big('geonet', 'n1', -21.038, 168.571, 6.6)];
+  const perms: RawObs[][] = [];
+  const permute = (rest: RawObs[], acc: RawObs[]): void => {
+    if (!rest.length) perms.push(acc);
+    for (let i = 0; i < rest.length; i++) permute([...rest.slice(0, i), ...rest.slice(i + 1)], [...acc, rest[i]!]);
+  };
+  permute(set, []);
+  for (const order of perms) {
+    const m = new Map<string, EventNode>();
+    const r = new Resolver(m, prio, cfg, T0);
+    for (const o of order) r.ingest(o, '2026-07-05T12:00:10Z');
+    const live = [...m.values()].filter((n) => n.state === 'live');
+    assert.equal(live.length, 1, `one live event for order ${order.map((o) => o.provider).join(',')}`);
+    assert.deepEqual(live[0]!.provenance.map((p) => p.provider).sort(), ['geofon', 'geonet', 'usgs']);
+    assert.equal(live[0]!.chosenProvider, 'usgs');
+    for (const n of m.values()) if (n !== live[0]) assert.equal(n.supersededBy, live[0]!.feedId);
+  }
+});
+
+// Still open: the surviving feed_id itself. op:merge makes the event, its rows and its
+// representative order-independent (above), not the id — that would need re-keying a node
+// after first sight, which the pinned-identity design (ulid.ts) rules out today.
+test.todo('feed_id is byte-identical under adversarial first-sighting reordering (needs re-keying beyond op:merge)');

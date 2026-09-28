@@ -4,6 +4,7 @@ import { DATA_DIR, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS, dataPaths } from './config.
 import { appendObservations, earliestEventMapDay, loadState, saveEventMap, saveMeta } from './bitemporal.js';
 import { onboardStep } from './onboard.js';
 import { Resolver, type IngestResult } from './dedup.js';
+import { mergeLine, observeLine } from './oplog.js';
 import { activeProviders, configMap, fetchProvider, fetchProviderDeleted, fetchProviderUpdated, loadRegistry, priorityMap } from './providers.js';
 import type { Observation, Op, RawObs } from './types.js';
 
@@ -51,28 +52,6 @@ function assertHeadMatchesLog(root: string, headSeq: number): void {
  *  entire feed (JMA's DDMM.m `cod`, 2026-08-22), so the log drops them at the door. */
 const hasBadCoords = (r: RawObs): boolean =>
   !Number.isFinite(r.lat) || !Number.isFinite(r.lon) || Math.abs(r.lat) > 90 || Math.abs(r.lon) > 180;
-
-function makeObservation(raw: RawObs, r: IngestResult, seq: number, ingestTime: string, op: Op = 'observe'): Observation {
-  return {
-    seq,
-    op,
-    feed_id: r.node.feedId,
-    revision: r.revision,
-    ingest_time: ingestTime,
-    event_time: isoFromMs(raw.eventTimeMs),
-    provider: raw.provider,
-    provider_event_id: raw.providerEventId,
-    provider_updated: raw.providerUpdatedMs != null ? isoFromMs(raw.providerUpdatedMs) : null,
-    status: raw.status,
-    lat: raw.lat,
-    lon: raw.lon,
-    depth: raw.depth,
-    mag: raw.mag,
-    magType: raw.magType,
-    place: raw.place,
-    fields: raw.fields,
-  };
-}
 
 async function main(): Promise<void> {
   const nowMs = Date.now();
@@ -127,17 +106,28 @@ async function main(): Promise<void> {
 
   let seq = state.head.seq;
   const newObs: Observation[] = [];
+  let merged = 0;
+  // Log one ingest: the op:merge lines it caused (each the loser's retiring revision) before
+  // the report's own line, so seq order reads cause → effect and the survivor's ingest_seq
+  // is the last one written.
+  const record = (raw: RawObs, r: IngestResult, op: Op = 'observe'): void => {
+    for (const m of r.merges) {
+      seq += 1;
+      m.loser.lastSeq = seq;
+      newObs.push(mergeLine(m, seq, ingestTime));
+      merged++;
+    }
+    seq += 1;
+    r.node.lastSeq = seq;
+    if (r.node.firstSeenSeq < 0) r.node.firstSeenSeq = seq;
+    newObs.push(observeLine(raw, r, seq, ingestTime, op));
+  };
   for (const raw of raws) {
     const r = resolver.ingest(raw, ingestTime);
     if (raw.providerUpdatedMs != null) {
       state.watermarks[raw.provider] = Math.max(state.watermarks[raw.provider] ?? 0, raw.providerUpdatedMs);
     }
-    if (r.changed) {
-      seq += 1;
-      r.node.lastSeq = seq;
-      if (r.node.firstSeenSeq < 0) r.node.firstSeenSeq = seq;
-      newObs.push(makeObservation(raw, r, seq, ingestTime));
-    }
+    if (r.changed) record(raw, r);
   }
 
   // Revision sweep (H2): updatedafter results revise KNOWN events only (reviseExisting
@@ -156,10 +146,7 @@ async function main(): Promise<void> {
     }
     const r = resolver.reviseExisting(raw, ingestTime);
     if (r?.changed) {
-      seq += 1;
-      r.node.lastSeq = seq;
-      if (r.node.firstSeenSeq < 0) r.node.firstSeenSeq = seq;
-      newObs.push(makeObservation(raw, r, seq, ingestTime));
+      record(raw, r);
       revisions++;
     }
   }
@@ -170,9 +157,7 @@ async function main(): Promise<void> {
   for (const raw of deletes) {
     const r = resolver.tombstoneProvider(raw, ingestTime);
     if (r?.changed) {
-      seq += 1;
-      r.node.lastSeq = seq;
-      newObs.push(makeObservation(raw, r, seq, ingestTime, 'tombstone'));
+      record(raw, r, 'tombstone');
       tombstoned++;
     }
   }
@@ -202,6 +187,7 @@ async function main(): Promise<void> {
     new_observations: newObs.length,
     revisions,
     tombstoned,
+    merged,
     duration_ms: Math.round(Date.now() - nowMs),
     degraded,
     providers,
@@ -221,7 +207,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `aggregate: seq=${seq} indexed=${state.eventMap.size} fetched=${fetched.length} stale_dropped=${staleDropped} new=${newObs.length} revisions=${revisions} tombstoned=${tombstoned} ` +
+    `aggregate: seq=${seq} indexed=${state.eventMap.size} fetched=${fetched.length} stale_dropped=${staleDropped} new=${newObs.length} revisions=${revisions} tombstoned=${tombstoned} merged=${merged} ` +
       `providers=${outcomes.filter((o) => o.status.ok).length}/${outcomes.length}` +
       (badCoordsDropped ? ` bad_coords_dropped=${badCoordsDropped}` : '') +
       (degraded.length ? ` degraded=[${degraded.join(',')}]` : ''),

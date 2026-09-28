@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { Resolver } from '../src/dedup.js';
-import { RETRACTION_REASON, healedEpoch, runFeedSideSteps } from '../src/heal.js';
+import { RETRACTION_REASON, ZEROED_REASON, healedEpoch, runFeedSideSteps, withdrawZeroedReports } from '../src/heal.js';
 import { LogBuffer, observationToRaw } from '../src/oplog.js';
 import { writeDayPartition } from '../src/partitions.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
@@ -171,4 +171,114 @@ test('runFeedSideSteps without a heal due: retraction only, no marker', () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// --- A provider zeroing an id the feed holds is its withdrawal (SCEDC / NCEDC delete signal) ---
+
+/** NCEDC 75437217 as logged: located at seq 162323 (2026-09-17 14:32Z), re-published at 0,0 M0
+ *  `MU` at seq 162652 (17:36Z) and never located again. */
+const located75437217 = (): RawObs =>
+  raw('ncedc', '75437217', { eventTimeMs: T, lat: 39.2945, lon: -124.1775, depth: 2.86, mag: 3.5, magType: 'Ml' });
+const zeroed75437217 = (): RawObs => placeholder('75437217', { eventTimeMs: T });
+
+/** Run 1 publishes the located report; the returned map is what the next run loads. */
+function publishedLocated(): { map: Map<string, EventNode>; node: EventNode } {
+  const map = new Map<string, EventNode>();
+  const node = new Resolver(map, prio, cfg, NOW).ingest(located75437217(), '2026-09-27T10:05:00.000Z').node;
+  node.firstSeenSeq = node.lastSeq = 100;
+  return { map, node };
+}
+
+/** aggregate's live path in a later run: the screen holds the zeroed report back, then
+ *  withdrawZeroedReports applies it. */
+function laterRun(map: Map<string, EventNode>, reports: RawObs[], seq: number, at: string) {
+  const r = new Resolver(map, prio, cfg, NOW);
+  const tally = emptyTally();
+  const zeroed: RawObs[] = [];
+  const kept = screen(reports, tally, undefined, zeroed);
+  const log = new LogBuffer(seq, at);
+  for (const k of kept) {
+    const res = r.ingest(k, at);
+    if (res.changed) log.record(k, res);
+  }
+  const out = withdrawZeroedReports(r, log, zeroed, at);
+  return { r, tally, zeroed, log, out };
+}
+
+test('a zeroed report of a known id withdraws it: the event is tombstoned with one op:tombstone line', () => {
+  const { map, node } = publishedLocated();
+  const rev = node.revision;
+  const { tally, zeroed, log, out } = laterRun(map, [zeroed75437217()], 200, '2026-09-27T13:10:00.000Z');
+  assert.equal(tally.coordinateless, 1, 'still refused as a report');
+  assert.equal(zeroed.length, 1, 'held back for the withdrawal');
+  assert.deepEqual(out, { withdrawn: 1, byProvider: { ncedc: 1 } });
+  assert.equal(node.state, 'tombstoned', 'no longer live at its old location');
+  assert.equal(node.provenance.length, 0);
+  assert.equal(node.revision, rev + 1);
+  assert.equal(node.lat, 39.2945, 'the solution is not moved to 0,0');
+  assert.deepEqual(log.lines.map((l) => [l.seq, l.op, l.feed_id, l.provider_event_id, l.reason]), [[201, 'tombstone', node.feedId, '75437217', ZEROED_REASON]]);
+  for (const l of log.lines) assert.ok(vObs(l), ajv.errorsText(vObs.errors));
+  assert.equal(node.lastSeq, 201);
+  assert.deepEqual(summaryFeats(map.values(), NOW), [], 'gone from the rolling summaries');
+  // The provider keeps publishing the zeroed id for as long as it is in the query window:
+  // nothing more happens, in the same run or the next one.
+  assert.equal(new Resolver(map, prio, cfg, NOW).withdrawZeroed(zeroed75437217(), '2026-09-27T13:15:00.000Z'), null);
+  assert.equal(laterRun(map, [zeroed75437217()], 300, '2026-09-27T13:20:00.000Z').log.lines.length, 0, 'idempotent');
+});
+
+test('a zeroed SCEDC row on a multi-provider event is withdrawn; the event stays live on the other rows', () => {
+  const map = new Map<string, EventNode>();
+  const r1 = new Resolver(map, prio, cfg, NOW);
+  const node = r1.ingest(raw('scedc', '41333159', { lat: 34.72067, lon: -118.2713333, mag: 2.23, magType: 'l' }), '2026-09-27T10:05:00.000Z').node;
+  r1.ingest(raw('usgs', 'ci41333159', { lat: 34.7211, lon: -118.2702, mag: 2.3, magType: 'ml', status: 'reviewed' }), '2026-09-27T10:06:00.000Z');
+  assert.deepEqual(node.provenance.map((p) => p.provider).sort(), ['scedc', 'usgs'], 'one event, two rows');
+  const { out } = laterRun(map, [raw('scedc', '41333159', { lat: 0, lon: 0, depth: 0, mag: 0, magType: 'un' })], 200, '2026-09-27T14:00:00.000Z');
+  assert.equal(out.withdrawn, 1);
+  assert.equal(node.state, 'live');
+  assert.deepEqual(node.provenance.map((p) => p.provider), ['usgs']);
+  assert.equal(node.lat, 34.7211, "the representative is USGS's solution");
+  assert.ok(node.aliases.includes('scedc:41333159'), 'the alias stays, so a located re-report lands here again');
+});
+
+test('an unknown placeholder changes nothing: no mint, no spatial match, no alias', () => {
+  const map = new Map<string, EventNode>();
+  // A real event near 0°N 0°E at the same second: the placeholder must not attach to it.
+  const gulf = new Resolver(map, prio, cfg, NOW).ingest(raw('emsc', 'gulf', { lat: 0.01, lon: 0.01, mag: 4.1, magType: 'mb' }), '2026-09-27T10:05:00.000Z').node;
+  const before = JSON.stringify([...map.values()]);
+  const { r, out, log } = laterRun(map, [placeholder('75417877')], 200, '2026-09-27T10:10:00.000Z');
+  assert.deepEqual(out, { withdrawn: 0, byProvider: {} });
+  assert.equal(log.lines.length, 0);
+  assert.equal(JSON.stringify([...map.values()]), before, 'map unchanged');
+  assert.equal(r.withdrawZeroed(raw('ncedc', 'x', { lat: 38.1, lon: -122.2, mag: 0 }), '2026-09-27T10:10:00.000Z'), null, 'a located report is never a withdrawal');
+  // Located later under the same id, it mints on its own instead of joining the Gulf event.
+  const later = r.ingest(raw('ncedc', '75417877', { lat: 38.1, lon: -122.2, mag: 2.1 }), '2026-09-27T10:20:00.000Z').node;
+  assert.notEqual(later.feedId, gulf.feedId);
+});
+
+test('a withdrawn id located again un-hides its event', () => {
+  const { map, node } = publishedLocated();
+  const { r } = laterRun(map, [zeroed75437217()], 200, '2026-09-27T13:10:00.000Z');
+  assert.equal(node.state, 'tombstoned');
+  const back = r.ingest(located75437217(), '2026-09-27T13:30:00.000Z');
+  assert.equal(back.node, node);
+  assert.equal(node.state, 'live');
+  assert.equal(node.lat, 39.2945);
+});
+
+test('the withdrawal line replays: tombstoneProvider finds the same row by the same id', () => {
+  const { map } = publishedLocated();
+  const { log } = laterRun(map, [zeroed75437217()], 200, '2026-09-27T13:10:00.000Z');
+  const again = publishedLocated();
+  const rr = new Resolver(again.map, prio, cfg, NOW);
+  for (const l of log.lines) rr.tombstoneProvider(observationToRaw(l), l.ingest_time);
+  const shape = (m: Map<string, EventNode>): unknown => [...m.values()].map((n) => [n.state, n.revision, n.lat, n.provenance.map((p) => p.nativeId)]);
+  assert.deepEqual(shape(again.map), shape(map));
+});
+
+test('the backfill resolver (no hot floor, no merge pass) withdraws a zeroed known id too', () => {
+  const { map, node } = publishedLocated();
+  const r = new Resolver(map, prio, cfg, NOW, { hotFloorMs: 0, merge: false });
+  const res = r.withdrawZeroed(zeroed75437217(), '2026-09-28T02:00:00.000Z');
+  assert.equal(res?.changed, true);
+  assert.equal(node.state, 'tombstoned');
 });

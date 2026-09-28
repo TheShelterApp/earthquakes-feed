@@ -269,7 +269,8 @@ Running in production: `updatedafter` revision + `includedeleted` tombstone swee
 agencies folds into one feed id once the solutions converge; the loser is published
 superseded; two ids fold only when each is the other's best match), a one-time heal of the
 hot window (`HEAL_EPOCH`, marker `knowledge/index/heal.json`), coordinate-less reports
-(NCEDC's `0, 0` / M0 placeholders) dropped at ingest and retracted where already published, `@sha` immutable partition URLs, paced historical **backfill** (~3-yr target) with
+(NCEDC's `0, 0` / M0 placeholders) dropped at ingest and retracted where already published (a
+zeroed report of a known SCEDC / NCEDC id is that provider's withdrawal), `@sha` immutable partition URLs, paced historical **backfill** (~3-yr target) with
 monthly **Release archival** of cold months (and re-roll when a new source backfills
 into one), automatic **new-source onboarding** of the recent window, an external
 5-minute Cloudflare-Worker **heartbeat**, and a monthly source **discovery-assist**.

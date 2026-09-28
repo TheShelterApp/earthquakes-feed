@@ -40,13 +40,22 @@ export const emptyTally = (): ScreenTally => ({ bad_coords: 0, coordinateless: 0
 
 /** Drop the reports `screenReason` rejects, counting them into `tally`. `allow` lists the
  *  reasons a path lets through: the delete sweep keeps coordinate-less rows (withdrawing a
- *  placeholder is correct, and there is nothing to place on a map). */
-export function screen<T extends RawObs>(arr: T[], tally: ScreenTally, allow: ReadonlySet<ScreenReason> = new Set()): T[] {
+ *  placeholder is correct, and there is nothing to place on a map). `zeroed`, when given,
+ *  collects the coordinate-less reports dropped here: one whose id the feed already holds is
+ *  its provider's withdrawal (Resolver.withdrawZeroed), not a report to throw away. */
+export function screen<T extends RawObs>(arr: T[], tally: ScreenTally, allow: ReadonlySet<ScreenReason> = new Set(), zeroed?: T[]): T[] {
   return arr.filter((r) => {
     const why = screenReason(r);
     if (!why || allow.has(why)) return true;
     tally[why]++;
     tally.byProvider[why][r.provider] = (tally.byProvider[why][r.provider] ?? 0) + 1;
+    if (why === 'coordinateless') zeroed?.push(r);
     return false;
   });
 }
+
+/** Deterministic ingest order (idempotency, design §8.10): event time, provider, provider id. */
+export const byIngestOrder = (a: RawObs, b: RawObs): number =>
+  a.eventTimeMs - b.eventTimeMs ||
+  (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0) ||
+  (a.providerEventId < b.providerEventId ? -1 : a.providerEventId > b.providerEventId ? 1 : 0);

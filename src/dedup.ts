@@ -470,12 +470,36 @@ export class Resolver {
     return this.withdrawRow(node, idx, ingestTime);
   }
 
+  /** A provider's own withdrawal by zeroing: SCEDC and NCEDC retract an event (deleted, or
+   *  folded into another of their ids) by re-publishing its id with no location — exactly lat 0 /
+   *  lon 0 with magnitude 0 or none (quality.ts `isCoordinateless`, magType `un` / `MU`). They have
+   *  no `includedeleted` sweep, so this is the only delete signal they send (2026-07..09: nine ids
+   *  located first and zeroed later, none ever located again). The ingest screen keeps such a
+   *  report off the map; for an id the feed already holds it withdraws that provider's row
+   *  exactly like tombstoneProvider does for an upstream delete (the node is tombstoned when no
+   *  row is left, else re-derives its solution). Found by id only — the provider's own id through
+   *  the alias map, never the spatial match (a report at 0,0 has no position to match on) — and
+   *  never mints, so an unknown placeholder stays a no-op and changes nothing. null when the
+   *  report is not coordinate-less, the id is unknown, or its row is already gone (idempotent).
+   *  A later located report of the same id un-hides the node, as after any tombstone. */
+  withdrawZeroed(raw: RawObs, ingestTime: string): IngestResult | null {
+    if (!isCoordinateless(raw)) return null;
+    const fid = this.alias.get(`${raw.provider}:${raw.providerEventId}`);
+    if (!fid) return null;
+    const node = this.resolveLive(fid);
+    if (!node || node.state !== 'live') return null;
+    const idx = node.provenance.findIndex((r) => r.provider === raw.provider && r.nativeId === raw.providerEventId);
+    if (idx < 0) return null;
+    return this.withdrawRow(node, idx, ingestTime);
+  }
+
   /** The feed's own retraction of coordinate-less rows (quality.ts `isCoordinateless`: exactly
    *  lat 0 / lon 0 with magnitude 0 or none — NCEDC's unlocated placeholders), through the same
    *  path as an upstream delete: the row leaves its live node, a node left with no row is
    *  tombstoned (off the summaries and the Pages day files at once), one with other rows
-   *  re-derives its solution. Ingest drops such reports at the door, so this only clears what
-   *  was published before the rule; it is idempotent (a retired node is never revisited).
+   *  re-derives its solution. Ingest drops such reports at the door (a zeroed report of a KNOWN
+   *  id withdraws that row through withdrawZeroed instead of replacing it), so this only clears
+   *  what was published before the rule; it is idempotent (a retired node is never revisited).
    *  Deterministic order (event time, feed id, then row), so the log lines replay. Each entry's
    *  `raw` is the withdrawn row as a report — what the op:tombstone line records and what a
    *  replay feeds back to tombstoneProvider. */

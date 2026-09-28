@@ -120,8 +120,9 @@ curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@<data_commit>
 ### `GET /v1/status.json`
 
 Last run's per-provider health, counts, timings, `degraded[]`. Counts include `merged`
-(`op:merge` lines), `bad_coords_dropped`, `coordinateless_dropped` (placeholders refused at
-ingest) and `coordinateless_retracted`; the heal run also carries `heal`.
+(`op:merge` lines), `bad_coords_dropped`, `coordinateless_dropped` (coordinate-less reports
+refused at ingest), `coordinateless_withdrawn` (those among them that withdrew a known id, see
+below) and `coordinateless_retracted`; the heal run also carries `heal`.
 
 ## The Feature
 
@@ -198,9 +199,18 @@ hot window once (the Loyalty Islands M7.0 of 2026-09-25 was six ids): its folds 
 it. Historical partitions are never rewritten.
 
 A report with no location — exactly 0° N, 0° E with magnitude 0 or none (NCEDC publishes such
-placeholders, `MU 0.0`) — is never ingested. The ones published before that rule were
-retracted by the feed itself through the upstream-delete path: `state: "tombstoned"`, an
-`op:tombstone` line with a `reason`, gone from the rolling summaries and the Pages day files.
+placeholders, `MU 0.0`) — is never ingested. When the id is one the feed already holds, the
+report is the provider's withdrawal (SCEDC and NCEDC delete an event by re-publishing its id
+that way, magType `un` / `MU`): the feed withdraws that provider's row exactly like an upstream
+delete — an `op:tombstone` line with `reason` "withdrawn by the provider: …", and the event is
+`tombstoned` when no other provider reports it (a later located report of the id brings it
+back). The ones published before that rule were retracted by the feed itself through the same
+path: `state: "tombstoned"`, an `op:tombstone` line with a `reason`, gone from the rolling
+summaries and the Pages day files. That retraction covered the 45-day event map (event days
+from 2026-08-14); older history is never rewritten, so the day partitions before 2026-08-14
+(1,909 such features in 2026-05-01…08-13) and the monthly Release archives still carry these
+placeholders as `live`. A consumer of that history should drop every feature at exactly 0, 0
+with magnitude 0 or none.
 
 ## Recipes
 

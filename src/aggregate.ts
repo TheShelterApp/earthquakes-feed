@@ -4,10 +4,11 @@ import { DATA_DIR, EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HOT_WINDOW_DAYS, LIVE_IND
 import { appendObservations, earliestEventMapDay, loadState, saveEventMap, saveMeta } from './bitemporal.js';
 import { onboardStep } from './onboard.js';
 import { Resolver } from './dedup.js';
-import { healedEpoch, runFeedSideSteps } from './heal.js';
+import { healedEpoch, runFeedSideSteps, withdrawZeroedReports } from './heal.js';
 import { LogBuffer } from './oplog.js';
 import { activeProviders, configMap, fetchProvider, fetchProviderDeleted, fetchProviderUpdated, loadRegistry, priorityMap } from './providers.js';
-import { emptyTally, screen } from './quality.js';
+import { byIngestOrder, emptyTally, screen } from './quality.js';
+import type { RawObs } from './types.js';
 
 /** FDSN nodes that support the `includedeleted` delete query (extensible). */
 const DELETE_PROVIDERS = new Set(['usgs']);
@@ -86,17 +87,15 @@ async function main(): Promise<void> {
   const staleDropped = fetched.length - inWindow.length;
   // Coordinate backstop across all three ingest paths — never silent: a nonzero
   // bad_coords_dropped in status names the scale so a provider regression is visible.
-  // Coordinate-less placeholders (quality.ts isCoordinateless: NCEDC's 0,0 / M0) are dropped
-  // at the door too, counted as coordinateless_dropped; the delete sweep keeps them.
+  // Coordinate-less reports (quality.ts isCoordinateless: 0,0 with M0 or none) never enter as
+  // reports, counted as coordinateless_dropped; the delete sweep keeps them. They are held in
+  // `zeroed`: for an id the feed already holds, zeroing is how SCEDC / NCEDC withdraw it
+  // (withdrawZeroedReports below); an unknown one (NCEDC's unlocated placeholder) is dropped.
   const tally = emptyTally();
-  const raws = screen(inWindow, tally);
+  const zeroed: RawObs[] = [];
+  const raws = screen(inWindow, tally, undefined, zeroed);
   // Deterministic ingest order (idempotency, design §8.10).
-  raws.sort(
-    (a, b) =>
-      a.eventTimeMs - b.eventTimeMs ||
-      (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0) ||
-      (a.providerEventId < b.providerEventId ? -1 : a.providerEventId > b.providerEventId ? 1 : 0),
-  );
+  raws.sort(byIngestOrder);
 
   // Every line this run appends, and the seq clock (LogBuffer.record: the op:merge lines an
   // ingest caused before the report's own line, so seq order reads cause → effect).
@@ -111,13 +110,8 @@ async function main(): Promise<void> {
 
   // Revision sweep (H2): updatedafter results revise KNOWN events only (reviseExisting
   // never mints), so revisions to events outside the hot index are skipped, not duped.
-  const updates = screen(updateOutcomes.flatMap((o) => o.obs).filter((r) => r.eventTimeMs <= futureCeil), tally);
-  updates.sort(
-    (a, b) =>
-      a.eventTimeMs - b.eventTimeMs ||
-      (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0) ||
-      (a.providerEventId < b.providerEventId ? -1 : a.providerEventId > b.providerEventId ? 1 : 0),
-  );
+  const updates = screen(updateOutcomes.flatMap((o) => o.obs).filter((r) => r.eventTimeMs <= futureCeil), tally, undefined, zeroed);
+  updates.sort(byIngestOrder);
   let revisions = 0;
   for (const raw of updates) {
     if (raw.providerUpdatedMs != null) {
@@ -129,6 +123,16 @@ async function main(): Promise<void> {
       revisions++;
     }
   }
+
+  // Provider withdrawals by zeroing (live and revision paths): a coordinate-less report of a
+  // KNOWN id withdraws that provider's row, like an upstream delete (op:tombstone with a reason);
+  // only unknown ids are dropped at the door. Watermarks count them as seen, like any report.
+  for (const raw of zeroed) {
+    if (raw.providerUpdatedMs != null) {
+      state.watermarks[raw.provider] = Math.max(state.watermarks[raw.provider] ?? 0, raw.providerUpdatedMs);
+    }
+  }
+  const zeroedOut = withdrawZeroedReports(resolver, log, zeroed, ingestTime);
 
   // Delete sweep: tombstone events retracted upstream (op:tombstone; never mints).
   const deletes = screen(deleteOutcomes.flatMap((o) => o.obs), tally, new Set(['coordinateless']));
@@ -155,6 +159,7 @@ async function main(): Promise<void> {
       `::warning::aggregate: dropped ${tally.bad_coords} obs with out-of-range coordinates: ${JSON.stringify(tally.byProvider.bad_coords)}`,
     );
   }
+  if (zeroedOut.withdrawn) console.log(`aggregate: withdrew ${zeroedOut.withdrawn} rows whose provider zeroed a known id: ${JSON.stringify(zeroedOut.byProvider)}`);
   if (feedSide.retracted) console.log(`aggregate: retracted ${feedSide.retracted} coordinate-less rows: ${JSON.stringify(feedSide.retractedByProvider)}`);
 
   const seq = log.seq;
@@ -176,6 +181,7 @@ async function main(): Promise<void> {
     stale_dropped: staleDropped,
     bad_coords_dropped: tally.bad_coords,
     coordinateless_dropped: tally.coordinateless,
+    coordinateless_withdrawn: zeroedOut.withdrawn,
     coordinateless_retracted: feedSide.retracted,
     new_observations: newObs.length,
     revisions,
@@ -196,6 +202,7 @@ async function main(): Promise<void> {
   try {
     const ob = await onboardStep(DATA_DIR, all, active, earliestEventMapDay(DATA_DIR, nowMs), nowMs, ingestTime);
     if (ob.provider) console.log(`onboard: ${JSON.stringify(ob)}`);
+    if (ob.screened?.bad_coords) console.warn(`::warning::onboard: dropped ${ob.screened.bad_coords} obs with out-of-range coordinates from ${ob.provider}`);
   } catch (err) {
     console.error(`onboard: step failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -205,6 +212,7 @@ async function main(): Promise<void> {
       `providers=${outcomes.filter((o) => o.status.ok).length}/${outcomes.length}` +
       (tally.bad_coords ? ` bad_coords_dropped=${tally.bad_coords}` : '') +
       (tally.coordinateless ? ` coordinateless_dropped=${tally.coordinateless}` : '') +
+      (zeroedOut.withdrawn ? ` coordinateless_withdrawn=${zeroedOut.withdrawn}` : '') +
       (feedSide.retracted ? ` coordinateless_retracted=${feedSide.retracted}` : '') +
       (heal ? ` heal_epoch=${heal.epoch} heal_merged=${heal.merged}` : '') +
       (degraded.length ? ` degraded=[${degraded.join(',')}]` : ''),

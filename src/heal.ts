@@ -3,6 +3,8 @@ import { dirname } from 'node:path';
 import { HEAL_EPOCH, dataPaths } from './config.js';
 import type { Resolver } from './dedup.js';
 import type { LogBuffer } from './oplog.js';
+import { byIngestOrder } from './quality.js';
+import type { RawObs } from './types.js';
 
 /** knowledge/index/heal.json — which one-time heal the data branch has had (config HEAL_EPOCH).
  *  Written by aggregate in the same commit as the heal's log lines, so the heal and its marker
@@ -36,6 +38,34 @@ export function writeHealMarker(root: string, marker: HealMarker): void {
 }
 
 export const RETRACTION_REASON = 'coordinate-less: lat 0, lon 0 and magnitude 0 or none (not located)';
+
+/** The op:tombstone reason when a provider zeroes an id the feed holds (Resolver.withdrawZeroed). */
+export const ZEROED_REASON = 'withdrawn by the provider: re-published without a location (lat 0, lon 0, magnitude 0 or none)';
+
+export interface ZeroedResult {
+  /** Rows withdrawn because their provider zeroed a known id (one op:tombstone line each). */
+  withdrawn: number;
+  byProvider: Record<string, number>;
+}
+
+/** aggregate's handling of the coordinate-less reports the ingest screen held back (quality.ts
+ *  `screen(…, zeroed)`): a report whose id the feed holds is that provider's withdrawal and goes
+ *  through Resolver.withdrawZeroed, logged as op:tombstone with ZEROED_REASON (a replay feeds it
+ *  back to tombstoneProvider, which finds the same row by the same id); an unknown placeholder
+ *  changes nothing and writes nothing. Deterministic order (byIngestOrder), and a report repeated
+ *  across the live and revision paths withdraws once. */
+export function withdrawZeroedReports(resolver: Resolver, log: LogBuffer, zeroed: RawObs[], ingestTime: string): ZeroedResult {
+  const byProvider: Record<string, number> = {};
+  let withdrawn = 0;
+  for (const raw of [...zeroed].sort(byIngestOrder)) {
+    const r = resolver.withdrawZeroed(raw, ingestTime);
+    if (!r?.changed) continue;
+    log.record(raw, r, 'tombstone', ZEROED_REASON);
+    withdrawn++;
+    byProvider[raw.provider] = (byProvider[raw.provider] ?? 0) + 1;
+  }
+  return { withdrawn, byProvider };
+}
 
 export interface FeedSideResult {
   /** Rows the coordinate-less retraction withdrew (one op:tombstone line each). */

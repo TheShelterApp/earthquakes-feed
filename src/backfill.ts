@@ -12,7 +12,7 @@ import {
   type Inventory,
 } from './partitions.js';
 import { activeProviders, fetchProviderWindow, loadRegistry, priorityMap, configMap } from './providers.js';
-import { emptyTally, screen } from './quality.js';
+import { byIngestOrder, emptyTally, screen } from './quality.js';
 import type { EventNode, Head, ProviderConfig, RawObs } from './types.js';
 import { isoFromMs } from './util.js';
 
@@ -175,6 +175,9 @@ async function main(): Promise<void> {
 
   // 4) Ingest (deterministic order). Overflowed windows are dropped + retried narrower.
   const raws: RawObs[] = [];
+  // Coordinate-less reports held back by the screen: a known id among them is its provider's
+  // withdrawal (Resolver.withdrawZeroed), applied after the ingest below.
+  const zeroed: RawObs[] = [];
   const screened = emptyTally();
   let overflowCount = 0;
   let saturatedCount = 0;
@@ -204,11 +207,13 @@ async function main(): Promise<void> {
       saturatedCount++;
     }
     // The same door as the live path: no out-of-range or coordinate-less report enters history.
-    for (const o of screen(res.obs, screened)) {
+    const heldBack: RawObs[] = [];
+    for (const o of screen(res.obs, screened, undefined, heldBack)) {
       const day = eventDayKey(o.eventTimeMs);
       // Archived days are now pulled into the transient above, so they can be ingested too.
       if (day < liveDay) raws.push(o);
     }
+    for (const o of heldBack) if (eventDayKey(o.eventTimeMs) < liveDay) zeroed.push(o);
     if (cur) {
       cur.failures = 0;
       cur.lastCount = res.obs.length;
@@ -226,12 +231,8 @@ async function main(): Promise<void> {
     }
   }
 
-  raws.sort(
-    (a, b) =>
-      a.eventTimeMs - b.eventTimeMs ||
-      (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0) ||
-      (a.providerEventId < b.providerEventId ? -1 : a.providerEventId > b.providerEventId ? 1 : 0),
-  );
+  raws.sort(byIngestOrder);
+  zeroed.sort(byIngestOrder);
 
   // Backfill does NOT append to the observation log or advance head.seq. Historical
   // data lives in the (lossless) day partitions; the log stays the LIVE knowledge
@@ -248,6 +249,18 @@ async function main(): Promise<void> {
       if (r.node.firstSeenSeq < 0) r.node.firstSeenSeq = seqMarker;
       changedDays.add(eventDayKey(r.node.eventTimeMs));
       changedCount++;
+    }
+  }
+  // A provider that zeroed an id this history already holds withdrew it (the live path's rule):
+  // drop its row, tombstoning the event when no row is left. Unknown placeholders change nothing.
+  let withdrawnCount = 0;
+  for (const raw of zeroed) {
+    const r = resolver.withdrawZeroed(raw, ingestTime);
+    if (r?.changed) {
+      r.node.lastSeq = seqMarker;
+      changedDays.add(eventDayKey(r.node.eventTimeMs));
+      changedCount++;
+      withdrawnCount++;
     }
   }
 
@@ -305,7 +318,8 @@ async function main(): Promise<void> {
     `backfill: jobs=${jobs.length} fetched=${raws.length} changed=${changedCount} days_written=${rewritten} ` +
       `rematerialized=${rematerialized} overflow=${overflowCount} saturated=${saturatedCount} providers_remaining=${remaining}` +
       (screened.bad_coords ? ` bad_coords_dropped=${screened.bad_coords}` : '') +
-      (screened.coordinateless ? ` coordinateless_dropped=${screened.coordinateless}` : ''),
+      (screened.coordinateless ? ` coordinateless_dropped=${screened.coordinateless}` : '') +
+      (withdrawnCount ? ` coordinateless_withdrawn=${withdrawnCount}` : ''),
   );
   // The rest of the run is honest work and stays written (cursor included), but the run must go
   // RED: a silently-green skip is exactly how the 2026-07 truncation went unnoticed for months.

@@ -255,7 +255,11 @@ one. Because a late event (like a revision or an upstream delete) can still chan
 The `aec` source reads the file behind the Alaska Earthquake Center's public map: about 14 days
 of Alaska and Aleutian events, rewritten every ~43 s. Its automatic SeisComP solutions arrive
 within minutes and are published with `status: "automatic"`; the analyst's solution replaces
-one later as `"reviewed"` (hours to days after origin). Many Alaska events reach ComCat only
+one later as `"reviewed"` (hours to days after origin). The feed reads AEC's rows only while the
+origin is inside the 7-day live window, and AEC reviews many events only later (on 2026-09-30,
+94 % of the file's rows 3 to 7 days old were still automatic), so a later review reaches the feed
+only through ComCat's row of the same id, which the ComCat sweep still attaches up to about 10
+days after origin; an AEC-only event that ComCat has not published by then stays `automatic`. Many Alaska events reach ComCat only
 after that review, so before this source 40 % of AEC's M ≥ 2.5 events never reached the feed.
 An automatic solution nobody has confirmed can be a false event: a consumer that alerts should
 not act on a feature whose only provenance row is an `aec` row with status `automatic`.

@@ -55,8 +55,13 @@ export const RETIRED_VISIBLE_MS = 48 * 3600_000;
  *  knowledge/index/heal.json holds a lower epoch (or none): the op:merge pass over every live
  *  node in the hot window (Resolver.heal) and the coordinate-less retraction over the whole
  *  event-map horizon, logged like any other change, then the marker records this epoch in the
- *  same commit. Bump it only to run a new heal on purpose. */
-export const HEAL_EPOCH = 1;
+ *  same commit. Bump it only to run a new heal on purpose. Epoch 1 (2026-09-28): events split under the pre-PF-1
+ *  rules. Epoch 2 (PF-5f): EMSC's copies of IGN, NC and SCSN solutions count as the agency's identity since then
+ *  (EMSC_AUTHORED_COPIES), and the ones minted beside the agency's event in a dense cell before (the Granada and The
+ *  Geysers cells: 18 IGN and 2 NC pairs in the hot window on 2026-09-30) fold into it; nothing else changed, so the
+ *  pass folds only what the current rules already call one event (on 2026-09-30 a heal under the old rules folded one
+ *  group). */
+export const HEAL_EPOCH = 2;
 /** The one-time correction (src/correction.ts). aggregate runs it once when the data branch's
  *  knowledge/index/correction.json holds a lower epoch (or none), before the run's reports, over the days the manifest
  *  does not call frozen (event days from now − LIVE_INDEX_DAYS on; partitions.ts FROZEN_AFTER_DAYS), logged like any
@@ -132,10 +137,36 @@ export const LOCATION_JOIN_MAX_DM = 1.5;
  *  19:19:18Z, 38.4667 / 39.2148, ml 0.9, auth AFAD). An EMSC row with one of these codes and the same solution
  *  (Resolver.sameSolution: ±2 s, 2 km, |ΔM| ≤ 0.1) as a row of the mapped provider shares that row's identity, the
  *  evidence a dense cell asks for before a location join (PF-5e: without it AFAD's report and EMSC's copy stay two
- *  events in the Sındırgı cell). Other agencies' copies behave the same way; add a code only after checking that
- *  EMSC copies the agency's origin unchanged. */
+ *  events in the Sındırgı cell). For a provider with a ComCat network prefix (COMCAT_ID_PREFIX: NCEDC `nc`, SCEDC
+ *  `ci`) ComCat's row of that network (`nc75441981`) is the same network's solution and counts as well
+ *  (Resolver.authorsRow). Add a code only after checking that EMSC copies the agency's origin unchanged.
+ *
+ *  Checked 2026-10-01 over the observation log (2026-07-05..09-30) and the live services (PF-5f):
+ *  - NC (NCEDC, ComCat `nc`): all 368 copies have the time (to 0.01 s) and place (to EMSC's 4 decimals) of ComCat's
+ *    `nc` row, 340 also its magnitude (to EMSC's 0.1), type and depth. The other 28 carry a magnitude ComCat never
+ *    had (its first NC origin of nc75407577 and nc75444342 already said 4.24 and 2.51 where EMSC says 3.4 and 2.1):
+ *    |ΔM| > 0.1, so they stay unlinked. ComCat's row matters: NCEDC's text service truncates the magnitude
+ *    (1.27 → "1.2") where EMSC rounds (1.3), so the NCEDC row alone is 0.1 off in 150 of the 368.
+ *  - SCSN (SCEDC, ComCat `ci`): 269 of 317 copies equal a ComCat revision in time, place, magnitude, type and depth.
+ *    The other 48 copy CI's first automatic origin, which CI replaced before the feed first read ComCat's row;
+ *    ComCat's superseded versions show it for ci40661098 and ci40662378 (EMSC's copy is CI's first origin to the
+ *    0.01 s, the fourth decimal and the rounded magnitude).
+ *  - IGN: 1,125 of the 1,166 copies that match an IGN row have its place to the fourth decimal and its magnitude
+ *    value, a time 0–0.99 s after IGN's (the IGN file cuts the seconds' fraction off) and a depth that IGN's file
+ *    rounds to whole km; EMSC labels IGN's mbLg `ml` and IGN's M(mb) `mb`, the values unchanged. In the rest IGN's
+ *    row has moved since (a revision); where it moved beyond sameSolution the copy stays unlinked.
+ *  Live check 2026-09-30 22:55 UTC, copies of the last 3 days: NC 13 of 14 and SCSN 4 of 5 equal the agency's row in
+ *  the same way (the other two: a magnitude the agency revised after EMSC copied it); IGN 25 of 28 (one relocated by
+ *  IGN, one 0.1 apart in magnitude, one no longer in IGN's file). No copy was the same solution of two different
+ *  events: the only rows one could pair with twice were one agency solution published under two ids (IGN
+ *  es2026nowua / es2026nowub; CI 40670850 / 40670858), which sameSolution already treats as one. */
 export const EMSC_PROVIDER = 'emsc';
-export const EMSC_AUTHORED_COPIES: ReadonlyMap<string, string> = new Map([['AFAD', 'afad']]);
+export const EMSC_AUTHORED_COPIES: ReadonlyMap<string, string> = new Map([
+  ['AFAD', 'afad'],
+  ['IGN', 'ign'],
+  ['NC', 'ncedc'],
+  ['SCSN', 'scedc'],
+]);
 /** Rolling-file sources whose ids are watched for disappearing (PF-5b, log only): a row younger than
  *  ABSENCE_WATCH_DAYS that the feed holds and a complete file no longer lists is counted in status `absent`. AEC's
  *  file spans ~14 days, so a younger id that vanishes was most likely deleted upstream; whether to retract on absence

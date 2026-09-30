@@ -1,4 +1,5 @@
 import {
+  COMCAT_ID_PREFIX,
   COMCAT_ID_PROVIDERS,
   COMCAT_LIFECYCLE_PROVIDERS,
   COMCAT_PROVIDER,
@@ -199,13 +200,23 @@ export class Resolver {
     return a.provenance.some((ra) => b.provenance.some((rb) => Resolver.authoredCopy(ra, rb) || Resolver.authoredCopy(rb, ra)));
   }
 
-  /** `copy` is EMSC's copy of `original`: an EMSC row whose `auth` names `original`'s provider
-   *  (config EMSC_AUTHORED_COPIES) with the same solution (sameSolution). EMSC re-publishes the authoring
-   *  agency's origin, so the two rows are one agency's one solution, as good as a shared id (PF-5e). */
+  /** `copy` is EMSC's copy of `original`: an EMSC row whose `auth` names the provider `original` is the solution of
+   *  (config EMSC_AUTHORED_COPIES, authorsRow) with the same solution (sameSolution). EMSC re-publishes the authoring
+   *  agency's origin, so the two rows are one agency's one solution, as good as a shared id (PF-5e, PF-5f). */
   private static authoredCopy(copy: SourcedSolution, original: SourcedSolution): boolean {
     if (copy.provider !== EMSC_PROVIDER) return false;
     const auth = copy.fields['auth'];
-    return typeof auth === 'string' && EMSC_AUTHORED_COPIES.get(auth) === original.provider && Resolver.sameSolution(copy, original);
+    const author = typeof auth === 'string' ? EMSC_AUTHORED_COPIES.get(auth) : undefined;
+    return author != null && Resolver.authorsRow(author, original) && Resolver.sameSolution(copy, original);
+  }
+
+  /** `row` is `author`'s own solution: a row of that provider, or, when the provider has a ComCat network prefix
+   *  (COMCAT_ID_PREFIX: NCEDC `nc`, SCEDC `ci`), ComCat's row whose own id is of that network (`nc75441981` is the NC
+   *  network's origin NCEDC publishes as 75441981). ComCat's row of another network (`us…`, `nn…`) is not. */
+  private static authorsRow(author: string, row: SourcedSolution): boolean {
+    if (row.provider === author) return true;
+    if (row.provider !== COMCAT_PROVIDER || !COMCAT_ID_PREFIX.get(author)) return false;
+    return nativeIdOfComcat(author, nativeIdOf(row)) != null;
   }
 
   /** One solution re-published under a second native id (INGV 46714321 / 47246702 on

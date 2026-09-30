@@ -211,7 +211,9 @@ split otherwise. On 2026-09-28 a one-time heal ran the same pass over every live
 hot window once (the Loyalty Islands M7.0 of 2026-09-25 was six ids): its folds are ordinary
 `op:merge` lines, and each survivor gets one `op:correction` line carrying its new revision
 (`reason` lists what it absorbed); `knowledge/index/heal.json` on the `data` branch records
-it. Historical partitions are never rewritten.
+it. A second heal (epoch 2) runs the same pass once more when EMSC's copies of IGN, NC and SCSN
+solutions start counting as the agency's own report (see *EMSC's copies of agencies'
+solutions*). Historical partitions are never rewritten.
 
 A report with no location — exactly 0° N, 0° E with magnitude 0 or none (NCEDC publishes such
 placeholders, `MU 0.0`) — is never ingested. When the id is one the feed already holds, the
@@ -250,6 +252,26 @@ must gate on `properties.time`, not on arrival; the feed never presents a late e
 one. Because a late event (like a revision or an upstream delete) can still change a day up to
 10 days old, `manifest.partitions[].frozen` turns true only after that (it was 3 days until
 2026-09-30).
+
+## EMSC's copies of agencies' solutions
+
+EMSC republishes many agencies' own solutions; `fields.auth` of the `emsc` provenance row names the
+authoring agency. Where the feed also reads that agency, an EMSC row with `auth` `AFAD`, `IGN`, `NC`
+or `SCSN` and the same solution as the agency's row (within 2 s, 2 km and 0.1 magnitude units)
+counts as the agency's report: the agency's row is the `afad` or `ign` row, and for NC and SCSN the
+`ncedc` / `scedc` row or ComCat's `nc…` / `ci…` row. Over three months of copies, EMSC's copy is the
+agency's solution up to rounding (four decimals, 0.1 in magnitude and depth; it labels IGN's `mbLg`
+as `ml`) or an earlier version of it; IGN's own file cuts the time to the second and the depth to
+whole km. This matters where many small quakes fall into one cell (the Granada basin, The Geysers,
+Sındırgı): there the feed joins two reports only on a shared id, and until the rule covered IGN, NC
+and SCSN their EMSC copy stood beside the agency's event (27 IGN and 3 NC pairs in the 11 days to
+2026-09-30, identical in time and place). The heal of epoch 2 (see *Retired events*) folds the ones
+inside the 7-day hot window once; older days keep both events (the day partitions 2026-06-01…09-19
+hold 276 IGN, 97 NC and 36 SCSN copies as live events of their own; drop a live feature whose only
+row is `emsc` with one of these `auth` codes when another live feature holds the agency's row within
+those limits). A copy of a solution the agency has revised since (EMSC seldom updates its copy:
+about 2 % of them ever changed) stays a separate event in such a cell. AFAD's copies count since
+2026-10-01 (see *Turkey (AFAD)*).
 
 ## Alaska (AEC)
 

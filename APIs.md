@@ -132,7 +132,7 @@ asks for the same window again), `epoch` (the catch-up epoch recorded with that 
 `catch_up: true` on the one-time catch-up run. `sweeps.epoch` is the current catch-up epoch.
 `comcat_twins_withdrawn` counts the AEC rows a ComCat delete withdrew in that run,
 `twin_withheld` the AEC reports held back beside another source's event, and `absent.aec`
-(`count`, the first 20 `ids`) the live AEC ids younger than 5 days that AEC's file no longer
+(`count`, the first 20 `ids`) the live AEC ids younger than 10 days that AEC's file no longer
 lists (see *Alaska (AEC)*; logged, never retracted).
 
 ## The Feature

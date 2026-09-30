@@ -438,13 +438,15 @@ test('aec deletes: the log replays to the same state (the AEC op:tombstone goes 
 
 // --- absence (log only) ---
 
-test('aec absence: live ids younger than 5 days missing from a complete file are counted; a failed fetch counts nothing', () => {
+test('aec absence: live ids younger than 10 days missing from a complete file are counted; a failed fetch counts nothing', () => {
   const map = new Map<string, EventNode>();
   const r = newResolver(map);
   r.ingest(aec('aka2026keep01'), INGEST);
   r.ingest(aec('aka2026gone01', { eventTimeMs: NOW - DAY, lat: 60, lon: -150 }), INGEST);
-  r.ingest(aec('aka2026old001', { eventTimeMs: NOW - 6 * DAY, lat: 61, lon: -151 }), INGEST);
+  // AEC deletes at its analyst review, 8 to 9 days after origin: still watched.
+  r.ingest(aec('aka2026gone08', { eventTimeMs: NOW - 8.5 * DAY, lat: 62, lon: -152 }), INGEST);
+  r.ingest(aec('aka2026old011', { eventTimeMs: NOW - 11 * DAY, lat: 61, lon: -151 }), INGEST);
   const listed = [aec('aka2026keep01')];
-  assert.deepEqual(vanishedIds(map, [{ provider: 'aec', obs: listed, status: { ok: true } }], NOW), { aec: { count: 1, ids: ['aka2026gone01'] } });
+  assert.deepEqual(vanishedIds(map, [{ provider: 'aec', obs: listed, status: { ok: true } }], NOW), { aec: { count: 2, ids: ['aka2026gone01', 'aka2026gone08'] } });
   assert.deepEqual(vanishedIds(map, [{ provider: 'aec', obs: [], status: { ok: false, error: 'timeout' } }], NOW), {});
 });

@@ -90,9 +90,12 @@ export const COMCAT_ID_PROVIDERS: ReadonlySet<string> = new Set(['aec']);
 /** Rolling-file sources whose ids are watched for disappearing (PF-5b, log only): a row younger than
  *  ABSENCE_WATCH_DAYS that the feed holds and a complete file no longer lists is counted in status `absent`. AEC's
  *  file spans ~14 days, so a younger id that vanishes was most likely deleted upstream; whether to retract on absence
- *  is decided after a week of these counts. */
+ *  is decided after a week of these counts. 10 days, the event map's default load (LIVE_INDEX_DAYS), because AEC
+ *  deletes late: of the 22 `ak` events ComCat deleted from 2026-09-15 to 09-30, 10 went 5.5 to 9.5 days after origin
+ *  (AEC's analyst review runs about 8 to 9 days behind), which a 5-day watch never saw. Still well inside the file's
+ *  span (its oldest rows were 14.5 to 15.8 days old on 2026-09-30), so a row aging out is never counted. */
 export const ABSENCE_WATCH_PROVIDERS: readonly string[] = ['aec'];
-export const ABSENCE_WATCH_DAYS = 5;
+export const ABSENCE_WATCH_DAYS = 10;
 export const FETCH_LIMIT = Number(process.env.FETCH_LIMIT ?? 5000);
 
 // --- sweeps (src/sweep-cursor.ts, PF-5c) ---

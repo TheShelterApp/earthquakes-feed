@@ -83,11 +83,17 @@ interface Solution {
   status: string | null;
 }
 
-/** A report or a stored row, as authoredCopy reads it. */
+/** A report or a stored row, as authoredCopy and lifecycleLocationBlocks read it. */
 interface SourcedSolution extends Solution {
   provider: string;
   fields: Extra;
+  /** A stored row's native id (ProvenanceRow). */
+  nativeId?: string;
+  /** A report's native id (RawObs). */
+  providerEventId?: string;
 }
+
+const nativeIdOf = (r: SourcedSolution): string => r.nativeId ?? r.providerEventId ?? '';
 
 /** One op:merge — `loser` folded into `survivor` because of `reason`. */
 export interface MergeRecord {
@@ -305,12 +311,22 @@ export class Resolver {
    *  event that holds no row of that provider needs origin times within LOCATION_JOIN_DT_MS and, when both magnitudes
    *  are known, |ΔM| ≤ LOCATION_JOIN_MAX_DM. Each side is its rows and its representative: a report is both, a node's
    *  representative is its chosen solution. True when such a row on one side is outside the limits against the other
-   *  side's representative. First sight and the merge pass alike; exact-id joins never come here. */
+   *  side's representative. First sight and the merge pass alike; exact-id joins never come here.
+   *  A row whose own side also holds ComCat's row of its id (its own id or one in `ids`) does not count: that event is
+   *  ComCat's by exact id, not a location join, and joins other agencies' reports by the usual rules, as it did before
+   *  AEC was a source. Otherwise the automatic AEC solution would keep vetoing them after ComCat's arrival and split the
+   *  quake in two: another agency's solution of one Alaska quake can lie more than 8 s from the Alaska network's
+   *  (GEOFON's of us7000tgk1, M4.5 on 2026-09-11, is 15.6 s from ComCat's reviewed one), and an automatic magnitude of
+   *  a great quake can run far below the final one. */
   private static lifecycleLocationBlocks(aRows: readonly SourcedSolution[], a: Solution, bRows: readonly SourcedSolution[], b: Solution): boolean {
     const far = (r: Solution, s: Solution): boolean =>
       Math.abs(r.eventTimeMs - s.eventTimeMs) > LOCATION_JOIN_DT_MS || (r.mag != null && s.mag != null && Math.abs(r.mag - s.mag) > LOCATION_JOIN_MAX_DM);
+    const confirmed = (r: SourcedSolution, rows: readonly SourcedSolution[]): boolean => {
+      const id = comcatIdOf(r.provider, nativeIdOf(r));
+      return id != null && rows.some((o) => comcatIdsNamed(o.provider, nativeIdOf(o), o.fields).includes(id));
+    };
     const blocks = (rows: readonly SourcedSolution[], others: readonly SourcedSolution[], rep: Solution): boolean =>
-      rows.some((r) => COMCAT_LIFECYCLE_PROVIDERS.has(r.provider) && !others.some((o) => o.provider === r.provider) && far(r, rep));
+      rows.some((r) => COMCAT_LIFECYCLE_PROVIDERS.has(r.provider) && !others.some((o) => o.provider === r.provider) && !confirmed(r, rows) && far(r, rep));
     return blocks(aRows, bRows, b) || blocks(bRows, aRows, a);
   }
 

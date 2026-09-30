@@ -141,3 +141,41 @@ test('ComCat’s own ids outrank an AEC location join: AEC 3 s from AVO joins it
   next.ingest(usgs('av90000006', ['av90000006', 'aka2026uuuuuu'], { mag: 1.1, eventTimeMs: T0 + 3_000, providerUpdatedMs: T0 + 1_200_000 }), INGEST);
   assert.equal(live(map).length, 1);
 });
+
+// Review of the fix: the limits hold only while the AEC row stands without ComCat's row of its id. Once ComCat's row is
+// in the same event, that event joins other agencies' reports by the usual rules, as before AEC was a source.
+function agency(provider: string, id: string, over: Partial<RawObs> = {}): RawObs {
+  return {
+    provider, providerEventId: id, eventTimeMs: T0, providerUpdatedMs: null, status: null,
+    lat: LAT, lon: LON, depth: 10, mag: 4.5, magType: 'mb', place: 'z', knownAliasIds: [], fields: {}, ...over,
+  };
+}
+
+test('ComCat-confirmed AEC event: another agency’s report 12 s off joins it (GEOFON’s us7000tgk1 was 15.6 s from ComCat’s)', () => {
+  const map = new Map<string, EventNode>();
+  const r = new Resolver(map, prio, cfg, NOW);
+  r.ingest(aec('aka2026tttttt', { mag: 4.4 }), INGEST);
+  r.ingest(usgs('aka2026tttttt', undefined, { mag: 4.5, eventTimeMs: T0 + 1_000 }), INGEST);
+  r.ingest(agency('geofon', 'gfz2026zzzz', { eventTimeMs: T0 + 13_000, lat: north(8), mag: 4.41 }), INGEST);
+  assert.deepEqual(shown(map), ['aec:aka2026tttttt geofon:gfz2026zzzz usgs:aka2026tttttt M4.5']);
+});
+
+test('ComCat-confirmed AEC event: a split made while AEC stood alone folds once ComCat’s row of the id arrives', () => {
+  const map = new Map<string, EventNode>();
+  const r = new Resolver(map, prio, cfg, NOW);
+  r.ingest(aec('aka2026ssssss', { mag: 4.4 }), INGEST);
+  r.ingest(agency('geofon', 'gfz2026yyyy', { eventTimeMs: T0 + 12_000, lat: north(5), mag: 4.5 }), INGEST);
+  assert.equal(live(map).length, 2, 'AEC alone: 12 s is outside the location-join limit');
+  const res = r.ingest(usgs('aka2026ssssss', undefined, { mag: 4.5, eventTimeMs: T0 + 1_000 }), INGEST);
+  assert.equal(res.merges.length, 1);
+  assert.deepEqual(shown(map), ['aec:aka2026ssssss geofon:gfz2026yyyy usgs:aka2026ssssss M4.5']);
+});
+
+test('ComCat-confirmed AEC event: an automatic magnitude far below the final one does not split a great quake', () => {
+  const map = new Map<string, EventNode>();
+  const r = new Resolver(map, prio, cfg, NOW);
+  r.ingest(aec('aka2026rrrrrr', { mag: 6.2 }), INGEST);
+  r.ingest(usgs('us7000zzzz', ['us7000zzzz', 'aka2026rrrrrr'], { mag: 7.9, magType: 'mww', eventTimeMs: T0 + 2_000, lat: north(15) }), INGEST);
+  r.ingest(agency('emsc', '20260930_0000999', { mag: 7.8, magType: 'mw', eventTimeMs: T0 + 3_000, lat: north(20) }), INGEST);
+  assert.deepEqual(shown(map), ['aec:aka2026rrrrrr emsc:20260930_0000999 usgs:us7000zzzz M7.9']);
+});

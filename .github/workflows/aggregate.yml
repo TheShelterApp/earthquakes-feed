@@ -25,7 +25,9 @@ permissions:
 
 jobs:
   aggregate:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: ubuntu-latest moves to Ubuntu 26.04 from 2026-10-19
+    # (actions/runner-images#14748). Move to ubuntu-26.04 deliberately, after a green test run.
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5

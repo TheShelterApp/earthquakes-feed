@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { JSDELIVR_BASE, RETIRED_VISIBLE_MS, SCHEMA_VERSION, dataPaths } from './config.js';
+import { JSDELIVR_BASE, LIVE_INDEX_DAYS, RETIRED_VISIBLE_MS, SCHEMA_VERSION, dataPaths } from './config.js';
 import { featureToNode, nodeToFeature, writeIfChanged } from './bitemporal.js';
 import type { EventNode } from './types.js';
 import { isoFromMs } from './util.js';
@@ -8,7 +8,16 @@ import { isoFromMs } from './util.js';
 const DOMAIN = 'https://earthquakes-feed.theshelter.app';
 /** Recent days also published to Pages as ready-to-render GeoJSON (map time-slider). */
 export const PAGES_DAY_WINDOW = 120;
-const FROZEN_AFTER_DAYS = 3;
+/** A day partition is flagged `frozen` (R2 serves it as immutable, and consumers pin it to
+ *  `@<data_commit>` and cache it forever) only once the 5-minute aggregate can no longer touch it.
+ *  aggregate loads the event_map shards of the last LIVE_INDEX_DAYS event-days, and any day it
+ *  loads can still change: a revision or upstream delete of a known id (the updatedafter and
+ *  includedeleted sweeps), a provider's zeroed withdrawal, and since PF-5a a ComCat event first
+ *  published days after its origin (minted into its origin day while that is inside the 7-day hot
+ *  window). Until 2026-09-30 this was 3 days, so a day kept changing for a week after the manifest
+ *  had called it frozen. Deliberate one-off passes still reach older days: a new HEAL_EPOCH and a
+ *  new source's onboarding / backfill. */
+export const FROZEN_AFTER_DAYS = LIVE_INDEX_DAYS;
 
 export interface PartStat {
   count: number;

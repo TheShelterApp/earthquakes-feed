@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { HOT_WINDOW_DAYS, LATE_MINT_PROVIDERS } from '../src/config.js';
+import { HOT_WINDOW_DAYS, LATE_MINT_PROVIDERS, LIVE_INDEX_DAYS, TEMPORAL_MS } from '../src/config.js';
 import { Resolver } from '../src/dedup.js';
+import { haversineKm } from '../src/geo.js';
 import { LogBuffer, observationToRaw } from '../src/oplog.js';
+import { FROZEN_AFTER_DAYS, manifestPartitions } from '../src/partitions.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import { byIngestOrder } from '../src/quality.js';
 import { lateMintReason, revisionSweep } from '../src/sweep.js';
@@ -147,6 +149,61 @@ test('late mint: the boundary is the hot floor itself', () => {
   const { map, result } = sweep([inside, outside]);
   assert.deepEqual(result.lateMinted.map((m) => m.providerEventId), ['us7000edge']);
   assert.equal(map.size, 1);
+});
+
+test('late mint: a row less than one identity window above the hot floor is skipped, since its twin may sit just below the floor, outside the spatial index', () => {
+  // Another agency's copy of the quake 30 s older than the late ComCat row, 5 km away: the copy is
+  // 10 s below the hot floor, so neither findExisting nor lateTwin can see it; minting the row
+  // would put a second live event beside it.
+  const floor = NOW - HOT_WINDOW_DAYS * DAY;
+  const map = seeded([emsc('20260923_0000777', floor - 10_000, { lat: 36.4, lon: 70.7, mag: 4.4, place: 'HINDU KUSH REGION, AFGHANISTAN' })]);
+  const row = usgs('us7000edgt', HOT_WINDOW_DAYS, { eventTimeMs: floor + 20_000, lat: north(36.4, 5), lon: 70.7, mag: 4.5, place: '35 km SE of Jurm, Afghanistan' });
+  const { log, result } = sweep([row], map);
+  assert.equal(result.lateMinted.length, 0, 'not minted');
+  assert.equal(result.lateWithheld.length, 0);
+  assert.equal(live(map).length, 1, 'still one live event');
+  assert.equal(log.lines.length, 0, 'nothing appended');
+
+  // One identity window above the floor every event the row could be matched against is indexed.
+  const clear = usgs('us7000edgu', HOT_WINDOW_DAYS, { eventTimeMs: floor + TEMPORAL_MS, lat: 10, lon: 140 });
+  assert.equal(sweep([clear]).result.lateMinted.length, 1, 'a row TEMPORAL_MS above the floor mints');
+});
+
+test('late mint: the spatial match and the twin check work across the antimeridian', () => {
+  const origin = NOW - 4 * DAY;
+  const fiji = (): Map<string, EventNode> => seeded([emsc('20260926_0000555', origin, { lat: -17.9, lon: 179.97, mag: 4.8, place: 'FIJI ISLANDS REGION' })]);
+
+  // ComCat's solution 3 s later and ~6 km away on the other side of 180°: one event.
+  const nearMap = fiji();
+  const near = usgs('us7000fjin', 4, { eventTimeMs: origin + 3_000, lat: -17.9, lon: -179.97, mag: 4.7, place: 'Fiji region' });
+  assert.ok(haversineKm(-17.9, 179.97, near.lat, near.lon) < 7);
+  const a = sweep([near], nearMap);
+  assert.equal(a.result.lateMinted.length, 0);
+  assert.equal(a.result.revisions, 1, 'folded into the EMSC event across 180°');
+  assert.equal(live(nearMap).length, 1);
+
+  // 17 km away across 180°: past the identity window, so the twin check withholds it.
+  const farMap = fiji();
+  const far = usgs('us7000fjif', 4, { eventTimeMs: origin + 3_000, lat: -17.9, lon: -179.87, mag: 4.7, place: 'Fiji region' });
+  const km = haversineKm(-17.9, 179.97, far.lat, far.lon);
+  assert.ok(km > 15 && km < 20, `${km} km`);
+  const b = sweep([far], farMap);
+  assert.equal(b.result.lateMinted.length, 0, 'not minted');
+  assert.equal(b.result.lateWithheld.length, 1, 'withheld beside the EMSC event across 180°');
+  assert.equal(live(farMap).length, 1);
+});
+
+test('late mint: a day the 5-minute run can still add to is never flagged frozen', () => {
+  assert.equal(FROZEN_AFTER_DAYS, LIVE_INDEX_DAYS, 'frozen once aggregate no longer loads the day');
+  const day = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+  const inv: Record<string, { count: number; bytes: number; min_mag: number | null; max_mag: number | null }> = {};
+  for (let d = 0; d <= LIVE_INDEX_DAYS + 3; d++) inv[day(NOW - d * DAY)] = { count: 1, bytes: 1, min_mag: 1, max_mag: 1 };
+  const parts = new Map(manifestPartitions(inv, NOW).map((p) => [p.date, p.frozen]));
+  // The oldest origin a late mint can have, and the oldest day aggregate loads (revisions, deletes).
+  assert.equal(parts.get(day(NOW - HOT_WINDOW_DAYS * DAY + TEMPORAL_MS)), false, 'the hot floor day is not frozen');
+  assert.equal(parts.get(day(NOW - LIVE_INDEX_DAYS * DAY)), false, 'the oldest loaded day is not frozen');
+  assert.equal(parts.get(day(NOW - (LIVE_INDEX_DAYS + 1) * DAY)), true, 'the day before it is');
+  assert.equal(parts.get(day(NOW - 4 * DAY)), false, 'a 4-day-old day (frozen before 2026-09-30) is not');
 });
 
 test('late mint: a known id is still only a revision, inside and past the hot window', () => {

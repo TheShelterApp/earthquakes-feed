@@ -58,7 +58,7 @@ forward with the same names, plus:
 | `origins[]` | `{id, base, max_object_bytes?, mutable_only?}` — prefixes a `path` is appended to: `pages`, `jsdelivr-sha`, `raw-sha`, `raw-data` (head only), `release` |
 | `status_url` | where `/v1/status.json` lives |
 | `summaries` | v1 entries plus `bytes` and `sha256` of the file |
-| `partitions[]` | v1 entries plus `sha256`; `frozen: true` means the bytes never change again |
+| `partitions[]` | v1 entries plus `sha256`; `frozen: true` means the bytes never change again (a day is frozen once it is older than the 10 days the 5-minute run can still revise, delete or add to — see *Late publications*) |
 | `tiles` | the offline region bundle `{version, url, sizeBytes, sha256}` (from `region-tiles/regions-db.json`), or `null` |
 
 Current signing keys (raw Ed25519 public key, base64):
@@ -224,8 +224,9 @@ with magnitude 0 or none.
 A source can publish an event days after its origin: ComCat (the `usgs` source) releases many
 events only after analyst review, for example in Alaska, Texas, Oklahoma and the Pacific
 Northwest (184 of 693 M ≥ 2.5 events with origins 2026-09-10…20 never reached the feed before
-this rule; a sample of 21 of them had been published 2.1–16.8 days after origin). Each run asks the sources for recent origins (the FDSN ones for the last 48 h), plus ComCat and EMSC
-for every event updated since the previous run. A ComCat event the feed has never seen enters
+this rule; a sample of 21 of them had been published 2.1–16.8 days after origin). Each run asks
+the sources for recent origins (the FDSN ones for the last 48 h), plus ComCat and EMSC for every
+event updated since the previous run. A ComCat event the feed has never seen enters
 the feed from that second query when its origin is within the last **7 days** (the window in
 which the feed matches reports by time and place). It is a new event of that run:
 `feed.first_ingest_time` (and its `op:observe` line's `ingest_time`) is days after
@@ -237,7 +238,9 @@ than 7 days is not added. A late ComCat report within ±60 s, 50 km and one magn
 another source's live event is withheld (`late_withheld`) rather than added as a second event:
 it is most likely that quake, which the feed already shows. A consumer that alerts on new events
 must gate on `properties.time`, not on arrival; the feed never presents a late event as a recent
-one.
+one. Because a late event (like a revision or an upstream delete) can still change a day up to
+10 days old, `manifest.partitions[].frozen` turns true only after that (it was 3 days until
+2026-09-30).
 
 ## Recipes
 

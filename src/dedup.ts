@@ -69,7 +69,7 @@ export type LateSweepOutcome =
   | { kind: 'revised' | 'minted'; result: IngestResult }
   /** Unknown, inside the hot window, and beside another provider's live event: not minted. */
   | { kind: 'withheld'; near: EventNode; km: number; dtMs: number }
-  /** Unknown and below the hot floor: not minted. */
+  /** Unknown and below the hot floor (plus one identity window): not minted. */
   | { kind: 'skipped' };
 
 export class Resolver {
@@ -404,7 +404,10 @@ export class Resolver {
   reviseOrMintInHotWindow(raw: RawObs, ingestTime: string): LateSweepOutcome {
     const fid = this.findExisting(raw);
     if (fid) return { kind: 'revised', result: this.applyIngest(fid, raw, ingestTime) };
-    if (raw.eventTimeMs < this.hotFloor) return { kind: 'skipped' };
+    // The floor keeps one identity window (TEMPORAL_MS) of margin: only live events at or above
+    // the hot floor are in the spatial index, so a copy of this quake less than 60 s older than
+    // a row at the floor itself would be invisible to findExisting and lateTwin alike.
+    if (raw.eventTimeMs < this.hotFloor + TEMPORAL_MS) return { kind: 'skipped' };
     const twin = this.lateTwin(raw);
     if (twin) return { kind: 'withheld', ...twin };
     return { kind: 'minted', result: this.applyIngest(this.mintId(raw), raw, ingestTime) };

@@ -71,6 +71,13 @@ export const FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS ?? 8000);
 export const BACKFILL_FETCH_TIMEOUT_MS = Number(process.env.BACKFILL_FETCH_TIMEOUT_MS ?? 20000);
 /** Each run asks providers for events in [now - lookback, now]; dedup absorbs overlap. */
 export const QUERY_LOOKBACK_MS = Number(process.env.QUERY_LOOKBACK_MS ?? 2 * 24 * 3600 * 1000);
+/** Providers whose `updatedafter` revision sweep may mint (PF-5a, src/sweep.ts). ComCat publishes
+ *  many events days after their origin, once analysts release them, past the live query's
+ *  lookback: 184 of 693 M ≥ 2.5 events with origins 2026-09-10..20 never reached the feed (a
+ *  sample of 21 had been published 2.1–16.8 days after origin), because the sweep, which does
+ *  return them, only revised known events. An unknown sweep row of these providers is minted when
+ *  its origin is inside the hot window (Resolver.reviseOrMintInHotWindow). */
+export const LATE_MINT_PROVIDERS: ReadonlySet<string> = new Set(['usgs']);
 export const FETCH_LIMIT = Number(process.env.FETCH_LIMIT ?? 5000);
 
 // --- derived views ---

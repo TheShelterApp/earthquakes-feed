@@ -58,7 +58,7 @@ forward with the same names, plus:
 | `origins[]` | `{id, base, max_object_bytes?, mutable_only?}` — prefixes a `path` is appended to: `pages`, `jsdelivr-sha`, `raw-sha`, `raw-data` (head only), `release` |
 | `status_url` | where `/v1/status.json` lives |
 | `summaries` | v1 entries plus `bytes` and `sha256` of the file |
-| `partitions[]` | v1 entries plus `sha256`; `frozen: true` means the bytes never change again |
+| `partitions[]` | v1 entries plus `sha256`; `frozen: true` means the bytes never change again (a day is frozen once it is older than the 10 days the 5-minute run can still revise, delete or add to — see *Late publications*) |
 | `tiles` | the offline region bundle `{version, url, sizeBytes, sha256}` (from `region-tiles/regions-db.json`), or `null` |
 
 Current signing keys (raw Ed25519 public key, base64):
@@ -122,7 +122,10 @@ curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@<data_commit>
 Last run's per-provider health, counts, timings, `degraded[]`. Counts include `merged`
 (`op:merge` lines), `bad_coords_dropped`, `coordinateless_dropped` (coordinate-less reports
 refused at ingest), `coordinateless_withdrawn` (those among them that withdrew a known id, see
-below) and `coordinateless_retracted`; the heal run also carries `heal`.
+below), `coordinateless_retracted`, `late_minted` and `late_withheld` (see *Late publications*);
+the heal run also carries `heal`. `sweeps.updated` / `sweeps.deleted` hold the outcome (`ok`,
+`http_status`, `latency_ms`, `events_returned`, `error`) of each source's `updatedafter` revision
+query and `includedeleted` delete query in that run.
 
 ## The Feature
 
@@ -215,6 +218,29 @@ from 2026-08-14); older history is never rewritten, so the day partitions before
 (1,909 such features in 2026-05-01…08-13) and the monthly Release archives still carry these
 placeholders as `live`. A consumer of that history should drop every feature at exactly 0, 0
 with magnitude 0 or none.
+
+## Late publications
+
+A source can publish an event days after its origin: ComCat (the `usgs` source) releases many
+events only after analyst review, for example in Alaska, Texas, Oklahoma and the Pacific
+Northwest (184 of 693 M ≥ 2.5 events with origins 2026-09-10…20 never reached the feed before
+this rule; a sample of 21 of them had been published 2.1–16.8 days after origin). Each run asks
+the sources for recent origins (the FDSN ones for the last 48 h), plus ComCat and EMSC for every
+event updated since the previous run. A ComCat event the feed has never seen enters
+the feed from that second query when its origin is within the last **7 days** (the window in
+which the feed matches reports by time and place). It is a new event of that run:
+`feed.first_ingest_time` (and its `op:observe` line's `ingest_time`) is days after
+`feed.event_time`; it lands in the day partition and day file of its **origin** day, and in a
+rolling summary only while its origin is inside that summary's window. Its log line carries a
+`reason` ("first seen in the provider's updatedafter sweep, … d after origin"), and
+`status.json` counts the run's additions as `late_minted`. A late event whose origin is older
+than 7 days is not added. A late ComCat report within ±60 s, 50 km and one magnitude unit of
+another source's live event is withheld (`late_withheld`) rather than added as a second event:
+it is most likely that quake, which the feed already shows. A consumer that alerts on new events
+must gate on `properties.time`, not on arrival; the feed never presents a late event as a recent
+one. Because a late event (like a revision or an upstream delete) can still change a day up to
+10 days old, `manifest.partitions[].frozen` turns true only after that (it was 3 days until
+2026-09-30).
 
 ## Recipes
 

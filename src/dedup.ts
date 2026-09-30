@@ -23,6 +23,8 @@ import { deterministicFeedId } from './ulid.js';
 import { knownAliasIdsOf, statusRank } from './util.js';
 
 const REVIEWED_DT_HARD_MS = 30_000;
+/** How far lateTwin looks for the event a late report duplicates: the widest identity window. */
+const LATE_TWIN_KM = LARGE_EVENT_MAX_KM;
 /** Bound on Resolver.heal's passes over the hot window (each pass after the first only picks up
  *  pairs whose mutual best formed during the previous one). */
 const HEAL_MAX_PASSES = 4;
@@ -61,6 +63,14 @@ export interface IngestResult {
   /** Post-revision folds this ingest caused (one op:merge line each), oldest first. */
   merges: MergeRecord[];
 }
+
+/** What reviseOrMintInHotWindow did with one sweep row of a late-publishing catalog. */
+export type LateSweepOutcome =
+  | { kind: 'revised' | 'minted'; result: IngestResult }
+  /** Unknown, inside the hot window, and beside another provider's live event: not minted. */
+  | { kind: 'withheld'; near: EventNode; km: number; dtMs: number }
+  /** Unknown and below the hot floor (plus one identity window): not minted. */
+  | { kind: 'skipped' };
 
 export class Resolver {
   private readonly alias = new Map<string, string>();
@@ -264,8 +274,11 @@ export class Resolver {
   }
 
   private resolve(raw: RawObs): string {
-    const existing = this.findExisting(raw);
-    if (existing) return existing;
+    return this.findExisting(raw) ?? this.mintId(raw);
+  }
+
+  /** A fresh feed id for a report findExisting could not place, registered under its alias. */
+  private mintId(raw: RawObs): string {
     let fid = deterministicFeedId(raw.eventTimeMs, raw.lat, raw.lon);
     for (let salt = 1; this.eventMap.has(fid); salt++) {
       fid = deterministicFeedId(raw.eventTimeMs, raw.lat, raw.lon, salt);
@@ -377,6 +390,51 @@ export class Resolver {
   reviseExisting(raw: RawObs, ingestTime: string): IngestResult | null {
     const fid = this.findExisting(raw);
     return fid ? this.applyIngest(fid, raw, ingestTime) : null;
+  }
+
+  /** An `updatedafter` observation from a catalog that may publish an event days after its
+   *  origin (ComCat, PF-5a). A report findExisting places is a revision, exactly as in
+   *  reviseExisting. An unknown one is minted, like a live report, when its origin is inside the
+   *  hot window, where findExisting has just matched it by space against every live event; below
+   *  the hot floor only ids match, so a mint could duplicate another provider's copy: skipped, as
+   *  before. Inside the window one more check: the identity windows (±60 s / ±10 km below M5.5)
+   *  leave agencies' solutions of one quake 15–20 km apart as two events, a split the live path
+   *  shares; days later the other agencies' copy is all the feed shows of the quake, so a late
+   *  report beside it is withheld rather than minted (lateTwin). */
+  reviseOrMintInHotWindow(raw: RawObs, ingestTime: string): LateSweepOutcome {
+    const fid = this.findExisting(raw);
+    if (fid) return { kind: 'revised', result: this.applyIngest(fid, raw, ingestTime) };
+    // The floor keeps one identity window (TEMPORAL_MS) of margin: only live events at or above
+    // the hot floor are in the spatial index, so a copy of this quake less than 60 s older than
+    // a row at the floor itself would be invisible to findExisting and lateTwin alike.
+    if (raw.eventTimeMs < this.hotFloor + TEMPORAL_MS) return { kind: 'skipped' };
+    const twin = this.lateTwin(raw);
+    if (twin) return { kind: 'withheld', ...twin };
+    return { kind: 'minted', result: this.applyIngest(this.mintId(raw), raw, ingestTime) };
+  }
+
+  /** The live event a late report most likely duplicates, or null: within ±TEMPORAL_MS and
+   *  LATE_TWIN_KM (the widest identity window, and the alerts gateway's fold window), with no row
+   *  of the report's own provider (one would be a distinct event by that provider's own ids, like
+   *  two small quakes seconds apart in a Southern California swarm) and, when both magnitudes are
+   *  known, |ΔM| ≤ LARGE_EVENT_MAX_DELTA (a much smaller or larger event is a different one).
+   *  The nearest in space wins. */
+  private lateTwin(raw: RawObs): { near: EventNode; km: number; dtMs: number } | null {
+    let best: { near: EventNode; km: number; dtMs: number } | null = null;
+    for (const cell of gatherCellKeys(raw.lat, raw.lon, LATE_TWIN_KM, GRID_CELL_DEG)) {
+      for (const fid of this.geo.get(cell) ?? []) {
+        const node = this.eventMap.get(fid);
+        if (!node || node.state !== 'live') continue;
+        const dtMs = node.eventTimeMs - raw.eventTimeMs;
+        if (Math.abs(dtMs) > TEMPORAL_MS) continue;
+        const km = haversineKm(raw.lat, raw.lon, node.lat, node.lon);
+        if (km > LATE_TWIN_KM) continue;
+        if (node.provenance.some((r) => r.provider === raw.provider)) continue;
+        if (raw.mag != null && node.mag != null && Math.abs(raw.mag - node.mag) > LARGE_EVENT_MAX_DELTA) continue;
+        if (!best || km < best.km || (km === best.km && node.feedId < best.near.feedId)) best = { near: node, km, dtMs };
+      }
+    }
+    return best;
   }
 
   private applyIngest(fid: string, raw: RawObs, ingestTime: string): IngestResult {

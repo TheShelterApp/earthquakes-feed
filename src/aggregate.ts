@@ -8,6 +8,7 @@ import { healedEpoch, runFeedSideSteps, withdrawZeroedReports } from './heal.js'
 import { LogBuffer } from './oplog.js';
 import { activeProviders, configMap, fetchProvider, fetchProviderDeleted, fetchProviderUpdated, loadRegistry, priorityMap } from './providers.js';
 import { byIngestOrder, emptyTally, screen } from './quality.js';
+import { revisionSweep } from './sweep.js';
 import type { RawObs } from './types.js';
 
 /** FDSN nodes that support the `includedeleted` delete query (extensible). */
@@ -108,20 +109,22 @@ async function main(): Promise<void> {
     if (r.changed) log.record(raw, r);
   }
 
-  // Revision sweep (H2): updatedafter results revise KNOWN events only (reviseExisting
-  // never mints), so revisions to events outside the hot index are skipped, not duped.
+  // Revision sweep (H2, src/sweep.ts): updatedafter results revise KNOWN events; an unknown row
+  // is skipped, not duped, except that a LATE_MINT_PROVIDERS row (ComCat publishes events days
+  // after origin, past the live lookback) is minted while its origin is inside the hot window,
+  // where the spatial match still runs, unless another provider's event sits beside it (PF-5a);
+  // status counts late_minted and late_withheld.
   const updates = screen(updateOutcomes.flatMap((o) => o.obs).filter((r) => r.eventTimeMs <= futureCeil), tally, undefined, zeroed);
   updates.sort(byIngestOrder);
-  let revisions = 0;
-  for (const raw of updates) {
-    if (raw.providerUpdatedMs != null) {
-      state.watermarks[raw.provider] = Math.max(state.watermarks[raw.provider] ?? 0, raw.providerUpdatedMs);
-    }
-    const r = resolver.reviseExisting(raw, ingestTime);
-    if (r?.changed) {
-      log.record(raw, r);
-      revisions++;
-    }
+  const sweep = revisionSweep(resolver, log, updates, state.watermarks, ingestTime);
+  const revisions = sweep.revisions;
+  const lateMinted = sweep.lateMinted.length;
+  const lateWithheld = sweep.lateWithheld.length;
+  for (const m of sweep.lateMinted) {
+    console.log(`  late mint ${m.feedId} ${m.provider}:${m.providerEventId} M${m.mag ?? '?'} ${m.eventTime} (${m.lagDays.toFixed(1)} d) ${m.place ?? ''}`);
+  }
+  for (const w of sweep.lateWithheld) {
+    console.log(`  late withheld ${w.provider}:${w.providerEventId} M${w.mag ?? '?'} ${w.eventTime}: beside ${w.nearFeedId} [${w.nearProviders.join(',')}] ${w.km.toFixed(1)} km ${w.dtS.toFixed(1)} s`);
   }
 
   // Provider withdrawals by zeroing (live and revision paths): a coordinate-less report of a
@@ -173,6 +176,17 @@ async function main(): Promise<void> {
     providers[o.provider] = o.status;
     if (!o.status.ok) degraded.push(o.provider);
   }
+  // The sweeps' own fetches (updatedafter, includedeleted): fail-open like the live fetch, so a
+  // failed one used to leave no trace, and the next run starts from a watermark the live rows
+  // already moved past its window. Recorded here so a sweep that delivers nothing is visible.
+  const sweeps = {
+    updated: Object.fromEntries(updateOutcomes.map((o) => [o.provider, o.status])),
+    deleted: Object.fromEntries(deleteOutcomes.map((o) => [o.provider, o.status])),
+  };
+  const sweepsFailed = [
+    ...updateOutcomes.filter((o) => !o.status.ok).map((o) => `${o.provider}:updated`),
+    ...deleteOutcomes.filter((o) => !o.status.ok).map((o) => `${o.provider}:deleted`),
+  ];
   const status = {
     generated: ingestTime,
     head_seq: seq,
@@ -185,12 +199,15 @@ async function main(): Promise<void> {
     coordinateless_retracted: feedSide.retracted,
     new_observations: newObs.length,
     revisions,
+    late_minted: lateMinted,
+    late_withheld: lateWithheld,
     tombstoned,
     merged: log.merged,
     ...(heal ? { heal } : {}),
     duration_ms: Math.round(Date.now() - nowMs),
     degraded,
     providers,
+    sweeps,
   };
   saveEventMap(DATA_DIR, state.eventMap);
   saveMeta(DATA_DIR, state.head, state.watermarks, status);
@@ -208,14 +225,15 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `aggregate: seq=${seq} indexed=${state.eventMap.size} fetched=${fetched.length} stale_dropped=${staleDropped} new=${newObs.length} revisions=${revisions} tombstoned=${tombstoned} merged=${log.merged} ` +
+    `aggregate: seq=${seq} indexed=${state.eventMap.size} fetched=${fetched.length} stale_dropped=${staleDropped} new=${newObs.length} revisions=${revisions} late_minted=${lateMinted} late_withheld=${lateWithheld} tombstoned=${tombstoned} merged=${log.merged} ` +
       `providers=${outcomes.filter((o) => o.status.ok).length}/${outcomes.length}` +
       (tally.bad_coords ? ` bad_coords_dropped=${tally.bad_coords}` : '') +
       (tally.coordinateless ? ` coordinateless_dropped=${tally.coordinateless}` : '') +
       (zeroedOut.withdrawn ? ` coordinateless_withdrawn=${zeroedOut.withdrawn}` : '') +
       (feedSide.retracted ? ` coordinateless_retracted=${feedSide.retracted}` : '') +
       (heal ? ` heal_epoch=${heal.epoch} heal_merged=${heal.merged}` : '') +
-      (degraded.length ? ` degraded=[${degraded.join(',')}]` : ''),
+      (degraded.length ? ` degraded=[${degraded.join(',')}]` : '') +
+      (sweepsFailed.length ? ` sweeps_failed=[${sweepsFailed.join(',')}]` : ''),
   );
 }
 

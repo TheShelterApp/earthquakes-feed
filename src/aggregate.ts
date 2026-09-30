@@ -268,7 +268,7 @@ async function main(): Promise<void> {
       (zeroedOut.withdrawn ? ` coordinateless_withdrawn=${zeroedOut.withdrawn}` : '') +
       (feedSide.retracted ? ` coordinateless_retracted=${feedSide.retracted}` : '') +
       (heal ? ` heal_epoch=${heal.epoch} heal_merged=${heal.merged}` : '') +
-      (correction ? ` correction_epoch=${correction.epoch} afad_retimed=${correction.afad.retimed} afad_moved_out=${correction.afad.moved_out} afad_merged=${correction.afad.merged}` : '') +
+      (correction ? ` correction_epoch=${correction.epoch} afad_retimed=${correction.afad.retimed} afad_moved_out=${correction.afad.moved_out} afad_merged=${correction.afad.merged} comcat_id_merged=${correction.comcat_id.merged}` : '') +
       (degraded.length ? ` degraded=[${degraded.join(',')}]` : '') +
       (sweep.stale ? ` sweep_stale_skipped=${sweep.stale}` : '') +
       ` sweeps_failed=[${sweepsFailed.join(',')}]` +

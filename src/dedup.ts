@@ -1,5 +1,6 @@
 import {
   COMCAT_ID_PROVIDERS,
+  COMCAT_LIFECYCLE_PROVIDERS,
   COMCAT_PROVIDER,
   EMSC_AUTHORED_COPIES,
   EMSC_PROVIDER,
@@ -24,7 +25,7 @@ import { gatherCellKeys, gridKey, haversineKm } from './geo.js';
 import { isCoordinateless } from './quality.js';
 import type { EventNode, Extra, Op, ProvenanceRow, ProviderConfig, RawObs } from './types.js';
 import { deterministicFeedId } from './ulid.js';
-import { knownAliasIdsOf, statusRank } from './util.js';
+import { comcatIdOf, knownAliasIdsOf, nativeIdOfComcat, statusRank } from './util.js';
 
 const REVIEWED_DT_HARD_MS = 30_000;
 /** How far lateTwin looks for the event a late report duplicates: the widest identity window. */
@@ -100,7 +101,7 @@ export interface IngestResult {
   revision: number;
   /** Post-revision folds this ingest caused (one op:merge line each), oldest first. */
   merges: MergeRecord[];
-  /** Set when a COMCAT_ID_PROVIDERS report was not minted because another agency's live event sits beside it
+  /** Set when a COMCAT_LIFECYCLE_PROVIDERS report was not minted because another agency's live event sits beside it
    *  (Resolver.ingest, PF-5b); `node` is that event, `changed` false. */
   withheld?: { km: number; dtMs: number };
 }
@@ -120,8 +121,8 @@ export class Resolver {
   /** When set, a cell's density counts only live events at or after it (isDense). */
   private readonly denseFloor: number | null;
   private readonly mergePass: boolean;
-  /** Provider keys of tombstoned nodes (the alias map holds live nodes only), so a COMCAT_ID_PROVIDERS report of an
-   *  id ComCat deleted is recognised in later runs too (retiredComcatNode). */
+  /** Provider keys of tombstoned nodes (the alias map holds live nodes only), so a COMCAT_LIFECYCLE_PROVIDERS report
+   *  of an id ComCat deleted is recognised in later runs too (retiredComcatNode). */
   private readonly retired = new Map<string, string>();
   /** ComCat id → the live node whose ComCat row names it (comcatIdsNamed), built on first use: a
    *  COMCAT_ID_PROVIDERS report resolves through it when ComCat prefers another network's id (PF-5b). */
@@ -314,26 +315,42 @@ export class Resolver {
   }
 
   /** The id half of findExisting: the report's own alias, then the ids it names (USGS `ids`, the ComCat id of a
-   *  COMCAT_ID_PROVIDERS report), then, for such a report, the live node whose ComCat row lists its id. */
+   *  COMCAT_ID_PROVIDERS report), then, for a ComCat report, the COMCAT_ID_PROVIDERS rows of the ComCat ids it names
+   *  (NCEDC 75438707 for nc75438707, PF-5d), then, for a COMCAT_ID_PROVIDERS report, the live node whose ComCat row
+   *  lists its ComCat id. */
   private findById(raw: RawObs): string | null {
     const key = `${raw.provider}:${raw.providerEventId}`;
     const hit = this.alias.get(key);
     if (hit) return hit;
-    for (const alt of raw.knownAliasIds) {
+    for (const alt of [...raw.knownAliasIds, ...this.comcatIdRowKeys(raw)]) {
       const h = this.alias.get(alt);
       if (h) {
         this.alias.set(key, h);
         return h;
       }
     }
-    if (COMCAT_ID_PROVIDERS.has(raw.provider)) {
-      const lister = this.comcatListing(raw.providerEventId);
+    const comcatId = comcatIdOf(raw.provider, raw.providerEventId);
+    if (comcatId) {
+      const lister = this.comcatListing(comcatId);
       if (lister) {
         this.alias.set(key, lister.feedId);
         return lister.feedId;
       }
     }
     return null;
+  }
+
+  /** For a ComCat report: the alias keys of the COMCAT_ID_PROVIDERS rows its ComCat ids name (`ncedc:75438707` for
+   *  nc75438707, `aec:aka2026…` for aka2026…); empty for any other report. */
+  private comcatIdRowKeys(raw: RawObs): string[] {
+    const out: string[] = [];
+    for (const id of comcatIdsNamed(raw.provider, raw.providerEventId, raw.fields)) {
+      for (const p of COMCAT_ID_PROVIDERS) {
+        const native = nativeIdOfComcat(p, id);
+        if (native) out.push(`${p}:${native}`);
+      }
+    }
+    return out;
   }
 
   /** The spatial half of findExisting (hot window only). */
@@ -384,20 +401,20 @@ export class Resolver {
     return node.provenance.some((r) => comcatIdsNamed(r.provider, r.nativeId, r.fields).includes(id)) ? node : undefined;
   }
 
-  /** The tombstoned node a COMCAT_ID_PROVIDERS report belongs to when nothing live claims it by id: its own id, or
+  /** The tombstoned node a COMCAT_LIFECYCLE_PROVIDERS report belongs to when nothing live claims it by id: its own id, or
    *  the ComCat id it names, retired with a node (ComCat deleted the event, and withdrawComcatTwins withdrew the
    *  report's row with it). Such a report is not ingested: the provider still listing a deleted id must not bring
    *  the event back, neither into the tombstoned node nor as a new one beside the other agencies' copies. */
   private retiredComcatNode(raw: RawObs): EventNode | undefined {
-    if (!COMCAT_ID_PROVIDERS.has(raw.provider)) return undefined;
-    for (const k of [`${raw.provider}:${raw.providerEventId}`, `${COMCAT_PROVIDER}:${raw.providerEventId}`]) {
+    if (!COMCAT_LIFECYCLE_PROVIDERS.has(raw.provider)) return undefined;
+    for (const k of [`${raw.provider}:${raw.providerEventId}`, `${COMCAT_PROVIDER}:${comcatIdOf(raw.provider, raw.providerEventId)}`]) {
       const node = this.eventMap.get(this.retired.get(k) ?? '');
       if (node?.state === 'tombstoned') return node;
     }
     return undefined;
   }
 
-  /** A COMCAT_ID_PROVIDERS report `node` must not take: the node is tombstoned (ComCat deleted the event), or it
+  /** A COMCAT_LIFECYCLE_PROVIDERS report `node` must not take: the node is tombstoned (ComCat deleted the event), or it
    *  held this very report once and lost it to a ComCat delete (withdrawComcatTwins; no other path withdraws such a
    *  row), while other agencies keep the node live. */
   private static withdrawnFrom(node: EventNode, raw: RawObs): boolean {
@@ -509,7 +526,7 @@ export class Resolver {
     return [node.mag, node.magType, node.status, node.lat.toFixed(4), node.lon.toFixed(4), node.depth, node.chosenProvider, node.eventTimeMs, node.place].join('|');
   }
 
-  /** Ingest a fresh observation (mints a new event if unknown). Two exceptions for a COMCAT_ID_PROVIDERS report
+  /** Ingest a fresh observation (mints a new event if unknown). Two exceptions for a COMCAT_LIFECYCLE_PROVIDERS report
    *  (PF-5b), both changing nothing: an id ComCat deleted (retiredComcatNode), and a report that would mint beside
    *  another agency's live event (lateTwin: ±60 s, ≤ 50 km, |ΔM| ≤ 1, no row of its own provider). The regional
    *  network lists every Alaska quake once, so when it has no row in that event, its unmatched solution is most likely
@@ -523,7 +540,7 @@ export class Resolver {
     if (retired) return { node: retired, changed: false, revision: retired.revision, merges: [] };
     const near = this.findNear(raw);
     if (near) return this.applyIngest(near, raw, ingestTime);
-    if (COMCAT_ID_PROVIDERS.has(raw.provider)) {
+    if (COMCAT_LIFECYCLE_PROVIDERS.has(raw.provider)) {
       const twin = this.lateTwin(raw);
       if (twin) return { node: twin.near, changed: false, revision: twin.near.revision, merges: [], withheld: { km: twin.km, dtMs: twin.dtMs } };
     }
@@ -600,7 +617,7 @@ export class Resolver {
     return { kind: 'minted', result: this.applyIngest(this.mintId(raw), raw, ingestTime) };
   }
 
-  /** The live event a late report (or an unmatched COMCAT_ID_PROVIDERS report, see ingest) most likely duplicates,
+  /** The live event a late report (or an unmatched COMCAT_LIFECYCLE_PROVIDERS report, see ingest) most likely duplicates,
    *  or null: within ±TEMPORAL_MS and
    *  LATE_TWIN_KM (the widest identity window, and the alerts gateway's fold window), with no row
    *  of the report's own provider (one would be a distinct event by that provider's own ids, like
@@ -629,9 +646,10 @@ export class Resolver {
   private applyIngest(fid: string, raw: RawObs, ingestTime: string, fold = true): IngestResult {
     const key = `${raw.provider}:${raw.providerEventId}`;
     let node = this.resolveLive(fid);
-    // A COMCAT_ID_PROVIDERS report also puts the ComCat id it names on the node (PF-5b), so a later ComCat row of
-    // that id, or one whose `ids` carry it under another preferred id, resolves here by alias.
-    const comcatKey = COMCAT_ID_PROVIDERS.has(raw.provider) ? `${COMCAT_PROVIDER}:${raw.providerEventId}` : null;
+    // A COMCAT_LIFECYCLE_PROVIDERS report also puts the ComCat id it names on the node (PF-5b), so a later ComCat row
+    // of that id, or one whose `ids` carry it under another preferred id, resolves here by alias. (A ComCat report
+    // finds any COMCAT_ID_PROVIDERS row by the row's own alias as well: findById, comcatIdRowKeys.)
+    const comcatKey = COMCAT_LIFECYCLE_PROVIDERS.has(raw.provider) ? `${COMCAT_PROVIDER}:${comcatIdOf(raw.provider, raw.providerEventId)}` : null;
     if (node && comcatKey && Resolver.withdrawnFrom(node, raw)) return { node, changed: false, revision: node.revision, merges: [] };
 
     if (!node) {
@@ -730,10 +748,11 @@ export class Resolver {
     if (!this.mergePass) return false;
     for (const id of comcatIdsNamed(raw.provider, raw.providerEventId, raw.fields)) {
       for (const p of COMCAT_ID_PROVIDERS) {
-        const fid = this.alias.get(`${p}:${id}`);
+        const native = nativeIdOfComcat(p, id);
+        const fid = native ? this.alias.get(`${p}:${native}`) : undefined;
         const other = fid ? this.resolveLive(fid) : undefined;
         if (!other || other === node || other.state !== 'live') continue;
-        if (other.provenance.some((r) => r.provider === p && r.nativeId === id) && !Resolver.nodesDistinct(node, other)) return true;
+        if (other.provenance.some((r) => r.provider === p && r.nativeId === native) && !Resolver.nodesDistinct(node, other)) return true;
       }
     }
     return false;
@@ -746,11 +765,12 @@ export class Resolver {
   }
 
   /** PF-5b: fold into `node` every live node that is the same event by exact ComCat id — one holds a
-   *  COMCAT_ID_PROVIDERS row whose native id a ComCat row of the other names (its own id or one in `ids`) — unless a
-   *  provider present in both under distinct ids says otherwise (nodesDistinct). Exact identity, so neither the
-   *  proximity windows nor the dense-cell rule apply: an automatic AEC solution can sit tens of km from the solution
-   *  ComCat prefers. It heals the one split first sight cannot prevent: ComCat listing the AEC id in a node's `ids`
-   *  only after the AEC report had minted its own node. Bounded like mergeAround; off when merge=false. */
+   *  COMCAT_ID_PROVIDERS row whose ComCat id (comcatIdOf) a ComCat row of the other names (its own id or one in
+   *  `ids`) — unless a provider present in both under distinct ids says otherwise (nodesDistinct). Exact identity, so
+   *  neither the proximity windows nor the dense-cell rule apply: an automatic AEC solution can sit tens of km from the
+   *  solution ComCat prefers. It heals the one split first sight cannot prevent: ComCat listing the AEC id in a node's
+   *  `ids` only after the AEC report had minted its own node (and, once, the NCEDC / SCEDC events minted beside
+   *  ComCat's copy before PF-5d: foldExactIdTwins). Bounded like mergeAround; off when merge=false. */
   private foldComcatTwins(node: EventNode, ingestTime: string, merges: MergeRecord[]): EventNode {
     if (!this.mergePass) return node;
     let cur = node;
@@ -774,13 +794,15 @@ export class Resolver {
       return { node: other, reason: `exact id: ComCat ${link} names ${id}, the id of the ${Resolver.comcatHolder(node, other, id)} report` };
     };
     for (const r of node.provenance) {
-      if (COMCAT_ID_PROVIDERS.has(r.provider)) {
-        const hit = consider(this.alias.get(`${COMCAT_PROVIDER}:${r.nativeId}`), r.nativeId) ?? consider(this.comcat().get(r.nativeId), r.nativeId);
+      const own = comcatIdOf(r.provider, r.nativeId);
+      if (own) {
+        const hit = consider(this.alias.get(`${COMCAT_PROVIDER}:${own}`), own) ?? consider(this.comcat().get(own), own);
         if (hit) return hit;
       }
       for (const id of comcatIdsNamed(r.provider, r.nativeId, r.fields)) {
         for (const p of COMCAT_ID_PROVIDERS) {
-          const hit = consider(this.alias.get(`${p}:${id}`), id);
+          const native = nativeIdOfComcat(p, id);
+          const hit = native ? consider(this.alias.get(`${p}:${native}`), id) : null;
           if (hit) return hit;
         }
       }
@@ -788,15 +810,15 @@ export class Resolver {
     return null;
   }
 
-  /** The native id of `lister`'s ComCat row that names `id` while `holder` holds a COMCAT_ID_PROVIDERS row of `id`,
-   *  or null. */
+  /** The native id of `lister`'s ComCat row that names `id` while `holder` holds a COMCAT_ID_PROVIDERS row of the
+   *  ComCat id `id`, or null. */
   private static comcatLink(holder: EventNode, lister: EventNode, id: string): string | null {
-    if (!holder.provenance.some((r) => COMCAT_ID_PROVIDERS.has(r.provider) && r.nativeId === id)) return null;
+    if (!holder.provenance.some((r) => comcatIdOf(r.provider, r.nativeId) === id)) return null;
     return lister.provenance.find((r) => comcatIdsNamed(r.provider, r.nativeId, r.fields).includes(id))?.nativeId ?? null;
   }
 
   private static comcatHolder(a: EventNode, b: EventNode, id: string): string {
-    return [...a.provenance, ...b.provenance].find((r) => COMCAT_ID_PROVIDERS.has(r.provider) && r.nativeId === id)?.provider ?? 'aec';
+    return [...a.provenance, ...b.provenance].find((r) => comcatIdOf(r.provider, r.nativeId) === id)?.provider ?? 'aec';
   }
 
   /** Upstream delete signal for one provider's contribution. Drops that provenance row;
@@ -812,8 +834,9 @@ export class Resolver {
     return this.withdrawRow(node, idx, ingestTime);
   }
 
-  /** PF-5b: a ComCat delete (the usgs `includedeleted` sweep) also withdraws the COMCAT_ID_PROVIDERS rows of the same
-   *  id: AEC's id is the ComCat id, and AEC is where an `ak` delete comes from. Found by id only (the provider's own
+  /** PF-5b: a ComCat delete (the usgs `includedeleted` sweep) also withdraws the COMCAT_LIFECYCLE_PROVIDERS rows of the
+   *  same id: AEC's id is the ComCat id, and AEC is where an `ak` delete comes from (NCEDC and SCEDC withdraw their own
+   *  rows by zeroing them, withdrawZeroed). Found by id only (the provider's own
    *  alias), never mints; the node is tombstoned when no row is left, else re-derives its solution, like
    *  tombstoneProvider. A later report of the id from the same provider changes nothing (withdrawnFrom,
    *  retiredComcatNode), so a file that keeps listing a deleted id cannot bring the event back. Each entry's `raw` is
@@ -822,11 +845,12 @@ export class Resolver {
   withdrawComcatTwins(raw: RawObs, ingestTime: string): { raw: RawObs; result: IngestResult }[] {
     if (raw.provider !== COMCAT_PROVIDER) return [];
     const out: { raw: RawObs; result: IngestResult }[] = [];
-    for (const p of [...COMCAT_ID_PROVIDERS].sort()) {
-      const fid = this.alias.get(`${p}:${raw.providerEventId}`);
+    for (const p of [...COMCAT_LIFECYCLE_PROVIDERS].sort()) {
+      const native = nativeIdOfComcat(p, raw.providerEventId);
+      const fid = native ? this.alias.get(`${p}:${native}`) : undefined;
       const node = fid ? this.resolveLive(fid) : undefined;
       if (!node || node.state !== 'live') continue;
-      const idx = node.provenance.findIndex((r) => r.provider === p && r.nativeId === raw.providerEventId);
+      const idx = node.provenance.findIndex((r) => r.provider === p && r.nativeId === native);
       if (idx < 0) continue;
       const withdrawn = rowAsReport(node.provenance[idx]!);
       out.push({ raw: withdrawn, result: this.withdrawRow(node, idx, ingestTime) });
@@ -1017,6 +1041,23 @@ export class Resolver {
       () => [...new Set(ids.map((f) => this.resolveLive(f)))].filter((n): n is EventNode => n != null && n.state === 'live' && n.eventTimeMs >= this.hotFloor),
       ingestTime,
     );
+  }
+
+  /** foldComcatTwins over every live event in the window that holds a COMCAT_ID_PROVIDERS row (event-time order, then
+   *  feed id): the one-time correction's fold of the NCEDC / SCEDC events minted beside ComCat's row of the same id
+   *  before PF-5d, when nothing linked the two ids and a dense cell (The Geysers) joins only on a shared id. One
+   *  `merges` list for the pass, like heal. A no-op when merge=false. */
+  foldExactIdTwins(ingestTime: string): { merges: MergeRecord[]; survivors: EventNode[] } {
+    const merges: MergeRecord[] = [];
+    if (!this.mergePass) return { merges, survivors: [] };
+    const byTimeThenId = (a: EventNode, b: EventNode): number =>
+      a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : a.feedId > b.feedId ? 1 : 0);
+    const nodes = [...this.eventMap.values()]
+      .filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor && n.provenance.some((r) => COMCAT_ID_PROVIDERS.has(r.provider)))
+      .sort(byTimeThenId);
+    for (const node of nodes) if (node.state === 'live') this.foldComcatTwins(node, ingestTime, merges);
+    const survivors = [...new Set(merges.map((m) => m.survivor))].filter((n) => n.state === 'live').sort(byTimeThenId);
+    return { merges, survivors };
   }
 
   /** mergeAround over the nodes `pick` returns, in event-time order (then feed id), in passes until one folds

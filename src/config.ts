@@ -62,7 +62,8 @@ export const HEAL_EPOCH = 1;
  *  does not call frozen (event days from now − LIVE_INDEX_DAYS on; partitions.ts FROZEN_AFTER_DAYS), logged like any
  *  other change; the marker records this epoch in the same commit. Frozen days are never touched: the feed does not
  *  rewrite history. Epoch 1 (2026-10-01): AFAD rows stored 3 h early are read again with the fixed parser and re-timed
- *  (PF-5e). Bump it only to run a new correction on purpose, with that correction's code. */
+ *  (PF-5e), and NCEDC / SCEDC events standing beside ComCat's row of the same id are folded into it (PF-5d). Bump it
+ *  only to run a new correction on purpose, with that correction's code. */
 export const CORRECTION_EPOCH = 1;
 /** Only events within this many days are kept in the in-memory dedup index. */
 export const HOT_WINDOW_DAYS = 7;
@@ -87,13 +88,29 @@ export const QUERY_LOOKBACK_MS = Number(process.env.QUERY_LOOKBACK_MS ?? 2 * 24 
 export const LATE_MINT_PROVIDERS: ReadonlySet<string> = new Set(['usgs']);
 /** The provider that reads ComCat, the USGS ANSS catalog (PF-5b). */
 export const COMCAT_PROVIDER = 'usgs';
-/** Providers whose native event id IS the ComCat event id (PF-5b): AEC's `event_name` (`aka2026…`) is the id ComCat
- *  gives the same event once AEC sends it there, so identity with the `usgs` row is exact, whatever the distance
- *  between the two solutions. A report of theirs names `usgs:<its id>` (util.ts knownAliasIdsOf), the node that
- *  holds it carries that alias too, and it resolves to a node whose ComCat row lists its id in `ids`, even when
- *  ComCat prefers another network's id (`us7000…`). A ComCat delete of the id withdraws their row as well, and a row
- *  of theirs withdrawn that way never comes back while the provider keeps listing the id (Resolver). */
-export const COMCAT_ID_PROVIDERS: ReadonlySet<string> = new Set(['aec']);
+/** Providers whose native event id names the ComCat event id, with the ComCat catalog prefix that turns one into the
+ *  other (util.ts comcatIdOf). AEC's `event_name` (`aka2026…`) IS the id ComCat gives the same event once AEC sends
+ *  it there (PF-5b). NCEDC's and SCEDC's event ids are the NC and CI networks' own ids, which ComCat carries as
+ *  `nc<id>` / `ci<id>` (PF-5d, 2026-10-01: NCEDC 75438707 is ComCat nc75438707, SCEDC 41341119 is ci41341119, the two
+ *  rows identical to the millisecond and the metre). Identity with the `usgs` row is exact, whatever the distance
+ *  between the two solutions and however dense the cell: a report of theirs names `usgs:<ComCat id>`
+ *  (util.ts knownAliasIdsOf), a ComCat report finds their row through the ComCat ids it names, and a node whose
+ *  ComCat row lists the id in `ids` claims it even when ComCat prefers another network's id (`us7000…`). Until
+ *  PF-5d the NCEDC and SCEDC rows had no link to ComCat's: in a dense cell (The Geysers) a location join needs a
+ *  shared id, so 286 NCEDC and 18 SCEDC events stood beside ComCat's copy in the 10 days to 2026-10-01. */
+export const COMCAT_ID_PREFIX: ReadonlyMap<string, string> = new Map([
+  ['aec', ''],
+  ['ncedc', 'nc'],
+  ['scedc', 'ci'],
+]);
+export const COMCAT_ID_PROVIDERS: ReadonlySet<string> = new Set(COMCAT_ID_PREFIX.keys());
+/** The COMCAT_ID_PROVIDERS whose event list follows ComCat's lifecycle and is mostly automatic solutions (AEC,
+ *  PF-5b). The node that holds such a report carries the alias `usgs:<its id>`; an unmatched report beside another
+ *  agency's event is withheld (Resolver.lateTwin); a ComCat delete of the id withdraws their row as well, and a row
+ *  of theirs withdrawn that way never comes back while the provider keeps listing the id. NCEDC and SCEDC are not in
+ *  it: they publish their networks' own catalogues and withdraw an id themselves by zeroing it
+ *  (Resolver.withdrawZeroed), so a ComCat delete leaves their row alone and a re-located id comes back as before. */
+export const COMCAT_LIFECYCLE_PROVIDERS: ReadonlySet<string> = new Set(['aec']);
 /** EMSC `auth` codes whose EMSC copy is that feed provider's own solution: EMSC re-publishes the authoring agency's
  *  origin, rounded (2026-09-30: AFAD 730046 at 19:19:18, 38.46667 / 39.21483, ML 0.9 is EMSC 20260930_0000241 at
  *  19:19:18Z, 38.4667 / 39.2148, ml 0.9, auth AFAD). An EMSC row with one of these codes and the same solution

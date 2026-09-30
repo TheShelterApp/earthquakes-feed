@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { vanishedIds } from '../src/absence.js';
 import { mergeCanonical } from '../src/canonical.js';
-import { COMCAT_ID_PROVIDERS, SWARM_CELL_ABSOLUTE } from '../src/config.js';
+import { COMCAT_ID_PROVIDERS, COMCAT_LIFECYCLE_PROVIDERS, SWARM_CELL_ABSOLUTE } from '../src/config.js';
 import { parseAec } from '../src/custom.js';
 import { Resolver } from '../src/dedup.js';
 import { LogBuffer, observationToRaw } from '../src/oplog.js';
@@ -183,7 +183,8 @@ test('aec: the registry entry and the alias rule', () => {
   assert.match(p.attribution, /Alaska Regional Network/);
   assert.match(p.attribution, /G25AC00133/);
   assert.match(p.attribution, /2024208/);
-  assert.deepEqual([...COMCAT_ID_PROVIDERS], ['aec']);
+  assert.deepEqual([...COMCAT_LIFECYCLE_PROVIDERS], ['aec'], 'withheld twins and ComCat deletes are AEC only');
+  assert.ok(COMCAT_ID_PROVIDERS.has('aec'));
   assert.deepEqual(knownAliasIdsOf('aec', 'aka2026x', {}), ['usgs:aka2026x']);
   assert.deepEqual(knownAliasIdsOf('usgs', 'us7000a', { ids: ',us7000a,aka2026x,' }), ['usgs:aka2026x'], 'ComCat rows unchanged');
   assert.deepEqual(knownAliasIdsOf('emsc', '2026abc', {}), []);

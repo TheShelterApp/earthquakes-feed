@@ -123,7 +123,8 @@ Last run's per-provider health, counts, timings, `degraded[]`. Counts include `m
 (`op:merge` lines), `bad_coords_dropped`, `coordinateless_dropped` (coordinate-less reports
 refused at ingest), `coordinateless_withdrawn` (those among them that withdrew a known id, see
 below), `coordinateless_retracted`, `late_minted` and `late_withheld` (see *Late publications*);
-the heal run also carries `heal`, and the one-time correction run `correction` (see *Turkey (AFAD)*). `sweeps.updated` / `sweeps.deleted` hold the outcome (`ok`,
+the heal run also carries `heal`, and the one-time correction run `correction` (see *Turkey (AFAD)*
+and *California (NCEDC, SCEDC)*). `sweeps.updated` / `sweeps.deleted` hold the outcome (`ok`,
 `http_status`, `latency_ms`, `events_returned`, `error`) of each source's `updatedafter` revision
 query and `includedeleted` delete query in that run, with where the sweep stands: `since` (the
 `updatedafter` it asked from), `pages`, `through` (its cursor after the run: the moment the last
@@ -276,6 +277,24 @@ ComCat delete of the id withdraws the AEC row too (an `op:tombstone` line with a
 the event is `tombstoned` when no other source reports it; AEC's file listing the id afterwards
 does not bring it back. The file has no update time and no delete marker. The source is
 forward-only: no backfill before its first run beyond the 7-day window that run ingested.
+
+## California (NCEDC, SCEDC)
+
+The `ncedc` and `scedc` sources read the Northern and Southern California networks' own catalogues.
+Their event ids are the ids ComCat gives the same events with the network's prefix (NCEDC
+`75438707` is ComCat `nc75438707`, SCEDC `41341119` is `ci41341119`), so since 2026-10-01 the feed
+joins such a row to ComCat's row of that id exactly, in either arrival order and also when ComCat
+prefers another id and lists the network's id in `ids`. Before that nothing linked the two ids, and
+where many small quakes fall into one cell (The Geysers) the feed joins two reports only on a shared
+id, so the regional row and ComCat's row of the same event were published as two events (286 NCEDC
+and 18 SCEDC ones in the 10 days to 2026-10-01, identical in time and place). The one-time correction
+of 2026-10-01 (see *Turkey (AFAD)*) folded the ones in the days not yet frozen into ComCat's event:
+`op:merge` lines with an `exact id` reason and an `op:correction` line for each survivor. Frozen days
+keep both events: the day partitions 2026-06-01…09-19 hold 3,899 NCEDC and 997 SCEDC events beside
+ComCat's event of the same id (drop a live `ncedc` / `scedc`-only feature whose `nc` / `ci` id another
+live feature lists in `feed.aliases` as `usgs:<id>`); the monthly Release archives before June were
+built by the same rules and were not re-checked. NCEDC and SCEDC withdraw an event themselves by re-publishing its id without a
+location (see *Retired events*); a ComCat delete of the id does not withdraw their row.
 
 ## Turkey (AFAD)
 

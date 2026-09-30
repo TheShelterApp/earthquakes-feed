@@ -19,6 +19,8 @@ export interface CorrectionMarker {
   /** The oldest event day it covered: the oldest day the manifest does not call frozen. Older days are untouched. */
   from_day: string;
   afad: AfadCorrection;
+  /** PF-5d: NCEDC / SCEDC events folded into ComCat's event of the same id (op:merge with an `exact id` reason). */
+  comcat_id: { merged: number; survivors: number };
 }
 
 export interface AfadCorrection {
@@ -45,7 +47,7 @@ export const AFAD_RETIMED_REASON =
   'correction epoch 1: re-read with the fixed AFAD parser; AFAD times are UTC and this row had been stored 3 h early, as Turkish local time (PF-5e)';
 export const AFAD_MOVED_OUT_REASON =
   'correction epoch 1: this AFAD row had joined the event at its 3 h early time; re-read at the right time, it is placed anew (PF-5e)';
-/** The label of the op:correction lines of the fold pass (LogBuffer.recordFolds). */
+/** The label of the op:correction lines of the fold passes (LogBuffer.recordFolds). */
 export const CORRECTION_FOLD_LABEL = `correction epoch ${CORRECTION_EPOCH}`;
 
 /** The epoch the data branch has been corrected to; 0 when it never was. */
@@ -99,7 +101,12 @@ export function afadCorrections(eventMap: Map<string, EventNode>, floorMs: numbe
  *  AFAD_MOVED_OUT_REASON and an op:observe line where it leaves another source's event. Once every row is at its
  *  real time, Resolver.foldAround folds the events they touched into the events they belong to: op:merge lines, then
  *  an op:correction line per survivor (CORRECTION_FOLD_LABEL). Rows of frozen days keep their old time: the feed does
- *  not rewrite history. */
+ *  not rewrite history.
+ *
+ *  NCEDC / SCEDC (PF-5d): their ids name ComCat's `nc…` / `ci…` event since PF-5d, which joins a new report to
+ *  ComCat's copy by id; the events minted beside ComCat's copy before (nothing linked the two ids, and a dense cell
+ *  joins only on a shared id) are folded into it once (Resolver.foldExactIdTwins): op:merge lines with an `exact id`
+ *  reason, then an op:correction line per survivor. */
 export function runCorrection(
   root: string,
   eventMap: Map<string, EventNode>,
@@ -134,6 +141,9 @@ export function runCorrection(
   afad.merged = folds.merges.length;
   afad.survivors = folds.survivors.length;
 
+  const twins = resolver.foldExactIdTwins(opts.ingestTime);
+  log.recordFolds(twins.merges, twins.survivors, CORRECTION_FOLD_LABEL);
+
   const wrote = log.seq >= firstSeq;
   const marker: CorrectionMarker = {
     epoch: CORRECTION_EPOCH,
@@ -142,6 +152,7 @@ export function runCorrection(
     last_seq: wrote ? log.seq : null,
     from_day: fromDay,
     afad,
+    comcat_id: { merged: twins.merges.length, survivors: twins.survivors.length },
   };
   writeCorrectionMarker(root, marker);
   return marker;

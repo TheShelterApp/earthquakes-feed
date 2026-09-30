@@ -18,7 +18,7 @@ import { join, resolve } from 'node:path';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { loadState } from '../src/bitemporal.js';
-import { LIVE_INDEX_DAYS } from '../src/config.js';
+import { COMCAT_ID_PREFIX, LIVE_INDEX_DAYS } from '../src/config.js';
 import { AFAD_LEGACY_OFFSET_MS, correctionFloor, runCorrection } from '../src/correction.js';
 import { Resolver } from '../src/dedup.js';
 import { haversineKm } from '../src/geo.js';
@@ -44,8 +44,6 @@ const state = loadState(dataDir, { sinceDays: LIVE_INDEX_DAYS, nowMs });
 const { floorMs, fromDay } = correctionFloor(nowMs);
 
 const liveFromFloor = (): EventNode[] => [...state.eventMap.values()].filter((n) => n.state === 'live' && n.eventTimeMs >= floorMs);
-/** The ComCat catalog prefix of the regional networks' ids (NCEDC 75438707 is ComCat nc75438707). */
-const COMCAT_ID_PREFIX = new Map([['ncedc', 'nc'], ['scedc', 'ci']]);
 const isAfadCopy = (r: ProvenanceRow): boolean => r.provider === 'emsc' && r.fields['auth'] === 'AFAD';
 
 /** AFAD rows and EMSC's AFAD-authored copies in different live events, ±2 s / 2 km apart (`shiftS` later). */

@@ -80,6 +80,40 @@ export const QUERY_LOOKBACK_MS = Number(process.env.QUERY_LOOKBACK_MS ?? 2 * 24 
 export const LATE_MINT_PROVIDERS: ReadonlySet<string> = new Set(['usgs']);
 export const FETCH_LIMIT = Number(process.env.FETCH_LIMIT ?? 5000);
 
+// --- sweeps (src/sweep-cursor.ts, PF-5c) ---
+/** Sources whose `updatedafter` revision sweep runs every aggregate: the two FDSN nodes whose rows
+ *  carry an update stamp (ComCat `updated`, EMSC `lastupdate`). */
+export const UPDATED_SWEEP_PROVIDERS: readonly string[] = ['usgs', 'emsc'];
+/** Sources whose `includedeleted=only` delete sweep runs every aggregate. */
+export const DELETE_SWEEP_PROVIDERS: readonly string[] = ['usgs'];
+/** One sweep's time budget, every page included (each page's timeout is what is left of it).
+ *  Measured 2026-09-30: the 7-day catch-up is one page per source (ComCat 2,337 rows in 2.0 s,
+ *  EMSC 3,064 rows in 3.4 s), a normal 5-minute sweep returns tens of rows in about a second,
+ *  and a cold name lookup on the runner takes up to 3.1 s with UV_THREADPOOL_SIZE=64: 30 s is
+ *  about ten times the largest page. The sweeps run alongside the live fetches, which already
+ *  take 12–17 s (median) and up to a minute when a custom adapter retries, so a run whose sweeps
+ *  use the whole budget keeps the Aggregate step near 40 s and the job (about 100 s, most of it
+ *  the data checkout) far inside its 5-minute timeout and the heartbeat's 5-minute interval.
+ *  The live FDSN fetches keep FETCH_TIMEOUT_MS (or the source's own timeoutMs). */
+export const SWEEP_TIMEOUT_MS = Number(process.env.SWEEP_TIMEOUT_MS ?? 30_000);
+/** A sweep asks from this long before its cursor: an update can reach the provider's search index
+ *  after the moment it is stamped with, and the runner's clock is not the provider's. Rows seen
+ *  twice change nothing (an unchanged re-report is a no-op). */
+export const SWEEP_OVERLAP_MS = 10 * 60_000;
+/** Consecutive pages of one sweep overlap by this many records, so an event that leaves the
+ *  result set between two page requests (an upstream delete) cannot push a row past both pages. */
+export const SWEEP_PAGE_OVERLAP = 100;
+/** At most this many pages per sweep and run (8 × FETCH_LIMIT = 40,000 rows, far above the ~2,300
+ *  (ComCat) and ~3,100 (EMSC) of a 7-day window); a sweep that needs more stays unfinished. */
+export const SWEEP_MAX_PAGES = 8;
+/** The one-time sweep catch-up. A sweep whose cursor is absent or carries a lower epoch asks from
+ *  now − HOT_WINDOW_DAYS instead of from its cursor, once; its first complete sweep records this
+ *  epoch with the cursor (knowledge/index/sweeps.json), so the catch-up does not repeat. Epoch 1
+ *  (2026-09-30): the sweeps had aborted in almost every run since they were added (PF-5c), and the
+ *  live rows had moved the shared watermark past every failed window; the 7-day catch-up held 191
+ *  revisions, 66 late events and 14 upstream deletes. Bump it only to run a new catch-up. */
+export const SWEEP_EPOCH = 1;
+
 // --- derived views ---
 export const MAX_PUBLISHED_BYTES = 18 * 1024 * 1024;
 export const SUMMARY_WINDOWS: Record<string, number> = {
@@ -110,6 +144,7 @@ export function dataPaths(root = DATA_DIR) {
     backfillCursor: join(root, 'knowledge', 'index', 'backfill.json'),
     onboardCursor: join(root, 'knowledge', 'index', 'onboard.json'),
     healMarker: join(root, 'knowledge', 'index', 'heal.json'),
+    sweepCursors: join(root, 'knowledge', 'index', 'sweeps.json'),
     archivesIndex: join(root, 'knowledge', 'index', 'archives.json'),
     partitionsIndex: join(root, 'knowledge', 'index', 'partitions.json'),
     providerHealth: join(root, 'knowledge', 'index', 'provider_health.json'),

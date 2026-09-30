@@ -1,18 +1,16 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { DATA_DIR, EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS, dataPaths } from './config.js';
+import { DATA_DIR, EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS, SWEEP_EPOCH, dataPaths } from './config.js';
 import { appendObservations, earliestEventMapDay, loadState, saveEventMap, saveMeta } from './bitemporal.js';
 import { onboardStep } from './onboard.js';
 import { Resolver } from './dedup.js';
 import { healedEpoch, runFeedSideSteps, withdrawZeroedReports } from './heal.js';
 import { LogBuffer } from './oplog.js';
-import { activeProviders, configMap, fetchProvider, fetchProviderDeleted, fetchProviderUpdated, loadRegistry, priorityMap } from './providers.js';
+import { activeProviders, configMap, loadRegistry, priorityMap } from './providers.js';
 import { byIngestOrder, emptyTally, screen } from './quality.js';
 import { revisionSweep } from './sweep.js';
+import { fetchRunInputs, loadSweepCursors, nextCursors, saveSweepCursors, sweepOriginFloorMs, sweepSpecs } from './sweep-cursor.js';
 import type { RawObs } from './types.js';
-
-/** FDSN nodes that support the `includedeleted` delete query (extensible). */
-const DELETE_PROVIDERS = new Set(['usgs']);
 import { isoFromMs } from './util.js';
 
 const FUTURE_LEEWAY_MS = 10 * 60_000;
@@ -64,21 +62,25 @@ async function main(): Promise<void> {
   assertHeadMatchesLog(DATA_DIR, state.head.seq);
   const resolver = new Resolver(state.eventMap, priorityMap(all), configMap(all), nowMs);
 
-  // Query updatedafter from LAST run's watermark (revisions since we last looked).
-  const prevWatermarks = { ...state.watermarks };
-  const [outcomes, updateOutcomes, deleteOutcomes] = await Promise.all([
-    Promise.all(active.map((p) => fetchProvider(p, nowMs))),
-    Promise.all(
-      active
-        .filter((p) => p.adapter === 'fdsn' && prevWatermarks[p.id])
-        .map((p) => fetchProviderUpdated(p, prevWatermarks[p.id]! - 300_000)),
-    ),
-    Promise.all(
-      active
-        .filter((p) => DELETE_PROVIDERS.has(p.id) && prevWatermarks[p.id])
-        .map((p) => fetchProviderDeleted(p, prevWatermarks[p.id]! - 300_000)),
-    ),
-  ]);
+  // The sweeps (updatedafter revisions, includedeleted deletes) ask from cursors of their own
+  // (knowledge/index/sweeps.json) that only a complete sweep advances, and go out before the live
+  // fetches with a budget of their own (src/sweep-cursor.ts, PF-5c). The watermarks the live rows
+  // advance are no longer where a sweep starts.
+  const cursors = loadSweepCursors(DATA_DIR);
+  const specs = sweepSpecs(active);
+  const { live: outcomes, sweeps: sweepRuns } = await fetchRunInputs(active, specs, cursors, {
+    nowMs,
+    originFloorMs: sweepOriginFloorMs(nowMs, loadDays),
+  });
+  const updateRuns = sweepRuns.filter((r) => r.spec.kind === 'updated');
+  const deleteRuns = sweepRuns.filter((r) => r.spec.kind === 'deleted');
+  for (const r of sweepRuns) {
+    const st = r.status;
+    console.log(
+      `  sweep ${r.key}${r.catchUp ? ' (catch-up)' : ''}: since ${st.since} pages=${st.pages} rows=${st.events_returned} ${Math.round((st.latency_ms ?? 0) / 100) / 10} s ` +
+        (r.complete ? `complete, cursor -> ${st.through}` : `UNFINISHED (${st.error}), cursor stays ${st.through ?? 'unset'}`),
+    );
+  }
   const fetched = outcomes.flatMap((o) => o.obs);
   // Live path handles the hot window only; older rows (e.g. CENC's rolling year file)
   // would bypass dedup outside it (C2) — drop them; backfill owns history.
@@ -114,7 +116,7 @@ async function main(): Promise<void> {
   // after origin, past the live lookback) is minted while its origin is inside the hot window,
   // where the spatial match still runs, unless another provider's event sits beside it (PF-5a);
   // status counts late_minted and late_withheld.
-  const updates = screen(updateOutcomes.flatMap((o) => o.obs).filter((r) => r.eventTimeMs <= futureCeil), tally, undefined, zeroed);
+  const updates = screen(updateRuns.flatMap((o) => o.obs).filter((r) => r.eventTimeMs <= futureCeil), tally, undefined, zeroed);
   updates.sort(byIngestOrder);
   const sweep = revisionSweep(resolver, log, updates, state.watermarks, ingestTime);
   const revisions = sweep.revisions;
@@ -138,7 +140,7 @@ async function main(): Promise<void> {
   const zeroedOut = withdrawZeroedReports(resolver, log, zeroed, ingestTime);
 
   // Delete sweep: tombstone events retracted upstream (op:tombstone; never mints).
-  const deletes = screen(deleteOutcomes.flatMap((o) => o.obs), tally, new Set(['coordinateless']));
+  const deletes = screen(deleteRuns.flatMap((o) => o.obs), tally, new Set(['coordinateless']));
   let tombstoned = 0;
   for (const raw of deletes) {
     const r = resolver.tombstoneProvider(raw, ingestTime);
@@ -176,17 +178,16 @@ async function main(): Promise<void> {
     providers[o.provider] = o.status;
     if (!o.status.ok) degraded.push(o.provider);
   }
-  // The sweeps' own fetches (updatedafter, includedeleted): fail-open like the live fetch, so a
-  // failed one used to leave no trace, and the next run starts from a watermark the live rows
-  // already moved past its window. Recorded here so a sweep that delivers nothing is visible.
+  // The sweeps' outcomes and cursors: fail-open like the live fetch, and a sweep that did not
+  // complete keeps its cursor, so the next run asks for the same window again. `epoch` is the
+  // catch-up epoch (config SWEEP_EPOCH); each sweep's `epoch` is the one its cursor carries.
   const sweeps = {
-    updated: Object.fromEntries(updateOutcomes.map((o) => [o.provider, o.status])),
-    deleted: Object.fromEntries(deleteOutcomes.map((o) => [o.provider, o.status])),
+    epoch: SWEEP_EPOCH,
+    updated: Object.fromEntries(updateRuns.map((r) => [r.spec.provider.id, r.status])),
+    deleted: Object.fromEntries(deleteRuns.map((r) => [r.spec.provider.id, r.status])),
   };
-  const sweepsFailed = [
-    ...updateOutcomes.filter((o) => !o.status.ok).map((o) => `${o.provider}:updated`),
-    ...deleteOutcomes.filter((o) => !o.status.ok).map((o) => `${o.provider}:deleted`),
-  ];
+  const sweepsFailed = sweepRuns.filter((r) => !r.complete).map((r) => r.key);
+  const sweepsCatchUp = sweepRuns.filter((r) => r.catchUp).map((r) => r.key);
   const status = {
     generated: ingestTime,
     head_seq: seq,
@@ -211,6 +212,7 @@ async function main(): Promise<void> {
   };
   saveEventMap(DATA_DIR, state.eventMap);
   saveMeta(DATA_DIR, state.head, state.watermarks, status);
+  saveSweepCursors(DATA_DIR, nextCursors(cursors, sweepRuns));
 
   // Onboard a newly-added source's recent live window [liveDay, now-lookback] into the
   // event_map (one paced chunk/run) so it has NO gap between the live path and deep backfill.
@@ -233,7 +235,8 @@ async function main(): Promise<void> {
       (feedSide.retracted ? ` coordinateless_retracted=${feedSide.retracted}` : '') +
       (heal ? ` heal_epoch=${heal.epoch} heal_merged=${heal.merged}` : '') +
       (degraded.length ? ` degraded=[${degraded.join(',')}]` : '') +
-      (sweepsFailed.length ? ` sweeps_failed=[${sweepsFailed.join(',')}]` : ''),
+      ` sweeps_failed=[${sweepsFailed.join(',')}]` +
+      (sweepsCatchUp.length ? ` sweeps_catch_up=[${sweepsCatchUp.join(',')}]` : ''),
   );
 }
 

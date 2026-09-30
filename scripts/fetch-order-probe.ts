@@ -1,16 +1,24 @@
 /**
  * Fetch-order probe (PF-5c): why does a provider's fetch latency on the GitHub runner grow with
- * its place in aggregate's fetch order? Run it on a runner (a throwaway workflow; each job is a
- * fresh VM, so its first pass sees a cold resolver cache, like every aggregate run does).
+ * its place in aggregate's fetch order? Run it on a runner (a throwaway workflow with one job per
+ * mode; each job is a fresh VM, so its first pass sees a cold resolver cache, as every aggregate
+ * run does).
  *
- *   npx tsx scripts/fetch-order-probe.ts lookup   # getaddrinfo (dns.lookup, libuv threadpool)
- *   npx tsx scripts/fetch-order-probe.ts cares    # c-ares (dns.Resolver, no threadpool)
- *   npx tsx scripts/fetch-order-probe.ts fetch    # the 41 live fetches, lookups timed
+ *   npx tsx scripts/fetch-order-probe.ts lookup   # getaddrinfo (dns.lookup, libuv thread pool)
+ *   npx tsx scripts/fetch-order-probe.ts cares    # c-ares (dns.Resolver, no thread pool)
+ *   npx tsx scripts/fetch-order-probe.ts fetch    # the 40 live fetches, lookups timed
  *   npx tsx scripts/fetch-order-probe.ts fetch --warm   # the same after warming the resolver
  *
  * Run each under the default pool and under UV_THREADPOOL_SIZE=64. The `lookup` and `cares`
  * modes send no HTTP request; `fetch` sends each live source one request (ComCat and EMSC one
- * each), never the sweeps.
+ * each), never the sweeps. The order is aggregate's order before PF-5c (the sweeps last).
+ *
+ * Result on ubuntu-24.04 (run 36740375837, 2026-09-30): cold getaddrinfo with 4 threads finished
+ * in fetch order, median 1.3 s for places 0-3, 3.7 s for 4-12, 7.1 s for 13-26, 9.0 s for 27-39
+ * and 9.8 s for the three sweeps; with 64 threads the slowest lookup took 3.1 s and the sweeps'
+ * 0.2-2.0 s; c-ares (no pool) at most 2.6 s. The live fetches with 4 threads: lookups done after
+ * up to 12.2 s, latencies up to 15.4 s, `usp` aborted; with 64 threads the slowest fetch took
+ * 3.5 s, and the event-loop delay stayed under 20 ms (p99) in both.
  */
 import dns from 'node:dns';
 import { readFileSync } from 'node:fs';
@@ -91,6 +99,7 @@ async function fetchAll(): Promise<void> {
   // Time every getaddrinfo the fetches make (undici connects through dns.lookup).
   const lookups: { host: string; issued: number; done: number }[] = [];
   const orig = dns.lookup;
+  const call = orig as unknown as (...a: unknown[]) => unknown;
   const t0 = performance.now();
   (dns as { lookup: unknown }).lookup = function (host: string, opts: unknown, cb: unknown) {
     const rec = { host, issued: performance.now() - t0, done: NaN };
@@ -100,7 +109,7 @@ async function fetchAll(): Promise<void> {
       rec.done = performance.now() - t0;
       done(...a);
     };
-    return typeof opts === 'function' ? orig.call(dns, host, wrapped as never) : orig.call(dns, host, opts as never, wrapped as never);
+    return typeof opts === 'function' ? call.call(dns, host, wrapped) : call.call(dns, host, opts, wrapped);
   };
   const loop = monitorEventLoopDelay({ resolution: 10 });
   loop.enable();

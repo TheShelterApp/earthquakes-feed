@@ -123,7 +123,7 @@ Last run's per-provider health, counts, timings, `degraded[]`. Counts include `m
 (`op:merge` lines), `bad_coords_dropped`, `coordinateless_dropped` (coordinate-less reports
 refused at ingest), `coordinateless_withdrawn` (those among them that withdrew a known id, see
 below), `coordinateless_retracted`, `late_minted` and `late_withheld` (see *Late publications*);
-the heal run also carries `heal`. `sweeps.updated` / `sweeps.deleted` hold the outcome (`ok`,
+the heal run also carries `heal`, and the one-time correction run `correction` (see *Turkey (AFAD)*). `sweeps.updated` / `sweeps.deleted` hold the outcome (`ok`,
 `http_status`, `latency_ms`, `events_returned`, `error`) of each source's `updatedafter` revision
 query and `includedeleted` delete query in that run, with where the sweep stands: `since` (the
 `updatedafter` it asked from), `pages`, `through` (its cursor after the run: the moment the last
@@ -276,6 +276,31 @@ ComCat delete of the id withdraws the AEC row too (an `op:tombstone` line with a
 the event is `tombstoned` when no other source reports it; AEC's file listing the id afterwards
 does not bring it back. The file has no update time and no delete marker. The source is
 forward-only: no backfill before its first run beyond the 7-day window that run ingested.
+
+## Turkey (AFAD)
+
+AFAD's event service writes its times in UTC without a zone suffix (`"date": "2026-09-30T19:19:18"`).
+Until 2026-10-01 the `afad` adapter read them as Turkish local time (UTC+3), so **every AFAD event
+from the source's first day to that date was stored 3 h early**, and EMSC's copy of the same quake
+(EMSC republishes AFAD's solution with `auth: "AFAD"`) stood beside it as a second event, 3 h later.
+The adapter reads them as UTC since then. A one-time correction (`knowledge/index/correction.json` on
+the `data` branch, epoch 1) re-read every AFAD row of the days the manifest did not yet call frozen
+(the last 10 event days) from the row's own stored `fields.date` and moved it to its real time: an
+`op:observe` line with a `reason` ("correction epoch 1: re-read with the fixed AFAD parser …"), after
+the `op:merge` lines of the folds it caused (an AFAD event and EMSC's copy of it, or another source's
+report of the same quake, become one event; the AFAD event can move to the next UTC day). An AFAD row
+that had joined another source's event at its wrong time left that event (an `op:tombstone` line with
+a `reason`) and was placed anew. In a dense cell, where two reports join only on a shared id, EMSC's
+copy of an AFAD solution (`auth: "AFAD"`, the same second, place and magnitude) counts as one.
+
+History is never rewritten: in the frozen day partitions and the monthly Release archives every AFAD
+row keeps its 3 h early time. On the `data` branch of 2026-10-01 that was every AFAD row from
+2023-07-06 (the start of its backfill) to 2026-09-20; the day partitions 2026-06-01…09-20 alone hold
+9,700 live AFAD rows (9,680 events AFAD alone reports, 3,309 of which have EMSC's AFAD-authored copy
+as a separate live event 3 h later) and 20 AFAD rows sitting in another source's event. A consumer of
+that history can shift a feature's time by +3 h when its chosen provider is `afad` and its
+`feed.event_time` is exactly 3 h before the chosen provenance row's `fields.date` read as UTC, and
+drop EMSC's `auth: "AFAD"` copy of it.
 
 ## Recipes
 

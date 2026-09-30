@@ -57,6 +57,13 @@ export const RETIRED_VISIBLE_MS = 48 * 3600_000;
  *  event-map horizon, logged like any other change, then the marker records this epoch in the
  *  same commit. Bump it only to run a new heal on purpose. */
 export const HEAL_EPOCH = 1;
+/** The one-time correction (src/correction.ts). aggregate runs it once when the data branch's
+ *  knowledge/index/correction.json holds a lower epoch (or none), before the run's reports, over the days the manifest
+ *  does not call frozen (event days from now − LIVE_INDEX_DAYS on; partitions.ts FROZEN_AFTER_DAYS), logged like any
+ *  other change; the marker records this epoch in the same commit. Frozen days are never touched: the feed does not
+ *  rewrite history. Epoch 1 (2026-10-01): AFAD rows stored 3 h early are read again with the fixed parser and re-timed
+ *  (PF-5e). Bump it only to run a new correction on purpose, with that correction's code. */
+export const CORRECTION_EPOCH = 1;
 /** Only events within this many days are kept in the in-memory dedup index. */
 export const HOT_WINDOW_DAYS = 7;
 /** aggregate loads only this many days of event_map shards (fast hot path). */
@@ -87,6 +94,15 @@ export const COMCAT_PROVIDER = 'usgs';
  *  ComCat prefers another network's id (`us7000…`). A ComCat delete of the id withdraws their row as well, and a row
  *  of theirs withdrawn that way never comes back while the provider keeps listing the id (Resolver). */
 export const COMCAT_ID_PROVIDERS: ReadonlySet<string> = new Set(['aec']);
+/** EMSC `auth` codes whose EMSC copy is that feed provider's own solution: EMSC re-publishes the authoring agency's
+ *  origin, rounded (2026-09-30: AFAD 730046 at 19:19:18, 38.46667 / 39.21483, ML 0.9 is EMSC 20260930_0000241 at
+ *  19:19:18Z, 38.4667 / 39.2148, ml 0.9, auth AFAD). An EMSC row with one of these codes and the same solution
+ *  (Resolver.sameSolution: ±2 s, 2 km, |ΔM| ≤ 0.1) as a row of the mapped provider shares that row's identity, the
+ *  evidence a dense cell asks for before a location join (PF-5e: without it AFAD's report and EMSC's copy stay two
+ *  events in the Sındırgı cell). Other agencies' copies behave the same way; add a code only after checking that
+ *  EMSC copies the agency's origin unchanged. */
+export const EMSC_PROVIDER = 'emsc';
+export const EMSC_AUTHORED_COPIES: ReadonlyMap<string, string> = new Map([['AFAD', 'afad']]);
 /** Rolling-file sources whose ids are watched for disappearing (PF-5b, log only): a row younger than
  *  ABSENCE_WATCH_DAYS that the feed holds and a complete file no longer lists is counted in status `absent`. AEC's
  *  file spans ~14 days, so a younger id that vanishes was most likely deleted upstream; whether to retract on absence
@@ -162,6 +178,7 @@ export function dataPaths(root = DATA_DIR) {
     backfillCursor: join(root, 'knowledge', 'index', 'backfill.json'),
     onboardCursor: join(root, 'knowledge', 'index', 'onboard.json'),
     healMarker: join(root, 'knowledge', 'index', 'heal.json'),
+    correctionMarker: join(root, 'knowledge', 'index', 'correction.json'),
     sweepCursors: join(root, 'knowledge', 'index', 'sweeps.json'),
     archivesIndex: join(root, 'knowledge', 'index', 'archives.json'),
     partitionsIndex: join(root, 'knowledge', 'index', 'partitions.json'),

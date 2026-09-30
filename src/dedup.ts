@@ -1,6 +1,8 @@
 import {
   COMCAT_ID_PROVIDERS,
   COMCAT_PROVIDER,
+  EMSC_AUTHORED_COPIES,
+  EMSC_PROVIDER,
   GRID_CELL_DEG,
   HOT_WINDOW_DAYS,
   LARGE_EVENT_BASE_KM,
@@ -20,7 +22,7 @@ import {
 import { qualityCount } from './canonical.js';
 import { gatherCellKeys, gridKey, haversineKm } from './geo.js';
 import { isCoordinateless } from './quality.js';
-import type { EventNode, ProvenanceRow, ProviderConfig, RawObs } from './types.js';
+import type { EventNode, Extra, Op, ProvenanceRow, ProviderConfig, RawObs } from './types.js';
 import { deterministicFeedId } from './ulid.js';
 import { knownAliasIdsOf, statusRank } from './util.js';
 
@@ -78,6 +80,12 @@ interface Solution {
   status: string | null;
 }
 
+/** A report or a stored row, as authoredCopy reads it. */
+interface SourcedSolution extends Solution {
+  provider: string;
+  fields: Extra;
+}
+
 /** One op:merge — `loser` folded into `survivor` because of `reason`. */
 export interface MergeRecord {
   survivor: EventNode;
@@ -109,6 +117,8 @@ export class Resolver {
   private readonly alias = new Map<string, string>();
   private readonly geo = new Map<string, Set<string>>();
   private readonly hotFloor: number;
+  /** When set, a cell's density counts only live events at or after it (isDense). */
+  private readonly denseFloor: number | null;
   private readonly mergePass: boolean;
   /** Provider keys of tombstoned nodes (the alias map holds live nodes only), so a COMCAT_ID_PROVIDERS report of an
    *  id ComCat deleted is recognised in later runs too (retiredComcatNode). */
@@ -122,11 +132,14 @@ export class Resolver {
     private readonly priority: Map<string, number>,
     private readonly cfg: Map<string, ProviderConfig>,
     nowMs: number,
-    opts: { hotFloorMs?: number; merge?: boolean } = {},
+    opts: { hotFloorMs?: number; denseFloorMs?: number; merge?: boolean } = {},
   ) {
     // Backfill passes hotFloorMs=0 to index events by event-time window (not wall-clock
     // recency), so historical reports dedup against the transient partition index (C2).
     this.hotFloor = opts.hotFloorMs ?? nowMs - HOT_WINDOW_DAYS * 86_400_000;
+    // The one-time correction reaches back past the hot window (hotFloorMs) but judges a cell's
+    // density as the regular pass does, over the hot window only (denseFloorMs).
+    this.denseFloor = opts.denseFloorMs ?? null;
     // Backfill and onboard pass merge=false: they never append to the observation log, so a
     // fold there would retire a published event with no op:merge line (and, on a run that
     // appended nothing, no change-log line either). Folds happen only on aggregate's logged
@@ -154,19 +167,36 @@ export class Resolver {
   }
 
   private isDense(lat: number, lon: number): boolean {
-    return (this.geo.get(gridKey(lat, lon, GRID_CELL_DEG))?.size ?? 0) >= SWARM_CELL_ABSOLUTE;
+    const set = this.geo.get(gridKey(lat, lon, GRID_CELL_DEG));
+    if (!set) return false;
+    if (this.denseFloor == null) return set.size >= SWARM_CELL_ABSOLUTE;
+    let n = 0;
+    for (const fid of set) if ((this.eventMap.get(fid)?.eventTimeMs ?? -Infinity) >= this.denseFloor && ++n >= SWARM_CELL_ABSOLUTE) return true;
+    return false;
   }
 
   /** Id-level linkage ONLY (design §8.4): in a dense cell the sole trustworthy evidence
-   *  that two reports are one event is a shared identifier — never bare provider equality. */
+   *  that two reports are one event is a shared identifier — never bare provider equality. An
+   *  authored copy (authoredCopy: EMSC re-publishing an agency's own solution) counts as one. */
   private sharesIdentity(raw: RawObs, node: EventNode): boolean {
-    return raw.knownAliasIds.some((a) => node.aliases.includes(a));
+    return raw.knownAliasIds.some((a) => node.aliases.includes(a)) || node.provenance.some((r) => Resolver.authoredCopy(raw, r) || Resolver.authoredCopy(r, raw));
   }
 
-  /** Node-to-node form of sharesIdentity: one node's own report names the other's id (USGS `ids`). */
+  /** Node-to-node form of sharesIdentity: one node's own report names the other's id (USGS `ids`), or one node holds
+   *  an authored copy of a row of the other. */
   private static nodesShareIdentity(a: EventNode, b: EventNode): boolean {
     const named = (n: EventNode): string[] => n.provenance.flatMap((r) => knownAliasIdsOf(r.provider, r.nativeId, r.fields));
-    return named(a).some((k) => b.aliases.includes(k)) || named(b).some((k) => a.aliases.includes(k));
+    if (named(a).some((k) => b.aliases.includes(k)) || named(b).some((k) => a.aliases.includes(k))) return true;
+    return a.provenance.some((ra) => b.provenance.some((rb) => Resolver.authoredCopy(ra, rb) || Resolver.authoredCopy(rb, ra)));
+  }
+
+  /** `copy` is EMSC's copy of `original`: an EMSC row whose `auth` names `original`'s provider
+   *  (config EMSC_AUTHORED_COPIES) with the same solution (sameSolution). EMSC re-publishes the authoring
+   *  agency's origin, so the two rows are one agency's one solution, as good as a shared id (PF-5e). */
+  private static authoredCopy(copy: SourcedSolution, original: SourcedSolution): boolean {
+    if (copy.provider !== EMSC_PROVIDER) return false;
+    const auth = copy.fields['auth'];
+    return typeof auth === 'string' && EMSC_AUTHORED_COPIES.get(auth) === original.provider && Resolver.sameSolution(copy, original);
   }
 
   /** One solution re-published under a second native id (INGV 46714321 / 47246702 on
@@ -507,6 +537,36 @@ export class Resolver {
     return fid ? this.applyIngest(fid, raw, ingestTime) : null;
   }
 
+  /** One-time correction (src/correction.ts), first step: `corrected` is a report the feed already holds, read again
+   *  with a fixed parser (PF-5e: AFAD's times, stored 3 h early). The provider sent nothing new, so the stored row is
+   *  found by its id only, and nothing happens when the id is unknown, retired or already holds this solution. When
+   *  every row of the node is this provider's, the row is replaced like a revision and the node moves with it (an
+   *  op:observe entry). When the node holds other providers' rows, the row joined them at its wrong time, so it leaves:
+   *  withdrawn from that node (an op:tombstone entry, `raw` the old row), its id taken off the node, and placed in an
+   *  event of its own at the right time (an op:observe entry). Nothing folds here: the caller corrects every row first
+   *  and then runs foldAround over the events it touched, so a fold never picks a partner while that partner's own
+   *  twin is still at its wrong time (AFAD 729259 and 729260, 20 s apart at one place: EMSC copied 729260, and folding
+   *  in time order gave EMSC's copy to 729259). The entries come back in log order. */
+  correctReport(corrected: RawObs, ingestTime: string): { raw: RawObs; result: IngestResult; op: Op }[] {
+    const key = `${corrected.provider}:${corrected.providerEventId}`;
+    const fid = this.alias.get(key);
+    const node = fid ? this.resolveLive(fid) : undefined;
+    if (!node || node.state !== 'live') return [];
+    const idx = node.provenance.findIndex((r) => r.provider === corrected.provider && r.nativeId === corrected.providerEventId);
+    if (idx < 0 || Resolver.solutionEqual(node.provenance[idx]!, corrected)) return [];
+    if (node.provenance.every((r) => r.provider === corrected.provider)) {
+      return [{ raw: corrected, result: this.applyIngest(node.feedId, corrected, ingestTime, false), op: 'observe' }];
+    }
+    const old = rowAsReport(node.provenance[idx]!);
+    const withdrawn = this.withdrawRow(node, idx, ingestTime, false);
+    node.aliases = node.aliases.filter((a) => a !== key);
+    this.alias.delete(key);
+    return [
+      { raw: old, result: withdrawn, op: 'tombstone' },
+      { raw: corrected, result: this.applyIngest(this.mintId(corrected), corrected, ingestTime), op: 'observe' },
+    ];
+  }
+
   /** True when the feed already holds this provider's report of the event (found by id only) with
    *  a later update stamp than `raw`'s: `raw` is an older copy. The sweeps are issued before the
    *  live fetches (PF-5c), so a sweep's answer can predate the live query's in the same run, and
@@ -565,7 +625,8 @@ export class Resolver {
     return best;
   }
 
-  private applyIngest(fid: string, raw: RawObs, ingestTime: string): IngestResult {
+  /** `fold` false skips the fold passes after a change (correctReport; the caller folds afterwards). */
+  private applyIngest(fid: string, raw: RawObs, ingestTime: string, fold = true): IngestResult {
     const key = `${raw.provider}:${raw.providerEventId}`;
     let node = this.resolveLive(fid);
     // A COMCAT_ID_PROVIDERS report also puts the ComCat id it names on the node (PF-5b), so a later ComCat row of
@@ -655,6 +716,7 @@ export class Resolver {
     if (structural || unhidden || Resolver.sig(node) !== beforeSig) {
       node.revision += 1;
       node.lastIngestTime = ingestTime;
+      if (!fold) return { node, changed: true, revision: node.revision, merges: [] };
       const merges: MergeRecord[] = [];
       const survivor = this.mergeAround(this.foldComcatTwins(node, ingestTime, merges), ingestTime, merges);
       return { node: survivor, changed: true, revision: survivor.revision, merges };
@@ -827,8 +889,8 @@ export class Resolver {
   }
 
   /** Drop one provenance row from a live node: tombstone it when none is left, else re-derive
-   *  the representative and run the merge pass (the solution may have moved). */
-  private withdrawRow(node: EventNode, idx: number, ingestTime: string): IngestResult {
+   *  the representative and run the merge pass (the solution may have moved; not when `fold` is false). */
+  private withdrawRow(node: EventNode, idx: number, ingestTime: string, fold = true): IngestResult {
     node.provenance.splice(idx, 1);
     node.revision += 1;
     node.lastIngestTime = ingestTime;
@@ -840,6 +902,7 @@ export class Resolver {
       return { node, changed: true, revision: node.revision, merges: [] };
     }
     this.reposition(node);
+    if (!fold) return { node, changed: true, revision: node.revision, merges: [] };
     const merges: MergeRecord[] = [];
     const survivor = this.mergeAround(node, ingestTime, merges);
     return { node: survivor, changed: true, revision: survivor.revision, merges };
@@ -942,16 +1005,31 @@ export class Resolver {
    *  op:merge re-aimed instead of logged twice. Returns the folds (in order) and the live
    *  survivors whose revision moved, in event-time order. A no-op when merge=false. */
   heal(ingestTime: string): { merges: MergeRecord[]; survivors: EventNode[] } {
+    return this.foldPasses(() => [...this.eventMap.values()].filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor), ingestTime);
+  }
+
+  /** The heal's pass over the live events behind `feedIds` only (each id followed to its live survivor): the
+   *  one-time correction's second step, after correctReport moved their rows. Same gates, survivor rule, passes and
+   *  single `merges` list as heal. A no-op when merge=false. */
+  foldAround(feedIds: Iterable<string>, ingestTime: string): { merges: MergeRecord[]; survivors: EventNode[] } {
+    const ids = [...new Set(feedIds)];
+    return this.foldPasses(
+      () => [...new Set(ids.map((f) => this.resolveLive(f)))].filter((n): n is EventNode => n != null && n.state === 'live' && n.eventTimeMs >= this.hotFloor),
+      ingestTime,
+    );
+  }
+
+  /** mergeAround over the nodes `pick` returns, in event-time order (then feed id), in passes until one folds
+   *  nothing: a node visited before its mutual partner formed (that partner was still paired with a better match)
+   *  gets another look. Bounded. */
+  private foldPasses(pick: () => EventNode[], ingestTime: string): { merges: MergeRecord[]; survivors: EventNode[] } {
     const merges: MergeRecord[] = [];
     if (!this.mergePass) return { merges, survivors: [] };
     const byTimeThenId = (a: EventNode, b: EventNode): number =>
       a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : a.feedId > b.feedId ? 1 : 0);
-    // Passes until one folds nothing: a node visited before its mutual partner formed (that
-    // partner was still paired with a better match) gets another look. Bounded.
     for (let pass = 0; pass < HEAL_MAX_PASSES; pass++) {
       const before = merges.length;
-      const nodes = [...this.eventMap.values()].filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor).sort(byTimeThenId);
-      for (const node of nodes) if (node.state === 'live') this.mergeAround(node, ingestTime, merges);
+      for (const node of pick().sort(byTimeThenId)) if (node.state === 'live') this.mergeAround(node, ingestTime, merges);
       if (merges.length === before) break;
     }
     const survivors = [...new Set(merges.map((m) => m.survivor))].filter((n) => n.state === 'live').sort(byTimeThenId);

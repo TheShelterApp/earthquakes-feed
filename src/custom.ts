@@ -117,32 +117,44 @@ export interface Window {
 }
 export type CustomAdapter = (cfg: ProviderConfig, nowMs: number, window?: Window) => Promise<RawObs[]>;
 
-// --- Turkey: AFAD (query is local time UTC+3, dense down to ~M0.6) ---
-const afad: CustomAdapter = async (cfg, nowMs, window) => {
-  const startMs = window ? window.startMs : nowMs - QUERY_LOOKBACK_MS;
-  const endMs = window ? window.endMs : nowMs;
-  // Pad ±4h so the UTC window is fully covered by the local-time (UTC+3) query bounds;
-  // fetchProviderWindow re-filters to the exact UTC window afterward.
-  const start = fmt(startMs - 4 * 3_600_000).replace(' ', '%20');
-  const end = fmt(endMs + 4 * 3_600_000).replace(' ', '%20');
-  const url = `${cfg.base}?start=${start}&end=${end}&orderby=timedesc&limit=500`;
-  const raw = JSON.parse(await getText(url, { timeoutMs: 12_000, retries: 2 })) as unknown;
-  const list = Array.isArray(raw) ? raw : ((raw as { eventList?: unknown[] }).eventList ?? []);
+// --- Turkey: AFAD (UTC timestamps without a zone suffix, dense down to ~M0.6) ---
+/** AFAD apiv2 `event/filter` records. `date` and `lastUpdateDate` are UTC written without a zone suffix
+ *  ("2026-09-30T19:19:18"), and the `start` / `end` query bounds are read in the same frame. Until 2026-10-01 this
+ *  parser read them as Turkish local time (UTC+3) and stored every AFAD event 3 h early (PF-5e): all 8,057 AFAD
+ *  observations logged from 2026-07-05 to 2026-09-30 sit exactly 3 h before their own `date`, EMSC's AFAD-authored copy
+ *  of AFAD 730046 says 19:19:18Z where the feed stored 16:19:18Z, the quickest first sight was then 3.06 h after the
+ *  stored origin (0.06 h read as UTC; median 0.52 h), and a query at 20:51 UTC on 2026-09-30 returned 19:34:46 as the
+ *  newest `date`, which as Turkish time would have been more than four hours of silence from a network that lists an
+ *  event every 15–25 minutes. */
+export function parseAfad(list: unknown, providerId: string): RawObs[] {
+  const rows = Array.isArray(list) ? list : ((list as { eventList?: unknown[] } | null)?.eventList ?? []);
   const out: RawObs[] = [];
-  for (const e of list as Record<string, unknown>[]) {
-    const t = shiftUtc(e['date'], 3);
+  for (const e of rows as Record<string, unknown>[]) {
+    const t = parseUtcMs(e['date'] as string | number | null);
     const lat = num(e['latitude']);
     const lon = num(e['longitude']);
     if (t == null || lat == null || lon == null) continue;
     out.push({
-      provider: cfg.id, providerEventId: String(e['eventID'] ?? ''), eventTimeMs: t,
-      providerUpdatedMs: shiftUtc(e['lastUpdateDate'], 3),
+      provider: providerId, providerEventId: String(e['eventID'] ?? ''), eventTimeMs: t,
+      providerUpdatedMs: parseUtcMs(e['lastUpdateDate'] as string | number | null),
       status: null, lat, lon, depth: num(e['depth']),
       mag: num(e['magnitude']), magType: (e['type'] as string) ?? null,
       place: (e['location'] as string) ?? null, knownAliasIds: [], fields: flattenScalars(e),
     });
   }
   return out.filter((o) => o.providerEventId);
+}
+
+/** The AFAD query for [startMs, endMs]: the bounds are UTC, like `date` (fetchProviderWindow re-filters to the exact
+ *  window afterward). Until 2026-10-01 they were padded by 4 h for a local-time reading of the API. */
+export function afadQueryUrl(base: string, startMs: number, endMs: number): string {
+  return `${base}?start=${fmt(startMs).replace(' ', '%20')}&end=${fmt(endMs).replace(' ', '%20')}&orderby=timedesc&limit=500`;
+}
+
+const afad: CustomAdapter = async (cfg, nowMs, window) => {
+  const startMs = window ? window.startMs : nowMs - QUERY_LOOKBACK_MS;
+  const endMs = window ? window.endMs : nowMs;
+  return parseAfad(JSON.parse(await getText(afadQueryUrl(cfg.base, startMs, endMs), { timeoutMs: 12_000, retries: 2 })) as unknown, cfg.id);
 };
 
 // --- China: CENC (Beijing time UTC+8) ---

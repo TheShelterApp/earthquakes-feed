@@ -125,7 +125,11 @@ refused at ingest), `coordinateless_withdrawn` (those among them that withdrew a
 below), `coordinateless_retracted`, `late_minted` and `late_withheld` (see *Late publications*);
 the heal run also carries `heal`. `sweeps.updated` / `sweeps.deleted` hold the outcome (`ok`,
 `http_status`, `latency_ms`, `events_returned`, `error`) of each source's `updatedafter` revision
-query and `includedeleted` delete query in that run.
+query and `includedeleted` delete query in that run, with where the sweep stands: `since` (the
+`updatedafter` it asked from), `pages`, `through` (its cursor after the run: the moment the last
+complete sweep was sent, so a sweep that did not complete keeps the previous one and the next run
+asks for the same window again), `epoch` (the catch-up epoch recorded with that cursor) and
+`catch_up: true` on the one-time catch-up run. `sweeps.epoch` is the current catch-up epoch.
 
 ## The Feature
 
@@ -226,7 +230,7 @@ events only after analyst review, for example in Alaska, Texas, Oklahoma and the
 Northwest (184 of 693 M ≥ 2.5 events with origins 2026-09-10…20 never reached the feed before
 this rule; a sample of 21 of them had been published 2.1–16.8 days after origin). Each run asks
 the sources for recent origins (the FDSN ones for the last 48 h), plus ComCat and EMSC for every
-event updated since the previous run. A ComCat event the feed has never seen enters
+event updated since its last complete sweep. A ComCat event the feed has never seen enters
 the feed from that second query when its origin is within the last **7 days** (the window in
 which the feed matches reports by time and place). It is a new event of that run:
 `feed.first_ingest_time` (and its `op:observe` line's `ingest_time`) is days after

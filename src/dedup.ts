@@ -392,6 +392,18 @@ export class Resolver {
     return fid ? this.applyIngest(fid, raw, ingestTime) : null;
   }
 
+  /** True when the feed already holds this provider's report of the event (found by id only) with
+   *  a later update stamp than `raw`'s: `raw` is an older copy. The sweeps are issued before the
+   *  live fetches (PF-5c), so a sweep's answer can predate the live query's in the same run, and
+   *  applying it after the live row would roll the event back for a run. */
+  isOlderThanStored(raw: RawObs): boolean {
+    if (raw.providerUpdatedMs == null) return false;
+    const fid = this.alias.get(`${raw.provider}:${raw.providerEventId}`);
+    const node = fid ? this.resolveLive(fid) : undefined;
+    const row = node?.provenance.find((r) => r.provider === raw.provider && r.nativeId === raw.providerEventId);
+    return row?.providerUpdatedMs != null && raw.providerUpdatedMs < row.providerUpdatedMs;
+  }
+
   /** An `updatedafter` observation from a catalog that may publish an event days after its
    *  origin (ComCat, PF-5a). A report findExisting places is a revision, exactly as in
    *  reviseExisting. An unknown one is minted, like a live report, when its origin is inside the

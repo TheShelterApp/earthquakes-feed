@@ -35,6 +35,8 @@ export interface SweepResult {
   lateMinted: LateMint[];
   /** Unknown rows inside the hot window not minted beside another provider's event (status `late_withheld`). */
   lateWithheld: LateWithheld[];
+  /** Rows older than the copy the feed already holds (Resolver.isOlderThanStored), skipped. */
+  stale: number;
 }
 
 const lagDaysOf = (raw: RawObs, ingestTime: string): number => (Date.parse(ingestTime) - raw.eventTimeMs) / 86_400_000;
@@ -45,7 +47,9 @@ export const lateMintReason = (lagDays: number): string =>
 
 /**
  * aggregate's revision sweep (H2): the `updatedafter` rows, screened and in ingest order. Each row
- * advances its provider's watermark. A row of a known event is a revision (Resolver.reviseExisting).
+ * advances its provider's watermark. A row stamped earlier than the copy of it the feed already
+ * holds is skipped (`stale`): the sweeps' answer can predate this run's live one (PF-5c). A row of a
+ * known event is a revision (Resolver.reviseExisting).
  * An unknown row is skipped, except for a `lateMintProviders` provider (config LATE_MINT_PROVIDERS,
  * PF-5a): there it is minted when its origin is inside the hot window
  * (Resolver.reviseOrMintInHotWindow), since that catalog publishes events days after their origin,
@@ -68,9 +72,14 @@ export function revisionSweep(
   let revisions = 0;
   const lateMinted: LateMint[] = [];
   const lateWithheld: LateWithheld[] = [];
+  let stale = 0;
   for (const raw of updates) {
     if (raw.providerUpdatedMs != null) {
       watermarks[raw.provider] = Math.max(watermarks[raw.provider] ?? 0, raw.providerUpdatedMs);
+    }
+    if (resolver.isOlderThanStored(raw)) {
+      stale++;
+      continue;
     }
     if (!lateMintProviders.has(raw.provider)) {
       const r = resolver.reviseExisting(raw, ingestTime);
@@ -114,5 +123,5 @@ export function revisionSweep(
       lagDays,
     });
   }
-  return { revisions, lateMinted, lateWithheld };
+  return { revisions, lateMinted, lateWithheld, stale };
 }

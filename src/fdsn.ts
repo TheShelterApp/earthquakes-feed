@@ -1,10 +1,16 @@
 import type { Extra, RawObs } from './types.js';
 import { flattenScalars, knownAliasIdsOf, num, parseUtcMs } from './util.js';
 
+/** How many records a response held before the parser dropped any (a sweep pages on it). */
+export interface ParseStats {
+  rows: number;
+}
+
 /** Tolerant parser for USGS-GeoJSON and EMSC seismicportal `format=json` (a GeoJSON superset). */
-export function parseGeoJSON(body: string, provider: string): RawObs[] {
+export function parseGeoJSON(body: string, provider: string, stats?: ParseStats): RawObs[] {
   const json = JSON.parse(body) as { features?: unknown[] };
   const features = Array.isArray(json.features) ? json.features : [];
+  if (stats) stats.rows = features.length;
   const out: RawObs[] = [];
   for (const f of features) {
     const feat = f as { id?: unknown; properties?: Record<string, unknown>; geometry?: { coordinates?: unknown[] } };
@@ -43,8 +49,9 @@ export function parseGeoJSON(body: string, provider: string): RawObs[] {
  * FDSN "text" bulletin:
  * #EventID|Time|Latitude|Longitude|Depth/km|Author|Catalog|Contributor|ContributorID|MagType|Magnitude|MagAuthor|EventLocationName|EventType
  */
-export function parseFdsnText(body: string, provider: string): RawObs[] {
+export function parseFdsnText(body: string, provider: string, stats?: ParseStats): RawObs[] {
   const lines = body.split('\n');
+  if (stats) stats.rows = lines.filter((l) => l.trim() && !l.trim().startsWith('#')).length;
   // Header names the columns (they vary: SCEDC adds ET/GT + a "Longtitude" typo; RESIF
   // uses MagnitudeType/MagnitudeAuthor) — capture every column verbatim by its real name.
   const header = lines.find((l) => l.startsWith('#'));

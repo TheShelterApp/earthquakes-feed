@@ -266,7 +266,9 @@ pruned to a 45-day dedup horizon, with older identity preserved in the day parti
 
 Running in production: `updatedafter` revision + `includedeleted` tombstone sweeps (the
 ComCat revision sweep also adds events ComCat published days after their origin, inside the
-7-day hot window — see [APIs.md](APIs.md#late-publications)),
+7-day hot window — see [APIs.md](APIs.md#late-publications); each sweep keeps its own cursor in
+`knowledge/index/sweeps.json`, which only a complete sweep advances, and ran a one-time 7-day
+catch-up, `SWEEP_EPOCH`),
 `op:merge` survivor selection (a large quake whose preliminary epicentres scattered across
 agencies folds into one feed id once the solutions converge; the loser is published
 superseded; two ids fold only when each is the other's best match), a one-time heal of the

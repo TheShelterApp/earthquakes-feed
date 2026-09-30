@@ -85,7 +85,8 @@ export function parseFdsnText(body: string, provider: string, stats?: ParseStats
       mag: num(c[10]),
       magType: (c[9] ?? '').trim() || null,
       place: (c[12] ?? '').trim() || null,
-      knownAliasIds: [],
+      // NCEDC / SCEDC ids name ComCat's `nc…` / `ci…` event (config COMCAT_ID_PREFIX, PF-5d).
+      knownAliasIds: knownAliasIdsOf(provider, providerEventId, fields),
       fields,
     });
   }

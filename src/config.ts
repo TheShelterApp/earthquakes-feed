@@ -57,6 +57,14 @@ export const RETIRED_VISIBLE_MS = 48 * 3600_000;
  *  event-map horizon, logged like any other change, then the marker records this epoch in the
  *  same commit. Bump it only to run a new heal on purpose. */
 export const HEAL_EPOCH = 1;
+/** The one-time correction (src/correction.ts). aggregate runs it once when the data branch's
+ *  knowledge/index/correction.json holds a lower epoch (or none), before the run's reports, over the days the manifest
+ *  does not call frozen (event days from now − LIVE_INDEX_DAYS on; partitions.ts FROZEN_AFTER_DAYS), logged like any
+ *  other change; the marker records this epoch in the same commit. Frozen days are never touched: the feed does not
+ *  rewrite history. Epoch 1 (2026-10-01): AFAD rows stored 3 h early are read again with the fixed parser and re-timed
+ *  (PF-5e), and NCEDC / SCEDC events standing beside ComCat's row of the same id are folded into it (PF-5d). Bump it
+ *  only to run a new correction on purpose, with that correction's code. */
+export const CORRECTION_EPOCH = 1;
 /** Only events within this many days are kept in the in-memory dedup index. */
 export const HOT_WINDOW_DAYS = 7;
 /** aggregate loads only this many days of event_map shards (fast hot path). */
@@ -80,13 +88,54 @@ export const QUERY_LOOKBACK_MS = Number(process.env.QUERY_LOOKBACK_MS ?? 2 * 24 
 export const LATE_MINT_PROVIDERS: ReadonlySet<string> = new Set(['usgs']);
 /** The provider that reads ComCat, the USGS ANSS catalog (PF-5b). */
 export const COMCAT_PROVIDER = 'usgs';
-/** Providers whose native event id IS the ComCat event id (PF-5b): AEC's `event_name` (`aka2026…`) is the id ComCat
- *  gives the same event once AEC sends it there, so identity with the `usgs` row is exact, whatever the distance
- *  between the two solutions. A report of theirs names `usgs:<its id>` (util.ts knownAliasIdsOf), the node that
- *  holds it carries that alias too, and it resolves to a node whose ComCat row lists its id in `ids`, even when
- *  ComCat prefers another network's id (`us7000…`). A ComCat delete of the id withdraws their row as well, and a row
- *  of theirs withdrawn that way never comes back while the provider keeps listing the id (Resolver). */
-export const COMCAT_ID_PROVIDERS: ReadonlySet<string> = new Set(['aec']);
+/** Providers whose native event id names the ComCat event id, with the ComCat catalog prefix that turns one into the
+ *  other (util.ts comcatIdOf). AEC's `event_name` (`aka2026…`) IS the id ComCat gives the same event once AEC sends
+ *  it there (PF-5b). NCEDC's and SCEDC's event ids are the NC and CI networks' own ids, which ComCat carries as
+ *  `nc<id>` / `ci<id>` (PF-5d, 2026-10-01: NCEDC 75438707 is ComCat nc75438707, SCEDC 41341119 is ci41341119, the two
+ *  rows identical to the millisecond and the metre). Identity with the `usgs` row is exact, whatever the distance
+ *  between the two solutions and however dense the cell: a report of theirs names `usgs:<ComCat id>`
+ *  (util.ts knownAliasIdsOf), a ComCat report finds their row through the ComCat ids it names, and a node whose
+ *  ComCat row lists the id in `ids` claims it even when ComCat prefers another network's id (`us7000…`). Until
+ *  PF-5d the NCEDC and SCEDC rows had no link to ComCat's: in a dense cell (The Geysers) a location join needs a
+ *  shared id, so 286 NCEDC and 18 SCEDC events stood beside ComCat's copy in the 10 days to 2026-10-01. */
+export const COMCAT_ID_PREFIX: ReadonlyMap<string, string> = new Map([
+  ['aec', ''],
+  ['ncedc', 'nc'],
+  ['scedc', 'ci'],
+]);
+export const COMCAT_ID_PROVIDERS: ReadonlySet<string> = new Set(COMCAT_ID_PREFIX.keys());
+/** The COMCAT_ID_PROVIDERS whose event list follows ComCat's lifecycle and is mostly automatic solutions (AEC,
+ *  PF-5b). The node that holds such a report carries the alias `usgs:<its id>`; an unmatched report beside another
+ *  agency's event is withheld (Resolver.lateTwin); a ComCat delete of the id withdraws their row as well, and a row
+ *  of theirs withdrawn that way never comes back while the provider keeps listing the id; and a location join with
+ *  another agency's event is held to LOCATION_JOIN_DT_MS / LOCATION_JOIN_MAX_DM. NCEDC and SCEDC are not in it:
+ *  they publish their networks' own catalogues and withdraw an id themselves by zeroing it (Resolver.withdrawZeroed),
+ *  so a ComCat delete leaves their row alone and a re-located id comes back as before. */
+export const COMCAT_LIFECYCLE_PROVIDERS: ReadonlySet<string> = new Set(['aec']);
+/** The origin-time and magnitude limits on a location join between a COMCAT_LIFECYCLE_PROVIDERS solution and an event
+ *  that holds no row of that provider (Resolver.lifecycleLocationBlocks: first sight and the merge pass alike; exact-id
+ *  joins are not affected). PF-5b review: AEC's automatic report joined by location to an AVO event 15 s away gave
+ *  that node the alias of AEC's id, so ComCat's later event of the same id welded into it: two quakes shown as one
+ *  where ComCat has two; and with a large magnitude gap an automatic M4.5 20 s / 2 km from a reviewed M1.5 was
+ *  shown as M1.5 (the ΔM-shrunk windows still allow 3 km / 24 s). Measured 2026-10-01 over 16 days of Alaska: every
+ *  same-quake AEC join was ≤ 3.4 s apart (373 exact-id joins ≤ 3.4 s and |ΔM| ≤ 0.2; 11 location joins ≤ 1.9 s and
+ *  |ΔM| ≤ 1.25, AEC's automatic ML of small volcanic quakes running high against AVO's reviewed one), while the
+ *  `ak` / `av` pairs ComCat keeps as distinct quakes are 13–55 s apart. An AEC report outside the limits is looked at
+ *  by lateTwin like any unmatched AEC report (withheld beside a same-size event, else minted). The limits hold only
+ *  while the AEC row stands without ComCat's row of its id: once ComCat's row is in the same event (an exact-id join),
+ *  that event joins other agencies' reports by the usual rules again, as before AEC was a source (review of PF-5b's
+ *  fix: an automatic solution must not keep splitting a quake ComCat has confirmed). */
+export const LOCATION_JOIN_DT_MS = 8_000;
+export const LOCATION_JOIN_MAX_DM = 1.5;
+/** EMSC `auth` codes whose EMSC copy is that feed provider's own solution: EMSC re-publishes the authoring agency's
+ *  origin, rounded (2026-09-30: AFAD 730046 at 19:19:18, 38.46667 / 39.21483, ML 0.9 is EMSC 20260930_0000241 at
+ *  19:19:18Z, 38.4667 / 39.2148, ml 0.9, auth AFAD). An EMSC row with one of these codes and the same solution
+ *  (Resolver.sameSolution: ±2 s, 2 km, |ΔM| ≤ 0.1) as a row of the mapped provider shares that row's identity, the
+ *  evidence a dense cell asks for before a location join (PF-5e: without it AFAD's report and EMSC's copy stay two
+ *  events in the Sındırgı cell). Other agencies' copies behave the same way; add a code only after checking that
+ *  EMSC copies the agency's origin unchanged. */
+export const EMSC_PROVIDER = 'emsc';
+export const EMSC_AUTHORED_COPIES: ReadonlyMap<string, string> = new Map([['AFAD', 'afad']]);
 /** Rolling-file sources whose ids are watched for disappearing (PF-5b, log only): a row younger than
  *  ABSENCE_WATCH_DAYS that the feed holds and a complete file no longer lists is counted in status `absent`. AEC's
  *  file spans ~14 days, so a younger id that vanishes was most likely deleted upstream; whether to retract on absence
@@ -162,6 +211,7 @@ export function dataPaths(root = DATA_DIR) {
     backfillCursor: join(root, 'knowledge', 'index', 'backfill.json'),
     onboardCursor: join(root, 'knowledge', 'index', 'onboard.json'),
     healMarker: join(root, 'knowledge', 'index', 'heal.json'),
+    correctionMarker: join(root, 'knowledge', 'index', 'correction.json'),
     sweepCursors: join(root, 'knowledge', 'index', 'sweeps.json'),
     archivesIndex: join(root, 'knowledge', 'index', 'archives.json'),
     partitionsIndex: join(root, 'knowledge', 'index', 'partitions.json'),

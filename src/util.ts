@@ -1,4 +1,4 @@
-import { COMCAT_ID_PROVIDERS, COMCAT_PROVIDER } from './config.js';
+import { COMCAT_ID_PREFIX, COMCAT_PROVIDER } from './config.js';
 
 export const round6 = (n: number): number => Math.round(n * 1e6) / 1e6;
 
@@ -90,15 +90,31 @@ export async function fetchText(url: string, timeoutMs: number): Promise<FetchRe
   }
 }
 
+/** The ComCat event id a COMCAT_ID_PROVIDERS native id names (AEC `aka2026…` → itself, NCEDC `75438707` →
+ *  `nc75438707`, SCEDC `41341119` → `ci41341119`), or null for any other provider. */
+export function comcatIdOf(provider: string, nativeId: string): string | null {
+  const prefix = COMCAT_ID_PREFIX.get(provider);
+  return prefix == null || !nativeId ? null : `${prefix}${nativeId}`;
+}
+
+/** The inverse of comcatIdOf: the native id `provider` would give the ComCat event `comcatId`, or null when the
+ *  ComCat id is not of that provider's catalog (`nc75438707` → NCEDC `75438707`; any id → AEC's own). */
+export function nativeIdOfComcat(provider: string, comcatId: string): string | null {
+  const prefix = COMCAT_ID_PREFIX.get(provider);
+  if (prefix == null || !comcatId.startsWith(prefix) || comcatId.length === prefix.length) return null;
+  return comcatId.slice(prefix.length);
+}
+
 /** Same-provider alias ids carried in a report's own vocabulary: USGS lists every contributing
  *  catalog id in `ids` (",us7000abc,ci12345,"). Registering them as `provider:id` aliases
  *  survives USGS preferred-id churn and gives the dense-cell guard real id-level linkage
  *  (design §8.3/§8.4). The same parse serves the adapters and the node-to-node merge pass.
- *  A COMCAT_ID_PROVIDERS report (AEC, PF-5b) also names the ComCat row of its own id
- *  (`usgs:aka2026…`): its native id is the ComCat id. */
+ *  A COMCAT_ID_PROVIDERS report also names the ComCat row of its own id (comcatIdOf: `usgs:aka2026…` for AEC,
+ *  PF-5b; `usgs:nc75438707` for NCEDC 75438707 and `usgs:ci41341119` for SCEDC 41341119, PF-5d). */
 export function knownAliasIdsOf(provider: string, providerEventId: string, fields: Record<string, unknown> | null | undefined): string[] {
   const out: string[] = [];
-  if (COMCAT_ID_PROVIDERS.has(provider) && providerEventId) out.push(`${COMCAT_PROVIDER}:${providerEventId}`);
+  const comcatId = comcatIdOf(provider, providerEventId);
+  if (comcatId) out.push(`${COMCAT_PROVIDER}:${comcatId}`);
   const ids = fields?.['ids'];
   if (typeof ids !== 'string') return out;
   for (const t of ids.split(',')) {

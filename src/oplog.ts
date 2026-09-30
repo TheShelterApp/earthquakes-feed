@@ -56,10 +56,11 @@ export function mergeLine(m: MergeRecord, seq: number, ingestTime: string): Obse
 }
 
 /** The op:correction line: a feed-side revision with no provider report behind it — the survivor
- *  of the one-time heal, whose revision the folds moved. `feed_id` / `revision` are the node's,
- *  the solution columns its representative (chosen row) after the folds, `fields` is empty (the
- *  rows were logged when observed) and `reason` names what it absorbed. It gives the survivor a
- *  seq of its own, so `ingest_seq` and the change-log stay one line per change. */
+ *  of a feed-side fold pass (the one-time heal or correction), whose revision the folds moved.
+ *  `feed_id` / `revision` are the node's, the solution columns its representative (chosen row)
+ *  after the folds, `fields` is empty (the rows were logged when observed) and `reason` names
+ *  what it absorbed. It gives the survivor a seq of its own, so `ingest_seq` and the change-log
+ *  stay one line per change. */
 export function correctionLine(node: EventNode, seq: number, ingestTime: string, reason: string): Observation {
   const chosen = node.provenance.find((r) => r.chosen) ?? node.provenance[0];
   return {
@@ -119,12 +120,18 @@ export class LogBuffer {
   /** The heal (Resolver.heal): one op:merge line per fold, in fold order, then one
    *  op:correction line per live survivor — the line that carries its new revision. */
   recordHeal(merges: MergeRecord[], survivors: EventNode[], epoch: number): void {
+    this.recordFolds(merges, survivors, `heal epoch ${epoch}`);
+  }
+
+  /** A feed-side fold pass (the heal, the one-time correction's Resolver.foldAround): one op:merge line per fold, in
+   *  fold order, then one op:correction line per live survivor, its `reason` `<label>: absorbed <feed ids>`. */
+  recordFolds(merges: MergeRecord[], survivors: EventNode[], label: string): void {
     for (const m of merges) this.merge(m);
     for (const node of survivors) {
       const absorbed = merges.filter((m) => m.survivor === node).map((m) => m.loser.feedId);
       this.seq += 1;
       node.lastSeq = this.seq;
-      this.lines.push(correctionLine(node, this.seq, this.ingestTime, `heal epoch ${epoch}: absorbed ${absorbed.join(', ')}`));
+      this.lines.push(correctionLine(node, this.seq, this.ingestTime, `${label}: absorbed ${absorbed.join(', ')}`));
     }
   }
 }

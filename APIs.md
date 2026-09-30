@@ -123,7 +123,8 @@ Last run's per-provider health, counts, timings, `degraded[]`. Counts include `m
 (`op:merge` lines), `bad_coords_dropped`, `coordinateless_dropped` (coordinate-less reports
 refused at ingest), `coordinateless_withdrawn` (those among them that withdrew a known id, see
 below), `coordinateless_retracted`, `late_minted` and `late_withheld` (see *Late publications*);
-the heal run also carries `heal`. `sweeps.updated` / `sweeps.deleted` hold the outcome (`ok`,
+the heal run also carries `heal`, and the one-time correction run `correction` (see *Turkey (AFAD)*
+and *California (NCEDC, SCEDC)*). `sweeps.updated` / `sweeps.deleted` hold the outcome (`ok`,
 `http_status`, `latency_ms`, `events_returned`, `error`) of each source's `updatedafter` revision
 query and `includedeleted` delete query in that run, with where the sweep stands: `since` (the
 `updatedafter` it asked from), `pages`, `through` (its cursor after the run: the moment the last
@@ -271,11 +272,61 @@ report that matches no event by id or by the usual time-and-place rules is not a
 source's live event lies within ±60 s, 50 km and one magnitude unit and holds no AEC row
 (`twin_withheld`): AEC lists every Alaska quake once, so that is most likely the same quake
 located differently (an automatic AEC solution 15 km from the Alaska Volcano Observatory's);
-it is looked at again every run and joins by id as soon as ComCat publishes it. A
+it is looked at again every run and joins by id as soon as ComCat publishes it. An AEC solution joins
+another source's event by time and place only when the two origins are within 8 s and one and a half
+magnitude units (every same-quake join seen was within 3.4 s; the Alaska Volcano Observatory quakes
+ComCat keeps apart from AEC's are 13 s or more apart): before 2026-10-01 an automatic AEC M4.5 20 s
+from a reviewed M1.5 could be shown as the M1.5, and two quakes ComCat publishes as two could be shown
+as one. A ComCat event that finds an event only through its AEC row, while that event's ComCat row is
+another quake by ComCat's own ids, stays a separate event. A
 ComCat delete of the id withdraws the AEC row too (an `op:tombstone` line with a `reason`), and
 the event is `tombstoned` when no other source reports it; AEC's file listing the id afterwards
 does not bring it back. The file has no update time and no delete marker. The source is
 forward-only: no backfill before its first run beyond the 7-day window that run ingested.
+
+## California (NCEDC, SCEDC)
+
+The `ncedc` and `scedc` sources read the Northern and Southern California networks' own catalogues.
+Their event ids are the ids ComCat gives the same events with the network's prefix (NCEDC
+`75438707` is ComCat `nc75438707`, SCEDC `41341119` is `ci41341119`), so since 2026-10-01 the feed
+joins such a row to ComCat's row of that id exactly, in either arrival order and also when ComCat
+prefers another id and lists the network's id in `ids`. Before that nothing linked the two ids, and
+where many small quakes fall into one cell (The Geysers) the feed joins two reports only on a shared
+id, so the regional row and ComCat's row of the same event were published as two events (286 NCEDC
+and 18 SCEDC ones in the 10 days to 2026-10-01, identical in time and place). The one-time correction
+of 2026-10-01 (see *Turkey (AFAD)*) folded the ones in the days not yet frozen into ComCat's event:
+`op:merge` lines with an `exact id` reason and an `op:correction` line for each survivor. Frozen days
+keep both events: the day partitions 2026-06-01…09-19 hold 3,899 NCEDC and 997 SCEDC events beside
+ComCat's event of the same id (drop a live `ncedc` / `scedc`-only feature whose `nc` / `ci` id another
+live feature lists in `feed.aliases` as `usgs:<id>`); the monthly Release archives before June were
+built by the same rules and were not re-checked. NCEDC and SCEDC withdraw an event themselves by re-publishing its id without a
+location (see *Retired events*); a ComCat delete of the id does not withdraw their row.
+
+## Turkey (AFAD)
+
+AFAD's event service writes its times in UTC without a zone suffix (`"date": "2026-09-30T19:19:18"`).
+Until 2026-10-01 the `afad` adapter read them as Turkish local time (UTC+3), so **every AFAD event
+from the source's first day to that date was stored 3 h early**, and EMSC's copy of the same quake
+(EMSC republishes AFAD's solution with `auth: "AFAD"`) stood beside it as a second event, 3 h later.
+The adapter reads them as UTC since then. A one-time correction (`knowledge/index/correction.json` on
+the `data` branch, epoch 1) re-read every AFAD row of the days the manifest did not yet call frozen
+(the last 10 event days) from the row's own stored `fields.date` and moved it to its real time: an
+`op:observe` line with a `reason` ("correction epoch 1: re-read with the fixed AFAD parser …"), after
+the `op:merge` lines of the folds it caused (an AFAD event and EMSC's copy of it, or another source's
+report of the same quake, become one event; the AFAD event can move to the next UTC day). An AFAD row
+that had joined another source's event at its wrong time left that event (an `op:tombstone` line with
+a `reason`) and was placed anew. In a dense cell, where two reports join only on a shared id, EMSC's
+copy of an AFAD solution (`auth: "AFAD"`, the same second, place and magnitude) counts as one.
+
+History is never rewritten: every AFAD row of an event day before the correction's `from_day`
+(2026-09-20, recorded in `knowledge/index/correction.json`) keeps its 3 h early time, in the frozen
+day partitions and the monthly Release archives alike: every AFAD row from 2023-07-06 (the start of
+its backfill) to 2026-09-19. The day partitions 2026-06-01…09-19 alone hold 9,621 live AFAD rows
+(9,601 events AFAD alone reports, about 3,300 of which have EMSC's AFAD-authored copy as a separate
+live event 3 h later) and 20 AFAD rows sitting in another source's event. A consumer of
+that history can shift a feature's time by +3 h when its chosen provider is `afad` and its
+`feed.event_time` is exactly 3 h before the chosen provenance row's `fields.date` read as UTC, and
+drop EMSC's `auth: "AFAD"` copy of it.
 
 ## Recipes
 

@@ -26,7 +26,9 @@ permissions:
 
 jobs:
   health:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: ubuntu-latest moves to Ubuntu 26.04 from 2026-10-19
+    # (actions/runner-images#14748). Move to ubuntu-26.04 deliberately, after a green test run.
+    runs-on: ubuntu-24.04
     # 10, not 5: the queue-stall branch below can spend ~260s on retries plus its deliberate
     # 60s re-read, and a step killed mid-flight never writes GITHUB_OUTPUT — which would skip
     # both issue steps, leaving an open health issue neither refreshed nor closed.
@@ -137,7 +139,7 @@ jobs:
     # check, never touches the feed's health issue, and a red here is attributable at a glance.
     # It lives in GitHub (not on Cloudflare) so it still fires when Cloudflare is the problem.
     name: alert pipeline
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The script bounds itself: 3 attempts x 15 s + 7 s backoff for status.json, the same for the
     # optional usage query (20 s per attempt). 5 min leaves room for checkout + setup-node.
     timeout-minutes: 5

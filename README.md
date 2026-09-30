@@ -264,7 +264,9 @@ field preserved), bitemporal log, 20 rolling feeds, per-day partitions + Pages d
 files, manifest, CI, and Cloudflare Pages serving. `event_map` is sharded by day and
 pruned to a 45-day dedup horizon, with older identity preserved in the day partitions.
 
-Running in production: `updatedafter` revision + `includedeleted` tombstone sweeps,
+Running in production: `updatedafter` revision + `includedeleted` tombstone sweeps (the
+ComCat revision sweep also adds events ComCat published days after their origin, inside the
+7-day hot window — see [APIs.md](APIs.md#late-publications)),
 `op:merge` survivor selection (a large quake whose preliminary epicentres scattered across
 agencies folds into one feed id once the solutions converge; the loser is published
 superseded; two ids fold only when each is the other's best match), a one-time heal of the

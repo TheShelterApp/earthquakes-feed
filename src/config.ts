@@ -107,10 +107,23 @@ export const COMCAT_ID_PROVIDERS: ReadonlySet<string> = new Set(COMCAT_ID_PREFIX
 /** The COMCAT_ID_PROVIDERS whose event list follows ComCat's lifecycle and is mostly automatic solutions (AEC,
  *  PF-5b). The node that holds such a report carries the alias `usgs:<its id>`; an unmatched report beside another
  *  agency's event is withheld (Resolver.lateTwin); a ComCat delete of the id withdraws their row as well, and a row
- *  of theirs withdrawn that way never comes back while the provider keeps listing the id. NCEDC and SCEDC are not in
- *  it: they publish their networks' own catalogues and withdraw an id themselves by zeroing it
- *  (Resolver.withdrawZeroed), so a ComCat delete leaves their row alone and a re-located id comes back as before. */
+ *  of theirs withdrawn that way never comes back while the provider keeps listing the id; and a location join with
+ *  another agency's event is held to LOCATION_JOIN_DT_MS / LOCATION_JOIN_MAX_DM. NCEDC and SCEDC are not in it:
+ *  they publish their networks' own catalogues and withdraw an id themselves by zeroing it (Resolver.withdrawZeroed),
+ *  so a ComCat delete leaves their row alone and a re-located id comes back as before. */
 export const COMCAT_LIFECYCLE_PROVIDERS: ReadonlySet<string> = new Set(['aec']);
+/** The origin-time and magnitude limits on a location join between a COMCAT_LIFECYCLE_PROVIDERS solution and an event
+ *  that holds no row of that provider (Resolver.lifecycleLocationBlocks: first sight and the merge pass alike; exact-id
+ *  joins are not affected). PF-5b review: AEC's automatic report joined by location to an AVO event 15 s away gave
+ *  that node the alias of AEC's id, so ComCat's later event of the same id welded into it: two quakes shown as one
+ *  where ComCat has two; and with a large magnitude gap an automatic M4.5 20 s / 2 km from a reviewed M1.5 was
+ *  shown as M1.5 (the ΔM-shrunk windows still allow 3 km / 24 s). Measured 2026-10-01 over 16 days of Alaska: every
+ *  same-quake AEC join was ≤ 3.4 s apart (373 exact-id joins ≤ 3.4 s and |ΔM| ≤ 0.2; 11 location joins ≤ 1.9 s and
+ *  |ΔM| ≤ 1.25, AEC's automatic ML of small volcanic quakes running high against AVO's reviewed one), while the
+ *  `ak` / `av` pairs ComCat keeps as distinct quakes are 13–55 s apart. A report outside the limits is looked at by
+ *  lateTwin like any unmatched AEC report (withheld beside a same-size event, else minted). */
+export const LOCATION_JOIN_DT_MS = 8_000;
+export const LOCATION_JOIN_MAX_DM = 1.5;
 /** EMSC `auth` codes whose EMSC copy is that feed provider's own solution: EMSC re-publishes the authoring agency's
  *  origin, rounded (2026-09-30: AFAD 730046 at 19:19:18, 38.46667 / 39.21483, ML 0.9 is EMSC 20260930_0000241 at
  *  19:19:18Z, 38.4667 / 39.2148, ml 0.9, auth AFAD). An EMSC row with one of these codes and the same solution

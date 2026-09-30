@@ -183,7 +183,7 @@ test('aec: the registry entry and the alias rule', () => {
   assert.match(p.attribution, /Alaska Regional Network/);
   assert.match(p.attribution, /G25AC00133/);
   assert.match(p.attribution, /2024208/);
-  assert.deepEqual([...COMCAT_LIFECYCLE_PROVIDERS], ['aec'], 'withheld twins and ComCat deletes are AEC only');
+  assert.deepEqual([...COMCAT_LIFECYCLE_PROVIDERS], ['aec'], 'withheld twins, ComCat deletes and the location-join limits are AEC only');
   assert.ok(COMCAT_ID_PROVIDERS.has('aec'));
   assert.deepEqual(knownAliasIdsOf('aec', 'aka2026x', {}), ['usgs:aka2026x']);
   assert.deepEqual(knownAliasIdsOf('usgs', 'us7000a', { ids: ',us7000a,aka2026x,' }), ['usgs:aka2026x'], 'ComCat rows unchanged');

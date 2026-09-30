@@ -11,6 +11,8 @@ import {
   LARGE_EVENT_MAG,
   LARGE_EVENT_MAX_DELTA,
   LARGE_EVENT_MAX_KM,
+  LOCATION_JOIN_DT_MS,
+  LOCATION_JOIN_MAX_DM,
   MAG_MERGE_MAX_DELTA,
   MERGE_MAX_ROUNDS,
   REID_DT_MS,
@@ -299,6 +301,19 @@ export class Resolver {
     return null;
   }
 
+  /** PF-5b review (weld / masking): a location join between a COMCAT_LIFECYCLE_PROVIDERS solution (AEC) and an
+   *  event that holds no row of that provider needs origin times within LOCATION_JOIN_DT_MS and, when both magnitudes
+   *  are known, |ΔM| ≤ LOCATION_JOIN_MAX_DM. Each side is its rows and its representative: a report is both, a node's
+   *  representative is its chosen solution. True when such a row on one side is outside the limits against the other
+   *  side's representative. First sight and the merge pass alike; exact-id joins never come here. */
+  private static lifecycleLocationBlocks(aRows: readonly SourcedSolution[], a: Solution, bRows: readonly SourcedSolution[], b: Solution): boolean {
+    const far = (r: Solution, s: Solution): boolean =>
+      Math.abs(r.eventTimeMs - s.eventTimeMs) > LOCATION_JOIN_DT_MS || (r.mag != null && s.mag != null && Math.abs(r.mag - s.mag) > LOCATION_JOIN_MAX_DM);
+    const blocks = (rows: readonly SourcedSolution[], others: readonly SourcedSolution[], rep: Solution): boolean =>
+      rows.some((r) => COMCAT_LIFECYCLE_PROVIDERS.has(r.provider) && !others.some((o) => o.provider === r.provider) && far(r, rep));
+    return blocks(aRows, bRows, b) || blocks(bRows, aRows, a);
+  }
+
   /** Live feed ids in every grid cell the widest window of `s` can reach. */
   private candidates(s: Solution): Set<string> {
     const cand = new Set<string>();
@@ -320,10 +335,15 @@ export class Resolver {
    *  lists its ComCat id. */
   private findById(raw: RawObs): string | null {
     const key = `${raw.provider}:${raw.providerEventId}`;
-    const hit = this.alias.get(key);
+    const accept = (fid: string | undefined): string | null => {
+      if (!fid) return null;
+      const node = this.resolveLive(fid);
+      return node && this.comcatClaimConflicts(raw, node) ? null : fid;
+    };
+    const hit = accept(this.alias.get(key));
     if (hit) return hit;
     for (const alt of [...raw.knownAliasIds, ...this.comcatIdRowKeys(raw)]) {
-      const h = this.alias.get(alt);
+      const h = accept(this.alias.get(alt));
       if (h) {
         this.alias.set(key, h);
         return h;
@@ -338,6 +358,21 @@ export class Resolver {
       }
     }
     return null;
+  }
+
+  /** PF-5b review (weld): a ComCat report that reaches `node` only through a COMCAT_ID_PROVIDERS row of it (the AEC
+   *  row of the report's id, or the `usgs:` alias that row put there) while the node's own ComCat row is another event
+   *  by ComCat's ids (sameProviderDistinct: another id, unlinked in `ids` either way, another solution) does not join
+   *  it. ComCat publishing the two ids apart outranks the location join that put the AEC row there: an AEC report
+   *  joined an AVO event by location, then ComCat published the AEC id as a quake of its own, and it welded into the
+   *  AVO event. The report then goes on to the space match like any unknown one (where the same-provider rule keeps it
+   *  off that event), and the AEC row stays where it joined. */
+  private comcatClaimConflicts(raw: RawObs, node: EventNode): boolean {
+    if (raw.provider !== COMCAT_PROVIDER) return false;
+    const named = new Set(comcatIdsNamed(raw.provider, raw.providerEventId, raw.fields));
+    if (node.provenance.some((r) => comcatIdsNamed(r.provider, r.nativeId, r.fields).some((id) => named.has(id)))) return false;
+    if (!node.provenance.some((r) => named.has(comcatIdOf(r.provider, r.nativeId) ?? ''))) return false;
+    return this.sameProviderDistinct(raw, node);
   }
 
   /** For a ComCat report: the alias keys of the COMCAT_ID_PROVIDERS rows its ComCat ids name (`ncedc:75438707` for
@@ -365,6 +400,7 @@ export class Resolver {
         if (!node || node.state !== 'live') continue;
         const d = haversineKm(raw.lat, raw.lon, node.lat, node.lon);
         if (this.reject(raw, node, d, dense)) continue;
+        if (Resolver.lifecycleLocationBlocks([raw], raw, node.provenance, node)) continue;
         if (this.sameProviderDistinct(raw, node)) continue;
         if (dense && !this.sharesIdentity(raw, node)) continue;
         if (d < bestKm) {
@@ -944,6 +980,9 @@ export class Resolver {
     const dense = this.pairDense(a, b);
     const gate = this.reject(a, b, d, dense);
     if (gate) return gate;
+    if (Resolver.lifecycleLocationBlocks(a.provenance, a, b.provenance, b)) {
+      return `AEC solution beyond ±${LOCATION_JOIN_DT_MS / 1000} s or |dM| ${LOCATION_JOIN_MAX_DM} of a location join`;
+    }
     if (Resolver.nodesDistinct(a, b)) return 'same provider under distinct native ids';
     if (dense && !Resolver.nodesShareIdentity(a, b)) return 'dense cell without a shared id';
     return null;

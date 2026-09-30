@@ -272,7 +272,13 @@ report that matches no event by id or by the usual time-and-place rules is not a
 source's live event lies within ±60 s, 50 km and one magnitude unit and holds no AEC row
 (`twin_withheld`): AEC lists every Alaska quake once, so that is most likely the same quake
 located differently (an automatic AEC solution 15 km from the Alaska Volcano Observatory's);
-it is looked at again every run and joins by id as soon as ComCat publishes it. A
+it is looked at again every run and joins by id as soon as ComCat publishes it. An AEC solution joins
+another source's event by time and place only when the two origins are within 8 s and one and a half
+magnitude units (every same-quake join seen was within 3.4 s; the Alaska Volcano Observatory quakes
+ComCat keeps apart from AEC's are 13 s or more apart): before 2026-10-01 an automatic AEC M4.5 20 s
+from a reviewed M1.5 could be shown as the M1.5, and two quakes ComCat publishes as two could be shown
+as one. A ComCat event that finds an event only through its AEC row, while that event's ComCat row is
+another quake by ComCat's own ids, stays a separate event. A
 ComCat delete of the id withdraws the AEC row too (an `op:tombstone` line with a `reason`), and
 the event is `tombstoned` when no other source reports it; AEC's file listing the id afterwards
 does not bring it back. The file has no update time and no delete marker. The source is

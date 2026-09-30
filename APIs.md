@@ -318,11 +318,12 @@ that had joined another source's event at its wrong time left that event (an `op
 a `reason`) and was placed anew. In a dense cell, where two reports join only on a shared id, EMSC's
 copy of an AFAD solution (`auth: "AFAD"`, the same second, place and magnitude) counts as one.
 
-History is never rewritten: in the frozen day partitions and the monthly Release archives every AFAD
-row keeps its 3 h early time. On the `data` branch of 2026-10-01 that was every AFAD row from
-2023-07-06 (the start of its backfill) to 2026-09-20; the day partitions 2026-06-01…09-20 alone hold
-9,700 live AFAD rows (9,680 events AFAD alone reports, 3,309 of which have EMSC's AFAD-authored copy
-as a separate live event 3 h later) and 20 AFAD rows sitting in another source's event. A consumer of
+History is never rewritten: every AFAD row of an event day before the correction's `from_day`
+(2026-09-20, recorded in `knowledge/index/correction.json`) keeps its 3 h early time, in the frozen
+day partitions and the monthly Release archives alike: every AFAD row from 2023-07-06 (the start of
+its backfill) to 2026-09-19. The day partitions 2026-06-01…09-19 alone hold 9,621 live AFAD rows
+(9,601 events AFAD alone reports, about 3,300 of which have EMSC's AFAD-authored copy as a separate
+live event 3 h later) and 20 AFAD rows sitting in another source's event. A consumer of
 that history can shift a feature's time by +3 h when its chosen provider is `afad` and its
 `feed.event_time` is exactly 3 h before the chosen provenance row's `fields.date` read as UTC, and
 drop EMSC's `auth: "AFAD"` copy of it.

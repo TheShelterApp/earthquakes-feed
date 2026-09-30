@@ -78,6 +78,21 @@ export const QUERY_LOOKBACK_MS = Number(process.env.QUERY_LOOKBACK_MS ?? 2 * 24 
  *  return them, only revised known events. An unknown sweep row of these providers is minted when
  *  its origin is inside the hot window (Resolver.reviseOrMintInHotWindow). */
 export const LATE_MINT_PROVIDERS: ReadonlySet<string> = new Set(['usgs']);
+/** The provider that reads ComCat, the USGS ANSS catalog (PF-5b). */
+export const COMCAT_PROVIDER = 'usgs';
+/** Providers whose native event id IS the ComCat event id (PF-5b): AEC's `event_name` (`aka2026…`) is the id ComCat
+ *  gives the same event once AEC sends it there, so identity with the `usgs` row is exact, whatever the distance
+ *  between the two solutions. A report of theirs names `usgs:<its id>` (util.ts knownAliasIdsOf), the node that
+ *  holds it carries that alias too, and it resolves to a node whose ComCat row lists its id in `ids`, even when
+ *  ComCat prefers another network's id (`us7000…`). A ComCat delete of the id withdraws their row as well, and a row
+ *  of theirs withdrawn that way never comes back while the provider keeps listing the id (Resolver). */
+export const COMCAT_ID_PROVIDERS: ReadonlySet<string> = new Set(['aec']);
+/** Rolling-file sources whose ids are watched for disappearing (PF-5b, log only): a row younger than
+ *  ABSENCE_WATCH_DAYS that the feed holds and a complete file no longer lists is counted in status `absent`. AEC's
+ *  file spans ~14 days, so a younger id that vanishes was most likely deleted upstream; whether to retract on absence
+ *  is decided after a week of these counts. */
+export const ABSENCE_WATCH_PROVIDERS: readonly string[] = ['aec'];
+export const ABSENCE_WATCH_DAYS = 5;
 export const FETCH_LIMIT = Number(process.env.FETCH_LIMIT ?? 5000);
 
 // --- sweeps (src/sweep-cursor.ts, PF-5c) ---

@@ -41,6 +41,10 @@ export interface SweepResult {
 
 const lagDaysOf = (raw: RawObs, ingestTime: string): number => (Date.parse(ingestTime) - raw.eventTimeMs) / 86_400_000;
 
+/** The `reason` on the op:tombstone line of a COMCAT_ID_PROVIDERS row withdrawn with a ComCat delete of its id
+ *  (Resolver.withdrawComcatTwins, PF-5b). */
+export const COMCAT_DELETE_REASON = 'withdrawn with ComCat: the event of this id was deleted upstream (the id is the ComCat id)';
+
 /** The `reason` on a late mint's op:observe line, so the log itself tells it from a live mint. */
 export const lateMintReason = (lagDays: number): string =>
   `first seen in the provider's updatedafter sweep, ${lagDays.toFixed(1)} d after origin`;

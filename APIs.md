@@ -130,6 +130,10 @@ query and `includedeleted` delete query in that run, with where the sweep stands
 complete sweep was sent, so a sweep that did not complete keeps the previous one and the next run
 asks for the same window again), `epoch` (the catch-up epoch recorded with that cursor) and
 `catch_up: true` on the one-time catch-up run. `sweeps.epoch` is the current catch-up epoch.
+`comcat_twins_withdrawn` counts the AEC rows a ComCat delete withdrew in that run,
+`twin_withheld` the AEC reports held back beside another source's event, and `absent.aec`
+(`count`, the first 20 `ids`) the live AEC ids younger than 5 days that AEC's file no longer
+lists (see *Alaska (AEC)*; logged, never retracted).
 
 ## The Feature
 
@@ -245,6 +249,29 @@ must gate on `properties.time`, not on arrival; the feed never presents a late e
 one. Because a late event (like a revision or an upstream delete) can still change a day up to
 10 days old, `manifest.partitions[].frozen` turns true only after that (it was 3 days until
 2026-09-30).
+
+## Alaska (AEC)
+
+The `aec` source reads the file behind the Alaska Earthquake Center's public map: about 14 days
+of Alaska and Aleutian events, rewritten every ~43 s. Its automatic SeisComP solutions arrive
+within minutes and are published with `status: "automatic"`; the analyst's solution replaces
+one later as `"reviewed"` (hours to days after origin). Many Alaska events reach ComCat only
+after that review, so before this source 40 % of AEC's M ≥ 2.5 events never reached the feed.
+An automatic solution nobody has confirmed can be a false event: a consumer that alerts should
+not act on a feature whose only provenance row is an `aec` row with status `automatic`.
+AEC's `event_name` is the event's ComCat id (`aka2026…`), so the feed joins it to the `usgs` row
+of the same id exactly, whatever the distance between the two solutions: the AEC row carries the
+alias `usgs:<id>` and a ComCat event that lists the id in its `ids` (under another preferred id,
+such as `us7000…`) is the same event. The reviewed ComCat solution leads when both exist. An AEC
+report that matches no event by id or by the usual time-and-place rules is not added when another
+source's live event lies within ±60 s, 50 km and one magnitude unit and holds no AEC row
+(`twin_withheld`): AEC lists every Alaska quake once, so that is most likely the same quake
+located differently (an automatic AEC solution 15 km from the Alaska Volcano Observatory's);
+it is looked at again every run and joins by id as soon as ComCat publishes it. A
+ComCat delete of the id withdraws the AEC row too (an `op:tombstone` line with a `reason`), and
+the event is `tombstoned` when no other source reports it; AEC's file listing the id afterwards
+does not bring it back. The file has no update time and no delete marker. The source is
+forward-only: no backfill before its first run beyond the 7-day window that run ingested.
 
 ## Recipes
 

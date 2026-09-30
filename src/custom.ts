@@ -2,7 +2,7 @@ import { request as httpsRequest } from 'node:https';
 import { gunzipSync, strFromU8, unzipSync, unzlibSync } from 'fflate';
 import { QUERY_LOOKBACK_MS } from './config.js';
 import type { ProviderConfig, RawObs } from './types.js';
-import { flattenScalars, num, parseUtcMs } from './util.js';
+import { flattenScalars, knownAliasIdsOf, num, parseUtcMs } from './util.js';
 
 const BROWSER_UA =
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
@@ -842,4 +842,60 @@ const phivolcs: CustomAdapter = async (cfg) =>
   // dost.gov.ph serves an incomplete TLS chain (UNABLE_TO_VERIFY_LEAF_SIGNATURE) — scoped insecure fetch.
   parsePhivolcs(await getText(cfg.base, { timeoutMs: 20_000, retries: 2, insecure: true }), cfg.id);
 
-export const CUSTOM_ADAPTERS: Record<string, CustomAdapter> = { afad, cenc, tmd, kagsr, ncs, jma, mexico, ipma, igp, egypt, bgs, ign, imo, bmkg, inpres, ga, ovsicori, igepn, csn, cwa, geosphere, koeri, phivolcs };
+// --- Alaska: AEC, the Alaska Earthquake Center (UAF). The JSON behind its public map
+//     (earthquake.alaska.edu → eqMap2 main-config.js): a flat array of `{event:{…}}` rows,
+//     ~14 days of Alaska and Aleutian events on both sides of the antimeridian, rewritten
+//     every ~43 s, no update time. Automatic SeisComP solutions arrive within minutes as
+//     `version` 1 / `magnitude_author` "scmag" (type "-"); analyst ones replace them as
+//     `version` 2 / "analyst". `event_name` is the ComCat id (`aka2026…`), so the `usgs`
+//     row of the same event is found by id (config COMCAT_ID_PROVIDERS). Rows from a stale
+//     2025 block carry a timestamp in `magnitude_type` and "region name" as their type; the
+//     live path's 7-day window drops them. Forward-only (no time-range query). ---
+const AEC_UA = 'earthquakes-feed/0.1 (+https://earthquakes-feed.theshelter.app)';
+/** AEC's placeholder types: "-" on automatic rows, "region name" on the stale block. */
+const AEC_NO_TYPE = new Set(['-', 'region name']);
+
+export function parseAec(list: unknown, providerId: string): RawObs[] {
+  if (!Array.isArray(list)) throw new Error('aec: body is not a JSON array');
+  const out: RawObs[] = [];
+  for (const row of list as unknown[]) {
+    const e = (row as { event?: unknown } | null)?.event;
+    if (!e || typeof e !== 'object') continue;
+    const ev = e as Record<string, unknown>;
+    const id = String(ev['event_name'] ?? '').trim();
+    const epoch = num(ev['event_time_epoch']); // UTC seconds with µs ("1790792249.93303")
+    const lat = num(ev['lat']);
+    const lon = num(ev['lng']);
+    if (!id || epoch == null || lat == null || lon == null) continue;
+    const version = num(ev['version']) ?? 0;
+    const magType = typeof ev['magnitude_type'] === 'string' && /^[A-Za-z]{1,4}$/.test(ev['magnitude_type']) ? ev['magnitude_type'] : null;
+    const type = typeof ev['event_type'] === 'string' ? ev['event_type'].trim() : '';
+    // A placeholder type is no type: canonical `type` then defaults to "earthquake". Real
+    // types ("earthquake", "quarry blast", "ice quake", "landslide") pass verbatim, as the
+    // usgs rows of the same events publish ComCat's.
+    const fields = flattenScalars({ ...ev, event_type: AEC_NO_TYPE.has(type.toLowerCase()) ? null : ev['event_type'] });
+    out.push({
+      provider: providerId,
+      providerEventId: id,
+      eventTimeMs: Math.round(epoch * 1000),
+      providerUpdatedMs: null,
+      status: version >= 2 || ev['magnitude_author'] === 'analyst' ? 'reviewed' : 'automatic',
+      lat,
+      lon,
+      depth: num(ev['depth_km']),
+      mag: num(ev['magnitude']),
+      magType,
+      place: (ev['place_km'] as string) || null,
+      knownAliasIds: knownAliasIdsOf(providerId, id, fields),
+      fields,
+    });
+  }
+  return out;
+}
+
+const aec: CustomAdapter = async (cfg) =>
+  // S3 serves anyone: an honest user agent, not the browser one. ~620 KB; a truncated body fails
+  // JSON.parse and the provider fails open for this run.
+  parseAec(JSON.parse(await getText(cfg.base, { timeoutMs: 15_000, retries: 2, ua: AEC_UA })), cfg.id);
+
+export const CUSTOM_ADAPTERS: Record<string, CustomAdapter> = { afad, cenc, tmd, kagsr, ncs, jma, mexico, ipma, igp, egypt, bgs, ign, imo, bmkg, inpres, ga, ovsicori, igepn, csn, cwa, geosphere, koeri, phivolcs, aec };

@@ -262,15 +262,17 @@ counts as the agency's report: the agency's row is the `afad` or `ign` row, and 
 `ncedc` / `scedc` row or ComCat's `nc…` / `ci…` row. Over three months of copies, EMSC's copy is the
 agency's solution up to rounding (four decimals, 0.1 in magnitude and depth; it labels IGN's `mbLg`
 as `ml`) or an earlier version of it; IGN's own file cuts the time to the second and the depth to
-whole km. This matters where many small quakes fall into one cell (the Granada basin, The Geysers,
-Sındırgı): there the feed joins two reports only on a shared id, and until the rule covered IGN, NC
-and SCSN their EMSC copy stood beside the agency's event (27 IGN and 3 NC pairs in the 11 days to
-2026-09-30, identical in time and place). The heal of epoch 2 (see *Retired events*) folds the ones
+whole km. A few copies keep the agency's time and place but carry a magnitude more than 0.1 from
+every version of the agency's solution the feed saw (about 5 % of NC's, 2 % of SCSN's); they do not
+count as the agency's report. This matters where many small quakes fall into one cell (the Granada
+basin, The Geysers, Sındırgı): there the feed joins two reports only on a shared id, and until the
+rule covered IGN, NC and SCSN their EMSC copy stood beside the agency's event (27 IGN, 3 NC and 1
+SCSN pairs in the 11 days to 2026-09-30, identical in time and place). The heal of epoch 2 (see *Retired events*) folds the ones
 inside the 7-day hot window once; older days keep both events (the day partitions 2026-06-01…09-19
 hold 276 IGN, 97 NC and 36 SCSN copies as live events of their own; drop a live feature whose only
 row is `emsc` with one of these `auth` codes when another live feature holds the agency's row within
 those limits). A copy of a solution the agency has revised since (EMSC seldom updates its copy:
-about 2 % of them ever changed) stays a separate event in such a cell. AFAD's copies count since
+about 3 % of them ever changed) stays a separate event in such a cell. AFAD's copies count since
 2026-10-01 (see *Turkey (AFAD)*).
 
 ## Alaska (AEC)

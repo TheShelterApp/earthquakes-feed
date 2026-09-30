@@ -235,6 +235,7 @@ async function main(): Promise<void> {
       (feedSide.retracted ? ` coordinateless_retracted=${feedSide.retracted}` : '') +
       (heal ? ` heal_epoch=${heal.epoch} heal_merged=${heal.merged}` : '') +
       (degraded.length ? ` degraded=[${degraded.join(',')}]` : '') +
+      (sweep.stale ? ` sweep_stale_skipped=${sweep.stale}` : '') +
       ` sweeps_failed=[${sweepsFailed.join(',')}]` +
       (sweepsCatchUp.length ? ` sweeps_catch_up=[${sweepsCatchUp.join(',')}]` : ''),
   );

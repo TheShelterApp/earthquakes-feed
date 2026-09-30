@@ -298,3 +298,37 @@ test('the catch-up lands a missed window once: a late event minted and a revisio
   assert.equal(second.out.revisions, 0);
   assert.equal(second.out.lateMinted.length, 0);
 });
+
+test('a sweep row older than the copy the live fetch stored in the same run is skipped, a newer one still revises', () => {
+  // The sweeps go out first, so a sweep's answer can predate the live query's: ComCat or EMSC
+  // revised the event between the two. Applied after the live row, the older copy would roll the
+  // event back for a run (and the next live fetch would revise it forward again).
+  const prio = priorityMap(registry);
+  const cfg = configMap(registry);
+  for (const provider of ['usgs', 'emsc'] as const) {
+    const map = new Map<string, EventNode>();
+    const resolver = new Resolver(map, prio, cfg, NOW);
+    const origin = NOW - DAY;
+    const row = (updatedMs: number, mag: number) => {
+      const [r] = parseGeoJSON(body([feature('uu00000007', origin, updatedMs, mag)]), provider);
+      return r!;
+    };
+    const log = new LogBuffer(1000, iso(NOW));
+    // This run's live fetch: the newest solution, M3.6 stamped a minute ago.
+    const live = row(NOW - 60_000, 3.6);
+    log.record(live, resolver.ingest(live, iso(NOW)));
+    // This run's sweep: the solution before it, M3.2 stamped two minutes ago.
+    const older = revisionSweep(resolver, log, [row(NOW - 120_000, 3.2)], {}, iso(NOW));
+    assert.equal(older.revisions, 0, provider);
+    assert.equal(older.stale, 1, provider);
+    assert.deepEqual(older.lateMinted, []);
+    const node = [...map.values()][0]!;
+    assert.equal(node.mag, 3.6, `${provider}: the live row stays`);
+    assert.equal(node.provenance[0]!.providerUpdatedMs, NOW - 60_000);
+    // A copy stamped later than the stored row is a revision as before.
+    const newer = revisionSweep(resolver, log, [row(NOW - 30_000, 3.7)], {}, iso(NOW));
+    assert.equal(newer.revisions, 1, provider);
+    assert.equal(newer.stale, 0, provider);
+    assert.equal(node.mag, 3.7);
+  }
+});

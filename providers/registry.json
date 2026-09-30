@@ -186,6 +186,26 @@
       "timeoutMs": 15000
     },
     {
+      "id": "aec",
+      "name": "AEC — Alaska Earthquake Center (University of Alaska Fairbanks)",
+      "priority": 15.5,
+      "active": true,
+      "adapter": "custom",
+      "parse": "custom",
+      "queryFormat": "json",
+      "base": "https://aecdynamicfiles.s3.us-west-2.amazonaws.com/recent_events.json",
+      "supportsTimeRange": false,
+      "refreshSeconds": 300,
+      "license": "unknown",
+      "attribution": "Alaska Earthquake Center, Univ. of Alaska Fairbanks (1987). Alaska Regional Network [Data set]; supported in part by USGS ANSS cooperative agreement #G25AC00133 and NSF award #2024208",
+      "doi": "10.7914/SN/AK",
+      "contact": "https://earthquake.alaska.edu",
+      "notes": "The JSON behind AEC's public map (earthquake.alaska.edu/earthquakes → eqMap2 main-config.js): a rolling ~14 days of Alaska and Aleutian events, rewritten every ~43 s. Automatic SeisComP solutions (version 1, magnitude_author scmag) within minutes, published with status automatic; analyst solutions (version 2) later, status reviewed. event_name is the ComCat id (aka…): exact-id dedup with usgs (config COMCAT_ID_PROVIDERS), and a ComCat delete withdraws the AEC row too. No stated licence or terms; the attribution follows https://earthquake.alaska.edu/data_citation_guidelines (network citation, DOI, acknowledgement). Undocumented endpoint: fails open. Forward-only (no time-range query, no backfill).",
+      "backfill": {
+        "enabled": false
+      }
+    },
+    {
       "id": "knmi",
       "name": "KNMI (Netherlands)",
       "priority": 16,

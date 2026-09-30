@@ -8,7 +8,8 @@ import { healedEpoch, runFeedSideSteps, withdrawZeroedReports } from './heal.js'
 import { LogBuffer } from './oplog.js';
 import { activeProviders, configMap, loadRegistry, priorityMap } from './providers.js';
 import { byIngestOrder, emptyTally, screen } from './quality.js';
-import { revisionSweep } from './sweep.js';
+import { COMCAT_DELETE_REASON, revisionSweep } from './sweep.js';
+import { vanishedIds } from './absence.js';
 import { fetchRunInputs, loadSweepCursors, nextCursors, saveSweepCursors, sweepOriginFloorMs, sweepSpecs } from './sweep-cursor.js';
 import type { RawObs } from './types.js';
 import { isoFromMs } from './util.js';
@@ -103,13 +104,21 @@ async function main(): Promise<void> {
   // Every line this run appends, and the seq clock (LogBuffer.record: the op:merge lines an
   // ingest caused before the report's own line, so seq order reads cause → effect).
   const log = new LogBuffer(state.head.seq, ingestTime);
+  // AEC reports not minted beside another agency's event (Resolver.ingest, PF-5b): status `twin_withheld`.
+  const twinWithheld: string[] = [];
   for (const raw of raws) {
     const r = resolver.ingest(raw, ingestTime);
     if (raw.providerUpdatedMs != null) {
       state.watermarks[raw.provider] = Math.max(state.watermarks[raw.provider] ?? 0, raw.providerUpdatedMs);
     }
     if (r.changed) log.record(raw, r);
+    if (r.withheld) {
+      twinWithheld.push(
+        `${raw.provider}:${raw.providerEventId} M${raw.mag ?? '?'} ${raw.status ?? ''} beside ${r.node.feedId} [${[...new Set(r.node.provenance.map((p) => p.provider))].sort().join(',')}] ${r.withheld.km.toFixed(1)} km ${(r.withheld.dtMs / 1000).toFixed(1)} s`,
+      );
+    }
   }
+  for (const w of twinWithheld) console.log(`  twin withheld ${w}`);
 
   // Revision sweep (H2, src/sweep.ts): updatedafter results revise KNOWN events; an unknown row
   // is skipped, not duped, except that a LATE_MINT_PROVIDERS row (ComCat publishes events days
@@ -139,15 +148,26 @@ async function main(): Promise<void> {
   }
   const zeroedOut = withdrawZeroedReports(resolver, log, zeroed, ingestTime);
 
-  // Delete sweep: tombstone events retracted upstream (op:tombstone; never mints).
+  // Delete sweep: tombstone events retracted upstream (op:tombstone; never mints). A ComCat delete also withdraws
+  // the AEC row of the same id (COMCAT_ID_PROVIDERS, PF-5b), one op:tombstone line with a reason each.
   const deletes = screen(deleteRuns.flatMap((o) => o.obs), tally, new Set(['coordinateless']));
   let tombstoned = 0;
+  let comcatTwinsWithdrawn = 0;
   for (const raw of deletes) {
     const r = resolver.tombstoneProvider(raw, ingestTime);
     if (r?.changed) {
       log.record(raw, r, 'tombstone');
       tombstoned++;
     }
+    for (const w of resolver.withdrawComcatTwins(raw, ingestTime)) {
+      log.record(w.raw, w.result, 'tombstone', COMCAT_DELETE_REASON);
+      comcatTwinsWithdrawn++;
+    }
+  }
+  // Rolling-file ids that vanished (PF-5b, log only; src/absence.ts).
+  const absent = vanishedIds(state.eventMap, outcomes, nowMs);
+  for (const [p, a] of Object.entries(absent)) {
+    if (a.count) console.log(`  absent ${p}: ${a.count} live id(s) younger than the watch window no longer listed: ${a.ids.join(', ')}${a.count > a.ids.length ? ', …' : ''}`);
   }
 
   // Feed-side steps (heal.ts): the coordinate-less retraction of rows published before the ingest
@@ -203,6 +223,9 @@ async function main(): Promise<void> {
     late_minted: lateMinted,
     late_withheld: lateWithheld,
     tombstoned,
+    comcat_twins_withdrawn: comcatTwinsWithdrawn,
+    twin_withheld: twinWithheld.length,
+    absent,
     merged: log.merged,
     ...(heal ? { heal } : {}),
     duration_ms: Math.round(Date.now() - nowMs),
@@ -228,6 +251,8 @@ async function main(): Promise<void> {
 
   console.log(
     `aggregate: seq=${seq} indexed=${state.eventMap.size} fetched=${fetched.length} stale_dropped=${staleDropped} new=${newObs.length} revisions=${revisions} late_minted=${lateMinted} late_withheld=${lateWithheld} tombstoned=${tombstoned} merged=${log.merged} ` +
+      (comcatTwinsWithdrawn ? `comcat_twins_withdrawn=${comcatTwinsWithdrawn} ` : '') +
+      (twinWithheld.length ? `twin_withheld=${twinWithheld.length} ` : '') +
       `providers=${outcomes.filter((o) => o.status.ok).length}/${outcomes.length}` +
       (tally.bad_coords ? ` bad_coords_dropped=${tally.bad_coords}` : '') +
       (tally.coordinateless ? ` coordinateless_dropped=${tally.coordinateless}` : '') +

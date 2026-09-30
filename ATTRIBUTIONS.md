@@ -24,6 +24,7 @@ each row carrying `license`, `attribution`, and `doi`.
 - **Earthquakes Canada (NRCan)** (`nrcan`) — OGL-Canada-2.0 — Natural Resources Canada — Earthquakes Canada
 - **Northern California Earthquake Data Center** (`ncedc`) — CC-BY-4.0, DOI [10.7932/NCEDC](https://doi.org/10.7932/NCEDC) — NCEDC (UC Berkeley Seismological Laboratory & USGS)
 - **Southern California Earthquake Data Center** (`scedc`) — CC-BY-4.0, DOI [10.7909/C3WD3xH1](https://doi.org/10.7909/C3WD3xH1) — SCEDC (Caltech / USGS)
+- **AEC — Alaska Earthquake Center (University of Alaska Fairbanks)** (`aec`) — unknown, DOI [10.7914/SN/AK](https://doi.org/10.7914/SN/AK) — Alaska Earthquake Center, Univ. of Alaska Fairbanks (1987). Alaska Regional Network [Data set]; supported in part by USGS ANSS cooperative agreement #G25AC00133 and NSF award #2024208
 - **KNMI (Netherlands)** (`knmi`) — CC-BY-4.0 — Royal Netherlands Meteorological Institute (KNMI)
 - **AusPass (Australia)** (`auspass`) — CC-BY-4.0 — AusPass — Australian Passive Seismic Server (ANU)
 - **AFAD (Turkey)** (`afad`) — unknown — AFAD — Republic of Türkiye, Disaster and Emergency Management Presidency (deprem.afad.gov.tr)

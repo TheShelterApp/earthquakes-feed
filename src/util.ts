@@ -1,3 +1,5 @@
+import { COMCAT_ID_PROVIDERS, COMCAT_PROVIDER } from './config.js';
+
 export const round6 = (n: number): number => Math.round(n * 1e6) / 1e6;
 
 /** Parse a seismic timestamp to epoch-ms, assuming UTC when no zone is present. */
@@ -91,11 +93,14 @@ export async function fetchText(url: string, timeoutMs: number): Promise<FetchRe
 /** Same-provider alias ids carried in a report's own vocabulary: USGS lists every contributing
  *  catalog id in `ids` (",us7000abc,ci12345,"). Registering them as `provider:id` aliases
  *  survives USGS preferred-id churn and gives the dense-cell guard real id-level linkage
- *  (design §8.3/§8.4). The same parse serves the adapters and the node-to-node merge pass. */
+ *  (design §8.3/§8.4). The same parse serves the adapters and the node-to-node merge pass.
+ *  A COMCAT_ID_PROVIDERS report (AEC, PF-5b) also names the ComCat row of its own id
+ *  (`usgs:aka2026…`): its native id is the ComCat id. */
 export function knownAliasIdsOf(provider: string, providerEventId: string, fields: Record<string, unknown> | null | undefined): string[] {
-  const ids = fields?.['ids'];
-  if (typeof ids !== 'string') return [];
   const out: string[] = [];
+  if (COMCAT_ID_PROVIDERS.has(provider) && providerEventId) out.push(`${COMCAT_PROVIDER}:${providerEventId}`);
+  const ids = fields?.['ids'];
+  if (typeof ids !== 'string') return out;
   for (const t of ids.split(',')) {
     const id = t.trim();
     if (id && id !== providerEventId) out.push(`${provider}:${id}`);

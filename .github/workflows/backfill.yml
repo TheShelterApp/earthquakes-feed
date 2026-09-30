@@ -58,6 +58,10 @@ jobs:
           BACKFILL_STARTTIME: ${{ inputs.starttime }}
           BACKFILL_ENDTIME: ${{ inputs.endtime }}
           BACKFILL_PROVIDERS: ${{ inputs.providers }}
+          # Same reason as aggregate.yml: the concurrent fetches' getaddrinfo lookups queue on libuv's
+          # 4-thread pool on this runner, so late fetches wait seconds for DNS alone (PF-5c). Must be set
+          # before node starts; an empty value would mean ONE thread.
+          UV_THREADPOOL_SIZE: '64'
         run: npx --no-install tsx src/backfill.ts
       - name: Validate log delta
         env:

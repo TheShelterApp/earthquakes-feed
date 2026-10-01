@@ -182,7 +182,8 @@ capped at 50 km (M5.5 → 20, M6.0 → 30, M6.5 → 40, M7.0 → 50), and only w
 windows shrink with the magnitude difference. Those are the feed's own identity rules
 (`src/dedup.ts`): agencies' preliminary epicentres of one M6–7 quake scatter by tens of
 km, and a provider re-publishing one solution under a second id (≤ 2 s, ≤ 2 km,
-|ΔM| ≤ 0.1) is the same event, not a new one. When the feed folds two existing ids it
+|ΔM| ≤ 0.1) is the same event, not a new one. Exactly 0.1 counts, for every pair of magnitudes (since 2026-10-01;
+before, floating point made 2.3 vs 2.2 count and 1.5 vs 1.4 not). When the feed folds two existing ids it
 folds a pair only when each is the other's best match (distance and time, relative to the
 pair's window), so a report is never welded to a neighbour while its own twin stays apart.
 
@@ -213,7 +214,9 @@ hot window once (the Loyalty Islands M7.0 of 2026-09-25 was six ids): its folds 
 (`reason` lists what it absorbed); `knowledge/index/heal.json` on the `data` branch records
 it. A second heal (epoch 2) runs the same pass once more when EMSC's copies of IGN, NC and SCSN
 solutions start counting as the agency's own report (see *EMSC's copies of agencies'
-solutions*). Historical partitions are never rewritten.
+solutions*). The agencies added to that list on 2026-10-01 and the exact-0.1 magnitude rule
+(see *Realtime + client dedup*) came without a heal: they apply to reports and revisions from then on.
+Historical partitions are never rewritten.
 
 A report with no location — exactly 0° N, 0° E with magnitude 0 or none (NCEDC publishes such
 placeholders, `MU 0.0`) — is never ingested. When the id is one the feed already holds, the
@@ -256,24 +259,56 @@ one. Because a late event (like a revision or an upstream delete) can still chan
 ## EMSC's copies of agencies' solutions
 
 EMSC republishes many agencies' own solutions; `fields.auth` of the `emsc` provenance row names the
-authoring agency. Where the feed also reads that agency, an EMSC row with `auth` `AFAD`, `IGN`, `NC`
-or `SCSN` and the same solution as the agency's row (within 2 s, 2 km and 0.1 magnitude units)
-counts as the agency's report: the agency's row is the `afad` or `ign` row, and for NC and SCSN the
-`ncedc` / `scedc` row or ComCat's `nc…` / `ci…` row. Over three months of copies, EMSC's copy is the
-agency's solution up to rounding (four decimals, 0.1 in magnitude and depth; it labels IGN's `mbLg`
-as `ml`) or an earlier version of it; IGN's own file cuts the time to the second and the depth to
-whole km. A few copies keep the agency's time and place but carry a magnitude more than 0.1 from
-every version of the agency's solution the feed saw (about 5 % of NC's, 2 % of SCSN's); they do not
-count as the agency's report. This matters where many small quakes fall into one cell (the Granada
-basin, The Geysers, Sındırgı): there the feed joins two reports only on a shared id, and until the
-rule covered IGN, NC and SCSN their EMSC copy stood beside the agency's event (27 IGN, 3 NC and 1
-SCSN pairs in the 11 days to 2026-09-30, identical in time and place). The heal of epoch 2 (see *Retired events*) folds the ones
-inside the 7-day hot window once; older days keep both events (the day partitions 2026-06-01…09-19
-hold 276 IGN, 97 NC and 36 SCSN copies as live events of their own; drop a live feature whose only
-row is `emsc` with one of these `auth` codes when another live feature holds the agency's row within
-those limits). A copy of a solution the agency has revised since (EMSC seldom updates its copy:
-about 3 % of them ever changed) stays a separate event in such a cell. AFAD's copies count since
-2026-10-01 (see *Turkey (AFAD)*).
+authoring agency. Where the feed also reads that agency, an EMSC row with one of the `auth` codes below
+and the same solution as the agency's row (within 2 s, 2 km and 0.1 magnitude units) counts as the
+agency's report:
+
+| `auth` | the agency's row | counts since |
+|---|---|---|
+| `AFAD` | `afad` | 2026-10-01 (see *Turkey (AFAD)*) |
+| `IGN` | `ign` | 2026-09-30 |
+| `NC` | `ncedc`, or ComCat's `nc…` row | 2026-09-30 |
+| `SCSN` | `scedc`, or ComCat's `ci…` row | 2026-09-30 |
+| `CENC` | `cenc` | 2026-10-01 |
+| `CSN` | `csn` | 2026-10-01 |
+| `GNS` | `geonet` | 2026-10-01 |
+| `INGV` | `ingv` | 2026-10-01 |
+| `KOERI` | `koeri` | 2026-10-01 |
+| `NDI` | `ncs` | 2026-10-01 |
+| `QUI` | `igepn` | 2026-10-01 |
+| `UNA` | `ovsicori` | 2026-10-01 |
+| `UNM` | `mexico` | 2026-10-01 |
+
+A code is on the list only where EMSC's copy is the agency's solution up to rounding: at least 90 %
+of the copies equal in time and place a version of the agency's solution the feed saw (or, for
+GeoNet, one in GeoNet's own origin history), at least 85 % in magnitude too, and no copy is the
+same solution of two different agency events. EMSC rounds (four decimals, two for CSN; 0.1 in
+magnitude and depth) and relabels some magnitude types (IGN's `mbLg` and GeoNet's `MLv` as `ml`);
+IGN's, KOERI's, GeoNet's and IG-EPN's own lists cut the time to the second, IGN's the depth to whole
+km. A copy often carries an earlier version of the agency's solution (EMSC copies GeoNet's origin
+of the moment and seldom follows a revision; it follows CSN's), and EMSC replaces many copies with
+its own solution later (most of KOERI's and AFAD's): such a copy counts only while it is within
+those limits of the agency's row. Where KOERI gives both ML and Mw the feed's row carries the Mw
+while EMSC copies the ML, so those copies do not count. Not on the list: BMKG (its public lists
+carry another solution), PHIVOLCS and JMA (their lists give the origin to the minute), GFZ,
+ReNaSS, ETHZ, NOA, IMO (too many copies differ from every version the feed saw), GSRAS (not
+KAGSR's solution), CN (the feed's NRCan rows carry no magnitude), the agencies with fewer than 50
+copies (IPMA, IGP, GA, CWA, IPGP's observatories, BGS, USP, KNMI, AEC), and the US networks EMSC
+names (NEIC, PR, HV, TX, …), which reach the feed only through ComCat.
+
+This matters where many small quakes fall into one cell (the Granada basin, The Geysers, Sındırgı,
+the Milford Sound and Puntarenas swarms): there the feed joins two reports only on a shared id,
+and before a code was on the list its EMSC copy stood beside the agency's event (27 IGN, 3 NC and
+1 SCSN pairs in the 11 days to 2026-09-30; in September 2026 13 GeoNet, 44 OVSICORI and 1 KOERI
+pairs, identical in time and place). The heal of epoch 2 (see *Retired events*) folded the IGN,
+NC and SCSN pairs inside the 7-day hot window once; the codes added on 2026-10-01 apply from
+then on, without a heal, and older days keep both events (the day partitions 2026-06-01…09-19 hold 276 IGN, 97 NC and
+36 SCSN copies as live events of their own, and the September GeoNet and OVSICORI pairs stay
+too; drop a live feature whose only row is `emsc` with one of these `auth` codes when another live
+feature holds the agency's row within those limits). A copy of a solution the agency has revised
+since stays a separate event in such a cell. An EMSC event id sometimes moves to another agency
+event (EMSC's `20260910_0000383` copied OVSICORI 1449691, then 1449690, 41 s later): the row
+stays in the event it joined, and the two agency events stay apart.
 
 ## Alaska (AEC)
 

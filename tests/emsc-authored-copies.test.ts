@@ -69,7 +69,8 @@ function permutations<T>(xs: T[]): T[][] {
 }
 
 test('config: EMSC copies of AFAD, IGN, NC and SCSN count as the agency’s identity', () => {
-  assert.deepEqual([...EMSC_AUTHORED_COPIES].sort(), [['AFAD', 'afad'], ['IGN', 'ign'], ['NC', 'ncedc'], ['SCSN', 'scedc']]);
+  // PF-5g added more codes (tests/emsc-authored-copies-pf5g.test.ts pins the whole map).
+  for (const [code, provider] of [['AFAD', 'afad'], ['IGN', 'ign'], ['NC', 'ncedc'], ['SCSN', 'scedc']]) assert.equal(EMSC_AUTHORED_COPIES.get(code!), provider, code);
   assert.equal(HEAL_EPOCH, 2, 'the heal folds the copies minted beside the agency’s event before this change once');
 });
 

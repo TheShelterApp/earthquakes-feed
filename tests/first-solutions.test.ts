@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +15,8 @@ import {
   type LaneContext,
   Pacer,
   PartitionReader,
+  type RunOutput,
+  adoptable,
   buildChunks,
   deepHistory,
   deepKey,
@@ -433,6 +436,33 @@ test('lane: a day source stops before a further event month once its records cov
   assert.deepEqual(monthsOf(second), ['2026-01', '2025-12'], 'the next run goes on from there');
   assert.equal(second.monthCapAt, undefined);
   assert.equal(nextDay(cur, plan()), null);
+});
+
+test('adoption: a run whose commit never landed is taken over only when it was uploaded and built on what data holds now', () => {
+  const sha = (t: string | null): string | null => (t == null ? null : createHash('sha256').update(t).digest('hex'));
+  const line = (asset: string, tag: string | null = 'first-solutions-2026-07'): string =>
+    JSON.stringify({ source: 'usgs', month: '2026-07', tag, asset, records: 3, bytes: 100, sha256: 'x', days: ['2026-07-05', '2026-07-05'], run: 'r1-1', collected: COLLECTED }) + '\n';
+  const now = { cursorText: '{"schema":1,"sources":{}}\n', chunksText: line('a.gz') };
+  const prev = (over: Partial<RunOutput> = {}): RunOutput => ({
+    cursorText: '{"schema":1,"sources":{"usgs":{"done":[["2026-07-05","2026-07-05"]],"failures":0,"requests":3,"records":3}}}\n',
+    chunksText: now.chunksText + line('b.gz') + line('c.gz'),
+    base: { cursor_sha256: sha(now.cursorText), chunks_sha256: sha(now.chunksText) },
+    summary: { run: 'r2-1', uploaded: true },
+    ...over,
+  });
+  const ok = adoptable(prev(), now);
+  assert.ok('added' in ok);
+  assert.deepEqual(ok.added.map((l) => l.asset), ['b.gz', 'c.gz']);
+  // The very first run: data holds neither file yet.
+  const first = adoptable(prev({ chunksText: line('b.gz'), base: { cursor_sha256: null, chunks_sha256: null } }), { cursorText: null, chunksText: null });
+  assert.ok('added' in first && first.added.length === 1);
+  const reason = (r: ReturnType<typeof adoptable>): string => ('reason' in r ? r.reason : 'adopted');
+  assert.match(reason(adoptable(prev({ summary: { run: 'local', uploaded: false } }), now)), /uploaded nothing/);
+  assert.match(reason(adoptable(prev(), { cursorText: prev().cursorText, chunksText: prev().chunksText })), /built on another cursor or chunk list/, 'its commit landed');
+  assert.match(reason(adoptable(prev({ chunksText: line('z.gz') + line('b.gz') }), now)), /does not extend/);
+  assert.match(reason(adoptable(prev({ cursorText: now.cursorText, chunksText: now.chunksText }), now)), /changed nothing/);
+  assert.match(reason(adoptable(prev({ chunksText: now.chunksText + line('b.gz', null) }), now)), /names no Release asset/);
+  assert.match(reason(adoptable(prev({ cursorText: '{' }), now)), /does not parse/);
 });
 
 // --- chunks and the merged answer --------------------------------------------------------------------------------------

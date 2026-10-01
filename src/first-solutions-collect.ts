@@ -556,6 +556,87 @@ function uploadChunk(line: ChunkLine, file: string): void {
 const sha256Of = (s: string | null): string | null => (s == null ? null : createHash('sha256').update(s).digest('hex'));
 const readOr = (f: string): string | null => (existsSync(f) ? readFileSync(f, 'utf8') : null);
 
+/** A run's output as its `first-solutions-out` artifact holds it. */
+export interface RunOutput {
+  cursorText: string;
+  chunksText: string;
+  base: { cursor_sha256: string | null; chunks_sha256: string | null };
+  summary: { run?: string; uploaded?: boolean };
+}
+
+/**
+ * Whether an earlier run's output can be taken over as this run's starting point. A commit job waiting for the writer
+ * lock is cancelled when another writer queues behind it (GitHub keeps one pending job per group; run 36909538501 on
+ * 2026-10-01 lost its commit that way, 41 uploaded chunks and half an hour of requests unlisted). Its output is still
+ * valid when it was uploaded and built on exactly the cursor and chunk list `data` holds now: then its commit never
+ * landed and nothing else did, and its chunk list is the current one with lines added. Returns the added lines, or
+ * why not.
+ */
+export function adoptable(prev: RunOutput, now: { cursorText: string | null; chunksText: string | null }): { added: ChunkLine[] } | { reason: string } {
+  if (prev.summary.uploaded !== true) return { reason: 'it uploaded nothing' };
+  if (prev.base.cursor_sha256 !== sha256Of(now.cursorText) || prev.base.chunks_sha256 !== sha256Of(now.chunksText)) {
+    return { reason: 'it was built on another cursor or chunk list than data holds now (its commit landed, or a later one did)' };
+  }
+  const have = now.chunksText ?? '';
+  if (!prev.chunksText.startsWith(have)) return { reason: 'its chunk list does not extend the current one' };
+  if (prev.chunksText === have && prev.cursorText === (now.cursorText ?? '')) return { reason: 'it changed nothing' };
+  let added: ChunkLine[];
+  try {
+    JSON.parse(prev.cursorText);
+    added = prev.chunksText
+      .slice(have.length)
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as ChunkLine);
+  } catch (err) {
+    return { reason: `its output does not parse: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (added.some((l) => !l.tag || !l.asset || l.tag !== releaseTag(l.month))) return { reason: 'a chunk line names no Release asset' };
+  return { added };
+}
+
+/** The newest earlier run that left a `first-solutions-out` artifact, when its output is adoptable and every chunk it
+ *  added is in its Release with the listed size. Read only; any failure means no adoption. */
+function adoptEarlierRun(now: { cursorText: string | null; chunksText: string | null }): { run: string; cursorText: string; chunksText: string; added: ChunkLine[] } | null {
+  const staging = mkdtempSync(join(tmpdir(), 'efd-fs-adopt-'));
+  try {
+    // Newest first. This run's own artifact does not exist yet; on a re-run of the whole run it is the first attempt's,
+    // which is exactly the output to take over.
+    const artifacts = JSON.parse(
+      ghRetryNet(['api', `repos/${REPO}/actions/artifacts?name=first-solutions-out&per_page=5`, '--jq', '[.artifacts[] | {run: .workflow_run.id, expired}]']),
+    ) as Array<{ run: number; expired: boolean }>;
+    const newest = artifacts[0];
+    if (!newest || newest.expired) return null;
+    gh(['run', 'download', String(newest.run), '-R', REPO, '-n', 'first-solutions-out', '-D', staging]);
+    const read = (f: string): string | null => readOr(join(staging, f));
+    const [cursorText, chunksText, baseText, summaryText] = [read('cursor.json'), read('chunks.ndjson'), read('base.json'), read('summary.json')];
+    if (cursorText == null || chunksText == null || baseText == null || summaryText == null) return null;
+    const prev: RunOutput = { cursorText, chunksText, base: JSON.parse(baseText) as RunOutput['base'], summary: JSON.parse(summaryText) as RunOutput['summary'] };
+    const name = prev.summary.run ?? `r${newest.run}`;
+    const verdict = adoptable(prev, now);
+    if ('reason' in verdict) {
+      console.log(`first-solutions: nothing to take over from run ${name}: ${verdict.reason}`);
+      return null;
+    }
+    const store = new GitHubStore();
+    const listed = new Map<string, Map<string, { size: number; state: string }>>();
+    for (const l of verdict.added) {
+      const assets = listed.get(l.tag!) ?? listed.set(l.tag!, new Map(store.list(l.tag!).map((a) => [a.name, a]))).get(l.tag!)!;
+      const a = assets.get(l.asset);
+      if (!a || a.size !== l.bytes || a.state !== 'uploaded') {
+        console.log(`::warning::first-solutions: run ${name} is not taken over: ${l.tag}/${l.asset} is not in its Release with ${l.bytes} bytes`);
+        return null;
+      }
+    }
+    return { run: name, cursorText, chunksText, added: verdict.added };
+  } catch (err) {
+    console.log(`::warning::first-solutions: could not look for an earlier run to take over: ${err instanceof Error ? err.message.split('\n')[0] : String(err)}`);
+    return null;
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+  }
+}
+
 export function firstSolutionsPaths(root: string) {
   const dir = join(root, 'knowledge', 'first_solutions');
   return { dir, cursor: join(dir, 'cursor.json'), chunks: join(dir, 'chunks.ndjson') };
@@ -596,7 +677,16 @@ async function main(): Promise<void> {
   const fsp = firstSolutionsPaths(root);
   const cursorText = readOr(fsp.cursor);
   const chunksText = readOr(fsp.chunks);
-  const cursor: FirstSolutionsCursor = cursorText ? (JSON.parse(cursorText) as FirstSolutionsCursor) : newCursor();
+  // An uploading run first takes over an earlier run whose commit never landed (FIRST_SOLUTIONS_ADOPT=1 / 0 forces or
+  // forbids the look, which only reads). What this run writes is then that run's work plus its own.
+  const adopt = process.env.FIRST_SOLUTIONS_ADOPT ? process.env.FIRST_SOLUTIONS_ADOPT === '1' : upload;
+  const adopted = adopt ? adoptEarlierRun({ cursorText, chunksText }) : null;
+  if (adopted) {
+    console.log(`first-solutions: taking over run ${adopted.run}, whose commit never landed: ${adopted.added.length} chunk(s), ${adopted.added.reduce((n, l) => n + l.records, 0)} record(s) already uploaded`);
+  }
+  const startCursorText = adopted ? adopted.cursorText : cursorText;
+  const startChunksText = adopted ? adopted.chunksText : chunksText;
+  const cursor: FirstSolutionsCursor = startCursorText ? (JSON.parse(startCursorText) as FirstSolutionsCursor) : newCursor();
   const backfillText = readOr(dataPaths(root).backfillCursor);
   const targetStart = (backfillText ? (JSON.parse(backfillText) as { targetStart?: string }).targetStart : undefined) ?? '2023-07-06';
   const archivesText = readOr(dataPaths(root).archivesIndex);
@@ -700,9 +790,13 @@ async function main(): Promise<void> {
   }
 
   writeFileSync(join(outDir, 'cursor.json'), JSON.stringify(cursor, null, 2) + '\n');
-  writeFileSync(join(outDir, 'chunks.ndjson'), (chunksText ?? '') + newLines.map((l) => JSON.stringify(l) + '\n').join(''));
+  writeFileSync(join(outDir, 'chunks.ndjson'), (startChunksText ?? '') + newLines.map((l) => JSON.stringify(l) + '\n').join(''));
+  // The base is what `data` holds (the commit job checks it), also when the run started from a taken-over run's output.
   writeFileSync(join(outDir, 'base.json'), JSON.stringify({ cursor_sha256: sha256Of(cursorText), chunks_sha256: sha256Of(chunksText) }, null, 2) + '\n');
-  writeFileSync(join(outDir, 'summary.json'), JSON.stringify({ run, started: isoFromMs(startedMs), finished: nowIso, uploaded: upload, sources: summary }, null, 2) + '\n');
+  writeFileSync(
+    join(outDir, 'summary.json'),
+    JSON.stringify({ run, started: isoFromMs(startedMs), finished: nowIso, uploaded: upload, ...(adopted ? { took_over: { run: adopted.run, chunks: adopted.added.length } } : {}), sources: summary }, null, 2) + '\n',
+  );
   if (blockers.length) writeFileSync(join(outDir, 'blocked.txt'), blockers.join('\n') + '\n');
   const total = newLines.reduce((s, l) => s + l.bytes, 0);
   console.log(`first-solutions: ${newLines.length} chunk(s), ${newLines.reduce((s, l) => s + l.records, 0)} record(s), ${total} bytes${upload ? ' uploaded' : ' (local only)'}; ${Math.round((Date.now() - startedMs) / 1000)} s`);

@@ -6,7 +6,8 @@ name: first-solutions
 # to the Release `first-solutions-YYYY-MM` of the event month. The `data` branch gets only the walk's cursor and the
 # chunk list (knowledge/first_solutions/), written by the short `commit` job under the writer lock; the `collect` job,
 # which spends up to 30 minutes on requests, holds no writer lock, so the 5-minute aggregate is never kept waiting. It
-# shares the deep-history walk's group instead, so the two never query a source at the same time.
+# shares the deep-history walk's group instead, so the two never query a source at the same time. A commit job that is
+# cancelled while it waits for the writer lock loses nothing: the next run's collect job takes its output over.
 #
 # Off until enabled: the scheduled runs go ahead only when the repository variable FIRST_SOLUTIONS_SCHEDULE is `on`
 # (gh variable set FIRST_SOLUTIONS_SCHEDULE --body on -R TheShelterApp/earthquakes-feed); a manual dispatch always runs.
@@ -36,8 +37,11 @@ concurrency:
   group: earthquakes-feed-first-solutions
   cancel-in-progress: false
 
+# actions: read lets the collect job read the previous run's `first-solutions-out` artifact: a run whose commit job was
+# cancelled while it waited for the writer lock is taken over by the next run instead of being done again.
 permissions:
   contents: write
+  actions: read
 
 jobs:
   collect:
@@ -76,7 +80,7 @@ jobs:
           FIRST_SOLUTIONS_DAYS: ${{ inputs.days }}
           FIRST_SOLUTIONS_SOURCES: ${{ inputs.sources }}
           FIRST_SOLUTIONS_BUDGET_MIN: ${{ inputs.budget_minutes }}
-          # gh: archived months (release download) and the chunk uploads.
+          # gh: archived months (release download), the chunk uploads and the previous run's artifact.
           GH_TOKEN: ${{ github.token }}
         run: npx --no-install tsx src/first-solutions-collect.ts
       - uses: actions/upload-artifact@v6

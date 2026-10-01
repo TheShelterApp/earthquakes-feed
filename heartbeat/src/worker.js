@@ -8,6 +8,12 @@
 //   minute 48            -> first-solutions (earliest-solutions side index, hourly; dispatched with tick=1, so
 //                           the workflow goes ahead only while the repository variable FIRST_SOLUTIONS_SCHEDULE
 //                           is `on`; its own hourly GitHub cron was delivered about 4 times a day on 2026-10-01)
+//   minute 26            -> history   (deep-history walk, hourly; no inputs: the workflow's own first step reads
+//                           providers/history.json and does nothing unless `enabled` is true. Its :29 GitHub cron was
+//                           not delivered once between 2026-10-01 16:54 and 21:00 UTC. :26 is after the
+//                           first-solutions collect job, which shares the walk's group `earthquakes-feed-history`
+//                           and ends by about :22, and its run is over before :48; history.yml as a workflow is in
+//                           no writer group, so a dispatch never queues beside aggregate, derive or backfill)
 //
 // health used to run on a bare hourly GitHub cron and was delivered ~20 times per 48h with
 // gaps of 2-4.5h. The 2026-07-31 12:02-12:30 Cloudflare Pages outage (522 on /pages/assets/
@@ -18,12 +24,13 @@ const REPO = 'TheShelterApp/earthquakes-feed';
 /**
  * The workflow to dispatch for a given UTC minute, or null on the ~42 minutes/hour that do nothing.
  * Pure + exported so the fan-out can be unit-checked without the runtime. The order matters only if the
- * ranges overlapped — they don't (41, 48 and 7/22/37/52 are never multiples of 5) — but the specific minutes
+ * ranges overlapped — they don't (26, 41, 48 and 7/22/37/52 are never multiples of 5) — but the specific minutes
  * are matched before the every-5 fallback for clarity.
  */
 export function workflowFor(minute) {
   if (minute === 41) return 'backfill.yml';
   if (minute === 48) return 'first-solutions.yml';
+  if (minute === 26) return 'history.yml';
   if (minute === 7 || minute === 22 || minute === 37 || minute === 52) return 'health.yml';
   if (minute % 5 === 0) return 'aggregate.yml';
   return null;

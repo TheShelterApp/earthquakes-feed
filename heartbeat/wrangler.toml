@@ -7,7 +7,8 @@ workers_dev = false
 preview_urls = false
 
 # GitHub throttles/delays low-activity scheduled workflows, so this external tick
-# drives them reliably: aggregate every 5 min, backfill hourly, health every 15 min.
+# drives them reliably: aggregate every 5 min, health every 15 min, and hourly backfill (:41),
+# first-solutions (:48) and history (:26).
 # health's own hourly GitHub cron was delivered ~20x per 48h with 2-4.5h gaps, so a
 # 28-minute Pages outage went entirely unreported (see src/worker.js).
 # ONE per-minute cron (not three): the account is capped at 5 cron triggers on the

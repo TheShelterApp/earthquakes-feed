@@ -4,7 +4,8 @@ import type { ProviderConfig, RawObs } from './types.js';
 /**
  * Deep history (PF-5j): one source's rows for one closed time range, fetched as a polite client. Requests go out one
  * at a time with at least `spacingMs` between the end of one and the start of the next; HTTP 429 / 5xx answers wait
- * (Retry-After when the source sends one, else 5 s doubling, capped at 2 min) and are retried a few times; a window
+ * (Retry-After when the source sends one, else 5 s doubling, capped at 2 min) and are retried a few times (a
+ * Retry-After over 2 min ends the attempt at once and is handed back, so the walk asks no sooner); a window
  * whose answer fills the page or times out is split in two. A range that cannot be fetched whole fails as a whole:
  * the caller uploads nothing for it and the next run asks again. A source with a count service (ComCat's
  * `fdsnws/event/1/count`) is asked for the count first: a window over the page is split before it is fetched, and
@@ -20,7 +21,8 @@ export interface HttpAnswer {
 }
 export type HistoryFetcher = (url: string, timeoutMs: number) => Promise<HttpAnswer>;
 
-export const HISTORY_USER_AGENT = 'earthquakes-feed-history/1.0 (+https://earthquakes-feed.theshelter.app; deep-history backfill, one request at a time)';
+/** The contact URL is the repository (issues, SECURITY.md): the feed host's root answers 404. */
+export const HISTORY_USER_AGENT = 'earthquakes-feed-history/1.0 (+https://github.com/TheShelterApp/earthquakes-feed; deep-history backfill, one request at a time)';
 
 export async function fetchHttp(url: string, timeoutMs: number): Promise<HttpAnswer> {
   const ctrl = new AbortController();
@@ -90,7 +92,7 @@ export interface FetchedRange {
 export type FetchRangeResult =
   | ({ ok: true } & FetchedRange)
   /** `budget`: the run's time budget ran out (not the source's fault: the range is asked again next run). */
-  | { ok: false; error: string; windows: WindowLog[]; requests: number; budget?: boolean };
+  | { ok: false; error: string; windows: WindowLog[]; requests: number; budget?: boolean; retryAfterMs?: number };
 
 export interface FetchRangeOptions {
   limit: number;
@@ -127,6 +129,8 @@ export async function fetchRange(p: ProviderConfig, startMs: number, endMs: numb
   const pace = o.pace ?? { lastEndMs: -Infinity };
 
   let budget = false;
+  /** A Retry-After over BACKOFF_CAP_MS: returned to the caller, which waits it out across runs. */
+  let longRetryAfterMs: number | null = null;
   /** One GET at the polite pace, with the 429 / 5xx / network retries. */
   const get = async (url: string): Promise<HttpAnswer | { status: null; error: string; timeout: boolean }> => {
     for (let attempt = 0; ; attempt++) {
@@ -150,12 +154,25 @@ export async function fetchRange(p: ProviderConfig, startMs: number, endMs: numb
       if (ans && ans.status !== 429 && ans.status < 500) return ans;
       if (timeout) return { status: null, error: `timeout after ${o.timeoutMs} ms`, timeout: true };
       if (attempt >= maxRetries) return { status: null, error: ans ? `HTTP ${ans.status}` : String(err), timeout: false };
+      // A source that asks for a longer pause than the cap gets it: the range fails now, and the walk leaves the
+      // source alone until the time it named (src/history.ts, attempts[].not_before).
+      if (ans?.retryAfterMs != null && ans.retryAfterMs > BACKOFF_CAP_MS) {
+        longRetryAfterMs = ans.retryAfterMs;
+        return { status: null, error: `HTTP ${ans.status}, Retry-After ${Math.round(ans.retryAfterMs / 1000)} s (over the ${BACKOFF_CAP_MS / 1000} s cap; asked again next run)`, timeout: false };
+      }
       const backoff = Math.min(BACKOFF_CAP_MS, Math.max(ans?.retryAfterMs ?? 0, BACKOFF_START_MS * 2 ** attempt));
       await sleep(backoff);
     }
   };
 
-  const fail = (error: string): FetchRangeResult => ({ ok: false, error, windows, requests, ...(budget ? { budget: true } : {}) });
+  const fail = (error: string): FetchRangeResult => ({
+    ok: false,
+    error,
+    windows,
+    requests,
+    ...(budget ? { budget: true } : {}),
+    ...(longRetryAfterMs != null ? { retryAfterMs: longRetryAfterMs } : {}),
+  });
   const byId = new Map<string, RawObs>();
   let responseRows = 0;
   let parsedRows = 0;

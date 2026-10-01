@@ -84,6 +84,19 @@ test('history config: refuses overlaps, days at or after the boundary, non-FDSN 
   assert.match(text, /requestSpacingMs must be at least 1000/);
 });
 
+test('history config: eras start and end on month boundaries (only the boundary may cut a month), so no two eras share a YYYY-MM unit', () => {
+  const problems = configProblems(
+    cfgOf([
+      { id: 'a', from: '2022-07-15', to: '2023-07-06', minMagnitude: null, sources: ['usgs'] },
+      { id: 'b', from: '2022-01-01', to: '2022-07-15', minMagnitude: 4.5, sources: ['usgs'] },
+    ]),
+    registry,
+  ).join('\n');
+  assert.match(problems, /era a: from 2022-07-15 is not the first day of a month/);
+  assert.match(problems, /era b: to 2022-07-15 is neither the first day of a month nor the boundary/);
+  assert.deepEqual(configProblems(cfgOf([pilot, { id: 'b', from: '2022-01-01', to: '2022-07-01', minMagnitude: 4.5, sources: ['usgs'] }]), registry), []);
+});
+
 test('history config: asset names are never reused (next generation / edition)', () => {
   assert.equal(rawAssetName('usgs', '2022-12'), 'raw-usgs-2022-12.ndjson.zst');
   const names = new Set([rawAssetName('usgs', '2022-12'), rawAssetName('usgs', '2022-12', 2), editionAssetName('2022-12', 1)]);
@@ -218,6 +231,18 @@ test('history fetch: 429 waits for Retry-After (at least the 5 s floor) and retr
   assert.equal(parseRetryAfter('Thu, 01 Jan 1970 00:01:00 GMT', 0), 60_000);
 });
 
+test('history fetch: a Retry-After over the 2-minute cap ends the attempt at once and is handed back (never asked sooner)', async () => {
+  const f = fakeSource(geofon, [S + 1000], { answers: (url) => (url.includes('/query?') ? { status: 503, body: '', latencyMs: 1, retryAfterMs: 3_600_000 } : null) });
+  const r = await fetchRange(geofon, S, E, { limit: 100, minMagnitude: null, spacingMs: 1100, timeoutMs: 1000, ...f.opts });
+  assert.equal(r.ok, false);
+  if (!r.ok) {
+    assert.equal(r.retryAfterMs, 3_600_000);
+    assert.match(r.error, /Retry-After 3600 s/);
+  }
+  assert.equal(f.calls.length, 1);
+  assert.ok(!f.sleeps.some((ms) => ms >= 5_000));
+});
+
 test('history fetch: the count URL drops limit/orderby and the query keeps the provider params', () => {
   const c = decodeURIComponent(historyQueryUrl(usgs, S, E, { limit: 20000, minMagnitude: 4, count: true }));
   assert.match(c, /\/fdsnws\/event\/1\/count\?format=geojson&starttime=2022-12-01T00:00:00&endtime=2023-01-01T00:00:00&minmagnitude=4$/);
@@ -312,9 +337,10 @@ test('history build: a row that joins the frozen newer neighbour is listed, neve
   const ctxNodes = [...map.values()];
   const inp = input({
     raws: [raw('usgs', [obs('usgs', 'us1')]), raw('emsc', [obs('emsc', 'emEdge', { eventTimeMs: next - 2000, lat: 10.01, lon: 10.01 })])],
-    context: { label: 'archive-2023-01/events-2023-01.tar.zst#01.ndjson', day: '2023-01-01', nodes: ctxNodes },
+    context: { label: 'archive-2023-01/events-2023-01.tar.zst#01.ndjson', day: '2023-01-01', nodes: ctxNodes, sha256: 'ab'.repeat(32) },
   });
   const out = buildEdition(inp);
+  assert.equal(out.meta.context?.sha256, 'ab'.repeat(32));
   assert.equal(out.meta.rows.joined_newer, 1);
   assert.deepEqual(out.meta.joined_newer[0], { provider: 'emsc', native_id: 'emEdge', feed_id: ctxNodes[0]!.feedId });
   assert.equal(out.meta.events, 1);

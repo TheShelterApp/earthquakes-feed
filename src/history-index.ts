@@ -59,6 +59,8 @@ export interface AttemptEntry {
   failures: number;
   since: string;
   last_error: string;
+  /** The source asked (Retry-After) not to be asked again before this time; its months wait until then. */
+  not_before?: string;
 }
 
 export interface HistoryIndex {

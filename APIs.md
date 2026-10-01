@@ -323,7 +323,10 @@ from all its raw assets, newest month first, and the older edition stays. The in
 walk adds to the `data` branch: `knowledge/index/history.json` (read it through jsDelivr,
 `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/knowledge/index/history.json`). It lists each raw asset
 (`url`, `sha256`, `bytes`, `rows`, `provider_count`, `fetched_at`) and each edition (`url`, `sha256`, `events`, `days`,
-`sources`, `built_from`); a month's current edition is its highest `edition`. The manifest does not list the deep
+`sources`, `built_from`); a month's current edition is its highest `edition`. Each `_edition.json` names its newer
+neighbour (`context`: the asset and day it read, with that asset's `sha256` as its index listed it), so a later re-roll of
+`archive-2023-07` stays visible against the edition built on the earlier copy. A month is a calendar month: an era
+starts on the first day of a month and ends on the first day of a month or at the boundary. The manifest does not list the deep
 history (yet), and the app does not read it.
 
 **How a month is built.** Offline, from the month's raw assets only, by the backfill's own identity resolution (one
@@ -343,7 +346,8 @@ backfilled rows. `feed.first_ingest_time` / `ingest_time` are that fetch time, a
 0: the event never passed through the observation log. There is no `pages_url` and no Pages day file.
 
 **Pace.** One request at a time per host, at least `requestSpacingMs` (1.1 s) apart, HTTP 429 / 5xx answered with
-Retry-After or a doubling pause from 5 s (at most 2 min), a window that fills the page or times out split in two, a
+Retry-After or a doubling pause from 5 s (at most 2 min; a source that asks for a longer pause is left alone until the
+time it named, `attempts[].not_before` in the index), a window that fills the page or times out split in two, a
 month that cannot be fetched whole fetched again next run (a source that fails a day of runs turns the run red). ComCat
 is asked for its count first and every window's rows must equal the count. At most `maxUnitsPerRun` source months and
 `maxSecondsPerRun` per hourly run; the collect job runs outside the writer lock and only the index commit takes it.

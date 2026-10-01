@@ -76,6 +76,9 @@ export interface ContextInput {
   label: string;
   day: string;
   nodes: EventNode[];
+  /** The checksum of the asset the day was read from, as its index lists it (archives.json / history.json), so a
+   *  later re-roll of that archive stays visible against this edition. */
+  sha256?: string | null;
 }
 
 export interface BuildInput {
@@ -108,7 +111,7 @@ export interface EditionMeta {
   end: string;
   sources: string[];
   raw: { source: string; asset: string; sha256: string; rows: number; provider_count: number | null }[];
-  context: { label: string; day: string; events: number } | null;
+  context: { label: string; day: string; events: number; sha256: string | null } | null;
   events: number;
   days: string[];
   rows: {
@@ -280,7 +283,7 @@ export function buildEdition(input: BuildInput): { dayFiles: Map<string, string>
       const r = bySource.get(s)!;
       return { source: s, asset: r.asset, sha256: r.sha256, rows: r.rows.length, provider_count: r.header.provider_count };
     }),
-    context: context ? { label: context.label, day: context.day, events: context.nodes.length } : null,
+    context: context ? { label: context.label, day: context.day, events: context.nodes.length, sha256: context.sha256 ?? null } : null,
     events: written.length,
     days: [...dayFiles.keys()],
     rows: {

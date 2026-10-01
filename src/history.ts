@@ -96,7 +96,7 @@ interface Ctx {
   store: HistoryStore;
   dryRun: boolean;
   work: string;
-  archives: ArchiveRef[];
+  archives: (ArchiveRef & { sha256?: string })[];
   archivedDays: Set<string>;
   deadline: number;
   assetCache: Map<string, AssetInfo[]>;
@@ -282,6 +282,15 @@ async function fetchUnits(ctx: Ctx, maxUnits: number): Promise<void> {
   for (const u of pendingUnits(ctx.cfg, ctx.idx)) {
     if (done >= maxUnits || Date.now() > ctx.deadline) break;
     if (failedSources.has(u.source)) continue;
+    const waitUntil = Object.entries(ctx.idx.attempts)
+      .filter(([k, v]) => k.startsWith(`${u.source}:`) && v.not_before)
+      .map(([, v]) => Date.parse(v.not_before!))
+      .reduce((m, t) => Math.max(m, t), -Infinity);
+    if (waitUntil > Date.now()) {
+      failedSources.add(u.source);
+      console.log(`history: ${u.source} asked not to be asked before ${new Date(waitUntil).toISOString()} (Retry-After); its months wait`);
+      continue;
+    }
     const p = ctx.byId.get(u.source)!;
     const era = eraOf(ctx.cfg, u.period);
     const key = `${u.source}:${u.period.key}`;
@@ -306,6 +315,8 @@ async function fetchUnits(ctx: Ctx, maxUnits: number): Promise<void> {
       const a = (ctx.idx.attempts[key] ??= { failures: 0, since: fetchedAt, last_error: '' });
       a.failures++;
       a.last_error = res.error.slice(0, 300);
+      if (res.retryAfterMs != null) a.not_before = new Date(Date.now() + res.retryAfterMs).toISOString();
+      else delete a.not_before;
       ctx.report.failed.push(`${key}: ${res.error} (${a.failures} failed run(s) since ${a.since}; ${res.requests} request(s))`);
       console.log(`::warning::history: ${key} failed: ${res.error} — ${a.failures} failed run(s) since ${a.since}`);
       if (a.failures >= ALARM_FAILURES && a.failures % ALARM_FAILURES === 0) {
@@ -355,7 +366,7 @@ function boundaryContext(ctx: Ctx, day: string): ContextInput {
   if (!entry) throw new Error(`the boundary day ${day} is not in an archive-YYYY-MM Release; history waits for the 3-year layer to be archived`);
   const res = readArchivedDays([entry], new Set([day]));
   if (res.failedMonths.size) throw new Error(`could not read ${entry.tag}/${entry.asset} for the boundary day ${day}`);
-  return { label: `${entry.tag}/${entry.asset}#${day.slice(8, 10)}.ndjson`, day, nodes: res.days.get(day) ?? [] };
+  return { label: `${entry.tag}/${entry.asset}#${day.slice(8, 10)}.ndjson`, day, nodes: res.days.get(day) ?? [], sha256: entry.sha256 ?? null };
 }
 
 function editionContext(ctx: Ctx, e: EditionEntry, day: string): ContextInput {
@@ -366,7 +377,7 @@ function editionContext(ctx: Ctx, e: EditionEntry, day: string): ContextInput {
     .split('\n')
     .filter((l) => l.trim())
     .map((l) => featureToNode(JSON.parse(l)));
-  return { label: `${e.tag}/${e.asset}#${day.slice(8, 10)}.ndjson`, day, nodes };
+  return { label: `${e.tag}/${e.asset}#${day.slice(8, 10)}.ndjson`, day, nodes, sha256: e.sha256 };
 }
 
 function sealPeriods(ctx: Ctx): void {
@@ -426,7 +437,7 @@ async function main(): Promise<void> {
   const backfill = JSON.parse(readFileSync(paths.backfillCursor, 'utf8')) as { targetStart?: string };
   // The boundary is where backfill's 3-year walk stopped: history must end exactly there, never inside it.
   if (backfill.targetStart !== cfg.boundary) throw new Error(`boundary ${cfg.boundary} differs from backfill.json targetStart ${backfill.targetStart}`);
-  const archives = existsSync(paths.archivesIndex) ? (JSON.parse(readFileSync(paths.archivesIndex, 'utf8')) as { list: ArchiveRef[] }).list : [];
+  const archives = existsSync(paths.archivesIndex) ? (JSON.parse(readFileSync(paths.archivesIndex, 'utf8')) as { list: (ArchiveRef & { sha256?: string })[] }).list : [];
   const archivedDays = new Set(archives.flatMap((a) => a.days ?? []));
   const localIndex = join(out, 'history.json');
   const indexIn = process.env.HISTORY_INDEX_IN ?? (dryRun && existsSync(localIndex) ? localIndex : join(paths.indexDir, 'history.json'));

@@ -97,6 +97,10 @@ export function configProblems(cfg: HistoryConfig, registry: ProviderConfig[]): 
       continue;
     }
     if (dayMs(era.from) >= dayMs(era.to)) out.push(`era ${era.id}: from ${era.from} is not before to ${era.to}`);
+    // Units are calendar months named YYYY-MM (asset names, index keys): an era that started or ended inside a month
+    // would share that month's key with its neighbour era. Only the boundary itself may cut a month.
+    if (!era.from.endsWith('-01')) out.push(`era ${era.id}: from ${era.from} is not the first day of a month`);
+    if (!era.to.endsWith('-01') && era.to !== cfg.boundary) out.push(`era ${era.id}: to ${era.to} is neither the first day of a month nor the boundary`);
     if (isDay(cfg.boundary) && dayMs(era.to) > dayMs(cfg.boundary)) out.push(`era ${era.id}: to ${era.to} is after the boundary ${cfg.boundary}`);
     if (era.minMagnitude != null && typeof era.minMagnitude !== 'number') out.push(`era ${era.id}: minMagnitude must be a number or null`);
     if (!Array.isArray(era.sources) || !era.sources.length) out.push(`era ${era.id}: no sources`);

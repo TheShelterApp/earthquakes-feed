@@ -70,8 +70,9 @@ const MAX_RETRY_AFTER_MS = 120_000;
  *  likely broken or moved than missing that many events. The streak's records are dropped and asked again next run. */
 export const GONE_STREAK_LIMIT = 50;
 /** A `day` source's day the node answers with no content (204, or 404 for nodes that say "no data" that way) while the
- *  feed holds reports of it: asked again in later runs (a node that is down answers 204 to everything, as NOA did on
- *  2026-10-01), recorded as missing on the third such answer. */
+ *  feed holds reports of it, when the node cannot be shown to be up (no earlier day with content to check, or that day
+ *  is empty now too: a node that is down answers 204 to everything, as NOA did on 2026-10-01): asked again in later
+ *  runs, recorded as missing on the third such answer. */
 export const EMPTY_DAY_RETRIES = 3;
 /** A lane takes no day of a further event month once its records of the run cover this many months. Each month is one
  *  chunk upload at the end of the run (with its Release checks, a few seconds each); a day source answers a whole day
@@ -388,11 +389,27 @@ export async function runLane(src: HistorySource, cur: SourceCursor, ctx: LaneCo
           out.error = `${day}: HTTP ${res.status} to the day query`;
           break;
         }
-        const tries = (cur.pending?.day === day ? (cur.pending.empty ?? 0) : 0) + 1;
-        if (tries < EMPTY_DAY_RETRIES) {
-          setPending({ day, offset: 0, empty: tries });
-          out.error = `${day}: no content (HTTP ${res.status}) for a day the feed holds ${ids.length} report(s) of; asked again next run (${tries}/${EMPTY_DAY_RETRIES})`;
-          break;
+        // Nothing for a day the feed holds reports of: either the node dropped those events (USP answered 204 for
+        // 2026-08-25, whose one report it no longer lists, and 200 for the day before, on 2026-10-01), or it is down
+        // and answers 204 to everything (NOA that day). Ask it again for the last day it answered with content: if
+        // that day still has content the node is up and the empty day is real, recorded at once.
+        let alive = false;
+        if (cur.contentDay && cur.contentDay !== day) {
+          const probe = await fetchPolitely(src.url(cur.contentDay), src, ctx.pacer, ctx.get, ctx.wait);
+          out.requests += probe.attempts;
+          if (probe.kind === 'fail') {
+            out.error = `${day}: no content (HTTP ${res.status}), and the check of ${cur.contentDay} failed: ${probe.error}`;
+            break;
+          }
+          alive = probe.kind === 'ok';
+        }
+        if (!alive) {
+          const tries = (cur.pending?.day === day ? (cur.pending.empty ?? 0) : 0) + 1;
+          if (tries < EMPTY_DAY_RETRIES) {
+            setPending({ day, offset: 0, empty: tries });
+            out.error = `${day}: no content (HTTP ${res.status}) for a day the feed holds ${ids.length} report(s) of${cur.contentDay ? `, and none for ${cur.contentDay}, which had content` : ''}; asked again next run (${tries}/${EMPTY_DAY_RETRIES})`;
+            break;
+          }
         }
         recs = ids.map((id) => missingRecord(src, { provider: src.provider, providerEventId: id, day, collected }, `http ${res.status}`));
       } else {
@@ -402,6 +419,7 @@ export async function runLane(src: HistorySource, cur: SourceCursor, ctx: LaneCo
           out.error = `${day}: unreadable answer: ${err instanceof Error ? err.message : String(err)}`;
           break;
         }
+        if (moveCursor && recs.length) cur.contentDay = day;
         const have = new Set(recs.map((r) => r.provider_event_id));
         for (const id of ids) if (!have.has(id)) recs.push(missingRecord(src, { provider: src.provider, providerEventId: id, day, collected }, 'not in the day answer'));
       }

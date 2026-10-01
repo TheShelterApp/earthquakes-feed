@@ -332,11 +332,13 @@ test('lane: a failed request keeps the day pending at that report; a streak of m
   assert.match(res2.error!, new RegExp(`${GONE_STREAK_LIMIT} answers in a row`));
 });
 
-test('lane: day source — a day without reports costs no request; 204 is asked again, then recorded as missing', async () => {
+test('lane: day source — a day without reports costs no request; 204 from a node that may be down is asked again, then recorded as missing', async () => {
   const geofonDay = fixture('geofon-allorigins-2026-09-11T1150.xml');
   const days = { '2026-07-04': partitionLine('geofon', ['gfz2026rvdx', 'gfz2026zzzz']), '2026-07-02': partitionLine('geofon', ['gfz2026aaaa']) };
   const cur = newSourceCursor();
-  const ctx = laneCtx(days, (url) => (url.includes('starttime=2026-07-04') ? { status: 200, body: geofonDay, retryAfterMs: null } : { status: 204, body: '', retryAfterMs: null }));
+  // The node answers its first request and nothing after it: the check of 2026-07-04 comes back empty too.
+  let answered = 0;
+  const ctx = laneCtx(days, (url) => (url.includes('starttime=2026-07-04') && answered++ === 0 ? { status: 200, body: geofonDay, retryAfterMs: null } : { status: 204, body: '', retryAfterMs: null }));
   const r1 = await runLane(source('geofon'), cur, ctx);
   assert.deepEqual(r1.daysDone, ['2026-07-04', '2026-07-03']);
   assert.deepEqual(r1.records.map((r) => [r.provider_event_id, r.versions.length, r.missing ?? null]), [
@@ -344,12 +346,39 @@ test('lane: day source — a day without reports costs no request; 204 is asked 
     ['gfz2026zzzz', 0, 'not in the day answer'],
   ]);
   assert.deepEqual(cur.pending, { day: '2026-07-02', offset: 0, empty: 1 });
-  assert.match(r1.error!, /no content \(HTTP 204\)/);
+  assert.match(r1.error!, /no content \(HTTP 204\) for a day the feed holds 1 report\(s\) of, and none for 2026-07-04, which had content/);
+  assert.equal(cur.contentDay, '2026-07-04');
   for (let i = 2; i < EMPTY_DAY_RETRIES; i++) await runLane(source('geofon'), cur, ctx);
   const last = await runLane(source('geofon'), cur, ctx);
   assert.deepEqual(last.records.map((r) => [r.provider_event_id, r.missing]), [['gfz2026aaaa', 'http 204']]);
   assert.ok(last.daysDone.includes('2026-07-02'));
   assert.equal(ctx.calls.filter((u) => u.includes('starttime=2026-07-03')).length, 0, 'no reports that day, no request');
+});
+
+test('lane: day source — an empty day is recorded at once when the last day with content still answers (the node is up)', async () => {
+  const geofonDay = fixture('geofon-allorigins-2026-09-11T1150.xml');
+  const days = {
+    '2026-07-04': partitionLine('geofon', ['gfz2026rvdx']),
+    '2026-07-03': partitionLine('geofon', ['gfz2026gone']),
+    '2026-07-02': partitionLine('geofon', ['gfz2026rvdx']),
+  };
+  const cur = newSourceCursor();
+  const ctx = laneCtx(days, (url) => (url.includes('starttime=2026-07-03') ? { status: 204, body: '', retryAfterMs: null } : { status: 200, body: geofonDay, retryAfterMs: null }));
+  const res = await runLane(source('geofon'), cur, ctx);
+  assert.equal(res.error, null, 'a day the node dropped is not a failure');
+  assert.deepEqual(res.daysDone, ['2026-07-04', '2026-07-03', '2026-07-02', '2026-07-01']);
+  assert.deepEqual(res.records.filter((r) => r.day === '2026-07-03').map((r) => [r.provider_event_id, r.missing]), [['gfz2026gone', 'http 204']]);
+  assert.deepEqual(ctx.calls.map((u) => /starttime=([0-9-]+)/.exec(u)![1]), ['2026-07-04', '2026-07-03', '2026-07-04', '2026-07-02'], 'one check of the last day with content');
+  assert.equal(res.requests, 4);
+  assert.equal(cur.pending, undefined);
+  assert.equal(cur.contentDay, '2026-07-02');
+  // The check itself failing (HTTP 503) stops the lane and records nothing for the empty day.
+  const cur2: SourceCursor = { ...newSourceCursor(), contentDay: '2026-07-04', done: [['2026-07-04', '2026-07-04']] };
+  const ctx2 = laneCtx(days, (url) => (url.includes('starttime=2026-07-03') ? { status: 204, body: '', retryAfterMs: null } : { status: 503, body: '', retryAfterMs: null }));
+  const res2 = await runLane(source('geofon'), cur2, ctx2);
+  assert.match(res2.error!, /2026-07-03: no content \(HTTP 204\), and the check of 2026-07-04 failed: HTTP 503/);
+  assert.equal(res2.records.length, 0);
+  assert.deepEqual(cur2.done, [['2026-07-04', '2026-07-04']]);
 });
 
 test('lane: a day query the node refuses (HTTP 400) stops the lane and records nothing', async () => {

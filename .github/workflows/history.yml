@@ -1,0 +1,153 @@
+name: history
+
+# Deep history (PF-5j; APIs.md, Deep history): walks the feed's history before the 3-year layer
+# (knowledge/index/backfill.json targetStart) into immutable `history-YYYY` Release assets: one raw
+# asset per source month, one events edition per month, built offline by the backfill's Resolver.
+# No day partition is committed and no existing archive or frozen day is touched: the data branch
+# gains only knowledge/index/history.json, written by the `commit` job below and nothing else.
+# Off unless providers/history.json says `"enabled": true` (then the walk runs hourly, a few source
+# months per run, one request at a time per host).
+on:
+  schedule:
+    - cron: '29 * * * *'
+  workflow_dispatch:
+    inputs:
+      max_units:
+        description: 'Source months to fetch this run (blank = maxUnitsPerRun)'
+        required: false
+      dry_run:
+        description: 'Dry run: no Release, no upload, no commit; the produced assets become a 3-day workflow artifact'
+        type: boolean
+        default: false
+
+# Runs never overlap, so the index each run reads is the one the previous run committed (or, when that
+# commit was cancelled while waiting for the writer lock, the next run adopts the uploaded assets).
+concurrency:
+  group: earthquakes-feed-history
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    # Outside the writer group: fetching takes minutes and must not hold up the 5-minute aggregate.
+    # It writes nothing to the data branch, only Release assets (immutable, never --clobber).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    outputs:
+      changed: ${{ steps.walk.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Gate (providers/history.json enabled)
+        id: gate
+        run: |
+          if [ "$(jq -r '.enabled' providers/history.json)" = "true" ] || [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "on=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "on=false" >> "$GITHUB_OUTPUT"
+            echo 'history: providers/history.json has enabled=false; nothing to do'
+          fi
+      - if: steps.gate.outputs.on == 'true'
+        uses: actions/checkout@v5
+        with:
+          ref: data
+          path: .data
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            knowledge/index/backfill.json
+            knowledge/index/archives.json
+            knowledge/index/history.json
+          sparse-checkout-cone-mode: false
+      - if: steps.gate.outputs.on == 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      - if: steps.gate.outputs.on == 'true'
+        run: npm ci
+      - name: Walk
+        id: walk
+        if: steps.gate.outputs.on == 'true'
+        env:
+          DATA_DIR: .data
+          HISTORY_OUT: history-out
+          HISTORY_DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          HISTORY_FORCE: ${{ inputs.dry_run && '1' || '' }}
+          HISTORY_MAX_UNITS: ${{ inputs.max_units }}
+          GH_TOKEN: ${{ github.token }}
+        run: npx --no-install tsx src/history.ts
+      - if: steps.walk.outputs.changed == 'true' && !inputs.dry_run
+        uses: actions/upload-artifact@v4
+        with:
+          name: history-index
+          path: history-out/history.json
+          retention-days: 3
+      - if: inputs.dry_run && steps.gate.outputs.on == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: history-dry-run
+          path: history-out/
+          retention-days: 3
+      - name: Fail if the walk was blocked
+        if: always()
+        run: |
+          if [ -f history-blocked.txt ]; then
+            cat history-blocked.txt
+            echo '::error::history: blocked or stalled (see above); the index of the uploaded work is still committed'
+            exit 1
+          fi
+
+  commit:
+    needs: collect
+    # Also after a red collect: whatever it uploaded must reach the index.
+    if: ${{ !cancelled() && needs.collect.outputs.changed == 'true' && !inputs.dry_run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: earthquakes-feed-writer
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: data
+          path: .data
+          fetch-depth: 1
+          sparse-checkout: |
+            knowledge/index/history.json
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: history-index
+          path: history-out
+      - name: Commit the history index (and nothing else)
+        working-directory: .data
+        run: |
+          set -euo pipefail
+          size=$(wc -c < ../history-out/history.json)
+          # The whole proposed deep history (PF-5j: 2000 on, 1973 on, 1900 on) indexes in about 4.5 MB.
+          if [ "$size" -gt 8000000 ]; then echo "::error::history.json is $size bytes, over the 8 MB cap"; exit 1; fi
+          mkdir -p knowledge/index
+          cp ../history-out/history.json knowledge/index/history.json
+          git config user.name  "earthquakes-feed-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add knowledge/index/history.json
+          staged=$(git diff --cached --name-only)
+          if [ -z "$staged" ]; then echo 'no changes'; exit 0; fi
+          if [ "$staged" != "knowledge/index/history.json" ]; then echo "::error::refusing to commit anything but knowledge/index/history.json: $staged"; exit 1; fi
+          git commit -m "history: index @ $(date -u +%FT%TZ)"
+          for _ in 1 2 3; do
+            git push origin HEAD:data && exit 0
+            git fetch origin data
+            # `|| true`: with no rebase started --abort exits 128 and bash -e would kill the step
+            # before the annotation is emitted, losing the reason the push died.
+            git rebase origin/data || { git rebase --abort || true; echo '::error::rebase conflict'; exit 1; }
+          done
+          echo '::error::push failed after 3 attempts'; exit 1

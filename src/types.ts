@@ -108,6 +108,10 @@ export interface ProviderConfig {
   timeoutMs?: number;
   /** false = skip on the live 5-min path (e.g. a months-delayed catalog); still backfilled. */
   liveActive?: boolean;
+  /** Live FDSN path: ask for origins of the last this many days instead of QUERY_LOOKBACK_MS (2 days), for a source
+   *  that publishes many events days after their origin (NRCan). Capped at HOT_WINDOW_DAYS: an older row is dropped
+   *  at ingest anyway (providers.ts liveLookbackMs). */
+  lookbackDays?: number;
   refreshSeconds: number;
   license: string;
   attribution: string;

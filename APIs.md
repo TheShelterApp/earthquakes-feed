@@ -302,6 +302,56 @@ those 26 monthly archives back (2023-07…2025-08, about 760 days), adding about
 2025-07-29…08-02 added 1,695 events to its 8,869 and an ISC row to 1,249 others) and re-rolling every archive. That is
 a deliberate one-off, like a heal, not an automatic step.
 
+## Deep history (before 2023-07-06)
+
+History older than the 3-year layer above is built by a separate walk, `history` (`.github/workflows/history.yml`,
+`src/history*.ts`), that never commits a day partition, never touches an `archive-YYYY-MM` Release and never rewrites a
+frozen day. It runs only while `providers/history.json` says `"enabled": true`; the first era configured is a pilot:
+ComCat (`usgs`), every magnitude, 2022-07-01 up to the boundary 2023-07-06 (the 3-year layer's first day, which must
+equal `knowledge/index/backfill.json` `targetStart`).
+
+**Where it lives.** Everything is an immutable asset of a Release `history-YYYY` (the year of the month):
+
+| Asset | What it is |
+|---|---|
+| `raw-<source>-<YYYY-MM>.ndjson.zst` | one source's answer for one month, normalised by the feed's parser: a header line (`kind: "earthquakes-feed/history-raw"`: the range, the queries' windows, the rows each answered, the source's own count where it has a count service (ComCat), `fetched_at`), then one report per line |
+| `events-<YYYY-MM>.e<N>.tar.zst` | the month's events: `DD.ndjson` day files in the day partitions' feature format (the same as `archive-YYYY-MM`), plus `_edition.json` (sources, the raw assets it was built from with their checksums, row counts, `joined_newer`) |
+
+An asset is never overwritten or deleted. A failed upload leaves its name behind as `unused` and the walk takes the next
+free name (`raw-usgs-2022-12.g2.ndjson.zst`); when a source joins an era, each month gets a new edition (`e2`) built
+from all its raw assets, newest month first, and the older edition stays. The index of all of it is the only file the
+walk adds to the `data` branch: `knowledge/index/history.json` (read it through jsDelivr,
+`https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/knowledge/index/history.json`). It lists each raw asset
+(`url`, `sha256`, `bytes`, `rows`, `provider_count`, `fetched_at`) and each edition (`url`, `sha256`, `events`, `days`,
+`sources`, `built_from`); a month's current edition is its highest `edition`. Each `_edition.json` names its newer
+neighbour (`context`: the asset and day it read, with that asset's `sha256` as its index listed it), so a later re-roll of
+`archive-2023-07` stays visible against the edition built on the earlier copy. A month is a calendar month: an era
+starts on the first day of a month and ends on the first day of a month or at the boundary. The manifest does not list the deep
+history (yet), and the app does not read it.
+
+**How a month is built.** Offline, from the month's raw assets only, by the backfill's own identity resolution (one
+`Resolver`, hot floor 0, merge pass off) in the deterministic ingest order: the same raw assets always give the same
+events with the same feed ids (ids are seeded by time and place). The month's newer neighbour is frozen first (the walk
+goes backwards): the 3-year layer's first day for the month before the boundary, else the first day of the newer month's
+current edition. Its events are loaded read-only, so a quake whose reports straddle midnight stays one event: a report
+of this month that joins one of them is not written (that day is immutable) and is listed in `_edition.json`
+`joined_newer` with the event's feed id. Before an edition is uploaded every line is checked against
+`schema/feature.schema.json`, every event lies on its file's day inside the month and before the boundary, no feed id
+and no source id is in two events, and every fetched report is written, joined to the neighbour or under the era's
+magnitude floor; `scripts/history-verify.ts` runs the same checks on downloaded assets and can re-ask ComCat for its
+counts.
+
+**What a deep event says.** A row is the source's solution on the day the walk fetched it (`fetched_at`), as for
+backfilled rows. `feed.first_ingest_time` / `ingest_time` are that fetch time, and `first_seen_seq` / `ingest_seq` are
+0: the event never passed through the observation log. There is no `pages_url` and no Pages day file.
+
+**Pace.** One request at a time per host, at least `requestSpacingMs` (1.1 s) apart, HTTP 429 / 5xx answered with
+Retry-After or a doubling pause from 5 s (at most 2 min; a source that asks for a longer pause is left alone until the
+time it named, `attempts[].not_before` in the index), a window that fills the page or times out split in two, a
+month that cannot be fetched whole fetched again next run (a source that fails a day of runs turns the run red). ComCat
+is asked for its count first and every window's rows must equal the count. At most `maxUnitsPerRun` source months and
+`maxSecondsPerRun` per hourly run; the collect job runs outside the writer lock and only the index commit takes it.
+
 ## EMSC's copies of agencies' solutions
 
 EMSC republishes many agencies' own solutions; `fields.auth` of the `emsc` provenance row names the
@@ -489,12 +539,17 @@ const stale = (Date.now() - fc.metadata.generated) / 1000 > 1800;
 // Time-slider: fetch a specific recent day
 const day = await (await fetch(`https://earthquakes-feed.theshelter.app/v1/events/${isoDate}.geojson`)).json();
 
-// Deep history immutably:
+// A frozen day immutably:
 const m = await (await fetch('https://earthquakes-feed.theshelter.app/v1/manifest.json')).json();
 const p = m.partitions.find(x => x.date === '2025-03-14');
 const url = p.frozen
   ? `https://cdn.jsdelivr.net/gh/${m.data_repo}@${m.data_commit}/${p.path}`
   : p.url;
+
+// Before 2023-07-06 (the deep history; APIs.md, Deep history): a month's current edition
+const h = await (await fetch('https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/knowledge/index/history.json')).json();
+const ed = h.editions.filter(e => e.period === '2022-12').sort((a, b) => b.edition - a.edition)[0];
+// ed.url: events-2022-12.e<N>.tar.zst, a zstd tar of DD.ndjson day files; check it against ed.sha256
 ```
 
 ## Versioning

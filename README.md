@@ -162,7 +162,8 @@ open, reachable source appears.
   (2023-07-06) in July 2026 except ISC, whose walk is paused; a backfilled row is the
   source's solution when it was fetched, while the log holds each report as first seen
   since 2026-07-05 (`scripts/first-observations.ts`; [APIs.md](APIs.md#history-and-backfill)).
-  History before 2023-07-06 goes elsewhere: the `history` walk (off until `providers/history.json` enables it) writes
+  History before 2023-07-06 goes elsewhere: the `history` walk (switched by `providers/history.json` `enabled`; on since
+  2026-10-01 for its first era, ComCat 2022-07-01 → 2023-07-06) writes
   immutable `history-YYYY` Release assets only, and the `data` branch gains just `knowledge/index/history.json`
   ([APIs.md](APIs.md#deep-history-before-2023-07-06)).
 - **A newly-added source fills in automatically:** its recent live window is onboarded

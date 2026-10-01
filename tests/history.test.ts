@@ -46,10 +46,10 @@ const cfgOf = (eras: HistoryEra[], over: Partial<HistoryConfig> = {}): HistoryCo
 
 // ---------- config ----------
 
-test('history config: the shipped providers/history.json is valid and switched off', () => {
+test('history config: the shipped providers/history.json is valid and its switch is a boolean', () => {
   const cfg = loadHistoryConfig();
   assert.deepEqual(configProblems(cfg, registry), []);
-  assert.equal(cfg.enabled, false);
+  assert.equal(typeof cfg.enabled, 'boolean');
   assert.ok(cfg.requestSpacingMs >= 1000);
 });
 

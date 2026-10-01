@@ -33,6 +33,7 @@ import {
   parseQuakemlAllOrigins,
 } from './first-solutions.js';
 import { gh, ghRetry, ghRetryNet, sleepMs } from './gh.js';
+import { GitHubStore } from './history-store.js';
 import { FROZEN_AFTER_DAYS, dayPartitionFile } from './partitions.js';
 import { isoFromMs } from './util.js';
 
@@ -59,7 +60,8 @@ import { isoFromMs } from './util.js';
  */
 
 const DAY = 86_400_000;
-const USER_AGENT = 'earthquakes-feed/0.1 first-solutions (+https://earthquakes-feed.theshelter.app)';
+/** Names the repository as contact (the feed host's root answers 404), like the deep-history walk's agent. */
+export const USER_AGENT = 'earthquakes-feed-first-solutions/1.0 (+https://github.com/TheShelterApp/earthquakes-feed; earliest-solutions side index, one request at a time)';
 /** Pauses before the 2nd, 3rd and 4th attempt of a request that failed transiently. */
 const RETRY_PAUSES_MS = [2_000, 8_000, 30_000];
 /** A Retry-After longer than this stops the lane for the run instead of waiting. */
@@ -71,6 +73,11 @@ export const GONE_STREAK_LIMIT = 50;
  *  feed holds reports of it: asked again in later runs (a node that is down answers 204 to everything, as NOA did on
  *  2026-10-01), recorded as missing on the third such answer. */
 export const EMPTY_DAY_RETRIES = 3;
+/** A lane takes no day of a further event month once its records of the run cover this many months. Each month is one
+ *  chunk upload at the end of the run (with its Release checks, a few seconds each); a day source answers a whole day
+ *  per request and would otherwise reach dozens of months in one run (GEOFON's 1,170 days with reports at 1–3 s each)
+ *  and push the uploads past the job's timeout, run after run. The one-event sources cover one or two months a run. */
+export const MAX_MONTHS_PER_LANE = 6;
 
 export interface HttpAnswer {
   status: number;
@@ -309,6 +316,8 @@ export interface LaneResult {
   requests: number;
   daysDone: string[];
   error: string | null;
+  /** The day the lane stopped before because of MAX_MONTHS_PER_LANE (not a failure: the next run starts there). */
+  monthCapAt?: string;
 }
 
 function parseAnswer(src: HistorySource, body: string, id: string, day: string, collected: string): FirstSolutionRecord {
@@ -327,6 +336,12 @@ export async function runLane(src: HistorySource, cur: SourceCursor, ctx: LaneCo
   const only = ctx.onlyIds ? (ctx.onlyIds.get(src.provider) ?? new Set<string>()) : undefined;
   const queue = oneOff ? [...ctx.days!] : null;
   const take = (): string | null => (queue ? (queue.shift() ?? null) : nextDay(cur, ctx.plan(src)));
+  /** A one-off slice never replaces the walk's own pending day: that day's offset would be lost and its reports asked
+   *  again from the start. The slice's unfinished day stays undone and the walk takes it in its turn. */
+  const setPending = (p: NonNullable<SourceCursor['pending']>): void => {
+    if (!moveCursor || (oneOff && cur.pending && cur.pending.day !== p.day)) return;
+    cur.pending = p;
+  };
   const finishDay = (day: string): void => {
     out.daysDone.push(day);
     if (moveCursor) {
@@ -336,7 +351,14 @@ export async function runLane(src: HistorySource, cur: SourceCursor, ctx: LaneCo
       if (key != null) (cur.deep ??= {})[day.slice(0, 7)] = key;
     }
   };
+  const months = new Set<string>();
+  let counted = 0;
   for (let day = take(); day != null && ctx.now() < ctx.deadlineMs; day = take()) {
+    for (; counted < out.records.length; counted++) months.add(out.records[counted]!.day.slice(0, 7));
+    if (!months.has(day.slice(0, 7)) && months.size >= MAX_MONTHS_PER_LANE) {
+      out.monthCapAt = day;
+      break;
+    }
     let ids: string[];
     try {
       ids = idsInPartition(await ctx.partitions.dayText(day), src.provider);
@@ -368,7 +390,7 @@ export async function runLane(src: HistorySource, cur: SourceCursor, ctx: LaneCo
         }
         const tries = (cur.pending?.day === day ? (cur.pending.empty ?? 0) : 0) + 1;
         if (tries < EMPTY_DAY_RETRIES) {
-          if (moveCursor) cur.pending = { day, offset: 0, empty: tries };
+          setPending({ day, offset: 0, empty: tries });
           out.error = `${day}: no content (HTTP ${res.status}) for a day the feed holds ${ids.length} report(s) of; asked again next run (${tries}/${EMPTY_DAY_RETRIES})`;
           break;
         }
@@ -427,7 +449,7 @@ export async function runLane(src: HistorySource, cur: SourceCursor, ctx: LaneCo
       finishDay(day);
       continue;
     }
-    if (moveCursor) cur.pending = { day, offset: i };
+    setPending({ day, offset: i });
     break;
   }
   return out;
@@ -507,9 +529,10 @@ function uploadChunk(line: ChunkLine, file: string): void {
   const tag = releaseTag(line.month);
   ensureRelease(tag);
   ghRetry(['release', 'upload', tag, file, '-R', REPO]);
-  const listed = JSON.parse(ghRetry(['release', 'view', tag, '-R', REPO, '--json', 'assets'])) as { assets: Array<{ name: string; size: number }> };
-  const a = listed.assets.find((x) => x.name === line.asset);
-  if (!a || a.size !== line.bytes) throw new Error(`asset ${line.asset} not listed with ${line.bytes} bytes after upload`);
+  // The paginated assets endpoint (history-store.ts), not `gh release view --json assets`: a month's Release collects
+  // one chunk per source and run (a few hundred over its life), and the check must see the newest one.
+  const a = new GitHubStore().list(tag).find((x) => x.name === line.asset);
+  if (!a || a.size !== line.bytes || a.state !== 'uploaded') throw new Error(`asset ${line.asset} not listed as uploaded with ${line.bytes} bytes`);
 }
 
 const sha256Of = (s: string | null): string | null => (s == null ? null : createHash('sha256').update(s).digest('hex'));
@@ -652,7 +675,7 @@ async function main(): Promise<void> {
     const left = daysLeft(cur, plan(HISTORY_SOURCES.find((s) => s.provider === res.provider)!));
     summary[res.provider] = { requests: res.requests, records: res.records.length, days: res.daysDone.length, pending: cur.pending ?? null, days_left: left, failures: cur.failures, error: res.error };
     console.log(
-      `first-solutions ${res.provider}: ${res.requests} request(s), ${res.records.length} record(s), ${res.daysDone.length} day(s) done${res.daysDone.length ? ` (${res.daysDone[0]}..${res.daysDone[res.daysDone.length - 1]})` : ''}, pending ${cur.pending ? `${cur.pending.day}+${cur.pending.offset}` : 'none'}, ${left} day(s) left${res.error ? `, stopped: ${res.error}` : ''}`,
+      `first-solutions ${res.provider}: ${res.requests} request(s), ${res.records.length} record(s), ${res.daysDone.length} day(s) done${res.daysDone.length ? ` (${res.daysDone[0]}..${res.daysDone[res.daysDone.length - 1]})` : ''}, pending ${cur.pending ? `${cur.pending.day}+${cur.pending.offset}` : 'none'}, ${left} day(s) left${res.error ? `, stopped: ${res.error}` : ''}${res.monthCapAt ? `, stopped before ${res.monthCapAt}: ${MAX_MONTHS_PER_LANE} event months this run` : ''}`,
     );
     if (level === 'warn') console.log(`::warning::first-solutions ${res.provider}: ${cur.failures} failed runs in a row since ${cur.failingSince}: ${cur.lastError}`);
     if (level === 'alarm') blockers.push(`first-solutions ${res.provider}: ${cur.failures} failed runs in a row since ${cur.failingSince}: ${cur.lastError}`);

@@ -8,13 +8,19 @@ name: first-solutions
 # which spends up to 30 minutes on requests, holds no writer lock, so the 5-minute aggregate is never kept waiting. It
 # shares the deep-history walk's group instead, so the two never query a source at the same time.
 #
-# Off until enabled: the schedule runs only when the repository variable FIRST_SOLUTIONS_SCHEDULE is `on`
-# (gh variable set FIRST_SOLUTIONS_SCHEDULE --body on -R TheShelterApp/earthquakes-feed); a dispatch always runs.
+# Off until enabled: the scheduled runs go ahead only when the repository variable FIRST_SOLUTIONS_SCHEDULE is `on`
+# (gh variable set FIRST_SOLUTIONS_SCHEDULE --body on -R TheShelterApp/earthquakes-feed); a manual dispatch always runs.
+# The heartbeat Worker dispatches this workflow hourly at :48 with `tick=1` (heartbeat/src/worker.js), because GitHub
+# delivers this repository's hourly crons about 4 times a day (backfill, derive and health each got 4 scheduled runs
+# between 2026-09-30 16:40 and 2026-10-01 16:40 UTC); the cron below is the fallback when the Worker is down.
 on:
   schedule:
     - cron: '50 * * * *'
   workflow_dispatch:
     inputs:
+      tick:
+        description: 'Set to 1 by the heartbeat Worker: then the run goes ahead only when FIRST_SOLUTIONS_SCHEDULE is on'
+        required: false
       days:
         description: 'One-off slice: days (2026-06-15 or 2026-06-15..2026-06-20); blank = the walk'
         required: false
@@ -35,7 +41,7 @@ permissions:
 
 jobs:
   collect:
-    if: github.event_name == 'workflow_dispatch' || vars.FIRST_SOLUTIONS_SCHEDULE == 'on'
+    if: vars.FIRST_SOLUTIONS_SCHEDULE == 'on' || (github.event_name == 'workflow_dispatch' && inputs.tick != '1')
     # Pinned, not ubuntu-latest: ubuntu-latest moves to Ubuntu 26.04 from 2026-10-19
     # (actions/runner-images#14748). Move to ubuntu-26.04 deliberately, after a green test run.
     runs-on: ubuntu-24.04
@@ -122,7 +128,7 @@ jobs:
           git add "$dir"
           git commit -m "first-solutions: $(jq -r '[.sources | to_entries[] | "\(.key) \(.value.records // 0)"] | join(", ")' ../fs-out/summary.json) @ $(date -u +%FT%TZ)" \
             || { echo 'no changes'; exit 0; }
-          for i in 1 2 3; do
+          for _ in 1 2 3; do
             git push origin HEAD:data && exit 0
             git fetch origin data
             # `|| true`: with no rebase started --abort exits 128 and bash -e would kill the step

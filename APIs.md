@@ -353,6 +353,7 @@ time it named, `attempts[].not_before` in the index), a window that fills the pa
 month that cannot be fetched whole fetched again next run (a source that fails a day of runs turns the run red). ComCat
 is asked for its count first and every window's rows must equal the count. At most `maxUnitsPerRun` source months and
 `maxSecondsPerRun` per hourly run; the collect job runs outside the writer lock and only the index commit takes it.
+
 ## Earliest solutions (side index)
 
 What did a source publish *first* for an event, and when? The log answers that since 2026-07-05, up to the polling
@@ -431,13 +432,20 @@ time (read on the same day, 2026-10-01, 40 of the 61 AK events of 2026-09-11 sti
 origin in ComCat, but only 22 of the 76 of 2026-06-15; TX 23 of 33 against 5 of 19), while history before the log no
 longer changes. Once caught up, each run takes the newly frozen day first.
 
-**Pace.** Hourly (`:50`), when the repository variable `FIRST_SOLUTIONS_SCHEDULE` is `on`. The `collect` job holds no
+**Pace.** Hourly, when the repository variable `FIRST_SOLUTIONS_SCHEDULE` is `on`: the heartbeat Worker dispatches the
+workflow at `:48` with `tick=1` (a run so dispatched goes ahead only while the variable is `on`; a manual dispatch always
+does), and the workflow's own `:50` cron is the fallback. The Worker is needed: GitHub delivered this repository's hourly
+crons about 4 times a day (backfill, derive and health each got 4 scheduled runs between 2026-09-30 16:40 and
+2026-10-01 16:40 UTC), which would stretch every estimate below about sixfold. The `collect` job holds no
 writer lock (it shares the deep-history walk's group, so the two never ask a host at the same time): up to 30 minutes of
 requests, chunks uploaded, then the `commit` job writes the two small files in seconds under the writer lock (a sparse checkout of `knowledge/first_solutions/`; it refuses to write if they changed since the
-collect job read them). At one request a second a run does up to about 1,750 requests per lane (ComCat answered 441
+collect job read them). A lane takes no day of a seventh event month in one run (each month is one chunk upload, so the
+uploads stay a few minutes inside the job's 45-minute timeout; a day source would otherwise reach dozens of months a
+run). At one request a second a run does up to about 1,750 requests per lane (ComCat answered 441
 requests of 2026-06-15 in 450 s), so ComCat's 454,000 reports take about 11 days of hourly runs (and about 4 more for
 the deep pilot era's 157,212 ComCat events, 2022-07-01 to 2023-07-06, as its editions appear), INGV's 55,000 about a
-day and a half, GeoNet's 22,000 about 13 hours, and the day sources (1–10 s per answer) a few hours each; then each run
+day and a half, GeoNet's 22,000 about 13 hours, and the day sources (1–10 s per answer, about six months of days a run) six to eight
+hourly runs each; then each run
 takes the newly frozen day (about 400 ComCat requests). Failures: three retries per request (2, 8, 30 s, Retry-After
 honoured); a lane that still fails stops for the run and resumes there; 50 answers in a row without the event stop a
 lane (its streak is asked again); a day source's day answered with 204 or 404 is asked again twice before it is

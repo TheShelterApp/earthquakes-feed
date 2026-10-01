@@ -10,6 +10,7 @@ import {
   EMPTY_DAY_RETRIES,
   GONE_STREAK_LIMIT,
   type HttpAnswer,
+  MAX_MONTHS_PER_LANE,
   type LaneContext,
   Pacer,
   PartitionReader,
@@ -370,6 +371,39 @@ test('lane: a one-off slice with only some ids leaves the cursor alone', async (
   assert.deepEqual(cur, newSourceCursor());
   const other = await runLane(source('usgs'), newSourceCursor(), ctx);
   assert.equal(other.requests, 0, 'a provider the ids do not name is skipped');
+});
+
+test('lane: a one-off slice stopped mid-day keeps the walk\'s own pending day and offset', async () => {
+  const days = { '2026-06-15': partitionLine('geonet', ['g1', 'g2', 'g3']) };
+  const cur: SourceCursor = { ...newSourceCursor(), pending: { day: '2026-07-04', offset: 7 } };
+  const ctx = laneCtx(days, () => ({ status: 200, body: geonetBody, retryAfterMs: null }), { days: ['2026-06-15'] });
+  const res = await runLane(source('geonet'), cur, { ...ctx, deadlineMs: 50 });
+  assert.equal(res.records.length, 1, 'the deadline falls after the first request');
+  assert.deepEqual(cur.pending, { day: '2026-07-04', offset: 7 }, 'the walk resumes where it stood');
+  assert.deepEqual(cur.done, [], 'the slice\'s unfinished day is not done');
+  const fresh = newSourceCursor();
+  await runLane(source('geonet'), fresh, { ...laneCtx(days, () => ({ status: 200, body: geonetBody, retryAfterMs: null }), { days: ['2026-06-15'] }), deadlineMs: 50 });
+  assert.deepEqual(fresh.pending, { day: '2026-06-15', offset: 1 }, 'with no walk pending, the slice\'s own offset is kept');
+});
+
+test('lane: a day source stops before a further event month once its records cover MAX_MONTHS_PER_LANE months', async () => {
+  // One GEOFON report on the 1st of each month, 2026-07 back to 2025-12 and beyond (history goes backward).
+  const months = ['2026-07', '2026-06', '2026-05', '2026-04', '2026-03', '2026-02', '2026-01', '2025-12'];
+  const days = Object.fromEntries(months.map((m) => [`${m}-01`, partitionLine('geofon', [`gfz${m.replace('-', '')}`])]));
+  const geofonDay = fixture('geofon-allorigins-2026-09-11T1150.xml');
+  const cur = newSourceCursor();
+  const plan = (): WalkPlan => ({ ...PLAN, targetStart: '2025-12-01', settledEnd: '2026-07-04' });
+  const ctx = laneCtx(days, () => ({ status: 200, body: geofonDay, retryAfterMs: null }), { plan });
+  const first = await runLane(source('geofon'), cur, ctx);
+  const monthsOf = (r: typeof first) => [...new Set(r.records.map((x) => x.day.slice(0, 7)))];
+  assert.equal(monthsOf(first).length, MAX_MONTHS_PER_LANE);
+  assert.equal(first.error, null, 'the cap is not a failure');
+  assert.equal(first.monthCapAt, '2026-01-31', 'stops before the first day of the seventh month, which stays undone');
+  assert.ok(!cur.done.some(([a, b]) => a <= '2026-01-31' && '2026-01-31' <= b));
+  const second = await runLane(source('geofon'), cur, ctx);
+  assert.deepEqual(monthsOf(second), ['2026-01', '2025-12'], 'the next run goes on from there');
+  assert.equal(second.monthCapAt, undefined);
+  assert.equal(nextDay(cur, plan()), null);
 });
 
 // --- chunks and the merged answer --------------------------------------------------------------------------------------

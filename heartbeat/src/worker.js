@@ -1,10 +1,13 @@
 // Cloudflare Worker cron: drive the GitHub workflows GitHub itself throttles.
-// ONE per-minute trigger, fanned out by the scheduled minute. The three schedules never share a
+// ONE per-minute trigger, fanned out by the scheduled minute. The schedules never share a
 // minute, so this reproduces the old three-cron behaviour EXACTLY while spending a single cron trigger
 // (the account is capped at 5 cron triggers on the Workers free tier):
 //   minute % 5 === 0     -> aggregate (keep the feed fresh, every 5 min)
 //   minute 7,22,37,52    -> health    (watchdog every 15 min; offset so it never lands on aggregate)
 //   minute 41            -> backfill  (walk history backward, hourly)
+//   minute 48            -> first-solutions (earliest-solutions side index, hourly; dispatched with tick=1, so
+//                           the workflow goes ahead only while the repository variable FIRST_SOLUTIONS_SCHEDULE
+//                           is `on`; its own hourly GitHub cron was delivered about 4 times a day on 2026-10-01)
 //
 // health used to run on a bare hourly GitHub cron and was delivered ~20 times per 48h with
 // gaps of 2-4.5h. The 2026-07-31 12:02-12:30 Cloudflare Pages outage (522 on /pages/assets/
@@ -13,19 +16,29 @@
 const REPO = 'TheShelterApp/earthquakes-feed';
 
 /**
- * The workflow to dispatch for a given UTC minute, or null on the ~43 minutes/hour that do nothing.
+ * The workflow to dispatch for a given UTC minute, or null on the ~42 minutes/hour that do nothing.
  * Pure + exported so the fan-out can be unit-checked without the runtime. The order matters only if the
- * ranges overlapped — they don't (41 and 7/22/37/52 are never multiples of 5) — but the specific minutes
+ * ranges overlapped — they don't (41, 48 and 7/22/37/52 are never multiples of 5) — but the specific minutes
  * are matched before the every-5 fallback for clarity.
  */
 export function workflowFor(minute) {
   if (minute === 41) return 'backfill.yml';
+  if (minute === 48) return 'first-solutions.yml';
   if (minute === 7 || minute === 22 || minute === 37 || minute === 52) return 'health.yml';
   if (minute % 5 === 0) return 'aggregate.yml';
   return null;
 }
 
+/**
+ * The `inputs` of a dispatch, or null for none. GitHub refuses inputs a workflow does not declare, so only the workflow
+ * that declares `tick` gets it.
+ */
+export function inputsFor(workflow) {
+  return workflow === 'first-solutions.yml' ? { tick: '1' } : null;
+}
+
 async function dispatch(env, workflow) {
+  const inputs = inputsFor(workflow);
   const res = await fetch(`https://api.github.com/repos/${REPO}/actions/workflows/${workflow}/dispatches`, {
     method: 'POST',
     headers: {
@@ -35,7 +48,7 @@ async function dispatch(env, workflow) {
       'user-agent': 'earthquakes-feed-heartbeat',
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ ref: 'main' }),
+    body: JSON.stringify(inputs ? { ref: 'main', inputs } : { ref: 'main' }),
   });
   if (!res.ok) {
     console.error(`dispatch ${workflow} failed: ${res.status} ${await res.text()}`);

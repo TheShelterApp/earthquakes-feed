@@ -166,6 +166,11 @@ open, reachable source appears.
   2026-10-01 for its first era, ComCat 2022-07-01 → 2023-07-06) writes
   immutable `history-YYYY` Release assets only, and the `data` branch gains just `knowledge/index/history.json`
   ([APIs.md](APIs.md#deep-history-before-2023-07-06)).
+- **Earliest solutions:** `first-solutions` collects the version histories that ComCat,
+  GeoNet, INGV and several SeisComP nodes keep (every solution they still hold, with its
+  publication time) into a side index of Release assets, one request per second per
+  source; `scripts/first-observations.ts` merges it with the log into each source's
+  earliest published solution ([APIs.md](APIs.md#earliest-solutions-side-index)).
 - **A newly-added source fills in automatically:** its recent live window is onboarded
   into the `event_map`, deep history is backfilled, and already-archived months are
   pulled from their Release, merged, and re-rolled — no manual steps, no gaps.

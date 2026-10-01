@@ -170,6 +170,33 @@ test('nrcan versions: a revised magnitude under the next id at the same origin i
   const live = [...map.values()].filter((n) => n.state === 'live');
   assert.equal(live.length, 1);
   assert.deepEqual(live[0]!.provenance.map((p) => p.nativeId).sort(), ['20260720.0647001', '20260720.0647002']);
+  // The event shows NRCan's revision, the newer id, not the version NRCan no longer lists (review of PF-5h).
+  assert.equal(live[0]!.provenance.find((p) => p.chosen)!.nativeId, '20260720.0647002');
+  assert.deepEqual([live[0]!.mag, live[0]!.magType], [4.73, "Mw'"]);
+  // Whatever order the versions arrive in.
+  const map2 = new Map<string, EventNode>();
+  const r2 = new Resolver(map2, prio, cfg, NOW);
+  r2.ingest(nrcan('20260720.0647002', '2026-07-20T06:47:09.000Z', 49.6116, -129.1818, "Mw'", '4.73'), iso(NOW));
+  r2.ingest(nrcan('20260720.0647001', '2026-07-20T06:47:09.000Z', 49.6116, -129.1818, "Mw'", '4.84'), iso(NOW));
+  const live2 = [...map2.values()].filter((n) => n.state === 'live');
+  assert.equal(live2.length, 1);
+  assert.equal(live2[0]!.mag, 4.73);
+});
+
+test('representative: the id tie-break stays ascending for every other source', () => {
+  const NOW = Date.parse('2026-07-14T19:00:00Z');
+  const map = new Map<string, EventNode>();
+  const r = new Resolver(map, prio, cfg, NOW);
+  // INGV's one solution under two ids (sameSolution joins them): the lower id represents the event, as before.
+  const ingv = (id: string): RawObs => ({
+    provider: 'ingv', providerEventId: id, eventTimeMs: Date.parse('2026-07-14T10:00:00Z'), providerUpdatedMs: null, status: null,
+    lat: 43.6, lon: 12.55, depth: 10, mag: 2.0, magType: 'ML', place: 'Piobbico', knownAliasIds: [], fields: { EventID: id },
+  });
+  r.ingest(ingv('46000002'), iso(NOW));
+  r.ingest(ingv('46000001'), iso(NOW));
+  const live = [...map.values()].filter((n) => n.state === 'live');
+  assert.equal(live.length, 1);
+  assert.equal(live[0]!.provenance.find((p) => p.chosen)!.nativeId, '46000001');
 });
 
 test('nrcan versions: another place, or another source’s two ids, stay two events', () => {

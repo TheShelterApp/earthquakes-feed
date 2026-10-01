@@ -537,7 +537,11 @@ export class Resolver {
     };
   }
 
-  /** reviewed > provisional > automatic, then richer solution, then newer, then priority, then id (total order). */
+  /** reviewed > provisional > automatic, then richer solution, then newer, then priority, then id (total order).
+   *  Two rows of a NEW_ID_PER_REVISION_PROVIDERS provider in one event are two versions of its solution, and the
+   *  higher id is the newer one (NRCan: 20260720.0647002, Mw' 4.73, revises 20260720.0647001, Mw' 4.84, and only the
+   *  newer stays listed), so the higher id wins there; it decides only when everything before it ties, and priorities
+   *  are unique, so the order stays total (PF-5h review). */
   private preferred(rows: ProvenanceRow[]): ProvenanceRow {
     const rank = (p: string): number => this.priority.get(p) ?? 9999;
     return [...rows].sort((a, b) => {
@@ -549,7 +553,8 @@ export class Resolver {
       if (up) return up;
       const pr = rank(a.provider) - rank(b.provider);
       if (pr) return pr;
-      return a.nativeId < b.nativeId ? -1 : a.nativeId > b.nativeId ? 1 : 0;
+      const id = a.nativeId < b.nativeId ? -1 : a.nativeId > b.nativeId ? 1 : 0;
+      return a.provider === b.provider && NEW_ID_PER_REVISION_PROVIDERS.has(a.provider) ? -id : id;
     })[0]!;
   }
 

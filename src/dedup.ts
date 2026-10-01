@@ -19,6 +19,7 @@ import {
   REID_DT_MS,
   REID_KM,
   REID_MAG_DELTA,
+  REID_MAG_TOLERANCE,
   SPATIAL_KM,
   SWARM_CELL_ABSOLUTE,
   TEMPORAL_MS,
@@ -220,12 +221,14 @@ export class Resolver {
   }
 
   /** One solution re-published under a second native id (INGV 46714321 / 47246702 on
-   *  2026-09-25: byte-identical origin, depth and magnitude): the same event, not a distinct one. */
+   *  2026-09-25: byte-identical origin, depth and magnitude): the same event, not a distinct one.
+   *  The magnitude test carries REID_MAG_TOLERANCE, so a difference of exactly 0.1 passes whatever its float error
+   *  (PF-5g). */
   private static sameSolution(a: Solution, b: Solution): boolean {
     if (Math.abs(a.eventTimeMs - b.eventTimeMs) > REID_DT_MS) return false;
     if (haversineKm(a.lat, a.lon, b.lat, b.lon) > REID_KM) return false;
     if (a.mag == null || b.mag == null) return a.mag == null && b.mag == null;
-    return Math.abs(a.mag - b.mag) <= REID_MAG_DELTA;
+    return Math.abs(a.mag - b.mag) <= REID_MAG_DELTA + REID_MAG_TOLERANCE;
   }
 
   /** A provider re-reporting the SAME event resolves via alias; the same provider using a

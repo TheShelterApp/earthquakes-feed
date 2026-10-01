@@ -43,6 +43,12 @@ export const LARGE_EVENT_MAX_DELTA = 1.0;
 export const REID_DT_MS = 2_000;
 export const REID_KM = 2;
 export const REID_MAG_DELTA = 0.1;
+/** Floating-point slack on the REID_MAG_DELTA test (Resolver.sameSolution: |ΔM| ≤ REID_MAG_DELTA + REID_MAG_TOLERANCE).
+ *  Magnitudes are published in 0.1 or 0.01 steps but held as binary floats, so a difference of exactly 0.1 lands on
+ *  either side of 0.1: 1.5 − 1.4 = 0.10000000000000009 failed the bare `≤ 0.1` while 2.3 − 2.2 = 0.09999999999999964
+ *  passed (PF-5g). 1e-9 is far above the rounding error of a difference of two magnitudes (about 1e-15) and far below
+ *  any published magnitude step (0.01), so every pair 0.1 apart is now one solution and every pair 0.11 apart is not. */
+export const REID_MAG_TOLERANCE = 1e-9;
 /** Bound on the post-revision merge chain one ingest may trigger (each round retires a node). */
 export const MERGE_MAX_ROUNDS = 8;
 /** A retired event (superseded by an op:merge, or tombstoned: an upstream delete, a provider's
@@ -60,7 +66,9 @@ export const RETIRED_VISIBLE_MS = 48 * 3600_000;
  *  (EMSC_AUTHORED_COPIES), and the ones minted beside the agency's event in a dense cell before (the Granada and The
  *  Geysers cells: 18 IGN and 2 NC pairs in the hot window on 2026-09-30) fold into it; nothing else changed, so the
  *  pass folds only what the current rules already call one event (on 2026-09-30 a heal under the old rules folded one
- *  group). */
+ *  group). PF-5g (2026-10-01: more EMSC codes in EMSC_AUTHORED_COPIES, REID_MAG_TOLERANCE) keeps epoch 2 on purpose:
+ *  a heal under its rules folded 3 groups of the hot window on 2026-10-01 (one IPMA and two AFAD ids published twice,
+ *  |ΔM| = 0.1), and a heal run loads the whole event-map horizon, where the sweeps' revisions reach frozen days. */
 export const HEAL_EPOCH = 2;
 /** The one-time correction (src/correction.ts). aggregate runs it once when the data branch's
  *  knowledge/index/correction.json holds a lower epoch (or none), before the run's reports, over the days the manifest
@@ -159,13 +167,56 @@ export const LOCATION_JOIN_MAX_DM = 1.5;
  *  the same way (the other two: a magnitude the agency revised after EMSC copied it); IGN 25 of 28 (one relocated by
  *  IGN, one 0.1 apart in magnitude, one no longer in IGN's file). No copy was the same solution of two different
  *  events: the only rows one could pair with twice were one agency solution published under two ids (IGN
- *  es2026nowua / es2026nowub; CI 40670850 / 40670858), which sameSolution already treats as one. */
+ *  es2026nowua / es2026nowub; CI 40670850 / 40670858), which sameSolution already treats as one.
+ *
+ *  Checked 2026-10-01 for every other `auth` code of an agency the feed reads itself (PF-5g), over every version of
+ *  each row the feed holds: the observation log (2026-07-05..10-01) and the event map's current rows (event days
+ *  08-17..10-01, which also hold the revisions of a row that did not move its event; the log has no line for those).
+ *  The bar is the one the four codes above meet on the same data: at least 50 copies beside an agency row; at least
+ *  90 % equal to a version of the agency's solution in time (≤ 1 s) and place (to the coarser of the two precisions),
+ *  at least 85 % in magnitude too (AFAD 94 / 92 %, IGN 100 / 96, NC 100 / 93, SCSN 91 / 88); no copy within
+ *  sameSolution of two distinct agency events, and none linked to an agency event other than the one it equals.
+ *  Copies beside an agency row, equal in time and place / and in magnitude:
+ *  - CENC (cenc) 168: 100 / 95 %. CSN (csn) 2,660: 99.6 / 98.3 % (EMSC rounds CSN's place to 2 decimals and follows
+ *    CSN's revisions). INGV (ingv) 321: 99.7 / 98.1 %. KOERI (koeri) 285: 99.3 / 95.8 % (KOERI's list cuts the
+ *    seconds' fraction off; where KOERI also gives Mw the feed's row carries the Mw while EMSC copies KOERI's ML).
+ *    NDI (ncs, India) 448: 95.5 / 91.1 %. QUI (igepn) 53: 98.1 / 96.2 %. UNA (ovsicori) 575: 99.8 / 96.2 %. UNM
+ *    (mexico, SSN) 2,409: 100 / 99.3 %.
+ *  - GNS (geonet) 423: 80 / 74 % against the rows the feed holds, and every one of the other 111 is an earlier GeoNet
+ *    origin of the same event to the 0.01 s, the fourth decimal and the rounded magnitude (GeoNet's quake history,
+ *    api.geonet.org.nz/quake/history), as SCSN's are CI's superseded origins. EMSC copies GeoNet's origin of the moment
+ *    and seldom follows a revision, so a copy links only while GeoNet's row is within sameSolution of that origin.
+ *  - Not added: GFZ (geofon) 91.6 / 84.4 %; ReNaSS (renass, resif) 86.8 / 85.1 %; ETHZ 79.7 %, NOA 74.9 %, IMO
+ *    72.0 %; BMKG (bmkg) 14.7 % of the 197 copies beside a BMKG row (BMKG's public lists carry another solution);
+ *    PIVS (phivolcs) 4.7 % and JMA (jma) 0 % (both lists give the origin to the minute); GSRAS (kagsr) 1.7 % (another
+ *    agency than KAGSR); CN (nrcan) equal in time and place, but the feed's NRCan rows carry no magnitude, so no copy
+ *    could link; fewer than 50 copies beside an agency row: IPMA, LIM (igp), AUST (ga), CWA, OVSG and OVSM (ipgp),
+ *    BGS, USP, KNMI, AK (aec, read since 2026-09-30). The US networks EMSC names (NEIC, PR, HV, TX, …) reach the feed
+ *    only through ComCat, whose rows authorsRow maps to a network only for NC and SCSN.
+ *  None of these 29 codes had a copy within sameSolution of two distinct agency events or linked to the wrong one. EMSC
+ *  does point an event id at another agency event later now and then (over the versions the feed holds: CSN 27, IGN 18,
+ *  UNA 6, AFAD 3, GNS 1, some of them an agency's own duplicate ids): the row stays in the event it joined, and the
+ *  agency's two ids keep the two events apart (nodesDistinct; OVSICORI 1449691 / 1449690 in the PF-5g test). Live
+ *  check 2026-10-01 00:30 UTC, copies of the last 2 days: CENC 5 of 5, CSN 24 of 24, INGV 7 of 7, NDI 10 of 10 (one
+ *  more not in NCS's list), QUI 1 of 1, UNM 12 of 12 and UNA 4 of 5 (one relocated by OVSICORI) equal the agency's row;
+ *  GNS 8 of 8 are a GeoNet origin (2 the current one, 6 earlier ones); EMSC held no KOERI copy, having replaced all 11
+ *  of those 2 days with its own solution (as it does with most of them later: a replaced copy is EMSC's own solution
+ *  again and no longer counts). */
 export const EMSC_PROVIDER = 'emsc';
 export const EMSC_AUTHORED_COPIES: ReadonlyMap<string, string> = new Map([
   ['AFAD', 'afad'],
+  ['CENC', 'cenc'],
+  ['CSN', 'csn'],
+  ['GNS', 'geonet'],
   ['IGN', 'ign'],
+  ['INGV', 'ingv'],
+  ['KOERI', 'koeri'],
   ['NC', 'ncedc'],
+  ['NDI', 'ncs'],
+  ['QUI', 'igepn'],
   ['SCSN', 'scedc'],
+  ['UNA', 'ovsicori'],
+  ['UNM', 'mexico'],
 ]);
 /** Rolling-file sources whose ids are watched for disappearing (PF-5b, log only): a row younger than
  *  ABSENCE_WATCH_DAYS that the feed holds and a complete file no longer lists is counted in status `absent`. AEC's

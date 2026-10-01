@@ -36,7 +36,7 @@ interface FetchParams {
   offset?: number;
 }
 
-function buildUrl(p: ProviderConfig, params: FetchParams): string {
+function buildUrl(p: ProviderConfig, params: FetchParams, base: string = p.base): string {
   const q = new URLSearchParams({ format: p.queryFormat });
   if (!p.noLimit) q.set('limit', String(FETCH_LIMIT));
   if (params.offset != null && params.offset > 1) q.set('offset', String(params.offset));
@@ -46,7 +46,7 @@ function buildUrl(p: ProviderConfig, params: FetchParams): string {
   if (params.minmag != null) q.set('minmagnitude', String(params.minmag));
   if (params.includedeleted != null) q.set('includedeleted', params.includedeleted);
   for (const [k, v] of Object.entries(p.params ?? {})) q.set(k, v);
-  return `${p.base}?${q.toString()}`;
+  return `${base}?${q.toString()}`;
 }
 
 interface FdsnResult {
@@ -57,10 +57,26 @@ interface FdsnResult {
   rows: number;
 }
 
-/** Fail-open FDSN fetch. `overflow` = the result likely hit the row cap (window too wide). */
+/**
+ * Fail-open FDSN fetch. `overflow` = the result likely hit the row cap (window too wide).
+ *
+ * A source with a `fallbackBase` (a second host of the same catalogue, same event ids) is asked there when `base`
+ * fails or answers with no rows; the fallback's answer is used only when it has rows, and status then names the host
+ * in `via`. Otherwise the outcome is `base`'s own, so a node that is merely quiet looks as it did before. NOA: the
+ * registered node `eida.gein.noa.gr` has answered every event query with 204 since 2026-09-24 11:47 UTC, also for
+ * years it used to hold, while `eida2.gein.noa.gr` serves the same catalogue under the same ids (PF-5j-NOA).
+ */
 async function fetchFdsn(p: ProviderConfig, params: FetchParams, timeoutMs = FETCH_TIMEOUT_MS, fetcher: Fetcher = fetchText): Promise<FdsnResult> {
+  const first = await fetchFdsnAt(p, p.base, params, timeoutMs, fetcher);
+  if (!p.fallbackBase || first.rows > 0) return first;
+  const second = await fetchFdsnAt(p, p.fallbackBase, params, timeoutMs, fetcher);
+  if (!second.status.ok || second.rows === 0) return first;
+  return { ...second, status: { ...second.status, via: new URL(p.fallbackBase).host } };
+}
+
+async function fetchFdsnAt(p: ProviderConfig, base: string, params: FetchParams, timeoutMs: number, fetcher: Fetcher): Promise<FdsnResult> {
   try {
-    const res = await fetcher(buildUrl(p, params), timeoutMs);
+    const res = await fetcher(buildUrl(p, params, base), timeoutMs);
     if (res.status === 204 || res.status === 404) {
       return { obs: [], status: { ok: true, http_status: res.status, latency_ms: res.latencyMs, events_returned: 0 }, overflow: false, rows: 0 };
     }

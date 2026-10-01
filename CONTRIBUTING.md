@@ -31,6 +31,8 @@ Adding one is a single entry in [`providers/registry.json`](providers/registry.j
 - `"lookbackDays": 7` for an FDSN source that publishes many events days after their origin
   (e.g. NRCan) — the live path asks it for that many days instead of 2 (at most 7, the
   window in which reports are matched by time and place).
+- `"fallbackBase": "<query URL>"` for an FDSN source with a second host of the same catalogue
+  under the same event ids (NOA) — asked when `base` fails or answers with no rows.
 - **License & attribution are required** — put the source's real terms and any DOI.
 
 Once merged and enabled, the source **fills in automatically**: its recent window is

@@ -102,6 +102,10 @@ export interface ProviderConfig {
   parse: 'geojson' | 'text' | 'custom';
   queryFormat: string;
   base: string;
+  /** FDSN sources only: a second host of the same catalogue (same event ids), asked when `base` fails or answers
+   *  with no rows; its answer is used only when it has rows (providers.ts fetchFdsn). The deep-history and
+   *  earliest-solutions walks ask `base` alone. */
+  fallbackBase?: string;
   supportsTimeRange: boolean;
   noLimit?: boolean;
   /** Per-provider fetch timeout override (ms) for slow endpoints (e.g. ISC). */
@@ -141,6 +145,8 @@ export interface ProviderStatus {
   latency_ms?: number;
   events_returned?: number;
   error?: string;
+  /** The host that answered, when it was the source's `fallbackBase` and not its `base`. */
+  via?: string;
 }
 
 export interface State {

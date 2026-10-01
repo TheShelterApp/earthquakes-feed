@@ -17,10 +17,10 @@ const DAY = 86_400_000;
 const NOW = Date.parse('2026-10-01T01:59:00Z');
 const NRCAN_BODY = readFileSync(here('fixtures/nrcan-fdsn-text-2026-10-01.txt'), 'utf8');
 
-test('lookback: NRCan asks for 7 days, every other FDSN source keeps 2', () => {
+test('lookback: NRCan asks for 7 days (and NOA, PF-5j-NOA: tests/noa-fallback.test.ts), every other FDSN source keeps 2', () => {
   assert.equal(liveLookbackMs(byId('nrcan')), 7 * DAY);
   assert.equal(QUERY_LOOKBACK_MS, 2 * DAY);
-  for (const p of registry.filter((x) => x.adapter === 'fdsn' && x.id !== 'nrcan')) {
+  for (const p of registry.filter((x) => x.adapter === 'fdsn' && x.id !== 'nrcan' && x.id !== 'noa')) {
     assert.equal(liveLookbackMs(p), QUERY_LOOKBACK_MS, p.id);
     assert.equal(p.lookbackDays, undefined, `${p.id} has no lookbackDays`);
   }

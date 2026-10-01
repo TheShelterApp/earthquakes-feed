@@ -111,14 +111,17 @@
       "adapter": "fdsn",
       "parse": "text",
       "queryFormat": "text",
-      "base": "https://eida.gein.noa.gr/fdsnws/event/1/query",
+      "base": "https://eida2.gein.noa.gr/fdsnws/event/1/query",
+      "fallbackBase": "https://eida.gein.noa.gr/fdsnws/event/1/query",
       "supportsTimeRange": true,
       "refreshSeconds": 600,
       "license": "CC-BY-4.0",
       "attribution": "National Observatory of Athens (NOA), Institute of Geodynamics",
       "doi": null,
       "contact": "https://www.gein.noa.gr",
-      "timeoutMs": 15000
+      "timeoutMs": 15000,
+      "lookbackDays": 7,
+      "notes": "PF-5j-NOA: the node the FDSN registry lists, eida.gein.noa.gr, has answered every event query with 204 since 2026-09-24 11:47 UTC (its SeisComP event database is empty: also for 2020, and /catalogs and /contributors are empty), while eida2.gein.noa.gr, NOA's second EIDA host, serves the same catalogue under the same ids (measured 2026-10-01: all 524 events of 09-17..09-23 on eida2 are the NOA rows the feed logged from eida, same id, place and magnitude). So `base` is eida2 and the registered node is the fallback. lookbackDays 7: SeisComP has no updatedafter, so the live query is the only way a row older than 2 days enters; it refills the outage as far as the 7-day window reaches."
     },
     {
       "id": "ethz",

@@ -441,8 +441,9 @@
       "attribution": "International Seismological Centre (ISC) On-line Bulletin",
       "doi": "10.31905/D808B830",
       "contact": "https://www.isc.ac.uk",
-      "notes": "Authoritative REVIEWED global catalog but months-delayed — near-empty on the live 2-day path; its value is backfill depth.",
+      "notes": "Authoritative REVIEWED global catalog but months-delayed — near-empty on the live 2-day path; its value is backfill depth. Backfill paused on 2026-10-01 at 2025-08-03 (knowledge/index/backfill.json): every day left before the 3-year target is a frozen day in a monthly Release archive, and the walk had failed 1,861 runs in a row since July 2026 (its 21-day window timed out). Re-enable only on purpose: the remaining walk rewrites those frozen days (see APIs.md, History and backfill).",
       "backfill": {
+        "enabled": false,
         "earliest": "1990-01-01",
         "minmag": 3
       }

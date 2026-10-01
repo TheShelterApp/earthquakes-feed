@@ -158,7 +158,10 @@ open, reachable source appears.
   target), and `archive` rolls cold months (>120 d) to GitHub Releases (un-metered) and
   prunes the tree — so the `data` branch stays bounded. `event_map` is sharded by
   event-day and pruned to a 45-day dedup horizon; identity older than that lives in the
-  frozen day partitions.
+  frozen day partitions. Every source with a time-range query reached the target
+  (2023-07-06) in July 2026 except ISC, whose walk is paused; a backfilled row is the
+  source's solution when it was fetched, while the log holds each report as first seen
+  since 2026-07-05 (`scripts/first-observations.ts`; [APIs.md](APIs.md#history-and-backfill)).
 - **A newly-added source fills in automatically:** its recent live window is onboarded
   into the `event_map`, deep history is backfilled, and already-archived months are
   pulled from their Release, merged, and re-rolled — no manual steps, no gaps.

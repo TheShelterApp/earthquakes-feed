@@ -85,11 +85,13 @@ jobs:
       # Red signal AFTER the durable work: backfill exits 0 and drops a marker instead of failing
       # its own step, because a failed step skips every later step without `if:` — the commit
       # would never land and each run would repeat and re-discard identical work.
-      - name: Fail if any archived month was unreadable
+      # The marker names each reason: an unreadable archived month, a dispatched window that failed
+      # or overflowed, or a provider whose walk has kept failing at a one-day window (about once a day).
+      - name: Fail if backfill was blocked or a walk is stalled
         if: always()
         run: |
           if [ -f backfill-blocked.txt ]; then
             cat backfill-blocked.txt
-            echo '::error::backfill: an archived month was unreadable (see above); this run'"'"'s other work was still committed'
+            echo '::error::backfill: blocked or stalled (see above); this run'"'"'s other work was still committed'
             exit 1
           fi

@@ -256,6 +256,52 @@ one. Because a late event (like a revision or an upstream delete) can still chan
 10 days old, `manifest.partitions[].frozen` turns true only after that (it was 3 days until
 2026-09-30).
 
+## History and backfill
+
+The feed's history has two parts, and what "the earliest observation of a source" can mean differs between them.
+
+**Observed live, since 2026-07-05.** Every report that changed the feed is a line of the observation log
+(`knowledge/observations/ingest=YYYY/MM/DD/HH.ndjson` on the `data` branch; an ingest month older than 120 days moves
+to the Release `archive-YYYY-MM` as `observations-YYYY-MM.tar.zst`). The log is append-only, and a report's first
+line is the version of it the feed saw first: `ingest_time` (when the feed first held it, a few minutes after the
+source published it at best: runs are about 5 minutes apart and GitHub delays some), `provider_updated` (the source's
+own time of that version, given by `usgs`, `emsc`, `imo`, `ipma`, `jma` and `igp`, and by `afad` for an event it has
+revised (`lastUpdateDate`, 28 of 9,071 logged AFAD reports by 2026-10-01); no source's list gives a creation time)
+and the solution itself. `scripts/first-observations.ts` prints that for an event, named by its feed id or by any
+`provider:native_id`, with superseded ids followed to their survivor. A source that revises within minutes
+(EMSC often does) may have had a version the feed never saw. Reports the feed held back have no line until they join
+an event (`twin_withheld` AEC reports, `late_withheld` ComCat reports), and a later revision of a row that represents
+nothing and moves nothing can update the event without a line; neither changes which line is first.
+
+**Filled by backfill.** History before that, and the history of a source added later, comes from `backfill`: one
+window per source and run (hourly), walking each source that has a time-range query backwards into the day
+partitions and the monthly Release archives. Backfill writes no log lines. A backfilled row is the source's solution
+on the day the backfill fetched it (2026-07-05…07-25 for most of history), with the source's update time of that
+version where the source gives one: neither the source's first solution nor necessarily its last (ComCat's
+`us7000st0n` of 2026-06-15 is held at mb 4.5 from ComCat's version of 07:30 UTC that day; ComCat revised it to 4.4 on
+2026-07-06 and 2026-08-31). A backfilled event's `feed.first_ingest_time` is the backfill run's time and its
+`first_seen_seq` the log position then.
+
+Where the walk stands (`knowledge/index/backfill.json`, 2026-10-01):
+
+| Sources | Earliest day | Note |
+|---|---|---|
+| `usgs`, `emsc`, `geofon`, `ingv`, `geonet`, `resif`, `noa`, `ethz`, `nrcan`, `ncedc`, `scedc`, `knmi`, `auspass`, `renass`, `ipgp`, `usp`, `lmu`, `afad`, `kagsr`, `imo`, `csn` | 2023-07-06 | the 3-year target, reached 2026-07-06…07-25; the walk goes no further |
+| `igp` | 2024-08 in practice | walked to 2023-07-06, but IGP's yearly files give UTC times only from 2024-08-15 on and the adapter skips a row without one: the 928 IGP reports of 2023-07-06…2024-08-15 are missing (889 of those quakes are in the feed through another source) |
+| `isc` | 2025-08-03 | paused (below); ISC rows also fill 2024-05 and 2025-02 (one-off fills) |
+| `aec`, `cenc`, `ncs`, `tmd`, `bmkg`, `jma`, `mexico`, `ipma`, `egypt`, `bgs`, `ign`, `inpres`, `ga`, `ovsicori`, `igepn`, `cwa`, `geosphere`, `koeri`, `phivolcs` | the source's first live run (whatever its list then held of the last 7 days) | forward-only: no time-range query |
+
+A source's walk reports its failures: a window that fails is halved for the next run (a window whose answer is too
+large to stream within the timeout fails as a timeout, never as an overflow), each failure is logged with its error,
+the cursor keeps `lastError` and `failingSince`, a streak of 24 runs adds a warning to every run, and from 72 runs at a
+one-day window the run turns red about once a day. Before 2026-10-01 a failing walk stayed silent and kept its
+window: ISC's 21-day window (more than 5,000 rows, about 35 s against ISC's 30 s timeout) failed 1,861 runs in a row,
+all green, from July to 2026-10-01. ISC's walk is paused since (`backfill.enabled: false` in the registry): every
+day it has left before the target lies in a frozen month already rolled to a Release, and finishing it means pulling
+those 26 monthly archives back (2023-07…2025-08, about 760 days), adding about a fifth more events to them (ISC's own small events: a local test of the window
+2025-07-29…08-02 added 1,695 events to its 8,869 and an ISC row to 1,249 others) and re-rolling every archive. That is
+a deliberate one-off, like a heal, not an automatic step.
+
 ## EMSC's copies of agencies' solutions
 
 EMSC republishes many agencies' own solutions; `fields.auth` of the `emsc` provenance row names the

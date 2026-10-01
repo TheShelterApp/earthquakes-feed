@@ -265,9 +265,10 @@ The feed's history has two parts, and what "the earliest observation of a source
 to the Release `archive-YYYY-MM` as `observations-YYYY-MM.tar.zst`). The log is append-only, and a report's first
 line is the version of it the feed saw first: `ingest_time` (when the feed first held it, a few minutes after the
 source published it at best: runs are about 5 minutes apart and GitHub delays some), `provider_updated` (the source's
-own time of that version, given by `usgs`, `emsc`, `imo`, `ipma`, `jma` and `igp`; no source's list gives a creation
-time) and the solution itself. `scripts/first-observations.ts` prints that for an event, named by its feed id or by
-any `provider:native_id`, with superseded ids followed to their survivor. A source that revises within minutes
+own time of that version, given by `usgs`, `emsc`, `imo`, `ipma`, `jma` and `igp`, and by `afad` for an event it has
+revised (`lastUpdateDate`, 28 of 9,071 logged AFAD reports by 2026-10-01); no source's list gives a creation time)
+and the solution itself. `scripts/first-observations.ts` prints that for an event, named by its feed id or by any
+`provider:native_id`, with superseded ids followed to their survivor. A source that revises within minutes
 (EMSC often does) may have had a version the feed never saw. Reports the feed held back have no line until they join
 an event (`twin_withheld` AEC reports, `late_withheld` ComCat reports), and a later revision of a row that represents
 nothing and moves nothing can update the event without a line; neither changes which line is first.

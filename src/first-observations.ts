@@ -7,7 +7,8 @@ export interface FirstSeen {
   seq: number;
   /** When the feed first held this report (the line's ingest time). */
   ingest_time: string;
-  /** The provider's own update time of that version, where the source gives one (usgs, emsc, imo, ipma, jma, igp). */
+  /** The provider's own update time of that version, where the source gives one (usgs, emsc, imo, ipma, jma, igp; afad
+   *  only for an event it has revised). */
   provider_updated: string | null;
   event_time: string;
   lat: number;

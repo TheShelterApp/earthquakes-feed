@@ -16,6 +16,7 @@ import {
   LOCATION_JOIN_MAX_DM,
   MAG_MERGE_MAX_DELTA,
   MERGE_MAX_ROUNDS,
+  NEW_ID_PER_REVISION_PROVIDERS,
   REID_DT_MS,
   REID_KM,
   REID_MAG_DELTA,
@@ -223,10 +224,12 @@ export class Resolver {
   /** One solution re-published under a second native id (INGV 46714321 / 47246702 on
    *  2026-09-25: byte-identical origin, depth and magnitude): the same event, not a distinct one.
    *  The magnitude test carries REID_MAG_TOLERANCE, so a difference of exactly 0.1 passes whatever its float error
-   *  (PF-5g). */
-  private static sameSolution(a: Solution, b: Solution): boolean {
+   *  (PF-5g). Two rows of a NEW_ID_PER_REVISION_PROVIDERS provider skip it: that provider re-publishes a quake with a
+   *  revised magnitude under a new id (NRCan, PF-5h). */
+  private static sameSolution(a: SourcedSolution, b: SourcedSolution): boolean {
     if (Math.abs(a.eventTimeMs - b.eventTimeMs) > REID_DT_MS) return false;
     if (haversineKm(a.lat, a.lon, b.lat, b.lon) > REID_KM) return false;
+    if (a.provider === b.provider && NEW_ID_PER_REVISION_PROVIDERS.has(a.provider)) return true;
     if (a.mag == null || b.mag == null) return a.mag == null && b.mag == null;
     return Math.abs(a.mag - b.mag) <= REID_MAG_DELTA + REID_MAG_TOLERANCE;
   }
@@ -648,6 +651,29 @@ export class Resolver {
       { raw: old, result: withdrawn, op: 'tombstone' },
       { raw: corrected, result: this.applyIngest(this.mintId(corrected), corrected, ingestTime), op: 'observe' },
     ];
+  }
+
+  /** One-time correction (src/correction.ts), PF-5h: `corrected` is a report the feed already holds, read again with a
+   *  fixed parser that fills columns the old one missed (NRCan's magnitude, magnitude type and place) and leaves what
+   *  places the event (time, location, depth) as stored. The provider sent nothing new, so the stored row is found by
+   *  its id only and replaced where it is, like a revision; nothing happens when the id is unknown or retired, when the
+   *  row already holds this solution, or when the re-read moves it (that is not a fill). The node's revision moves
+   *  even when its representative stays another provider's row: the row is published in `feed.provenance`, and an
+   *  event's place falls back to it, so every fill gets its own log line. Nothing folds here: the caller runs
+   *  foldAround over the events it touched. */
+  fillReport(corrected: RawObs, ingestTime: string): IngestResult | null {
+    const fid = this.alias.get(`${corrected.provider}:${corrected.providerEventId}`);
+    const node = fid ? this.resolveLive(fid) : undefined;
+    if (!node || node.state !== 'live') return null;
+    const idx = node.provenance.findIndex((r) => r.provider === corrected.provider && r.nativeId === corrected.providerEventId);
+    const row = node.provenance[idx];
+    if (!row || Resolver.solutionEqual(row, corrected)) return null;
+    if (row.eventTimeMs !== corrected.eventTimeMs || row.lat !== corrected.lat || row.lon !== corrected.lon || row.depth !== corrected.depth) return null;
+    node.provenance[idx] = this.makeRow(corrected);
+    this.reposition(node);
+    node.revision += 1;
+    node.lastIngestTime = ingestTime;
+    return { node, changed: true, revision: node.revision, merges: [] };
   }
 
   /** True when the feed already holds this provider's report of the event (found by id only) with

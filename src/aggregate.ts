@@ -66,8 +66,8 @@ async function main(): Promise<void> {
   // ingest caused before the report's own line, so seq order reads cause → effect).
   const log = new LogBuffer(state.head.seq, ingestTime);
   // The one-time correction (config CORRECTION_EPOCH, src/correction.ts) goes first, over the days
-  // the manifest does not call frozen, with a Resolver of its own; this run's Resolver is built on
-  // the corrected event map.
+  // the manifest does not call frozen, with a Resolver of its own, making the steps of the epochs
+  // after the data branch's marker; this run's Resolver is built on the corrected event map.
   const correction = correctedEpoch(DATA_DIR) < CORRECTION_EPOCH
     ? runCorrection(DATA_DIR, state.eventMap, priorityMap(all), configMap(all), log, { nowMs, ingestTime })
     : null;
@@ -268,7 +268,10 @@ async function main(): Promise<void> {
       (zeroedOut.withdrawn ? ` coordinateless_withdrawn=${zeroedOut.withdrawn}` : '') +
       (feedSide.retracted ? ` coordinateless_retracted=${feedSide.retracted}` : '') +
       (heal ? ` heal_epoch=${heal.epoch} heal_merged=${heal.merged}` : '') +
-      (correction ? ` correction_epoch=${correction.epoch} afad_retimed=${correction.afad.retimed} afad_moved_out=${correction.afad.moved_out} afad_merged=${correction.afad.merged} comcat_id_merged=${correction.comcat_id.merged}` : '') +
+      (correction ? ` correction_epoch=${correction.epoch} from_epoch=${correction.from_epoch}` : '') +
+      (correction?.afad ? ` afad_retimed=${correction.afad.retimed} afad_moved_out=${correction.afad.moved_out} afad_merged=${correction.afad.merged}` : '') +
+      (correction?.comcat_id ? ` comcat_id_merged=${correction.comcat_id.merged}` : '') +
+      (correction?.nrcan ? ` nrcan_filled=${correction.nrcan.filled} nrcan_chosen=${correction.nrcan.chosen} nrcan_merged=${correction.nrcan.merged}` : '') +
       (degraded.length ? ` degraded=[${degraded.join(',')}]` : '') +
       (sweep.stale ? ` sweep_stale_skipped=${sweep.stale}` : '') +
       ` sweeps_failed=[${sweepsFailed.join(',')}]` +

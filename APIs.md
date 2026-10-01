@@ -453,8 +453,12 @@ had content for: content there now means the node is up and the day's reports ar
 answered 204 for 2026-08-25, whose one report it no longer lists); with no such day yet, or with that day empty too (a
 node that is down), the day is asked again in the next two runs before it is recorded as missing; any other refusal
 stops the lane; a source failing 24 runs in a row warns, from 72 the run turns
-red about once a day. A run whose upload fails keeps that source's cursor where it was; a run whose commit job never
-lands (cancelled while waiting for the lock) leaves its chunks unlisted, and the next run does the same work again.
+red about once a day. A run whose upload fails keeps that source's cursor where it was. A run whose commit job never
+lands (GitHub keeps one pending job per concurrency group, so a commit waiting for the writer lock is cancelled when
+another writer queues behind it; run 36909538501 lost its commit that way on 2026-10-01) is taken over by the next run:
+the collect job reads the newest `first-solutions-out` artifact, and when that output was uploaded, was built on
+exactly the cursor and chunk list `data` still holds, and every chunk it added is in its Release with the listed size,
+the run starts from it, so its commit lands both runs' work and nothing is asked twice.
 
 ## EMSC's copies of agencies' solutions
 

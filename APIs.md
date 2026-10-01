@@ -15,6 +15,7 @@ archival, redaction).
 | jsDelivr (branch) | `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/` | full-history partitions | ~12 h |
 | jsDelivr (`@sha`) | `…@<data_commit>/` | immutable frozen partitions | 1 year, immutable |
 | GitHub Releases | `archive-YYYY-MM` assets | very old months (bulk) | immutable, no CORS |
+| GitHub Releases | `first-solutions-YYYY-MM` assets | each source's kept versions per report (*Earliest solutions*) | immutable, no CORS |
 
 ## Endpoints
 
@@ -280,7 +281,8 @@ on the day the backfill fetched it (2026-07-05…07-25 for most of history), wit
 version where the source gives one: neither the source's first solution nor necessarily its last (ComCat's
 `us7000st0n` of 2026-06-15 is held at mb 4.5 from ComCat's version of 07:30 UTC that day; ComCat revised it to 4.4 on
 2026-07-06 and 2026-08-31). A backfilled event's `feed.first_ingest_time` is the backfill run's time and its
-`first_seen_seq` the log position then.
+`first_seen_seq` the log position then. The sources' own version histories, where they keep one, are collected into a side
+index for both parts (*Earliest solutions*, below).
 
 Where the walk stands (`knowledge/index/backfill.json`, 2026-10-01):
 
@@ -301,6 +303,94 @@ day it has left before the target lies in a frozen month already rolled to a Rel
 those 26 monthly archives back (2023-07…2025-08, about 760 days), adding about a fifth more events to them (ISC's own small events: a local test of the window
 2025-07-29…08-02 added 1,695 events to its 8,869 and an ISC row to 1,249 others) and re-rolling every archive. That is
 a deliberate one-off, like a heal, not an automatic step.
+
+## Earliest solutions (side index)
+
+What did a source publish *first* for an event, and when? The log answers that since 2026-07-05, up to the polling
+interval; backfilled history cannot. Some sources keep a version history of their own, and the
+[`first-solutions`](.github/workflows/first-solutions.yml) workflow collects it into a side index, for every report in
+the feed's day partitions: the history the feed holds (from the backfill target, 2023-07-06, and further back if that
+target moves) and every day since, once its partition is frozen (ten days). Nothing in the day partitions, the archives
+or the log changes.
+
+**Sources** (checked 2026-10-01; one lane each, its own host, one request at a time, at least 1 s apart):
+
+| Source | How | What it keeps | Requests |
+|---|---|---|---|
+| `usgs` (ComCat) | `eventid=…&includesuperseded=true` per report ([USGS FDSN event](https://earthquake.usgs.gov/fdsnws/event/1/), read 2026-10-01) | every `origin` product version still held, with its `updateTime`; the tsunami centres' (`pt`, `at`) are often minutes before NEIC's (`us7000keq3`, 2023-07-10: 6, 8 and 18 min after origin). Not every first solution: of the 441 events of 2026-06-15, 283 had a reviewed version as their earliest kept one (published hours to days after origin: AK, UU, AV, NC, US and others), and no `usauto` origin is kept | one per report: 429,575 history + 24,774 since 2026-07-05 |
+| `ncedc`, `scedc`, `aec` | ComCat's event of the same id (`nc…`, `ci…`, `ak…`), its own network's origin products | as above | none of their own |
+| `geonet` | `quake/history/{publicID}` per report ([GeoNet API](https://api.geonet.org.nz/), read 2026-10-01: "Not all quakes have a location history.") | every location version with its `modificationTime` and `quality`, **for 365 days after origin only** (measured 2026-10-01 15:40 UTC: the events of 2025-10-01 before about 15:40 had none, every later one 7–67 versions), so this lane walks oldest first; the 50,534 GeoNet reports before 2025-10-02 have no history left. The first automatic versions can be another quake (`2026p685142`: an M3.5 at 624 km off New Zealand for 26 versions before the M6.0 in the Banda Sea) | one per report: 17,023 still kept + 4,974 since 2026-07-05 |
+| `ingv` | QuakeML `includeallorigins` + `includeallmagnitudes`, only with `eventid` | every origin, with `creationTime` and INGV's version number | one per report: 51,455 + 4,039 |
+| `ethz`, `usp` | the same, for a whole UTC day | every origin (ETHZ's first seconds after origin, 2023 included) | one per day with a report: 1,082 + 78, 1,071 + 68 |
+| `geofon`, `knmi`, `ipgp`, `lmu` | the same, for a whole UTC day | the event's `creationTime` and only later origins (GEOFON 1–3, the others the final manual one): the first publication *time* is known, its values are not | one per day with a report: 1,090 + 78, 397 + 24, 1,032 + 78, 644 + 5 |
+
+Left out: EMSC (its QuakeML origins have no creation time and its event `creationTime` is the last update), RESIF and
+RéNaSS (all origins, no creation times), NRCan (creation time is the date only), AusPass (creation time is the import
+day), IMO (`/events/{id}` is the current solution only), KAGSR (no QuakeML), NOA (its node answered every query with
+204 on 2026-10-01), ISC (its origins are the contributing agencies', and its walk is paused), AFAD (an update time only,
+already in the rows) and the forward-only custom sources: for them the log is all there is.
+
+**Storage.** One gzip NDJSON chunk per source, event month and run, `fs-<source>-<YYYY-MM>-r<run>.ndjson.gz`, in the
+GitHub Release `first-solutions-<YYYY-MM>` of the event month (at most 1,000 assets per release, 2 GiB each, no total
+or bandwidth limit: [About releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases),
+read 2026-10-01). The `data` branch holds only `knowledge/first_solutions/cursor.json` (where each walk stands) and
+`chunks.ndjson` (one line per chunk: source, month, release, asset, records, bytes, sha256, days, run). Measured on
+2026-06-15: 608 records; per record ComCat 584 bytes of JSON (60 gzipped), GeoNet 4,151 (249), INGV 758 (78), ETHZ
+2,912 (379), USP 2,517 (385), GEOFON 437 (64). For everything listed above that is about 450 MB of NDJSON, 45 MB
+gzipped: as plain files in the `data` tree it would grow every 5-minute aggregate checkout by about 70 % (the tree is
+620 MB), and even gzipped it would add 45 MB to every checkout and to the history for good; as Release assets it adds
+nothing to either. R2 would also keep it out of git, but would make the owner's bucket the only copy of a dataset the
+repository otherwise keeps itself (R2 is a derived, additive origin here) and put R2 secrets into another job.
+
+**A record** (one line of a chunk): `provider`, `provider_event_id` (the id the feed holds), `day` (the event day it
+was collected for), `method` (`comcat-superseded`, `geonet-history`, `quakeml-all-origins`), `ids` (ComCat: every id
+of the event), `created` (the source's creation time of the event, QuakeML), `versions` (each `published`, `time`,
+`lat`, `lon`, `depth` km, `mag`, `magType`, `status` = ComCat `review-status` / GeoNet `quality` / QuakeML
+`evaluationMode`, `evaluation`, `source` = ComCat product source or QuakeML agency, `version`; oldest publication
+first), `deleted` (ComCat), `missing` (why there is no version: `http 404`, `no history`, `not in the day answer`, …)
+and `collected` (a version published later is not in it). Each chunk's data carries its source's licence and
+attribution (registry, [ATTRIBUTIONS.md](ATTRIBUTIONS.md)).
+
+**Looking it up.** `scripts/first-observations.ts` merges the side index with the log, one answer per report:
+
+```bash
+gh release download first-solutions-2026-06 -R TheShelterApp/earthquakes-feed -D fs
+FIRST_SOLUTIONS_DIRS=fs DATA_DIR=.data npx tsx scripts/first-observations.ts usgs:us7000st0n
+```
+
+`first_solution` is the earliest solution whose values are known, with its provenance: `provider version history`
+(`at` = the source's own publication time of that version) or `first seen by the feed` (`at` = when the log first
+held it; the source published it then or earlier). The earlier one wins, a tie goes to the history.
+`first_published` is the earliest publication time known: the event's creation time (`provider event creation
+time`) where that is earlier than every kept origin (GEOFON, KNMI, IPGP, LMU). `provider_history` summarises the kept
+versions (`first`, `first_non_automatic`, `last`, `versions`, `via` for a network read through ComCat) and
+`feed_first_seen` is the log's first line. A version history is the source's history *as kept on the day it was
+collected*: an earliest kept version that is already reviewed bounds the first publication from above only.
+
+Even where the log has the report, the history is usually earlier: for the events of 2026-09-11 (collected
+2026-10-01) the source's first kept version was published before the feed first held the report for all 352 ComCat
+reports (median 151 s), 49 GeoNet (182 s), 56 INGV (704 s), 5 ETHZ, 3 USP, 4 IPGP and 1 KNMI; for NCEDC and SCEDC (via
+ComCat) for 51 of 52 and 41 of 50 (the other ten: the feed saw an automatic solution ComCat no longer keeps); for GEOFON
+the creation time came first for all 7 logged reports, its first kept origin after the feed's first sight for 3.
+
+**Order.** GeoNet goes oldest first from the first day it still keeps, ahead of its expiry. Every other source takes
+the days since the log began first, oldest first, and then history, from 2026-07-04 backward: a history thins out with
+time (read on the same day, 2026-10-01, 40 of the 61 AK events of 2026-09-11 still had both an automatic and a reviewed
+origin in ComCat, but only 22 of the 76 of 2026-06-15; TX 23 of 33 against 5 of 19), while history before the log no
+longer changes. Once caught up, each run takes the newly frozen day first.
+
+**Pace.** Hourly (`:50`), when the repository variable `FIRST_SOLUTIONS_SCHEDULE` is `on`. The `collect` job holds no
+lock: up to 30 minutes of requests, chunks uploaded, then the `commit` job writes the two small files in seconds under
+the writer lock (a sparse checkout of `knowledge/first_solutions/`; it refuses to write if they changed since the
+collect job read them). At one request a second a run does up to about 1,750 requests per lane (ComCat answered 441
+requests of 2026-06-15 in 450 s), so ComCat's 454,000 reports take about 11 days of hourly runs, INGV's 55,000 about a
+day and a half, GeoNet's 22,000 about 13 hours, and the day sources (1–10 s per answer) a few hours each; then each run
+takes the newly frozen day (about 400 ComCat requests). Failures: three retries per request (2, 8, 30 s, Retry-After
+honoured); a lane that still fails stops for the run and resumes there; 50 answers in a row without the event stop a
+lane (its streak is asked again); a day source's day answered with 204 or 404 is asked again twice before it is
+recorded as missing, any other refusal stops the lane; a source failing 24 runs in a row warns, from 72 the run turns
+red about once a day. A run whose upload fails keeps that source's cursor where it was; a run whose commit job never
+lands (cancelled while waiting for the lock) leaves its chunks unlisted, and the next run does the same work again.
 
 ## EMSC's copies of agencies' solutions
 

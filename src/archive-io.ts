@@ -8,7 +8,7 @@ import { ghRetry } from './gh.js';
 import type { EventNode } from './types.js';
 
 /** Extract an archive asset (.tar.zst or .tar.gz) into a directory. */
-function extractTarball(file: string, intoDir: string): void {
+export function extractTarball(file: string, intoDir: string): void {
   if (file.endsWith('.zst')) {
     const tar = file.replace(/\.zst$/, '');
     execFileSync('zstd', ['-d', '-q', '-f', file, '-o', tar]);

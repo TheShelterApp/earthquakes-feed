@@ -1,0 +1,135 @@
+name: first-solutions
+
+# The earliest-solutions side index (PF-5i P-3; APIs.md, Earliest solutions). Each run asks the sources that keep a
+# version history (ComCat, GeoNet, INGV, ETHZ, USP, GEOFON, KNMI, IPGP, LMU) for the history of the reports the feed
+# holds, one source per lane, at most one request per second per host, and uploads what it gets as gzip NDJSON chunks
+# to the Release `first-solutions-YYYY-MM` of the event month. The `data` branch gets only the walk's cursor and the
+# chunk list (knowledge/first_solutions/), written by the short `commit` job under the writer lock; the `collect` job,
+# which spends up to 30 minutes on requests, holds no lock, so the 5-minute aggregate is never kept waiting.
+#
+# Off until enabled: the schedule runs only when the repository variable FIRST_SOLUTIONS_SCHEDULE is `on`
+# (gh variable set FIRST_SOLUTIONS_SCHEDULE --body on -R TheShelterApp/earthquakes-feed); a dispatch always runs.
+on:
+  schedule:
+    - cron: '50 * * * *'
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'One-off slice: days (2026-06-15 or 2026-06-15..2026-06-20); blank = the walk'
+        required: false
+      sources:
+        description: 'Comma-separated providers (blank = all)'
+        required: false
+      budget_minutes:
+        description: 'Minutes of requests (blank = 30)'
+        required: false
+
+# One run at a time: a run reads the cursor the previous run's commit job wrote.
+concurrency:
+  group: earthquakes-feed-first-solutions
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    if: github.event_name == 'workflow_dispatch' || vars.FIRST_SOLUTIONS_SCHEDULE == 'on'
+    # Pinned, not ubuntu-latest: ubuntu-latest moves to Ubuntu 26.04 from 2026-10-19
+    # (actions/runner-images#14748). Move to ubuntu-26.04 deliberately, after a green test run.
+    runs-on: ubuntu-24.04
+    # 30 minutes of requests, about 3 of setup and uploads.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      # Read only: the day partitions (the work list), the cursor, archives.json and backfill.json.
+      - uses: actions/checkout@v5
+        with:
+          ref: data
+          path: .data
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Collect
+        env:
+          DATA_DIR: .data
+          FIRST_SOLUTIONS_OUT: fs-out
+          FIRST_SOLUTIONS_UPLOAD: '1'
+          FIRST_SOLUTIONS_DAYS: ${{ inputs.days }}
+          FIRST_SOLUTIONS_SOURCES: ${{ inputs.sources }}
+          FIRST_SOLUTIONS_BUDGET_MIN: ${{ inputs.budget_minutes }}
+          # gh: archived months (release download) and the chunk uploads.
+          GH_TOKEN: ${{ github.token }}
+        run: npx --no-install tsx src/first-solutions-collect.ts
+      - uses: actions/upload-artifact@v6
+        with:
+          name: first-solutions-out
+          path: |
+            fs-out/cursor.json
+            fs-out/chunks.ndjson
+            fs-out/base.json
+            fs-out/summary.json
+            fs-out/blocked.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  commit:
+    needs: collect
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The only part that writes `data`: a sparse checkout of knowledge/first_solutions/ (blobs fetched on demand), two
+    # small files, a commit. Seconds inside the writer lock.
+    concurrency:
+      group: earthquakes-feed-writer
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: first-solutions-out
+          path: fs-out
+      - uses: actions/checkout@v5
+        with:
+          ref: data
+          path: .data
+          fetch-depth: 1
+          sparse-checkout: knowledge/first_solutions
+      - name: Commit & push cursor and chunk list
+        working-directory: .data
+        run: |
+          dir=knowledge/first_solutions
+          mkdir -p "$dir"
+          # The collect job read these files; anything else having changed them since means two writers: stop.
+          sha() { if [ -f "$1" ]; then sha256sum "$1" | cut -d' ' -f1; else echo null; fi; }
+          if [ "$(sha "$dir/cursor.json")" != "$(jq -r '.cursor_sha256 // "null"' ../fs-out/base.json)" ] \
+            || [ "$(sha "$dir/chunks.ndjson")" != "$(jq -r '.chunks_sha256 // "null"' ../fs-out/base.json)" ]; then
+            echo '::error::knowledge/first_solutions changed since the collect job read it; not overwriting'; exit 1
+          fi
+          cp ../fs-out/cursor.json ../fs-out/chunks.ndjson "$dir/"
+          git config user.name  "earthquakes-feed-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add "$dir"
+          git commit -m "first-solutions: $(jq -r '[.sources | to_entries[] | "\(.key) \(.value.records // 0)"] | join(", ")' ../fs-out/summary.json) @ $(date -u +%FT%TZ)" \
+            || { echo 'no changes'; exit 0; }
+          for i in 1 2 3; do
+            git push origin HEAD:data && exit 0
+            git fetch origin data
+            # `|| true`: with no rebase started --abort exits 128 and bash -e would kill the step
+            # before the annotation is emitted, losing the reason the push died.
+            git rebase origin/data || { git rebase --abort || true; echo '::error::rebase conflict'; exit 1; }
+          done
+          echo '::error::push failed after 3 attempts'; exit 1
+      # After the commit, so a stalled source does not hold back the others' progress.
+      - name: Fail if a source's walk is stalled
+        if: always()
+        run: |
+          if [ -f fs-out/blocked.txt ]; then
+            cat fs-out/blocked.txt
+            echo '::error::first-solutions: a source has failed for days (see above); the other sources'"'"' work was committed'
+            exit 1
+          fi

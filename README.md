@@ -162,6 +162,11 @@ open, reachable source appears.
   (2023-07-06) in July 2026 except ISC, whose walk is paused; a backfilled row is the
   source's solution when it was fetched, while the log holds each report as first seen
   since 2026-07-05 (`scripts/first-observations.ts`; [APIs.md](APIs.md#history-and-backfill)).
+- **Earliest solutions:** `first-solutions` collects the version histories that ComCat,
+  GeoNet, INGV and several SeisComP nodes keep (every solution they still hold, with its
+  publication time) into a side index of Release assets, one request per second per
+  source; `scripts/first-observations.ts` merges it with the log into each source's
+  earliest published solution ([APIs.md](APIs.md#earliest-solutions-side-index)).
 - **A newly-added source fills in automatically:** its recent live window is onboarded
   into the `event_map`, deep history is backfilled, and already-archived months are
   pulled from their Release, merged, and re-rolled — no manual steps, no gaps.

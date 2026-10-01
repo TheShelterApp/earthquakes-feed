@@ -1,6 +1,17 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dataPaths } from './config.js';
 import { type BackfillCfg, backfillCfg } from './backfill-cfg.js';
+import {
+  type ProviderCursor,
+  advance,
+  dayStartMs,
+  narrowAfterOverflow,
+  newCursor,
+  nextWindow,
+  recordAnswer,
+  recordFailure,
+  stallLevel,
+} from './backfill-cursor.js';
 import { readArchivedDays } from './archive-io.js';
 import { eventDayKey } from './bitemporal.js';
 import { Resolver } from './dedup.js';
@@ -19,23 +30,10 @@ import { isoFromMs } from './util.js';
 const DAY = 86_400_000;
 const BACKFILL_TARGET_YEARS = Number(process.env.BACKFILL_TARGET_YEARS ?? 3);
 
-interface ProviderCursor {
-  filledBackTo: string;
-  windowDays: number;
-  done: boolean;
-  failures: number;
-  lastCount: number;
-  lastRun: string;
-  /** Days denser than the provider's page cap even at a 1-day window — captured partially,
-   *  recorded here (bounded) for optional later sub-day remediation. */
-  saturatedDays?: string[];
-}
 interface Cursor {
   targetStart: string;
   providers: Record<string, ProviderCursor>;
 }
-
-const dayStartMs = (dayKey: string): number => Date.parse(`${dayKey}T00:00:00Z`);
 
 /** Oldest UTC day owned by the live pipeline (has an event_map shard). Backfill fills
  *  strictly before this, so it never collides with aggregate/derive rewrites. */
@@ -99,15 +97,11 @@ async function main(): Promise<void> {
       jobs.push({ p, cfg, cur: null, startMs: dispatchStart, endMs: dispatchEnd });
       continue;
     }
-    const cur = (cursor.providers[p.id] ??= { filledBackTo: liveDay, windowDays: cfg.initialWindowDays, done: false, failures: 0, lastCount: 0, lastRun: '' });
+    const cur = (cursor.providers[p.id] ??= newCursor(liveDay, cfg));
     if (cur.done) continue;
-    const endMs = Math.min(dayStartMs(cur.filledBackTo), liveDayMs);
-    const startMs = Math.max(targetMs, cfg.earliestMs, endMs - cur.windowDays * DAY);
-    if (startMs >= endMs) {
-      cur.done = true;
-      continue;
-    }
-    jobs.push({ p, cfg, cur, startMs, endMs });
+    const win = nextWindow(cur, cfg, targetMs, liveDayMs);
+    if (!win) continue;
+    jobs.push({ p, cfg, cur, ...win });
   }
 
   if (!jobs.length) {
@@ -181,6 +175,10 @@ async function main(): Promise<void> {
   const screened = emptyTally();
   let overflowCount = 0;
   let saturatedCount = 0;
+  let failedCount = 0;
+  // What must turn this run red after its commit (the marker below), besides an unreadable archive.
+  const blockers: string[] = [];
+  const windowText = (j: Job): string => `${eventDayKey(j.startMs)}..${eventDayKey(j.endMs)} (${Math.round((j.endMs - j.startMs) / DAY)} d)`;
   for (let i = 0; i < jobs.length; i++) {
     const j = jobs[i]!;
     const res = results[i]!;
@@ -189,12 +187,24 @@ async function main(): Promise<void> {
     // Overflow WITH room to narrow: retry a smaller window next run, ingest nothing
     // (avoid partial-window gaps). At windowDays<=1 we can't narrow further — fall through.
     if (res.overflow && (!cur || cur.windowDays > 1)) {
-      if (cur) cur.windowDays = Math.max(1, Math.floor(cur.windowDays / 2));
+      if (cur) narrowAfterOverflow(cur);
+      // A dispatched range is asked for once: an overflow there fills nothing, which must not pass as done.
+      else blockers.push(`backfill: dispatched window ${windowText(j)} of ${j.p.id} filled the page cap and was not ingested; dispatch narrower ranges`);
       overflowCount++;
       continue;
     }
     if (!res.status.ok) {
-      if (cur) cur.failures++;
+      failedCount++;
+      const error = res.status.error ?? `HTTP ${res.status.http_status ?? '?'}`;
+      if (cur) {
+        recordFailure(cur, error, ingestTime);
+        console.log(
+          `backfill: ${j.p.id} window ${windowText(j)} failed${res.status.latency_ms != null ? ` after ${res.status.latency_ms} ms` : ''}: ${error} — ` +
+            `${cur.failures} consecutive failure(s) since ${cur.failingSince}; next window ${cur.windowDays} d`,
+        );
+      } else {
+        blockers.push(`backfill: dispatched window ${windowText(j)} of ${j.p.id} failed: ${error}`);
+      }
       continue;
     }
     // Saturated single day (overflow even at a 1-day window): this one day is denser than the
@@ -215,20 +225,26 @@ async function main(): Promise<void> {
     }
     for (const o of heldBack) if (eventDayKey(o.eventTimeMs) < liveDay) zeroed.push(o);
     if (cur) {
-      cur.failures = 0;
-      cur.lastCount = res.obs.length;
+      recordAnswer(cur, res.obs.length);
       // Window contains a day we must leave unwritten below: advancing would walk the cursor past
       // it and it would never be revisited — a silent skip of history, the same failure mode as
       // the 2026-07 truncation. Freeze this provider (window size included) so the identical
       // window is retried once Releases are reachable; every other provider keeps advancing.
-      if (!windowHasUntouchable(j.startMs, j.endMs)) {
-        // Advance + adapt the window: reset after a saturated day, else grow when sparse.
-        cur.filledBackTo = eventDayKey(j.startMs);
-        if (saturated) cur.windowDays = j.cfg.initialWindowDays;
-        else if (res.obs.length < 0.3 * 5000) cur.windowDays = Math.min(j.cfg.maxWindowDays, Math.ceil(cur.windowDays * 1.5));
-        if (dayStartMs(cur.filledBackTo) <= Math.max(targetMs, j.cfg.earliestMs)) cur.done = true;
-      }
+      // Advance + adapt the window: reset after a saturated day, else grow when sparse.
+      if (!windowHasUntouchable(j.startMs, j.endMs)) advance(cur, j.cfg, j.startMs, res.obs.length, saturated, targetMs);
     }
+  }
+  // A walk that keeps failing is reported, never silent (backfill-cursor.ts stallLevel).
+  for (const j of jobs) {
+    const cur = j.cur;
+    if (!cur) continue;
+    const level = stallLevel(cur);
+    if (level === 'ok') continue;
+    const msg =
+      `backfill: ${j.p.id} has failed ${cur.failures} consecutive runs since ${cur.failingSince} (last error: ${cur.lastError}); ` +
+      `its walk stands at ${cur.filledBackTo} with a ${cur.windowDays}-day window. Fix the source or set its registry backfill.enabled to false`;
+    if (level === 'alarm') blockers.push(msg);
+    else console.log(`::warning::${msg}`);
   }
 
   raws.sort(byIngestOrder);
@@ -316,7 +332,7 @@ async function main(): Promise<void> {
   const remaining = Object.values(cursor.providers).filter((c) => !c.done).length;
   console.log(
     `backfill: jobs=${jobs.length} fetched=${raws.length} changed=${changedCount} days_written=${rewritten} ` +
-      `rematerialized=${rematerialized} overflow=${overflowCount} saturated=${saturatedCount} providers_remaining=${remaining}` +
+      `rematerialized=${rematerialized} overflow=${overflowCount} saturated=${saturatedCount} failed=${failedCount} providers_remaining=${remaining}` +
       (screened.bad_coords ? ` bad_coords_dropped=${screened.bad_coords}` : '') +
       (screened.coordinateless ? ` coordinateless_dropped=${screened.coordinateless}` : '') +
       (withdrawnCount ? ` coordinateless_withdrawn=${withdrawnCount}` : ''),
@@ -324,15 +340,18 @@ async function main(): Promise<void> {
   // The rest of the run is honest work and stays written (cursor included), but the run must go
   // RED: a silently-green skip is exactly how the 2026-07 truncation went unnoticed for months.
   if (failedMonths.size) {
-    const msg =
+    blockers.unshift(
       `backfill: archive unreadable for ${[...failedMonths].sort().join(', ')} — left ${skippedDays} archived day(s) whose history exists only in those tarballs untouched ` +
-      `rather than rewrite them from fresh rows alone, and held back the cursor of every provider whose window overlapped them; re-run once Releases are reachable`;
-    console.error(`::error::${msg}`);
+        `rather than rewrite them from fresh rows alone, and held back the cursor of every provider whose window overlapped them; re-run once Releases are reachable`,
+    );
+  }
+  if (blockers.length) {
+    for (const msg of blockers) console.error(`::error::${msg}`);
     // Marker + exit 0, NOT process.exitCode = 1: a non-zero tool step makes Actions skip every
     // later step lacking `if:`, so the commit never lands and each run redoes and re-discards the
     // same work. The workflow's final always()-step reads this and goes red AFTER the push.
     // Workspace root, never .data — a marker under .data would be committed to the data branch.
-    writeFileSync('backfill-blocked.txt', msg + '\n');
+    writeFileSync('backfill-blocked.txt', blockers.join('\n') + '\n');
   }
 }
 

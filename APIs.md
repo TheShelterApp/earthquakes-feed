@@ -448,8 +448,11 @@ day and a half, GeoNet's 22,000 about 13 hours, and the day sources (1–10 s pe
 hourly runs each; then each run
 takes the newly frozen day (about 400 ComCat requests). Failures: three retries per request (2, 8, 30 s, Retry-After
 honoured); a lane that still fails stops for the run and resumes there; 50 answers in a row without the event stop a
-lane (its streak is asked again); a day source's day answered with 204 or 404 is asked again twice before it is
-recorded as missing, any other refusal stops the lane; a source failing 24 runs in a row warns, from 72 the run turns
+lane (its streak is asked again); a day source's day answered with 204 or 404 is checked against the last day the node
+had content for: content there now means the node is up and the day's reports are recorded as missing at once (USP
+answered 204 for 2026-08-25, whose one report it no longer lists); with no such day yet, or with that day empty too (a
+node that is down), the day is asked again in the next two runs before it is recorded as missing; any other refusal
+stops the lane; a source failing 24 runs in a row warns, from 72 the run turns
 red about once a day. A run whose upload fails keeps that source's cursor where it was; a run whose commit job never
 lands (cancelled while waiting for the lock) leaves its chunks unlisted, and the next run does the same work again.
 

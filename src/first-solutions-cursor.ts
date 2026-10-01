@@ -12,6 +12,9 @@ export interface SourceCursor {
   /** A day collected in part: its first `offset` reports (native ids in code-point order) are in uploaded chunks. A
    *  `day` source's day the node answered with no content `empty` times (first-solutions-collect.ts EMPTY_DAY_RETRIES). */
   pending?: { day: string; offset: number; empty?: number };
+  /** `day` sources: the last day the node answered with events. A day it answers with no content is checked against
+   *  this one (first-solutions-collect.ts): content there now means the node is up and the empty day is real. */
+  contentDay?: string;
   /** Consecutive runs that stopped on a failed request (0 after a run without one). */
   failures: number;
   lastError?: string;

@@ -239,7 +239,7 @@ A source can publish an event days after its origin: ComCat (the `usgs` source) 
 events only after analyst review, for example in Alaska, Texas, Oklahoma and the Pacific
 Northwest (184 of 693 M ≥ 2.5 events with origins 2026-09-10…20 never reached the feed before
 this rule; a sample of 21 of them had been published 2.1–16.8 days after origin). Each run asks
-the sources for recent origins (the FDSN ones for the last 48 h), plus ComCat and EMSC for every
+the sources for recent origins (the FDSN ones for the last 48 h, NRCan for 7 days), plus ComCat and EMSC for every
 event updated since its last complete sweep. A ComCat event the feed has never seen enters
 the feed from that second query when its origin is within the last **7 days** (the window in
 which the feed matches reports by time and place). It is a new event of that run:
@@ -413,7 +413,20 @@ higher id (the newer version) is the chosen row.
 Since the correction, an event NRCan alone reports carries NRCan's magnitude, so it reaches the magnitude summaries
 (`1.0_*`, `2.5_*`, `4.5_*`) and every magnitude filter, where it was left out before. NRCan's place sometimes names a
 non-earthquake source ("Blast, …", "Mining event, …", "Suspected industry-related event, …"); its answer has no event
-type column, so such rows carry `type: "earthquake"` like the rest.
+type column, so such rows carry `type: "earthquake"` like the rest (in the 45 days to 2026-10-01: 25 blasts, suspected
+blasts and mining events, all below M3; 24 industry-related events, induced earthquakes).
+
+NRCan publishes many events days after their origin (its analysts release them in batches), and until 2026-10-01 the
+feed asked it for the last 2 days only, like every FDSN source: of the 435 events NRCan listed for the 44 days to
+2026-10-01, 132 (41 of M ≥ 2.5, the largest M3.7) never reached the feed through any source, and 12 of the 57 of the
+last 8 days, every one of which NRCan listed at most 5.3 days after its origin. Since then the feed asks NRCan for the
+last 7 days (the window in which the feed matches reports by time and place, so a late report joins its event as any
+report does): such an event enters the feed in the run after NRCan lists it, in the day partition and day file of its
+origin day, with `feed.first_ingest_time` days after `feed.event_time`. In a dry run on 2026-10-01 the first run with
+the 7-day window added 13 events (those 12, and an M2.4 whose nearest event is an automatic AEC solution 69 km away),
+joined one NRCan report to the AEC event of the same quake (1.9 km apart) and changed nothing else; a second run over
+the same answer changed nothing. An event NRCan lists more than 7 days after origin is still missed, and the ones
+missed before 2026-10-01 (event days up to 2026-09-24) stay missing: older days are not rewritten.
 
 History is never rewritten: the `nrcan` rows of an event day before the correction's `from_day` keep `mag`, `magType`
 and `place` null, in the frozen day partitions and the monthly Release archives alike. A consumer of that history can

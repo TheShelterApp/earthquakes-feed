@@ -28,6 +28,9 @@ Adding one is a single entry in [`providers/registry.json`](providers/registry.j
 - `"timeoutMs": 20000` for a slow endpoint (default 8 s on the live path).
 - `"liveActive": false` for a months-delayed catalog (e.g. ISC) — skipped on the 5-min
   live path but still backfilled for historical depth.
+- `"lookbackDays": 7` for an FDSN source that publishes many events days after their origin
+  (e.g. NRCan) — the live path asks it for that many days instead of 2 (at most 7, the
+  window in which reports are matched by time and place).
 - **License & attribution are required** — put the source's real terms and any DOI.
 
 Once merged and enabled, the source **fills in automatically**: its recent window is

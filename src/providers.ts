@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { BACKFILL_FETCH_TIMEOUT_MS, FETCH_LIMIT, FETCH_TIMEOUT_MS, QUERY_LOOKBACK_MS, REGISTRY_PATH } from './config.js';
+import { BACKFILL_FETCH_TIMEOUT_MS, FETCH_LIMIT, FETCH_TIMEOUT_MS, HOT_WINDOW_DAYS, QUERY_LOOKBACK_MS, REGISTRY_PATH } from './config.js';
 import { CUSTOM_ADAPTERS } from './custom.js';
 import { type ParseStats, parseFdsnText, parseGeoJSON } from './fdsn.js';
 import type { ProviderConfig, ProviderStatus, RawObs } from './types.js';
@@ -89,6 +89,16 @@ export interface WindowOutcome extends FetchOutcome {
   overflow: boolean;
 }
 
+/** How far back the live path asks a time-range FDSN source for origins: QUERY_LOOKBACK_MS (2 days), or the source's
+ *  own `lookbackDays`, at most HOT_WINDOW_DAYS (aggregate drops an older row before the dedup sees it). Earthquakes
+ *  Canada publishes many events more than 2 days after origin: on 2026-10-01, 12 of the 57 events of its 8-day answer
+ *  had reached the feed through no source at all, and each of the 12 was in its answer at most 5.3 days after origin;
+ *  over the 44 days to then, 132 of its 435 events (41 of them M ≥ 2.5) had not reached the feed. */
+export function liveLookbackMs(p: ProviderConfig): number {
+  if (p.lookbackDays == null || !(p.lookbackDays > 0)) return QUERY_LOOKBACK_MS;
+  return Math.min(p.lookbackDays, HOT_WINDOW_DAYS) * 86_400_000;
+}
+
 /** Live path: recent events only (starttime = now − lookback). Fail-open. */
 export async function fetchProvider(p: ProviderConfig, nowMs: number, fetcher: Fetcher = fetchText): Promise<FetchOutcome> {
   // Delayed catalogs (e.g. ISC) contribute nothing to the 2-day live window — skip them here
@@ -105,7 +115,7 @@ export async function fetchProvider(p: ProviderConfig, nowMs: number, fetcher: F
       return { provider: p.id, obs: [], status: { ok: false, latency_ms: Math.round(performance.now() - started), error: err instanceof Error ? err.message : String(err) } };
     }
   }
-  const r = await fetchFdsn(p, p.supportsTimeRange ? { starttime: nowMs - QUERY_LOOKBACK_MS } : {}, p.timeoutMs ?? FETCH_TIMEOUT_MS, fetcher);
+  const r = await fetchFdsn(p, p.supportsTimeRange ? { starttime: nowMs - liveLookbackMs(p) } : {}, p.timeoutMs ?? FETCH_TIMEOUT_MS, fetcher);
   return { provider: p.id, obs: r.obs, status: r.status };
 }
 

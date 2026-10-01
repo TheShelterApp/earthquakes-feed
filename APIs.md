@@ -214,7 +214,7 @@ hot window once (the Loyalty Islands M7.0 of 2026-09-25 was six ids): its folds 
 (`reason` lists what it absorbed); `knowledge/index/heal.json` on the `data` branch records
 it. A second heal (epoch 2) runs the same pass once more when EMSC's copies of IGN, NC and SCSN
 solutions start counting as the agency's own report (see *EMSC's copies of agencies'
-solutions*). The agencies added to that list in October 2026 and the exact-0.1 magnitude rule
+solutions*). The agencies added to that list on 2026-10-01 and the exact-0.1 magnitude rule
 (see *Realtime + client dedup*) came without a heal: they apply to reports and revisions from then on.
 Historical partitions are never rewritten.
 
@@ -269,15 +269,15 @@ agency's report:
 | `IGN` | `ign` | 2026-09-30 |
 | `NC` | `ncedc`, or ComCat's `nc…` row | 2026-09-30 |
 | `SCSN` | `scedc`, or ComCat's `ci…` row | 2026-09-30 |
-| `CENC` | `cenc` | October 2026 |
-| `CSN` | `csn` | October 2026 |
-| `GNS` | `geonet` | October 2026 |
-| `INGV` | `ingv` | October 2026 |
-| `KOERI` | `koeri` | October 2026 |
-| `NDI` | `ncs` | October 2026 |
-| `QUI` | `igepn` | October 2026 |
-| `UNA` | `ovsicori` | October 2026 |
-| `UNM` | `mexico` | October 2026 |
+| `CENC` | `cenc` | 2026-10-01 |
+| `CSN` | `csn` | 2026-10-01 |
+| `GNS` | `geonet` | 2026-10-01 |
+| `INGV` | `ingv` | 2026-10-01 |
+| `KOERI` | `koeri` | 2026-10-01 |
+| `NDI` | `ncs` | 2026-10-01 |
+| `QUI` | `igepn` | 2026-10-01 |
+| `UNA` | `ovsicori` | 2026-10-01 |
+| `UNM` | `mexico` | 2026-10-01 |
 
 A code is on the list only where EMSC's copy is the agency's solution up to rounding: at least 90 %
 of the copies equal in time and place a version of the agency's solution the feed saw (or, for
@@ -301,7 +301,7 @@ the Milford Sound and Puntarenas swarms): there the feed joins two reports only 
 and before a code was on the list its EMSC copy stood beside the agency's event (27 IGN, 3 NC and
 1 SCSN pairs in the 11 days to 2026-09-30; in September 2026 13 GeoNet, 44 OVSICORI and 1 KOERI
 pairs, identical in time and place). The heal of epoch 2 (see *Retired events*) folded the IGN,
-NC and SCSN pairs inside the 7-day hot window once; the codes added in October 2026 apply from
+NC and SCSN pairs inside the 7-day hot window once; the codes added on 2026-10-01 apply from
 then on, without a heal, and older days keep both events (the day partitions 2026-06-01…09-19 hold 276 IGN, 97 NC and
 36 SCSN copies as live events of their own, and the September GeoNet and OVSICORI pairs stay
 too; drop a live feature whose only row is `emsc` with one of these `auth` codes when another live

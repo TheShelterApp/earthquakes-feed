@@ -21,6 +21,7 @@ import {
   recordAnswer,
   recordFailure,
   stallLevel,
+  unmarkRange,
 } from './first-solutions-cursor.js';
 import {
   type FirstSolutionRecord,
@@ -37,8 +38,8 @@ import { isoFromMs } from './util.js';
 
 /**
  * The earliest-solutions collector (PF-5i P-3, `.github/workflows/first-solutions.yml`). Each run walks every
- * HISTORY_SOURCES provider through the feed's day partitions (the in-tree days, and the archived months pulled back
- * from their Release), asks the provider for the version history of each report the feed holds (or, for the `day`
+ * HISTORY_SOURCES provider through the feed's day partitions (the in-tree days, the archived months pulled back from
+ * their Release, and before the 3-year layer the deep history's current monthly editions, PF-5j), asks the provider for the version history of each report the feed holds (or, for the `day`
  * sources, for the whole day at once), and writes what it gets as gzip NDJSON chunks, one per source and event month.
  * The chunks go to the GitHub Release `first-solutions-YYYY-MM` (never into the `data` branch's git history); the walk's
  * cursor and the list of chunks are small files in `knowledge/first_solutions/`, which the workflow's commit job
@@ -167,39 +168,109 @@ interface ArchiveEntry {
   days?: string[];
 }
 
-/** Day partitions: in the tree when there, else from the month's Release archive (downloaded once per run). */
+/** A month of the deep history (PF-5j, knowledge/index/history.json `editions`): a `history-YYYY` Release asset of day
+ *  files in the partitions' feature format, built from the listed raw assets (one or more per source). */
+export interface DeepEdition {
+  period: string;
+  edition: number;
+  tag: string;
+  asset: string;
+  days: string[];
+  built_from: string[];
+}
+
+export interface DeepHistory {
+  /** The 3-year layer's first day; the deep history lies before it. */
+  boundary: string | null;
+  /** Each month's current edition (its highest). */
+  current: Map<string, DeepEdition>;
+  /** The first day of the deep months built back from the boundary without a gap, or null when none is. */
+  start: string | null;
+}
+
+/** The deep history the side index can walk: each month's current edition, and how far back they reach without a gap
+ *  (the history walk builds months newest first, so a gap is a month not built yet). */
+export function deepHistory(index: { boundary?: string; editions?: DeepEdition[] } | null): DeepHistory {
+  const current = new Map<string, DeepEdition>();
+  for (const e of index?.editions ?? []) {
+    const had = current.get(e.period);
+    if (!had || e.edition > had.edition) current.set(e.period, e);
+  }
+  const boundary = index?.boundary ?? null;
+  let start: string | null = null;
+  if (boundary) {
+    for (let m = addDays(boundary, -1).slice(0, 7); current.has(m); m = addDays(`${m}-01`, -1).slice(0, 7)) start = `${m}-01`;
+  }
+  return { boundary, current, start };
+}
+
+/** Which raw assets of a source an edition was built from: the source's rows in that month change only when these do. */
+export const deepKey = (provider: string, e: DeepEdition): string =>
+  e.built_from
+    .filter((a) => a.startsWith(`raw-${provider}-`))
+    .sort()
+    .join(',');
+
+/** Re-open the deep months whose current edition was built from other raw assets of the source than the ones it was
+ *  collected from (the source joined the era, or was fetched again). Returns the months re-opened. */
+export function reopenChangedDeepMonths(provider: string, cur: SourceCursor, deep: DeepHistory): string[] {
+  const reopened: string[] = [];
+  if (!cur.deep || !deep.boundary) return reopened;
+  for (const [period, key] of Object.entries(cur.deep)) {
+    const e = deep.current.get(period);
+    if (!e || deepKey(provider, e) === key) continue;
+    const last = addDays(`${addDays(`${period}-28`, 7).slice(0, 7)}-01`, -1);
+    unmarkRange(cur, `${period}-01`, last < deep.boundary ? last : addDays(deep.boundary, -1));
+    delete cur.deep[period];
+    reopened.push(period);
+  }
+  return reopened;
+}
+
+/** Day partitions: in the tree when there, else from the month's Release archive, else (before the 3-year layer) from
+ *  the month's current deep-history edition; each asset downloaded once per run. */
 export class PartitionReader {
   private readonly archivedDay = new Map<string, ArchiveEntry>();
-  private readonly months = new Map<string, Promise<string>>();
+  private readonly assets = new Map<string, Promise<string>>();
   private staging: string | null = null;
 
   constructor(
     private readonly root: string,
     archives: ArchiveEntry[],
-    private readonly download: (e: ArchiveEntry, intoDir: string) => void = downloadArchive,
+    private readonly download: (e: { tag: string; asset: string }, intoDir: string) => void = downloadArchive,
+    private readonly deep: DeepHistory = { boundary: null, current: new Map(), start: null },
   ) {
     for (const a of archives) for (const d of a.days ?? []) this.archivedDay.set(d, a);
   }
 
-  /** The partition's text, '' when the feed has no partition of that day; throws when an archived month cannot be read. */
+  private fetchAsset(e: { tag: string; asset: string }): Promise<string> {
+    let dir = this.assets.get(e.asset);
+    if (!dir) {
+      this.staging ??= mkdtempSync(join(tmpdir(), 'efd-fs-arch-'));
+      const into = join(this.staging, e.asset.replace(/[^A-Za-z0-9.-]/g, '_'));
+      dir = Promise.resolve().then(() => {
+        mkdirSync(into, { recursive: true });
+        this.download(e, into);
+        return into;
+      });
+      this.assets.set(e.asset, dir);
+      dir.catch(() => this.assets.delete(e.asset));
+    }
+    return dir;
+  }
+
+  /** The partition's text, '' when the feed has no partition of that day; throws when an archive or edition cannot be
+   *  read. */
   async dayText(day: string): Promise<string> {
     const inTree = dayPartitionFile(this.root, day);
     if (existsSync(inTree)) return readFileSync(inTree, 'utf8');
-    const entry = this.archivedDay.get(day);
-    if (!entry) return '';
-    let dir = this.months.get(entry.period);
-    if (!dir) {
-      this.staging ??= mkdtempSync(join(tmpdir(), 'efd-fs-arch-'));
-      const into = join(this.staging, entry.period);
-      dir = Promise.resolve().then(() => {
-        mkdirSync(into, { recursive: true });
-        this.download(entry, into);
-        return into;
-      });
-      this.months.set(entry.period, dir);
-      dir.catch(() => this.months.delete(entry.period));
+    let entry: { tag: string; asset: string } | undefined = this.archivedDay.get(day);
+    if (!entry && this.deep.boundary && day < this.deep.boundary) {
+      const e = this.deep.current.get(day.slice(0, 7));
+      if (e && e.days.includes(day)) entry = e;
     }
-    const file = join(await dir, `${day.slice(8, 10)}.ndjson`);
+    if (!entry) return '';
+    const file = join(await this.fetchAsset(entry), `${day.slice(8, 10)}.ndjson`);
     return existsSync(file) ? readFileSync(file, 'utf8') : '';
   }
 
@@ -208,7 +279,7 @@ export class PartitionReader {
   }
 }
 
-function downloadArchive(e: ArchiveEntry, intoDir: string): void {
+function downloadArchive(e: { tag: string; asset: string }, intoDir: string): void {
   const asset = join(intoDir, e.asset);
   ghRetry(['release', 'download', e.tag, '-R', REPO, '-p', e.asset, '-O', asset, '--clobber']);
   extractTarball(asset, intoDir);
@@ -228,6 +299,8 @@ export interface LaneContext {
   days?: string[];
   /** With `days`: only these native ids of each provider; the cursor is not moved. */
   onlyIds?: Map<string, Set<string>>;
+  /** For a deep-history day, the source's raw assets its month's edition was built from (deepKey); null otherwise. */
+  deepKeyOf?: (provider: string, day: string) => string | null;
 }
 
 export interface LaneResult {
@@ -259,6 +332,8 @@ export async function runLane(src: HistorySource, cur: SourceCursor, ctx: LaneCo
     if (moveCursor) {
       markDone(cur, day);
       if (cur.pending?.day === day) delete cur.pending;
+      const key = ctx.deepKeyOf?.(src.provider, day) ?? null;
+      if (key != null) (cur.deep ??= {})[day.slice(0, 7)] = key;
     }
   };
   for (let day = take(); day != null && ctx.now() < ctx.deadlineMs; day = take()) {
@@ -485,9 +560,12 @@ async function main(): Promise<void> {
   const targetStart = (backfillText ? (JSON.parse(backfillText) as { targetStart?: string }).targetStart : undefined) ?? '2023-07-06';
   const archivesText = readOr(dataPaths(root).archivesIndex);
   const archives = archivesText ? ((JSON.parse(archivesText) as { list: ArchiveEntry[] }).list ?? []) : [];
+  const historyText = readOr(join(dataPaths(root).indexDir, 'history.json'));
+  const deep = deepHistory(historyText ? (JSON.parse(historyText) as { boundary?: string; editions?: DeepEdition[] }) : null);
+  const walkStart = deep.start && deep.start < targetStart ? deep.start : targetStart;
   const settledEnd = addDays(eventDayKey(startedMs - FROZEN_AFTER_DAYS * DAY), -1);
   const plan = (src: HistorySource): WalkPlan => ({
-    targetStart,
+    targetStart: walkStart,
     logStart: LOG_START_DAY,
     settledEnd,
     retentionStart: src.retentionDays ? addDays(eventDayKey(Date.now() - src.retentionDays * DAY), 1) : null,
@@ -498,8 +576,17 @@ async function main(): Promise<void> {
   for (const s of sources) {
     cursor.sources[s.provider] ??= newSourceCursor();
     before.set(s.provider, JSON.stringify(cursor.sources[s.provider]));
+    if (!onlyIds) {
+      const reopened = reopenChangedDeepMonths(s.provider, cursor.sources[s.provider]!, deep);
+      if (reopened.length) console.log(`first-solutions ${s.provider}: deep month(s) ${reopened.join(', ')} have a new edition with other ${s.provider} rows; collected again`);
+    }
   }
-  const partitions = new PartitionReader(root, archives);
+  const partitions = new PartitionReader(root, archives, undefined, deep);
+  const deepKeyOf = (provider: string, day: string): string | null => {
+    if (!deep.boundary || day >= deep.boundary) return null;
+    const e = deep.current.get(day.slice(0, 7));
+    return e ? deepKey(provider, e) : null;
+  };
   const pacer = new Pacer(minIntervalMs);
   const ctx: LaneContext = {
     deadlineMs: startedMs + budgetMs,
@@ -511,8 +598,9 @@ async function main(): Promise<void> {
     plan,
     days,
     onlyIds,
+    deepKeyOf,
   };
-  console.log(`first-solutions: run ${run}, budget ${Math.round(budgetMs / 1000)} s, target ${targetStart}, settled to ${settledEnd}, sources ${sources.map((s) => s.provider).join(',')}${days ? `, one-off days ${days.join(',')}` : ''}`);
+  console.log(`first-solutions: run ${run}, budget ${Math.round(budgetMs / 1000)} s, target ${walkStart}${walkStart !== targetStart ? ` (deep history from ${walkStart}, 3-year layer from ${targetStart})` : ''}, settled to ${settledEnd}, sources ${sources.map((s) => s.provider).join(',')}${days ? `, one-off days ${days.join(',')}` : ''}`);
   let results: LaneResult[];
   try {
     results = await Promise.all(sources.map((s) => runLane(s, cursor.sources[s.provider]!, ctx)));

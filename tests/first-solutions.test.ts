@@ -1,20 +1,38 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { gunzipSync } from 'node:zlib';
 import { FirstObservationIndex, earliestReport } from '../src/first-observations.js';
 import {
+  type DeepEdition,
   EMPTY_DAY_RETRIES,
   GONE_STREAK_LIMIT,
   type HttpAnswer,
   type LaneContext,
   Pacer,
+  PartitionReader,
   buildChunks,
+  deepHistory,
+  deepKey,
   fetchPolitely,
   idsInPartition,
+  reopenChangedDeepMonths,
   runLane,
 } from '../src/first-solutions-collect.js';
-import { LOG_START_DAY, type SourceCursor, type WalkPlan, daysLeft, markDone, newSourceCursor, nextDay, recordFailure, stallLevel } from '../src/first-solutions-cursor.js';
+import {
+  LOG_START_DAY,
+  type SourceCursor,
+  type WalkPlan,
+  daysLeft,
+  markDone,
+  newSourceCursor,
+  nextDay,
+  recordFailure,
+  stallLevel,
+  unmarkRange,
+} from '../src/first-solutions-cursor.js';
 import {
   type FirstSolutionRecord,
   FirstSolutionIndex,
@@ -438,4 +456,71 @@ test('earliest: NCEDC reads its history from the ComCat event of its id, through
   assert.equal(r.provider_history!.via, 'usgs:nc75143581');
   assert.deepEqual([r.first_solution!.source, r.first_solution!.at, r.first_solution!.status], ['nc', '2025-03-06T01:02:46.940Z', 'automatic']);
   assert.equal(earliestReport('scedc', '75143581', null, side).provider_history, null, 'no ComCat record of ci75143581');
+});
+
+// --- deep history (PF-5j editions before the 3-year layer) -------------------------------------------------------------
+
+const edition = (period: string, n: number, builtFrom: string[], days: string[] = [`${period}-01`]): DeepEdition => ({
+  period,
+  edition: n,
+  tag: `history-${period.slice(0, 4)}`,
+  asset: `events-${period}.e${n}.tar.zst`,
+  days,
+  built_from: builtFrom,
+});
+
+test('deep: the walk reaches back over the months built from the boundary without a gap, current = highest edition', () => {
+  assert.deepEqual(deepHistory(null), { boundary: null, current: new Map(), start: null });
+  const d = deepHistory({
+    boundary: '2023-07-06',
+    editions: [edition('2023-07', 1, ['raw-usgs-2023-07.ndjson.zst']), edition('2023-06', 1, ['raw-usgs-2023-06.ndjson.zst']), edition('2023-06', 2, ['raw-usgs-2023-06.ndjson.zst', 'raw-emsc-2023-06.ndjson.zst']), edition('2023-04', 1, [])],
+  });
+  assert.equal(d.start, '2023-06-01', '2023-05 is not built yet: 2023-04 is not reachable');
+  assert.equal(d.current.get('2023-06')!.edition, 2);
+  assert.equal(deepHistory({ boundary: '2023-07-06', editions: [edition('2023-06', 1, [])] }).start, null, 'the boundary month itself first');
+  assert.equal(deepKey('usgs', d.current.get('2023-06')!), 'raw-usgs-2023-06.ndjson.zst');
+  assert.equal(deepKey('geofon', d.current.get('2023-06')!), '');
+});
+
+test('deep: a month whose edition has other raw assets of the source is re-opened; others stay done', () => {
+  const d = deepHistory({ boundary: '2023-07-06', editions: [edition('2023-07', 1, ['raw-usgs-2023-07.ndjson.zst']), edition('2023-06', 2, ['raw-usgs-2023-06.g2.ndjson.zst'])] });
+  const cur: SourceCursor = { ...newSourceCursor(), done: [['2023-06-01', '2026-09-20']], deep: { '2023-07': 'raw-usgs-2023-07.ndjson.zst', '2023-06': 'raw-usgs-2023-06.ndjson.zst' } };
+  assert.deepEqual(reopenChangedDeepMonths('usgs', cur, d), ['2023-06']);
+  assert.deepEqual(cur.done, [['2023-07-01', '2026-09-20']]);
+  assert.deepEqual(cur.deep, { '2023-07': 'raw-usgs-2023-07.ndjson.zst' });
+  assert.deepEqual(reopenChangedDeepMonths('usgs', cur, d), [], 'nothing else changed');
+  const c2: SourceCursor = { ...newSourceCursor(), done: [['2023-07-01', '2023-07-31']], deep: { '2023-07': '' } };
+  reopenChangedDeepMonths('usgs', c2, d);
+  assert.deepEqual(c2.done, [['2023-07-06', '2023-07-31']], 'only the deep days of the boundary month');
+  unmarkRange(c2, '2023-07-10', '2023-07-12');
+  assert.deepEqual(c2.done, [['2023-07-06', '2023-07-09'], ['2023-07-13', '2023-07-31']]);
+});
+
+test('deep: partitions before the boundary come from the current edition; the lane records which raw assets it read', async () => {
+  const d = deepHistory({ boundary: '2023-07-06', editions: [edition('2023-07', 3, ['raw-geonet-2023-07.ndjson.zst'], ['2023-07-02'])] });
+  const downloads: string[] = [];
+  const reader = new PartitionReader(
+    mkdtempSync(join(tmpdir(), 'efd-fs-test-')),
+    [],
+    (e, dir) => {
+      downloads.push(`${e.tag}/${e.asset}`);
+      writeFileSync(join(dir, '02.ndjson'), partitionLine('geonet', ['2023p500000']) + '\n');
+    },
+    d,
+  );
+  assert.equal(await reader.dayText('2023-07-01'), '', 'a day the edition has no file of');
+  assert.match(await reader.dayText('2023-07-02'), /2023p500000/);
+  assert.match(await reader.dayText('2023-07-02'), /2023p500000/);
+  assert.deepEqual(downloads, ['history-2023/events-2023-07.e3.tar.zst'], 'downloaded once');
+  assert.equal(await reader.dayText('2023-07-10'), '', 'the 3-year layer is not read from the edition');
+  reader.close();
+
+  const cur = newSourceCursor();
+  const ctx = laneCtx({ '2023-07-02': partitionLine('ingv', ['i1']) }, () => ({ status: 200, body: fixture('ingv-allorigins-41883962.xml'), retryAfterMs: null }), {
+    days: ['2023-07-02', '2023-07-10'],
+    deepKeyOf: (p, day) => (day < '2023-07-06' ? deepKey(p, d.current.get(day.slice(0, 7))!) : null),
+  });
+  const res = await runLane(source('ingv'), cur, ctx);
+  assert.deepEqual(res.daysDone, ['2023-07-02', '2023-07-10']);
+  assert.deepEqual(cur.deep, { '2023-07': '' }, 'no INGV raw asset in that edition yet');
 });

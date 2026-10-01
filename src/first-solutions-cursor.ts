@@ -16,6 +16,10 @@ export interface SourceCursor {
   failures: number;
   lastError?: string;
   failingSince?: string;
+  /** Deep-history months (before the 3-year layer, `history-YYYY` editions) collected, each with the raw assets of this
+   *  source its edition was built from (first-solutions-collect.ts deepKey). A month whose current edition was built from
+   *  other raw assets of the source (the source joined the era, or was fetched again) is collected again. */
+  deep?: Record<string, string>;
   /** Requests sent and records written, over all runs. */
   requests: number;
   records: number;
@@ -52,9 +56,25 @@ export function markDone(cur: SourceCursor, day: string): void {
   cur.done = out;
 }
 
+/** Take the days `from`..`to` (inclusive) out of the done ranges. */
+export function unmarkRange(cur: SourceCursor, from: string, to: string): void {
+  const out: Array<[string, string]> = [];
+  for (const [a, b] of cur.done) {
+    if (b < from || a > to) {
+      out.push([a, b]);
+      continue;
+    }
+    if (a < from) out.push([a, addDays(from, -1)]);
+    if (b > to) out.push([addDays(to, 1), b]);
+  }
+  cur.done = out;
+  if (cur.pending && cur.pending.day >= from && cur.pending.day <= to) delete cur.pending;
+}
+
 /** The days a source's walk may take, and in which order (nextDay). */
 export interface WalkPlan {
-  /** The earliest event day to cover (the backfill cursor's targetStart; P-4 moves it earlier). */
+  /** The earliest event day to cover: the backfill cursor's targetStart (the 3-year layer's first day), or the first
+   *  day of the deep-history months built so far back from it without a gap (first-solutions-collect.ts deepHistory). */
   targetStart: string;
   /** The live log's first day (LOG_START_DAY). */
   logStart: string;

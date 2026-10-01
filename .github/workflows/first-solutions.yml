@@ -5,7 +5,8 @@ name: first-solutions
 # holds, one source per lane, at most one request per second per host, and uploads what it gets as gzip NDJSON chunks
 # to the Release `first-solutions-YYYY-MM` of the event month. The `data` branch gets only the walk's cursor and the
 # chunk list (knowledge/first_solutions/), written by the short `commit` job under the writer lock; the `collect` job,
-# which spends up to 30 minutes on requests, holds no lock, so the 5-minute aggregate is never kept waiting.
+# which spends up to 30 minutes on requests, holds no writer lock, so the 5-minute aggregate is never kept waiting. It
+# shares the deep-history walk's group instead, so the two never query a source at the same time.
 #
 # Off until enabled: the schedule runs only when the repository variable FIRST_SOLUTIONS_SCHEDULE is `on`
 # (gh variable set FIRST_SOLUTIONS_SCHEDULE --body on -R TheShelterApp/earthquakes-feed); a dispatch always runs.
@@ -40,6 +41,11 @@ jobs:
     runs-on: ubuntu-24.04
     # 30 minutes of requests, about 3 of setup and uploads.
     timeout-minutes: 45
+    # The deep-history walk (history.yml, workflow-level group `earthquakes-feed-history`) asks the same hosts (ComCat
+    # first): sharing its group, the two never run at once, so each host still gets at most one request a second.
+    concurrency:
+      group: earthquakes-feed-history
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v5
         with:

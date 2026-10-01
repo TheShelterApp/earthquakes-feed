@@ -123,8 +123,8 @@ Last run's per-provider health, counts, timings, `degraded[]`. Counts include `m
 (`op:merge` lines), `bad_coords_dropped`, `coordinateless_dropped` (coordinate-less reports
 refused at ingest), `coordinateless_withdrawn` (those among them that withdrew a known id, see
 below), `coordinateless_retracted`, `late_minted` and `late_withheld` (see *Late publications*);
-the heal run also carries `heal`, and the one-time correction run `correction` (see *Turkey (AFAD)*
-and *California (NCEDC, SCEDC)*). `sweeps.updated` / `sweeps.deleted` hold the outcome (`ok`,
+the heal run also carries `heal`, and the one-time correction run `correction` (see *Turkey (AFAD)*,
+*California (NCEDC, SCEDC)* and *Canada (NRCan)*). `sweeps.updated` / `sweeps.deleted` hold the outcome (`ok`,
 `http_status`, `latency_ms`, `events_returned`, `error`) of each source's `updatedafter` revision
 query and `includedeleted` delete query in that run, with where the sweep stands: `since` (the
 `updatedafter` it asked from), `pages`, `through` (its cursor after the run: the moment the last
@@ -386,6 +386,39 @@ live event 3 h later) and 20 AFAD rows sitting in another source's event. A cons
 that history can shift a feature's time by +3 h when its chosen provider is `afad` and its
 `feed.event_time` is exactly 3 h before the chosen provenance row's `fields.date` read as UTC, and
 drop EMSC's `auth: "AFAD"` copy of it.
+
+## Canada (NRCan)
+
+Earthquakes Canada's FDSN text answer has eight columns
+(`EventID|Time|Latitude|Longitude|Depth/km|MagType|Magnitude|EventLocationName`) where most services send the
+standard thirteen or fourteen. Until 2026-10-01 the feed read every FDSN text column at its standard position, so
+**every `nrcan` row from the source's first day to that date has `mag`, `magType` and `place` null**, although its
+`fields` hold `Magnitude`, `MagType` and `EventLocationName` (an event NRCan alone reports was published without a
+magnitude or a place). The feed finds the columns by their header name since then, and `place` is the English half of
+NRCan's bilingual name ("16 km SSE of Duncan, BC" of "16 km SSE of Duncan, BC/16 km SSE de Duncan, BC"; the original
+stays in `fields.EventLocationName`). Every other FDSN text source has these columns at the standard positions, so
+nothing changed for them.
+
+A one-time correction (`knowledge/index/correction.json`, epoch 2) re-read every `nrcan` row of the days the manifest
+did not yet call frozen (the last 10 event days) from the row's own stored `fields` and filled it where it is: an
+`op:observe` line with a `reason` ("correction epoch 2: re-read with the fixed FDSN text parser …") and a new revision
+for each, also where another source represents the event (the row is in `feed.provenance`). Nothing moved: the time,
+epicentre and depth it re-read are the ones stored before.
+
+NRCan publishes a revised solution under the next id of the same origin minute (`20260720.0647001`, Mw' 4.84, then
+`20260720.0647002`, Mw' 4.73) and lists only the newest. Two `nrcan` rows within 2 s and 2 km are one quake whatever
+their magnitudes, as they were while the feed stored no NRCan magnitude, and when NRCan represents that event the
+higher id (the newer version) is the chosen row.
+
+Since the correction, an event NRCan alone reports carries NRCan's magnitude, so it reaches the magnitude summaries
+(`1.0_*`, `2.5_*`, `4.5_*`) and every magnitude filter, where it was left out before. NRCan's place sometimes names a
+non-earthquake source ("Blast, …", "Mining event, …", "Suspected industry-related event, …"); its answer has no event
+type column, so such rows carry `type: "earthquake"` like the rest.
+
+History is never rewritten: the `nrcan` rows of an event day before the correction's `from_day` keep `mag`, `magType`
+and `place` null, in the frozen day partitions and the monthly Release archives alike. A consumer of that history can
+read them from the provenance row's `fields` (`Magnitude`, `MagType`, `EventLocationName`), and a feature whose chosen
+provider is `nrcan` has its magnitude in the chosen row's `fields.Magnitude`.
 
 ## Recipes
 

@@ -49,6 +49,16 @@ export const REID_MAG_DELTA = 0.1;
  *  passed (PF-5g). 1e-9 is far above the rounding error of a difference of two magnitudes (about 1e-15) and far below
  *  any published magnitude step (0.01), so every pair 0.1 apart is now one solution and every pair 0.11 apart is not. */
 export const REID_MAG_TOLERANCE = 1e-9;
+/** Providers that publish a revised solution of a quake under a new native id and drop the old id from their list:
+ *  two of their rows within REID_DT_MS and REID_KM are one quake whatever their magnitudes (Resolver.sameSolution
+ *  skips its magnitude test for two rows of such a provider). Earthquakes Canada's id is the origin minute and a
+ *  sequence number (20260720.0647001, Mw' 4.84; then 20260720.0647002, Mw' 4.73, same origin and place), and its list
+ *  keeps the newest version only (on 2026-10-01: 46 of its 47 ids of the last 7 days end in 001). The feed sees no
+ *  delete, so the older id stays beside the newer one. Until PF-5h every NRCan row was stored without a magnitude, which
+ *  passed the magnitude test for every such pair (none and none), so the versions were one event; with magnitudes,
+ *  replaying the whole observation log (2026-07-05..10-01: 44 version pairs within 2 s and 2 km, magnitudes up to 0.6
+ *  apart) split 9 events in two. */
+export const NEW_ID_PER_REVISION_PROVIDERS: ReadonlySet<string> = new Set(['nrcan']);
 /** Bound on the post-revision merge chain one ingest may trigger (each round retires a node). */
 export const MERGE_MAX_ROUNDS = 8;
 /** A retired event (superseded by an op:merge, or tombstoned: an upstream delete, a provider's
@@ -74,10 +84,13 @@ export const HEAL_EPOCH = 2;
  *  knowledge/index/correction.json holds a lower epoch (or none), before the run's reports, over the days the manifest
  *  does not call frozen (event days from now − LIVE_INDEX_DAYS on; partitions.ts FROZEN_AFTER_DAYS), logged like any
  *  other change; the marker records this epoch in the same commit. Frozen days are never touched: the feed does not
- *  rewrite history. Epoch 1 (2026-10-01): AFAD rows stored 3 h early are read again with the fixed parser and re-timed
- *  (PF-5e), and NCEDC / SCEDC events standing beside ComCat's row of the same id are folded into it (PF-5d). Bump it
- *  only to run a new correction on purpose, with that correction's code. */
-export const CORRECTION_EPOCH = 1;
+ *  rewrite history. A run makes only the steps of the epochs above the marker's. Epoch 1 (2026-10-01): AFAD rows stored
+ *  3 h early are read again with the fixed parser and re-timed (PF-5e), and NCEDC / SCEDC events standing beside
+ *  ComCat's row of the same id are folded into it (PF-5d). Epoch 2 (PF-5h): NRCan rows stored without the magnitude,
+ *  magnitude type and place their own fields carry (the FDSN text parser read NRCan's 8 columns at the standard
+ *  positions) are read again with the fixed parser and filled. Bump it only to run a new correction on purpose, with
+ *  that correction's code. */
+export const CORRECTION_EPOCH = 2;
 /** Only events within this many days are kept in the in-memory dedup index. */
 export const HOT_WINDOW_DAYS = 7;
 /** aggregate loads only this many days of event_map shards (fast hot path). */

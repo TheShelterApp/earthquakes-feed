@@ -5,12 +5,14 @@
  * writes nothing to the data directory.
  *
  * Usage:
- *   npx tsx scripts/correction-dryrun.ts --data <data-branch dir> [--now <iso>] [--lines <out.ndjson>] [--splits]
+ *   npx tsx scripts/correction-dryrun.ts --data <data-branch dir> [--now <iso>] [--from-epoch <n>] [--lines <out.ndjson>] [--splits]
  *
  * <data-branch dir> needs knowledge/index (event_map shards + head.json), e.g.
  *   git archive origin/data knowledge/index | tar -x -C /tmp/data
- * --now defaults to head.ingest_time + 5 min (the next aggregate run). --lines writes the lines it would append;
- * --splits lists the AFAD rows still beside EMSC's AFAD-authored copy afterwards, with the gate that keeps them apart.
+ * --now defaults to head.ingest_time + 5 min (the next aggregate run). --from-epoch defaults to the data branch's
+ * marker (knowledge/index/correction.json), so only the steps aggregate would make run. --lines writes the lines it
+ * would append; --splits lists the AFAD rows still beside EMSC's AFAD-authored copy afterwards, with the gate that
+ * keeps them apart.
  */
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,7 +21,7 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { loadState } from '../src/bitemporal.js';
 import { COMCAT_ID_PREFIX, LIVE_INDEX_DAYS } from '../src/config.js';
-import { AFAD_LEGACY_OFFSET_MS, correctionFloor, runCorrection } from '../src/correction.js';
+import { AFAD_LEGACY_OFFSET_MS, NRCAN_PROVIDER, correctedEpoch, correctionFloor, runCorrection } from '../src/correction.js';
 import { Resolver } from '../src/dedup.js';
 import { haversineKm } from '../src/geo.js';
 import { LogBuffer } from '../src/oplog.js';
@@ -33,7 +35,7 @@ const opt = (name: string): string | undefined => {
 };
 const dataDir = opt('--data');
 if (!dataDir) {
-  console.error('usage: correction-dryrun --data <data-branch dir> [--now <iso>] [--lines <out.ndjson>] [--splits]');
+  console.error('usage: correction-dryrun --data <data-branch dir> [--now <iso>] [--from-epoch <n>] [--lines <out.ndjson>] [--splits]');
   process.exit(2);
 }
 const head = JSON.parse(readFileSync(resolve(dataDir, 'knowledge/index/head.json'), 'utf8')) as { seq: number; ingest_time: string };
@@ -42,6 +44,7 @@ const ingestTime = new Date(nowMs).toISOString();
 const registry = loadRegistry(resolve(new URL('../providers/registry.json', import.meta.url).pathname));
 const state = loadState(dataDir, { sinceDays: LIVE_INDEX_DAYS, nowMs });
 const { floorMs, fromDay } = correctionFloor(nowMs);
+const fromEpoch = opt('--from-epoch') != null ? Number(opt('--from-epoch')) : correctedEpoch(dataDir);
 
 const liveFromFloor = (): EventNode[] => [...state.eventMap.values()].filter((n) => n.state === 'live' && n.eventTimeMs >= floorMs);
 const isAfadCopy = (r: ProvenanceRow): boolean => r.provider === 'emsc' && r.fields['auth'] === 'AFAD';
@@ -94,6 +97,27 @@ function metrics(label: string): void {
       owner.set(a, n.feedId);
     }
   }
+  // NRCan (PF-5h): rows without the magnitude their own fields carry, NRCan-only events without one, and NRCan events
+  // left beside a ComCat / EMSC event within 60 s and 50 km that shares no provider with them.
+  let nrcanRows = 0;
+  let nrcanNoMag = 0;
+  let nrcanFieldsMag = 0;
+  for (const n of live) for (const r of n.provenance) if (r.provider === NRCAN_PROVIDER) {
+    nrcanRows++;
+    if (r.mag == null) nrcanNoMag++;
+    if (r.mag == null && r.fields['Magnitude'] != null) nrcanFieldsMag++;
+  }
+  const nrcanOnly = live.filter((n) => n.provenance.every((r) => r.provider === NRCAN_PROVIDER));
+  const others = live.filter((n) => n.provenance.some((r) => r.provider === 'usgs' || r.provider === 'emsc') && !n.provenance.some((r) => r.provider === NRCAN_PROVIDER));
+  let besideOthers = 0;
+  for (const a of live.filter((n) => n.provenance.some((r) => r.provider === NRCAN_PROVIDER))) {
+    if (others.some((b) => Math.abs(a.eventTimeMs - b.eventTimeMs) <= 60_000 && haversineKm(a.lat, a.lon, b.lat, b.lon) <= 50)) besideOthers++;
+  }
+  console.log(
+    `${label}: NRCan rows ${nrcanRows}, without a magnitude ${nrcanNoMag} (${nrcanFieldsMag} of them with fields.Magnitude); NRCan-only events ${nrcanOnly.length}, ` +
+      `without a magnitude ${nrcanOnly.filter((n) => n.mag == null).length}, without a place ${nrcanOnly.filter((n) => n.place == null).length}; ` +
+      `events chosen by NRCan ${live.filter((n) => n.chosenProvider === NRCAN_PROVIDER).length}; NRCan events beside a ComCat / EMSC event (60 s, 50 km) ${besideOthers}`,
+  );
   console.log(
     `${label}: live events from ${fromDay}: ${live.length}; AFAD rows ${afadRows}, 3 h early ${early}; AFAD / EMSC-copy pairs in two events: ` +
       `same time ${copyPairs(live, 0).length}, 3 h apart ${copyPairs(live, AFAD_LEGACY_OFFSET_MS / 1000).length}; ComCat-id rows in another event ` +
@@ -108,7 +132,7 @@ const keysBefore = liveRowKeys();
 metrics('before');
 const log = new LogBuffer(head.seq, ingestTime);
 const scratch = mkdtempSync(join(tmpdir(), 'correction-dryrun-'));
-const marker = runCorrection(scratch, state.eventMap, priorityMap(registry), configMap(registry), log, { nowMs, ingestTime });
+const marker = runCorrection(scratch, state.eventMap, priorityMap(registry), configMap(registry), log, { nowMs, ingestTime, fromEpoch });
 rmSync(scratch, { recursive: true, force: true });
 metrics('after ');
 const keysAfter = liveRowKeys();

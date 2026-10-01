@@ -208,7 +208,7 @@ test('correction: idempotent — a second run finds nothing and writes nothing; 
   const first = correct(map);
   assert.equal(correctedEpoch(first.root), CORRECTION_EPOCH);
   const again = correct(map, RUN + 300_000);
-  assert.equal(again.marker.afad.found, 0);
+  assert.equal(again.marker.afad?.found, 0);
   assert.deepEqual(again.log.lines, []);
   rmSync(first.root, { recursive: true, force: true });
   rmSync(again.root, { recursive: true, force: true });
@@ -222,7 +222,7 @@ test('correction: frozen days keep their old time — only event days from now �
   const { marker, root } = correct(map, later);
   rmSync(root, { recursive: true, force: true });
   assert.equal(marker.from_day, '2026-09-25');
-  assert.equal(marker.afad.found, 2);
+  assert.equal(marker.afad?.found, 2);
   for (const id of ['729169', '729186', '729259', '729260', '729496']) {
     const row = [...map.values()].flatMap((n) => n.provenance).find((r) => r.nativeId === id)!;
     assert.equal(Date.parse(`${row.fields['date']}Z`) - row.eventTimeMs, AFAD_LEGACY_OFFSET_MS, id);

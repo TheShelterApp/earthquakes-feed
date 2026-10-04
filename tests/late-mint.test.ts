@@ -182,9 +182,10 @@ test('late mint: the spatial match and the twin check work across the antimeridi
   assert.equal(a.result.revisions, 1, 'folded into the EMSC event across 180°');
   assert.equal(live(nearMap).length, 1);
 
-  // 17 km away across 180°: past the identity window, so the twin check withholds it.
+  // 17 km away across 180° and 25 s later: past every identity window (the moderate-event window of FEED-1 takes
+  // 20 s at most), so the twin check withholds it.
   const farMap = fiji();
-  const far = usgs('us7000fjif', 4, { eventTimeMs: origin + 3_000, lat: -17.9, lon: -179.87, mag: 4.7, place: 'Fiji region' });
+  const far = usgs('us7000fjif', 4, { eventTimeMs: origin + 25_000, lat: -17.9, lon: -179.87, mag: 4.7, place: 'Fiji region' });
   const km = haversineKm(-17.9, 179.97, far.lat, far.lon);
   assert.ok(km > 15 && km < 20, `${km} km`);
   const b = sweep([far], farMap);
@@ -253,14 +254,22 @@ test('late mint: an unknown usgs row that matches another provider’s event by 
 
 test('late mint: an unknown row beside another provider’s event, past the identity window, is withheld, not minted', () => {
   // us6000tx60 (dry run 2026-09-30): ComCat M4.6 published 6.8 d late, 15.8 km and 1.4 s from the
-  // GEOFON + EMSC M4.7 the feed already showed. The identity window (±10 km below M5.5) keeps them
-  // apart, so a mint would be a second Colombia M4.6.
+  // GEOFON + EMSC M4.7 the feed already showed. Until FEED-1 the identity window (±10 km below M5.5) kept them apart
+  // and the twin check withheld the row; since FEED-1 the moderate-event window (M4.6: 32 km × 0.97) makes it the
+  // same event, a revision.
   const origin = NOW - 6.8 * DAY;
-  const map = seeded([
-    emsc('20260923_0000331', origin - 1_400, { lat: 6.28, lon: -75.61, mag: 4.7, place: 'NORTHERN COLOMBIA' }),
-  ]);
+  const colombia = (): Map<string, EventNode> =>
+    seeded([emsc('20260923_0000331', origin - 1_400, { lat: 6.28, lon: -75.61, mag: 4.7, place: 'NORTHERN COLOMBIA' })]);
+  const joined = colombia();
+  const real = sweep([usgs('us6000tx60', 6.8, { eventTimeMs: origin, lat: north(6.28, 15.8), lon: -75.61, mag: 4.6, place: '9 km S of San Antonio, Colombia' })], joined);
+  assert.equal(real.result.lateMinted.length, 0);
+  assert.equal(real.result.lateWithheld.length, 0);
+  assert.equal(real.result.revisions, 1, 'one event with the EMSC copy');
+  assert.equal(live(joined).length, 1);
+  // The same row 25 s from EMSC's: past every identity window, so the twin check withholds it.
+  const map = colombia();
   const before = map.size;
-  const row = usgs('us6000tx60', 6.8, { eventTimeMs: origin, lat: north(6.28, 15.8), lon: -75.61, mag: 4.6, place: '9 km S of San Antonio, Colombia' });
+  const row = usgs('us6000tx60', 6.8, { eventTimeMs: origin + 23_600, lat: north(6.28, 15.8), lon: -75.61, mag: 4.6, place: '9 km S of San Antonio, Colombia' });
   const { log, result } = sweep([row], map);
   assert.equal(result.lateMinted.length, 0, 'not minted');
   assert.equal(result.revisions, 0);
@@ -269,7 +278,7 @@ test('late mint: an unknown row beside another provider’s event, past the iden
   assert.equal(w.providerEventId, 'us6000tx60');
   assert.deepEqual(w.nearProviders, ['emsc']);
   assert.equal(w.km.toFixed(1), '15.8');
-  assert.equal(w.dtS, -1.4);
+  assert.equal(w.dtS, -25);
   assert.equal(map.size, before, 'no new event');
   assert.equal(log.lines.length, 0, 'nothing appended');
 });
@@ -330,7 +339,8 @@ test('late mint: late_minted counts only the mints, in ingest order, with one se
     { ...known, status: 'reviewed', mag: 4.5, providerUpdatedMs: NOW - 30_000 },
     usgs('us7000guam', 4, { eventTimeMs: NOW - 4 * DAY + 2_000, lat: 11.95, lon: 143.91, mag: 4.7, place: 'south of Guam' }),
     emsc('20260929_0000123', NOW - 3 * DAY, { lat: 40, lon: 20 }),
-    usgs('us7000twin', 4, { eventTimeMs: NOW - 4 * DAY - 1_000, lat: north(11.945, 20), lon: 143.9047, mag: 4.6, place: 'south of Guam' }),
+    // M3.9: below the moderate-event window of FEED-1, so 20 km keeps it off the EMSC copy (M4.8).
+    usgs('us7000twin', 4, { eventTimeMs: NOW - 4 * DAY - 1_000, lat: north(11.945, 20), lon: 143.9047, mag: 3.9, place: 'south of Guam' }),
   ];
   const before = map.size;
   const { log, result } = sweep(rows, map);

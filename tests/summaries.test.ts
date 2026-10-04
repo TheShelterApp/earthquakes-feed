@@ -46,7 +46,7 @@ function scenario(): Record<'live' | 'superseded' | 'oldSuperseded' | 'tombstone
   const r = new Resolver(map, priorityMap(registry), configMap(registry), NOW);
   const at = iso(NOW - 3600_000);
   const live = r.ingest(obs('usgs', 'u1', { status: 'reviewed' }), iso(T + 60_000)).node;
-  const superseded = r.ingest(obs('emsc', 'e1', { mag: 6.5, lat: -21.3 + 40 / 111.195 }), iso(T + 120_000)).node;
+  const superseded = r.ingest(obs('emsc', 'e1', { mag: 6.5, lat: -21.3 + 60 / 111.195 }), iso(T + 120_000)).node;
   const fold = r.ingest(obs('emsc', 'e1', { mag: 6.5, lat: -21.3 + 5 / 111.195 }), at);
   assert.equal(fold.merges.length, 1, 'setup: the revision folds emsc into usgs');
   assert.equal(superseded.state, 'superseded');

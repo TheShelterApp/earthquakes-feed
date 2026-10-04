@@ -151,8 +151,12 @@ export interface EditionStats {
   new_events: number;
   /** Events of the archived day that are no longer live (folded into another, or emptied). */
   retired: number;
-  /** Events of the archived day whose time moved to another day (AFAD rows 3 h early, re-read). */
-  left_day: number;
+  /** Events of the archived day whose time is now on another day (AFAD rows 3 h early, re-read across midnight): kept
+   *  in this edition, the day their archive gave them, so no event leaves the published days or appears in two. */
+  off_day: number;
+  /** Fetched rows that joined an event of a neighbouring archived day: that day is not re-published, so this edition
+   *  does not carry them (the event itself stays published by its own archive). */
+  neighbour_joins: number;
   /** AFAD rows of the context re-read at their real time first (PF-5e, as the correction did for unfrozen days). */
   afad_retimed: number;
   afad_moved_out: number;
@@ -165,11 +169,19 @@ export interface EditionStats {
 /**
  * The complete day after remediation, built on the archived day and its neighbours (context, so an event near
  * midnight is matched):
- *  1. the rows the archive holds 3 h early (AFAD before 2026-10-01, PF-5e) are re-read at their real time and their
+ *  1. the rows the archived DAY holds 3 h early (AFAD before 2026-10-01, PF-5e) are re-read at their real time and their
  *     events folded, exactly as the one-time correction did for the unfrozen days (Resolver.correctReport +
- *     foldAround) — otherwise a re-asked AFAD day would hold both time bases;
- *  2. the fetched rows go through the ingest screen and backfill's Resolver (merge off: history never folds on ingest);
- *  3. the day's nodes are serialized exactly as a day partition (writeDayPartition: event time, feed id; nodeToFeature).
+ *     foldAround), among the day's own events only — otherwise a re-asked AFAD day would hold both time bases;
+ *  2. the fetched rows go through the ingest screen and backfill's Resolver (merge off: history never folds on ingest),
+ *     against the day and its neighbours;
+ *  3. the edition is the archived day's events (by feed id, whatever their time is now) plus the events this build
+ *     minted, serialized exactly as a day partition (writeDayPartition: event time, feed id; nodeToFeature).
+ *
+ * The edition replaces ONE archived day while its neighbours stay as archived, so membership follows the archive, not
+ * the corrected time: an event re-read across midnight stays in this edition (counted `off_day`), an event of a
+ * neighbouring day never enters it, and no fold crosses into a neighbour. Otherwise an AFAD row stored at 22:00 for
+ * 01:00 the next day would leave this edition and be in no published day, and the next day's rows stored before
+ * midnight would be published twice (review of FEED-DQ-1, 2026-10-04: 12 events of 2025-07-30 left the day).
  */
 export function buildDayEdition(input: {
   day: string;
@@ -188,20 +200,24 @@ export function buildDayEdition(input: {
     for (const n of nodes) if (n.state === 'live') for (const r of n.provenance) c[r.provider] = (c[r.provider] ?? 0) + 1;
     return c;
   };
-  const archived = [...map.values()].filter(onDay);
+  const archived = input.context.get(input.day) ?? [];
   const archivedIds = new Set(archived.map((n) => n.feedId));
+  const archivedReports = new Set(archived.flatMap((n) => n.provenance.map(reportKey)));
   const liveBefore = new Set(archived.filter((n) => n.state === 'live').map((n) => n.feedId));
   const contextIds = new Set(map.keys());
   const before = providerRows(archived);
   const priority = priorityMap(input.registry);
   const cfg = configMap(input.registry);
 
-  // 1) The AFAD rows stored 3 h early, re-read and folded (the correction's step, on this context only).
-  const fixer = new Resolver(map, priority, cfg, input.nowMs, { hotFloorMs: 0 });
+  // 1) The AFAD rows stored 3 h early, re-read and folded (the correction's step), on the archived day's events only:
+  //    a neighbour's rows are published by its own archive, and a fold with a neighbour's event would leave one of the
+  //    two copies there.
+  const dayMap = new Map(archived.map((n) => [n.feedId, n]));
+  const fixer = new Resolver(dayMap, priority, cfg, input.nowMs, { hotFloorMs: 0 });
   let afadRetimed = 0;
   let afadMovedOut = 0;
   const touched: string[] = [];
-  for (const raw of afadCorrections(map, 0)) {
+  for (const raw of afadCorrections(dayMap, 0)) {
     const entries = fixer.correctReport(raw, input.ingestTime);
     for (const e of entries) {
       touched.push(e.result.node.feedId);
@@ -214,6 +230,11 @@ export function buildDayEdition(input: {
   const folds = fixer.foldAround(touched, input.ingestTime);
   for (const n of folds.survivors) n.lastSeq = input.seqMarker;
   for (const m of folds.merges) m.loser.lastSeq = input.seqMarker;
+  // An AFAD row that left an event of other providers is in an event the correction minted: it joins the context.
+  for (const [id, n] of dayMap) map.set(id, n);
+  // In the edition: the archived day's events, and the events this build minted (from the day's fetched rows, or from
+  // the day's own AFAD rows re-read above).
+  const inEdition = (n: EventNode): boolean => archivedIds.has(n.feedId) || !contextIds.has(n.feedId);
 
   // 2) The fetched rows, through the ingest screen and backfill's Resolver.
   const resolver = new Resolver(map, priority, cfg, input.nowMs, { hotFloorMs: 0, merge: false });
@@ -222,6 +243,7 @@ export function buildDayEdition(input: {
   const kept = screen(input.rows, tally, undefined, zeroed).sort(byIngestOrder);
   let changed = 0;
   let unchanged = 0;
+  let neighbourJoins = 0;
   for (const raw of kept) {
     const r = resolver.ingest(raw, input.ingestTime);
     if (!r.changed) {
@@ -229,6 +251,7 @@ export function buildDayEdition(input: {
       continue;
     }
     changed++;
+    if (!inEdition(r.node)) neighbourJoins++;
     r.node.lastSeq = input.seqMarker;
     if (r.node.firstSeenSeq < 0) r.node.firstSeenSeq = input.seqMarker;
   }
@@ -238,9 +261,8 @@ export function buildDayEdition(input: {
   }
 
   // 3) The day.
-  const nodes = [...map.values()].filter(onDay).sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : 1));
+  const nodes = [...map.values()].filter(inEdition).sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : 1));
   const after = providerRows(nodes);
-  const nodeIds = new Set(nodes.map((n) => n.feedId));
   const provider_rows: Record<string, { before: number; after: number }> = {};
   for (const p of new Set([...Object.keys(before), ...Object.keys(after)])) {
     if (input.rows.some((r) => r.provider === p) || (before[p] ?? 0) !== (after[p] ?? 0)) provider_rows[p] = { before: before[p] ?? 0, after: after[p] ?? 0 };
@@ -256,7 +278,8 @@ export function buildDayEdition(input: {
     screened: tally.bad_coords + tally.coordinateless,
     new_events: nodes.filter((n) => !contextIds.has(n.feedId)).length,
     retired: [...liveBefore].filter((id) => map.get(id)?.state !== 'live').length,
-    left_day: [...archivedIds].filter((id) => !nodeIds.has(id)).length,
+    off_day: archived.filter((n) => !onDay(n)).length,
+    neighbour_joins: neighbourJoins,
     afad_retimed: afadRetimed,
     afad_moved_out: afadMovedOut,
     merged: folds.merges.length,
@@ -266,18 +289,38 @@ export function buildDayEdition(input: {
   return { text: feats.join('\n') + (feats.length ? '\n' : ''), nodes, stats };
 }
 
-/** What must hold for an edition before it is published: every event on the day, no report in two live events. */
-export function editionProblems(day: string, nodes: EventNode[]): string[] {
+const reportKey = (r: { provider: string; nativeId: string }): string => `${r.provider}:${r.nativeId}`;
+
+/**
+ * What must hold for an edition before it is published: every event is on the day — or, given the ARCHIVED days it was
+ * built on (`archive`, unchanged), was archived on the day or holds only reports the archived day held (an AFAD row
+ * re-read across midnight); no report is in two live events; and no report the archived day did not hold live is live
+ * in a neighbouring archived day (replacing the day by the edition must never publish one report twice).
+ */
+export function editionProblems(day: string, nodes: EventNode[], archive?: ReadonlyMap<string, readonly EventNode[]>): string[] {
   const problems: string[] = [];
+  const archivedDay = archive?.get(day) ?? [];
+  const archivedIds = new Set(archivedDay.map((n) => n.feedId));
+  const archivedReports = new Set(archivedDay.flatMap((n) => n.provenance.map(reportKey)));
+  const archivedLive = new Set(archivedDay.filter((n) => n.state === 'live').flatMap((n) => n.provenance.map(reportKey)));
+  const neighbourLive = new Map<string, string>();
+  for (const [d, ns] of archive ?? []) {
+    if (d === day) continue;
+    for (const n of ns) if (n.state === 'live') for (const r of n.provenance) neighbourLive.set(reportKey(r), `${n.feedId} (${d})`);
+  }
   const seen = new Map<string, string>();
   for (const n of nodes) {
-    if (eventDayKey(n.eventTimeMs) !== day) problems.push(`${n.feedId} is on ${eventDayKey(n.eventTimeMs)}, not ${day}`);
+    const nDay = eventDayKey(n.eventTimeMs);
+    const belongs = nDay === day || (archive != null && (archivedIds.has(n.feedId) || n.provenance.every((r) => archivedReports.has(reportKey(r)))));
+    if (!belongs) problems.push(`${n.feedId} is on ${nDay}, not ${day}`);
     if (n.state !== 'live') continue;
     for (const r of n.provenance) {
-      const key = `${r.provider}:${r.nativeId}`;
+      const key = reportKey(r);
       const other = seen.get(key);
       if (other && other !== n.feedId) problems.push(`${key} is in two live events (${other}, ${n.feedId})`);
       seen.set(key, n.feedId);
+      const there = archivedLive.has(key) ? undefined : neighbourLive.get(key);
+      if (there) problems.push(`${key} would be live twice: in ${n.feedId} here and in ${there}`);
     }
   }
   return problems;

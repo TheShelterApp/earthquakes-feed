@@ -378,12 +378,19 @@ editions instead, Kamchatka first, then the Sındırgı days:
 - the result is the complete day in the day-partition format, published as `events-<day>.e<N>.ndjson.gz` beside
   `raw-<source>-<day>.ndjson.gz` (a header line, then exactly the rows the source answered) in the Release
   `remediation-YYYY`. Both are immutable; a later remediation of the same day (another source) is the next edition,
-  built from the archive and every raw asset of the day. Each upload is read back and its checksum compared.
+  built from the archive and every raw asset of the day. Each upload is read back and its checksum compared;
+- an edition replaces ONE archived day while its neighbours stay as archived, so it holds the archived day's events by
+  feed id plus the events the remediation minted. An AFAD event re-read across midnight keeps the day its archive gave
+  it (its time may then lie up to 3 h into the next day; `stats.off_day`), the AFAD re-read and its folds stay among
+  the day's own events, and an event archived on a neighbouring day never enters the edition (a fetched row that
+  joins one is counted in `stats.neighbour_joins` and stays unpublished; the event itself stays in its archive). Before
+  upload the edition is checked: no report live twice in it, and none it adds live in a neighbouring archived day, so
+  reading the edition instead of the archived day never drops an event or publishes one twice.
 
 `knowledge/index/remediation.json` lists every raw asset (`provider`, `day`, `rows`, `requests`, `partial`,
 `sha256`, …) and every edition (`day`, `edition`, `url`, `sha256`, `built_on`: the archive asset and its checksum,
-`built_from`: the raw assets, and `stats`: events before and after, new, retired, rows changed / unchanged, AFAD rows
-re-read). The archived day, its `archive-YYYY-MM` asset and `manifest.json` are unchanged: a consumer that wants the
+`built_from`: the raw assets, and `stats`: events before and after, new, retired, off the day, rows changed /
+unchanged, rows that joined a neighbouring day, AFAD rows re-read). The archived day, its `archive-YYYY-MM` asset and `manifest.json` are unchanged: a consumer that wants the
 repaired day reads the current edition (the highest `edition` of the day) instead of the archived day.
 
 ## Earliest solutions (side index)

@@ -149,7 +149,7 @@ async function main(): Promise<void> {
       // Fresh nodes per task: buildDayEdition ingests into them.
       const fresh = new Map([...context].map(([d, nodes]) => [d, nodes.map((n) => structuredClone(n))]));
       const built = buildDayEdition({ day: t.day, context: fresh, rows, registry, nowMs, ingestTime: nowIso, seqMarker: head.seq });
-      const problems = editionProblems(t.day, built.nodes);
+      const problems = editionProblems(t.day, built.nodes, context);
       if (problems.length) {
         report.failed.push(`${t.provider}:${t.day}: the edition fails its check: ${problems.slice(0, 3).join('; ')}`);
         continue;
@@ -184,7 +184,7 @@ async function main(): Promise<void> {
       const s = built.stats;
       const line =
         `${t.provider}:${t.day} -> ${tag}/${edName}: ${f.rows.length} rows in ${f.windows.filter((w) => !w.split).length} window(s) (${f.requests} requests${f.partial ? ', PARTIAL' : ''}); ` +
-        `events ${s.archived_events} -> ${s.events}, live ${s.live_before} -> ${s.live_after} (+${s.new_events} new, ${s.retired} retired, ${s.left_day} left the day; rows ${s.changed} changed, ${s.unchanged} unchanged, ${s.screened} screened` +
+        `events ${s.archived_events} -> ${s.events}, live ${s.live_before} -> ${s.live_after} (+${s.new_events} new, ${s.retired} retired, ${s.off_day} off the day, ${s.neighbour_joins} joined a neighbouring day; rows ${s.changed} changed, ${s.unchanged} unchanged, ${s.screened} screened` +
         `${s.afad_retimed || s.afad_moved_out ? `; AFAD re-read ${s.afad_retimed} retimed, ${s.afad_moved_out} moved out, ${s.merged} folded` : ''}); ` +
         `${t.provider} rows ${s.provider_rows[t.provider]?.before ?? 0} -> ${s.provider_rows[t.provider]?.after ?? 0}`;
       report.done.push(line);

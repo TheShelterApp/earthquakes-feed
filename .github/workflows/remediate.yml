@@ -84,7 +84,9 @@ jobs:
 
   commit:
     needs: collect
-    # Also after a red collect: whatever it uploaded must reach the index.
+    # Also when a step after the remediation turned collect red: once remediate.ts has written its index (output
+    # `changed`), whatever it uploaded must reach the data branch. A run that died inside remediate.ts writes no index;
+    # its uploaded assets stay unindexed and the next run uses the next free names (assets are never replaced).
     if: ${{ !cancelled() && needs.collect.outputs.changed == 'true' && !inputs.dry_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10

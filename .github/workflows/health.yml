@@ -194,6 +194,24 @@ jobs:
             gh issue comment "$NUM" --repo "${{ github.repository }}" --body "Recovered — live feed healthy again as of $(date -u +%FT%TZ) (run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
             gh issue close "$NUM" --repo "${{ github.repository }}"
           fi
+      - name: Repository size (logged; a warning past the threshold, never a red run)
+        # LIVE-2: the data branch's history only grows (nothing is ever rewritten) and GitHub asks to keep repositories
+        # small; finished months of status/history and changes/ leave the tree (archive.yml), so the growth is the
+        # observation log, the day partitions and the current month's logs. GitHub reports `size` in KB.
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # 6 GB: 5.48 GB on 2026-10-04.
+          REPO_SIZE_WARN_KB: '6000000'
+        run: |
+          KB=$(gh api "repos/${{ github.repository }}" --jq .size || true)
+          case "$KB" in ''|*[!0-9]*) echo "repository size: unknown"; exit 0;; esac
+          GB=$(awk -v kb="$KB" 'BEGIN { printf "%.2f", kb / 1e6 }')
+          echo "repository size: ${GB} GB (${KB} KB, warning above ${REPO_SIZE_WARN_KB} KB)"
+          if [ "$KB" -gt "$REPO_SIZE_WARN_KB" ]; then
+            echo "::warning title=Repository size::the repository is ${GB} GB, over the ${REPO_SIZE_WARN_KB} KB threshold: check what grows (gh api repos/${{ github.repository }} --jq .size; the data branch tree by top-level directory)"
+          fi
 
   alerts:
     # The alert-pipeline watchdog. A separate job on purpose: it runs in parallel with the feed

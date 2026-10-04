@@ -385,6 +385,7 @@ export function dataPaths(root = DATA_DIR) {
     correctionMarker: join(root, 'knowledge', 'index', 'correction.json'),
     sweepCursors: join(root, 'knowledge', 'index', 'sweeps.json'),
     archivesIndex: join(root, 'knowledge', 'index', 'archives.json'),
+    logArchivesIndex: join(root, 'knowledge', 'index', 'log_archives.json'),
     partitionsIndex: join(root, 'knowledge', 'index', 'partitions.json'),
     providerHealth: join(root, 'knowledge', 'index', 'provider_health.json'),
     providerActivity: join(root, 'knowledge', 'index', 'provider_activity.json'),

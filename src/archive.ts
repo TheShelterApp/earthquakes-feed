@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { REPO, dataPaths } from './config.js';
 import { gh, ghRetry, ghRetryNet, sleepMs, withinShrinkTolerance } from './gh.js';
+import { archiveLogFiles, ghReleaseIo, loadLogArchives, saveLogArchives } from './log-archive.js';
 import { loadInventory, saveInventory } from './partitions.js';
 import { isoFromMs } from './util.js';
 
@@ -343,14 +344,27 @@ function main(): void {
     // run would redo and re-discard the same work forever. So: drop a marker, exit 0, let the
     // commit land, and let a trailing `if: always()` step turn the job red. Workspace root, never
     // .data — a marker under .data would get committed to the data branch.
-    if (blocked.length) writeFileSync(join(process.cwd(), 'archive-blocked.txt'), blocked.join('\n') + '\n');
-
     // Second pass: roll the observation log's cold ingest-months to Releases too.
     const logArchived = archiveLog(root, cutoff, archives, staging);
 
+    // Third pass (LIVE-2, src/log-archive.ts): the finished months' run logs (status/history, changes/) become
+    // immutable gzip assets of `logs-YYYY-MM`, verified before the tree copy goes; only the current month stays.
+    const logIndex = loadLogArchives(root);
+    const runLogs = archiveLogFiles(root, logIndex, nowMs, ghReleaseIo, join(staging, 'run-logs'), { dryRun: DRY_RUN });
+    for (const b of runLogs.blocked) console.error(`::error::log-archive: ${b}`);
+    blocked.push(...runLogs.blocked.map((b) => `run log ${b}`));
+    if (!DRY_RUN) saveLogArchives(root, logIndex);
+
+    if (blocked.length) writeFileSync(join(process.cwd(), 'archive-blocked.txt'), blocked.join('\n') + '\n');
+
     saveArchives(root, archives);
     saveInventory(root, inv);
-    console.log(`archive: ${archived} event-month(s) + ${logArchived} log-month(s) archived${blocked.length ? `, ${blocked.length} blocked` : ''}`);
+    console.log(
+      `archive: ${archived} event-month(s) + ${logArchived} log-month(s) + ${runLogs.archived.length} run-log file(s) archived` +
+        (runLogs.adopted.length ? `, ${runLogs.adopted.length} adopted` : '') +
+        (runLogs.leftoversRemoved.length ? `, ${runLogs.leftoversRemoved.length} leftover(s) removed` : '') +
+        (blocked.length ? `, ${blocked.length} blocked` : ''),
+    );
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }

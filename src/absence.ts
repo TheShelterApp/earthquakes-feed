@@ -1,4 +1,4 @@
-import { ABSENCE_WATCH_DAYS, ABSENCE_WATCH_PROVIDERS } from './config.js';
+import { ABSENCE_LAST_ITEMS_PROVIDERS, ABSENCE_WATCH_DAYS, ABSENCE_WATCH_PROVIDERS } from './config.js';
 import type { FetchOutcome } from './providers.js';
 import type { EventNode } from './types.js';
 
@@ -32,10 +32,18 @@ export function vanishedIds(
     const o = outcomes.find((x) => x.provider === p);
     if (!o?.status.ok) continue;
     const listed = new Set(o.obs.map((r) => r.providerEventId));
+    // A last-N-items file (Mexico's RSS: its last 15 items, about half a day) drops old ids by count: only ids younger
+    // than the oldest item it still lists can have vanished, and an empty one says nothing. AEC's file spans ~14 days,
+    // more than the window, so the window alone bounds it.
+    let from = floor;
+    if (ABSENCE_LAST_ITEMS_PROVIDERS.has(p)) {
+      if (!o.obs.length) continue;
+      from = Math.max(floor, Math.min(...o.obs.map((r) => r.eventTimeMs)));
+    }
     const gone: string[] = [];
     for (const n of eventMap.values()) {
       if (n.state !== 'live') continue;
-      for (const r of n.provenance) if (r.provider === p && r.eventTimeMs >= floor && !listed.has(r.nativeId)) gone.push(r.nativeId);
+      for (const r of n.provenance) if (r.provider === p && r.eventTimeMs >= from && !listed.has(r.nativeId)) gone.push(r.nativeId);
     }
     gone.sort();
     out[p] = { count: gone.length, ids: gone.slice(0, MAX_LISTED) };

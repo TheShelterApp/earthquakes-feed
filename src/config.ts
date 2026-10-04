@@ -297,8 +297,13 @@ export const EMSC_COMCAT_NETWORK_COPIES: ReadonlyMap<string, string> = new Map([
  *  is decided after a week of these counts. 10 days, the event map's default load (LIVE_INDEX_DAYS), because AEC
  *  deletes late: of the 22 `ak` events ComCat deleted from 2026-09-15 to 09-30, 10 went 5.5 to 9.5 days after origin
  *  (AEC's analyst review runs about 8 to 9 days behind), which a 5-day watch never saw. Still well inside the file's
- *  span (its oldest rows were 14.5 to 15.8 days old on 2026-09-30), so a row aging out is never counted. */
-export const ABSENCE_WATCH_PROVIDERS: readonly string[] = ['aec'];
+ *  span (its oldest rows were 14.5 to 15.8 days old on 2026-09-30), so a row aging out is never counted.
+ *  Mexico (FEED-5, 2026-10-04): SSN's RSS lists only its last 15 items (about half a day), and a preliminary item
+ *  leaves it when the reviewed one arrives; only ids younger than the oldest item listed are counted
+ *  (ABSENCE_LAST_ITEMS_PROVIDERS), so an item that merely aged out is never counted. */
+export const ABSENCE_WATCH_PROVIDERS: readonly string[] = ['aec', 'mexico'];
+/** Watched sources whose file is their last N items rather than a time span (absence.ts). */
+export const ABSENCE_LAST_ITEMS_PROVIDERS: ReadonlySet<string> = new Set(['mexico']);
 export const ABSENCE_WATCH_DAYS = 10;
 export const FETCH_LIMIT = Number(process.env.FETCH_LIMIT ?? 5000);
 

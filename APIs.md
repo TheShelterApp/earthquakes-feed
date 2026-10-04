@@ -136,7 +136,9 @@ asks for the same window again), `epoch` (the catch-up epoch recorded with that 
 `comcat_twins_withdrawn` counts the AEC rows a ComCat delete withdrew in that run,
 `twin_withheld` the AEC reports held back beside another source's event, and `absent.aec`
 (`count`, the first 20 `ids`) the live AEC ids younger than 10 days that AEC's file no longer
-lists (see *Alaska (AEC)*; logged, never retracted).
+lists (see *Alaska (AEC)*; logged, never retracted). `absent.mexico` does the same for SSN's RSS, which lists only its
+last 15 items: only ids younger than the oldest item it still lists are counted. `preliminary_superseded` and
+`preliminary_skipped` count SSN preliminary solutions withdrawn or not ingested (see *Mexico (SSN)*).
 
 **Failing and silent sources.** A provider whose fetch failed has `ok: false` and is in `degraded`. An FDSN answer of
 HTTP 204 is an empty success; HTTP 404 is an empty success only for a source whose query asks `nodata=404` (none does
@@ -686,6 +688,24 @@ History is never rewritten: the `nrcan` rows of an event day before the correcti
 and `place` null, in the frozen day partitions and the monthly Release archives alike. A consumer of that history can
 read them from the provenance row's `fields` (`Magnitude`, `MagType`, `EventLocationName`), and a feature whose chosen
 provider is `nrcan` has its magnitude in the chosen row's `fields.Magnitude`.
+
+## Mexico (SSN)
+
+SSN's RSS (`http://www.ssn.unam.mx/rss/ultimos-sismos.xml`, its last 15 items, local time UTC−6) first lists a quick
+solution titled `Preliminar: M 4.4, 85 km al SUROESTE de MAPASTEPEC, CHIS` and replaces it 5 to 25 minutes later with
+the reviewed item (`4.4, 188 km al SUROESTE de MAPASTEPEC, CHIS`). The adapter's id is origin time plus position, so
+the two items never share an id: in the log from 2026-07-05 to 2026-10-03, 25 of 29 preliminary items had a reviewed
+item 0 to 18 s earlier in origin time and 3 to 111 km away, and each stayed in the feed as an event of its own, without
+a magnitude (the title was read for a leading number). Since 2026-10-04 (FEED-5):
+
+- a preliminary item keeps its magnitude and place and is published with `status: automatic`; its `fields.title` is
+  SSN's title as sent;
+- once a reviewed SSN solution with an origin within 60 s and a position within 150 km is in the feed, the preliminary
+  row leaves its event (`op:tombstone` with a reason; an event with no row left is tombstoned and stays published,
+  non-live, for 48 h), on days the manifest does not call frozen; a preliminary item that arrives when its reviewed one
+  is already known is not ingested, so the pair never flips back;
+- the first run after the change withdrew the 6 preliminary rows then in the unfrozen days (dry run on a copy of
+  origin/data); older ones stay in the frozen days as they were.
 
 ## Greece (NOA)
 

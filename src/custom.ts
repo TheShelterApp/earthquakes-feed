@@ -379,6 +379,16 @@ export function parseJmaList(list: unknown, providerId: string): RawObs[] {
 const jma: CustomAdapter = async (cfg) =>
   parseJmaList(JSON.parse(await getText(cfg.base, { timeoutMs: 12_000, retries: 2 })), cfg.id);
 
+/** An SSN item title: "4.2, 188 km al SUROESTE de  MAPASTEPEC, CHIS", or for a quick solution "Preliminar: M 4.4, 85 km
+ *  al SUROESTE de MAPASTEPEC, CHIS" (FEED-5: before 2026-10-04 such a title gave no magnitude and the whole title as
+ *  the place). A preliminary item is published as `automatic` and superseded by the reviewed one (preliminary.ts). */
+export function mexicoTitle(title: string): { mag: number | null; place: string | null; preliminary: boolean } {
+  const pre = /^\s*Preliminar\b\s*:?\s*(?:M\s*)?([\d.]+)\s*,\s*([\s\S]*)$/i.exec(title);
+  if (pre) return { mag: num(pre[1]), place: pre[2]!.trim() || null, preliminary: true };
+  if (/^\s*Preliminar\b/i.test(title)) return { mag: null, place: title.trim() || null, preliminary: true };
+  return { mag: num(/^([\d.]+)/.exec(title)?.[1]), place: title.replace(/^[\d.]+,\s*/, '') || null, preliminary: false };
+}
+
 // --- Mexico: SSN/UNAM (RSS; local time America/Mexico_City = UTC-6, no DST) ---
 const mexico: CustomAdapter = async (cfg) => {
   const xml = await getText(cfg.base, { timeoutMs: 12_000, retries: 2 });
@@ -392,10 +402,11 @@ const mexico: CustomAdapter = async (cfg) => {
     const t = local ? shiftUtc(local, -6) : null;
     if (lat == null || lon == null || t == null) continue;
     const title = htmlDecode(/<title>([^<]+)</.exec(it)?.[1] ?? '');
+    const head = mexicoTitle(title);
     out.push({
       provider: cfg.id, providerEventId: `${local!.replace(/[ :]/g, '')}_${lat}_${lon}`, eventTimeMs: t,
-      providerUpdatedMs: null, status: null, lat, lon, depth: num(/Profundidad:\s*([\d.]+)/.exec(desc)?.[1]),
-      mag: num(/^([\d.]+)/.exec(title)?.[1]), magType: null, place: title.replace(/^[\d.]+,\s*/, '') || null,
+      providerUpdatedMs: null, status: head.preliminary ? 'automatic' : null, lat, lon, depth: num(/Profundidad:\s*([\d.]+)/.exec(desc)?.[1]),
+      mag: head.mag, magType: null, place: head.place,
       knownAliasIds: [], fields: { title, description: desc.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() },
     });
   }

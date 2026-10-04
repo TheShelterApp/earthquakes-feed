@@ -108,6 +108,17 @@ export const RETIRED_VISIBLE_MS = 48 * 3600_000;
  *  a heal under its rules folded 3 groups of the hot window on 2026-10-01 (one IPMA and two AFAD ids published twice,
  *  |ΔM| = 0.1), and a heal run loads the whole event-map horizon, where the sweeps' revisions reach frozen days. */
 export const HEAL_EPOCH = 2;
+/** The regular heal (FEED-6): every aggregate run that is not an epoch heal runs the same op:merge pass over every live
+ *  event of the hot window (Resolver.heal, heal.ts runFeedSideSteps), so a rule change, or a pair a report's merge pass
+ *  did not reach (a mint folds nothing; a moderate-event join waits for mutual best), folds on the next run instead of on
+ *  a revision that may never come, and HEAL_EPOCH no longer needs a bump for a rule change: an epoch heal is only for a
+ *  run that must load the whole event-map horizon (a parser re-read goes through CORRECTION_EPOCH). It is idempotent: a
+ *  run whose reports changed nothing folds nothing. At most this many folds a run, so a rule that suddenly folds
+ *  hundreds of events spreads them over several runs, each logged and reviewable, instead of rewriting the hot window
+ *  in one commit; the rest fold in the next runs (status `heal_capped`). Measured 2026-10-04 on the event map of
+ *  origin/data 47f0ed5696: the first run after FEED-1 folds 105 pairs (0.4 s with the coordinate-less retraction and the
+ *  copy re-home pass); the next folds none (0.2 s). */
+export const HEAL_MAX_FOLDS_PER_RUN = 100;
 /** The one-time correction (src/correction.ts). aggregate runs it once when the data branch's
  *  knowledge/index/correction.json holds a lower epoch (or none), before the run's reports, over the days the manifest
  *  does not call frozen (event days from now − LIVE_INDEX_DAYS on; partitions.ts FROZEN_AFTER_DAYS), logged like any

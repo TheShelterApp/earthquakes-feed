@@ -38,6 +38,34 @@ export const LARGE_EVENT_BASE_KM = 20;
 export const LARGE_EVENT_KM_PER_MAG = 20;
 export const LARGE_EVENT_MAX_KM = 50;
 export const LARGE_EVENT_MAX_DELTA = 1.0;
+/** Moderate-event identity (FEED-1). Agencies' solutions of one M4–5.5 quake scatter by 15–40 km too (GEOFON vs
+ *  EMSC/USGS, KAGSR, NCS, BMKG, RéNaSS), and below M5.5 the windows above stop at 10 km, so on 2026-10-02 42 of the 58
+ *  live M ≥ 4.5 events had another live event within 60 s and 50 km. When BOTH magnitudes are ≥ MODERATE_EVENT_MAG, a
+ *  pair the windows above keep apart is still one event when all of these hold:
+ *  - distance ≤ clamp(MODERATE_EVENT_BASE_KM + MODERATE_EVENT_KM_PER_MAG · (min(M) − MODERATE_EVENT_MAG),
+ *    MODERATE_EVENT_BASE_KM, LARGE_EVENT_MAX_KM), shrunk by ΔM like the others (M4.0 → 20 km, M4.5 → 30, M5.0 → 40,
+ *    M5.5 → 50; the cap is the alerts gateway's own fold window);
+ *  - origin times ≤ MODERATE_EVENT_MAX_DT_MS apart and |ΔM| ≤ MODERATE_EVENT_MAX_DELTA;
+ *  - no provider on both sides, none of MODERATE_EVENT_EXCLUDED_PROVIDERS on either (Earthquakes Canada's splits with
+ *    ComCat are left alone: owner decision 2026-10-02), neither cell dense;
+ *  - mutual best: at first sight the report goes to its best-scored such event only when no mergeable neighbour of
+ *    that event scores better; in the merge pass every such pair ranks behind every pair the windows above accept.
+ *  It applies at first sight only when the windows above find nothing, and in the merge pass (Resolver.whyNotMerged).
+ *  Chosen by replaying the whole observation log (2026-07-05..10-04, 202,575 lines) against the rules before it, with
+ *  slopes 10 / 20 / 30 per magnitude unit and bases 15 / 20 km: base 20 and slope 20 folded 138 of the 200 pairs of live
+ *  M ≥ 4.5 events within 60 s and 50 km in the event map of 2026-09-24..10-04 (slope 10: 114, base 15: 123, slope 30:
+ *  138 with 12 more folds to review) and took the share of live M ≥ 4.5 events of those days with such a sibling from
+ *  69 % to 31 %. On the event map of 2026-10-04 the merge pass over the hot window folds 91 such pairs (every one
+ *  ≤ 15.6 s and ≤ 43.7 km apart, |ΔM| ≤ 0.46). Excluded on purpose: KAGSR's magnitudes run 0.6–0.8 above the others'
+ *  (|ΔM| > 0.5 keeps those pairs apart), PHIVOLCS's and JMA's minute-rounded times beyond 20 s, and the same provider
+ *  under two ids (SSN, CSN). Known residual: EMSC re-points its own event id to another quake now and then (2026-09-07
+ *  off Oregon, M5.3 → its M3.9 foreshock 24 s earlier); a GEOFON row the window had joined to EMSC's then goes along. */
+export const MODERATE_EVENT_MAG = 4.0;
+export const MODERATE_EVENT_BASE_KM = 20;
+export const MODERATE_EVENT_KM_PER_MAG = 20;
+export const MODERATE_EVENT_MAX_DT_MS = 20_000;
+export const MODERATE_EVENT_MAX_DELTA = 0.5;
+export const MODERATE_EVENT_EXCLUDED_PROVIDERS: ReadonlySet<string> = new Set(['nrcan']);
 /** A provider re-publishing ONE solution under a second native id (INGV 46714321 / 47246702,
  *  2026-09-25) is a re-id, not a distinct event: rows this close fold instead of minting. */
 export const REID_DT_MS = 2_000;

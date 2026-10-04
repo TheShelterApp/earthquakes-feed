@@ -17,6 +17,12 @@ import {
   LOCATION_JOIN_MAX_DM,
   MAG_MERGE_MAX_DELTA,
   MERGE_MAX_ROUNDS,
+  MODERATE_EVENT_BASE_KM,
+  MODERATE_EVENT_EXCLUDED_PROVIDERS,
+  MODERATE_EVENT_KM_PER_MAG,
+  MODERATE_EVENT_MAG,
+  MODERATE_EVENT_MAX_DELTA,
+  MODERATE_EVENT_MAX_DT_MS,
   NEW_ID_PER_REVISION_PROVIDERS,
   REID_DT_MS,
   REID_KM,
@@ -39,6 +45,9 @@ const LATE_TWIN_KM = LARGE_EVENT_MAX_KM;
 /** Bound on Resolver.heal's passes over the hot window (each pass after the first only picks up
  *  pairs whose mutual best formed during the previous one). */
 const HEAL_MAX_PASSES = 4;
+/** Added to the merge-pass score of a pair that is one event only through the moderate-event window (FEED-1), so
+ *  every pair the base and large-event windows accept (score < 2) ranks ahead of it: the tier only adds folds. */
+const MODERATE_SCORE_OFFSET = 2;
 const clamp = (n: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, n));
 /** How the op:tombstone line of a re-homed EMSC copy (Resolver.rehomeCopy, FEED-2) starts its reason. */
 export const REHOMED_REASON_PREFIX = 're-homed:';
@@ -313,8 +322,45 @@ export class Resolver {
 
   /** The widest spatial window `s` can get against any neighbour — the candidate gather radius. */
   private static maxWindowKm(s: Solution): number {
-    if (s.mag == null || s.mag < LARGE_EVENT_MAG) return SPATIAL_KM;
-    return Resolver.largeEventKm(s.mag);
+    if (s.mag == null) return SPATIAL_KM;
+    const moderate = s.mag >= MODERATE_EVENT_MAG ? Resolver.moderateEventKm(s.mag) : 0;
+    return Math.max(s.mag < LARGE_EVENT_MAG ? SPATIAL_KM : Resolver.largeEventKm(s.mag), moderate);
+  }
+
+  /** The moderate-event spatial base for a pair whose smaller magnitude is `minMag` (≥ MODERATE_EVENT_MAG). */
+  private static moderateEventKm(minMag: number): number {
+    return clamp(MODERATE_EVENT_BASE_KM + MODERATE_EVENT_KM_PER_MAG * (minMag - MODERATE_EVENT_MAG), MODERATE_EVENT_BASE_KM, LARGE_EVENT_MAX_KM);
+  }
+
+  /** The moderate-event window of a pair (FEED-1), or null when its magnitudes keep it out of the tier. */
+  private static moderateWindow(a: Solution, b: Solution): { km: number; ms: number } | null {
+    if (a.mag == null || b.mag == null || a.mag < MODERATE_EVENT_MAG || b.mag < MODERATE_EVENT_MAG) return null;
+    const dM = Math.abs(a.mag - b.mag);
+    if (dM > MODERATE_EVENT_MAX_DELTA + REID_MAG_TOLERANCE) return null;
+    return { km: Resolver.moderateEventKm(Math.min(a.mag, b.mag)) * clamp(1 - 0.3 * dM, 0.3, 1), ms: MODERATE_EVENT_MAX_DT_MS };
+  }
+
+  /** Whether two sides (their providers) may use the moderate-event window: no provider on both, none excluded. */
+  private static moderateProviders(a: readonly string[], b: readonly string[]): boolean {
+    if (a.some((p) => MODERATE_EVENT_EXCLUDED_PROVIDERS.has(p)) || b.some((p) => MODERATE_EVENT_EXCLUDED_PROVIDERS.has(p))) return false;
+    return !a.some((p) => b.includes(p));
+  }
+
+  /** null when the pair is one event through the moderate-event window, else why not. */
+  private rejectModerate(a: Solution, b: Solution, d: number): string | null {
+    const w = Resolver.moderateWindow(a, b);
+    if (!w) return 'moderate: magnitudes';
+    const dt = Math.abs(a.eventTimeMs - b.eventTimeMs);
+    if (dt > w.ms) return `moderate: dt ${(dt / 1000).toFixed(1)} s > ${(w.ms / 1000).toFixed(1)} s`;
+    if (d > w.km) return `moderate: d ${d.toFixed(1)} km > ${w.km.toFixed(1)} km`;
+    if (this.magGuardBlocks(a, b)) return 'moderate: reviewed-vs-reviewed mag/time guard';
+    return null;
+  }
+
+  /** Whether the moderate-event window may judge the two nodes: neither cell dense, providers allowed. */
+  private moderatePair(a: EventNode, b: EventNode): boolean {
+    if (this.isDense(a.lat, a.lon) || this.isDense(b.lat, b.lon)) return false;
+    return Resolver.moderateProviders([...new Set(a.provenance.map((r) => r.provider))], [...new Set(b.provenance.map((r) => r.provider))]);
   }
 
   /** The widened spatial base for a pair whose smaller magnitude is `minMag` (≥ LARGE_EVENT_MAG). */
@@ -441,7 +487,9 @@ export class Resolver {
     return out;
   }
 
-  /** The spatial half of findExisting (hot window only). */
+  /** The spatial half of findExisting (hot window only): the nearest event within the base / large-event windows,
+   *  else an event holding the report's own solution under another provider (findTwinRow), else the moderate-event
+   *  window's mutual best (findNearModerate, FEED-1). */
   private findNear(raw: RawObs): string | null {
     const key = `${raw.provider}:${raw.providerEventId}`;
     if (raw.eventTimeMs >= this.hotFloor) {
@@ -461,12 +509,72 @@ export class Resolver {
           best = fid;
         }
       }
+      if (!best) best = this.findTwinRow(raw) ?? this.findNearModerate(raw);
       if (best) {
         this.alias.set(key, best);
         return best;
       }
     }
     return null;
+  }
+
+  /** The twin-row half of findNear (FEED-1), asked only when no event is within the base windows: the live event
+   *  (neither cell dense) holding another provider's row with the report's own solution (sameSolution: 2 s, 2 km, 0.1 M),
+   *  the nearest such row first, unless that event holds another id of the report's provider (sameProviderDistinct) or
+   *  an AEC row the location-join limits keep apart. A row can sit far from its event's representative once a wider
+   *  window joined it there (RéNaSS's M5.34 beside a USGS M6.0, 2026-08-12), and the representative is all the windows
+   *  see: without this, RESIF's report of the same RéNaSS solution, M5.24 and 0.76 below the event, minted a second
+   *  event. Measured over the whole log, it keeps 5 groups together that the moderate-event window alone would split. */
+  private findTwinRow(raw: RawObs): string | null {
+    if (this.isDense(raw.lat, raw.lon)) return null;
+    let best: EventNode | null = null;
+    let bestKm = Infinity;
+    for (const cell of gatherCellKeys(raw.lat, raw.lon, LARGE_EVENT_MAX_KM, GRID_CELL_DEG)) {
+      for (const fid of this.geo.get(cell) ?? []) {
+        const node = this.eventMap.get(fid);
+        if (!node || node.state !== 'live' || this.isDense(node.lat, node.lon)) continue;
+        const twin = node.provenance.find((r) => r.provider !== raw.provider && Resolver.sameSolution(r, raw));
+        if (!twin) continue;
+        if (this.sameProviderDistinct(raw, node)) continue;
+        if (Resolver.lifecycleLocationBlocks([raw], raw, node.provenance, node)) continue;
+        const km = haversineKm(raw.lat, raw.lon, twin.lat, twin.lon);
+        if (km < bestKm || (km === bestKm && best && node.feedId < best.feedId)) {
+          best = node;
+          bestKm = km;
+        }
+      }
+    }
+    return best?.feedId ?? null;
+  }
+
+  /** The moderate-event half of findNear (FEED-1), asked only when no event is within the base windows: the live
+   *  event the report is one quake with through the moderate-event window (neither cell dense, the event holds no
+   *  row of the report's provider, no excluded provider on either side), best score first; and only when the report
+   *  is that event's own best match too: an event with a better mergeable neighbour is left to the merge pass. */
+  private findNearModerate(raw: RawObs): string | null {
+    if (raw.mag == null || raw.mag < MODERATE_EVENT_MAG) return null;
+    if (this.isDense(raw.lat, raw.lon)) return null;
+    let best: EventNode | null = null;
+    let bestScore = Infinity;
+    for (const fid of this.candidates(raw)) {
+      const node = this.eventMap.get(fid);
+      if (!node || node.state !== 'live') continue;
+      if (this.isDense(node.lat, node.lon)) continue;
+      if (!Resolver.moderateProviders([raw.provider], [...new Set(node.provenance.map((r) => r.provider))])) continue;
+      const d = haversineKm(raw.lat, raw.lon, node.lat, node.lon);
+      if (this.rejectModerate(raw, node, d)) continue;
+      if (Resolver.lifecycleLocationBlocks([raw], raw, node.provenance, node)) continue;
+      const w = Resolver.moderateWindow(raw, node)!;
+      const score = d / w.km + Math.abs(raw.eventTimeMs - node.eventTimeMs) / w.ms;
+      if (score < bestScore || (score === bestScore && best && node.feedId < best.feedId)) {
+        best = node;
+        bestScore = score;
+      }
+    }
+    if (!best) return null;
+    const rival = this.mergeableNeighbours(best)[0];
+    if (rival && rival.score < MODERATE_SCORE_OFFSET + bestScore) return null;
+    return best.feedId;
   }
 
   /** The ComCat index (comcatIndex), built from every live node on first use. */
@@ -1152,7 +1260,11 @@ export class Resolver {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
     const dense = this.pairDense(a, b);
     const gate = this.reject(a, b, d, dense);
-    if (gate) return gate;
+    if (gate) {
+      if (!this.moderatePair(a, b)) return gate;
+      const moderate = this.rejectModerate(a, b, d);
+      if (moderate) return `${gate}; ${moderate}`;
+    }
     if (Resolver.lifecycleLocationBlocks(a.provenance, a, b.provenance, b)) {
       return `AEC solution beyond ±${LOCATION_JOIN_DT_MS / 1000} s or |dM| ${LOCATION_JOIN_MAX_DM} of a location join`;
     }
@@ -1169,8 +1281,11 @@ export class Resolver {
    *  (0 = one solution, < 2 inside both windows). It ranks a neighbour that matches in space AND
    *  time ahead of one that is merely near. */
   private score(a: EventNode, b: EventNode): number {
-    const { km, ms } = this.windows(a, b, this.pairDense(a, b));
-    return haversineKm(a.lat, a.lon, b.lat, b.lon) / km + Math.abs(a.eventTimeMs - b.eventTimeMs) / ms;
+    const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
+    const dense = this.pairDense(a, b);
+    const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b) : null;
+    const { km, ms } = moderate ?? this.windows(a, b, dense);
+    return (moderate ? MODERATE_SCORE_OFFSET : 0) + d / km + Math.abs(a.eventTimeMs - b.eventTimeMs) / ms;
   }
 
   /** Every live neighbour `node` may fold with (whyNotMerged passes), best score first, ties
@@ -1207,10 +1322,12 @@ export class Resolver {
 
   private foldReason(a: EventNode, b: EventNode): string {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
-    const { km, ms } = this.windows(a, b, this.pairDense(a, b));
+    const dense = this.pairDense(a, b);
+    const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b) : null;
+    const { km, ms } = moderate ?? this.windows(a, b, dense);
     const dt = Math.abs(a.eventTimeMs - b.eventTimeMs) / 1000;
     const dM = a.mag != null && b.mag != null ? Math.abs(a.mag - b.mag).toFixed(2) : 'n/a';
-    return `proximity: d=${d.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} window=${km.toFixed(1)} km/${(ms / 1000).toFixed(0)} s`;
+    return `proximity: d=${d.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} ${moderate ? 'moderate window' : 'window'}=${km.toFixed(1)} km/${(ms / 1000).toFixed(0)} s`;
   }
 
   /** After a live node changed, match it against its live neighbours with the first-sight

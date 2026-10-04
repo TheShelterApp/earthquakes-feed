@@ -188,6 +188,19 @@ before, floating point made 2.3 vs 2.2 count and 1.5 vs 1.4 not). When the feed 
 folds a pair only when each is the other's best match (distance and time, relative to the
 pair's window), so a report is never welded to a neighbour while its own twin stays apart.
 
+Since FEED-1 (2026-10) two reports of different providers are also one event when both
+magnitudes are ≥ 4.0, the origins are ≤ 20 s apart, |ΔM| ≤ 0.5 and the distance is within
+`20 + 20·(min(M) − 4.0)` km, capped at 50 km (M4.0 → 20, M4.5 → 30, M5.0 → 40, M5.5 → 50) and
+shrunk by the magnitude difference like the others. This moderate-event window holds only
+outside dense cells, only when no provider reports both, never for NRCan, and only for each
+other's best match; it is tried after the windows above. A report with the same solution as
+another provider's row already in an event (≤ 2 s, ≤ 2 km, |ΔM| ≤ 0.1) joins that event. Before
+the change 42 of the 58 live M ≥ 4.5 events of 2026-10-02 had another live event within 60 s
+and 50 km (agencies' solutions of one M4–5.5 quake scatter by 15–40 km); replaying the
+observation log under the new rule leaves about a third with one. A client reconciling a
+realtime source may use the same window; the feed keeps apart what KAGSR's high magnitudes,
+minute-rounded PHIVOLCS and JMA times beyond 20 s, and one provider's two ids keep apart.
+
 ## Retired events
 
 An event can leave the live set in two ways: an upstream delete (`state: "tombstoned"`,

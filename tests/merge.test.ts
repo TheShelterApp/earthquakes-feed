@@ -267,7 +267,9 @@ test('large-event window: widens with the smaller magnitude, shrinks with ΔM, c
     const map = new Map<string, EventNode>();
     const r = new Resolver(map, prio, cfg, NOW);
     r.ingest(obs('usgs', 'u', a), '2026-09-25T21:25:00Z');
-    r.ingest(obs('emsc', 'e', { eventTimeMs: T0 + 2_000, ...b }), '2026-09-25T21:25:00Z');
+    // 25 s apart: inside every large-event time window (60 s × at most 0.75), outside the moderate-event window's
+    // 20 s (FEED-1, tests/moderate-identity.test.ts), so only the large-event window decides.
+    r.ingest(obs('emsc', 'e', { eventTimeMs: T0 + 25_000, ...b }), '2026-09-25T21:25:00Z');
     return map.size;
   };
   // Both large: base 20 + 20·(6.4 − 5.5) = 38 km, ×(1 − 0.3·0.2) = 35.7 km → 35 km joins.
@@ -286,14 +288,14 @@ test('large-event window: widens with the smaller magnitude, shrinks with ΔM, c
   assert.equal(pair({ mag: 7.5 }, { mag: 7.5, lat: north(-21.3, 55) }), 2, 'nothing beyond the cap');
 });
 
-/** A: usgs reviewed at P0; B: emsc automatic 40 km north — separate at first sight. Then
- *  emsc's revision moves B to 5 km from A. */
+/** A: usgs reviewed at P0; B: emsc automatic 60 km north — separate at first sight (beyond the 50 km cap of every
+ *  window). Then emsc's revision moves B to 5 km from A. */
 function moveScenario(aStatus = 'reviewed', bStatus = 'automatic'): { map: Map<string, EventNode>; r: Resolver; a: EventNode; b: EventNode; res: IngestResult } {
   const map = new Map<string, EventNode>();
   const r = new Resolver(map, prio, cfg, NOW);
   const a = r.ingest(obs('usgs', 'u1', { status: aStatus, providerUpdatedMs: T0 + 60_000 }), '2026-09-25T21:25:00Z').node;
-  const b = r.ingest(obs('emsc', 'e1', { status: bStatus, mag: 6.5, lat: north(-21.3, 40) }), '2026-09-25T21:26:00Z').node;
-  assert.equal(map.size, 2, 'separate at first sight (40 km > 29 km)');
+  const b = r.ingest(obs('emsc', 'e1', { status: bStatus, mag: 6.5, lat: north(-21.3, 60) }), '2026-09-25T21:26:00Z').node;
+  assert.equal(map.size, 2, 'separate at first sight (60 km > 50 km)');
   const res = r.ingest(obs('emsc', 'e1', { status: bStatus, mag: 6.5, lat: north(-21.3, 5) }), '2026-09-25T21:31:00Z');
   return { map, r, a, b, res };
 }
@@ -341,7 +343,7 @@ test('merge=false (backfill, onboard: paths with no log line) never folds', () =
   const map = new Map<string, EventNode>();
   const r = new Resolver(map, prio, cfg, NOW, { merge: false });
   const a = r.ingest(obs('usgs', 'u1', { status: 'reviewed', providerUpdatedMs: T0 + 60_000 }), '2026-09-25T21:25:00Z').node;
-  const b = r.ingest(obs('emsc', 'e1', { mag: 6.5, lat: north(-21.3, 40) }), '2026-09-25T21:26:00Z').node;
+  const b = r.ingest(obs('emsc', 'e1', { mag: 6.5, lat: north(-21.3, 60) }), '2026-09-25T21:26:00Z').node;
   const res = r.ingest(obs('emsc', 'e1', { mag: 6.5, lat: north(-21.3, 5) }), '2026-09-25T21:31:00Z');
   assert.equal(res.changed, true, 'the revision itself lands');
   assert.equal(res.node, b);
@@ -357,7 +359,7 @@ test('op:merge survivor: most providers beats status; status beats priority; the
   let r = new Resolver(map, prio, cfg, NOW);
   const a = r.ingest(obs('usgs', 'u1'), '2026-09-25T21:25:00Z').node;
   r.ingest(obs('geofon', 'g1', { lat: north(-21.3, 1) }), '2026-09-25T21:25:00Z');
-  const b = r.ingest(obs('emsc', 'e1', { status: 'reviewed', mag: 6.5, lat: north(-21.3, 40) }), '2026-09-25T21:26:00Z').node;
+  const b = r.ingest(obs('emsc', 'e1', { status: 'reviewed', mag: 6.5, lat: north(-21.3, 60) }), '2026-09-25T21:26:00Z').node;
   let res = r.ingest(obs('emsc', 'e1', { status: 'reviewed', mag: 6.5, lat: north(-21.3, 3) }), '2026-09-25T21:31:00Z');
   assert.equal(res.node, a, 'two providers beat one reviewed provider');
   assert.equal(b.state, 'superseded');
@@ -366,7 +368,7 @@ test('op:merge survivor: most providers beats status; status beats priority; the
   map = new Map();
   r = new Resolver(map, prio, cfg, NOW);
   const a2 = r.ingest(obs('usgs', 'u1'), '2026-09-25T21:25:00Z').node;
-  const b2 = r.ingest(obs('emsc', 'e1', { status: 'reviewed', mag: 6.5, lat: north(-21.3, 40) }), '2026-09-25T21:26:00Z').node;
+  const b2 = r.ingest(obs('emsc', 'e1', { status: 'reviewed', mag: 6.5, lat: north(-21.3, 60) }), '2026-09-25T21:26:00Z').node;
   res = r.ingest(obs('emsc', 'e1', { status: 'reviewed', mag: 6.5, lat: north(-21.3, 3) }), '2026-09-25T21:31:00Z');
   assert.equal(res.node, b2, 'reviewed beats automatic even when it is the node that moved');
   assert.equal(a2.state, 'superseded');
@@ -375,7 +377,7 @@ test('op:merge survivor: most providers beats status; status beats priority; the
   map = new Map();
   r = new Resolver(map, prio, cfg, NOW);
   const a3 = r.ingest(obs('usgs', 'u1'), '2026-09-25T21:25:00Z').node;
-  const b3 = r.ingest(obs('emsc', 'e1', { mag: 6.5, lat: north(-21.3, 40) }), '2026-09-25T21:26:00Z').node;
+  const b3 = r.ingest(obs('emsc', 'e1', { mag: 6.5, lat: north(-21.3, 60) }), '2026-09-25T21:26:00Z').node;
   res = r.ingest(obs('emsc', 'e1', { mag: 6.5, lat: north(-21.3, 3) }), '2026-09-25T21:31:00Z');
   assert.equal(res.node, a3, 'lower priority number survives');
   assert.equal(b3.state, 'superseded');
@@ -418,7 +420,7 @@ test('op:merge never crosses the same-provider-distinct or reviewed guards', () 
   const map = new Map<string, EventNode>();
   const r = new Resolver(map, prio, cfg, NOW);
   const a = r.ingest(obs('emsc', 'e1'), '2026-09-25T21:25:00Z').node;
-  const b = r.ingest(obs('emsc', 'e2', { eventTimeMs: T0 + 10_000, lat: north(-21.3, 40) }), '2026-09-25T21:26:00Z').node;
+  const b = r.ingest(obs('emsc', 'e2', { eventTimeMs: T0 + 10_000, lat: north(-21.3, 60) }), '2026-09-25T21:26:00Z').node;
   const res = r.ingest(obs('emsc', 'e2', { eventTimeMs: T0 + 10_000, lat: north(-21.3, 3) }), '2026-09-25T21:31:00Z');
   assert.equal(res.merges.length, 0);
   assert.equal(a.state, 'live');

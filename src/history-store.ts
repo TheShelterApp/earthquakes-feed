@@ -28,6 +28,9 @@ export interface HistoryStore {
 export class GitHubStore implements HistoryStore {
   readonly label = `GitHub Releases of ${REPO}`;
 
+  /** `notesFor` names a new release's notes; the default describes a deep-history year (history-YYYY). */
+  constructor(private readonly notesFor?: (tag: string) => string) {}
+
   list(tag: string): AssetInfo[] {
     let id: string;
     try {
@@ -56,9 +59,10 @@ export class GitHubStore implements HistoryStore {
       /* not created yet */
     }
     const notes =
+      this.notesFor?.(tag) ??
       `Deep history of earthquakes-feed for ${tag.slice(-4)} (before the 3-year layer): immutable raw source answers ` +
-      '(raw-<source>-<YYYY-MM>.ndjson.zst) and monthly events editions (events-<YYYY-MM>.e<N>.tar.zst). Index: ' +
-      'knowledge/index/history.json on the data branch; format: APIs.md, Deep history.';
+        '(raw-<source>-<YYYY-MM>.ndjson.zst) and monthly events editions (events-<YYYY-MM>.e<N>.tar.zst). Index: ' +
+        'knowledge/index/history.json on the data branch; format: APIs.md, Deep history.';
     try {
       // --latest=false: these Releases must never become the repository's "Latest release".
       ghRetryNet(['release', 'create', tag, '-R', REPO, '--target', 'main', '--title', tag, '--notes', notes, '--latest=false']);

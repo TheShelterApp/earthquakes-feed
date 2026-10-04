@@ -16,6 +16,7 @@ archival, redaction).
 | jsDelivr (`@sha`) | `…@<data_commit>/` | immutable frozen partitions | 1 year, immutable |
 | GitHub Releases | `archive-YYYY-MM` assets | very old months (bulk) | immutable, no CORS |
 | GitHub Releases | `first-solutions-YYYY-MM` assets | each source's kept versions per report (*Earliest solutions*) | immutable, no CORS |
+| GitHub Releases | `remediation-YYYY` assets | complete editions of days a source's backfill could not fetch whole (*Saturated days*) | immutable, no CORS |
 
 ## Endpoints
 
@@ -304,6 +305,33 @@ day it has left before the target lies in a frozen month already rolled to a Rel
 those 26 monthly archives back (2023-07…2025-08, about 760 days), adding about a fifth more events to them (ISC's own small events: a local test of the window
 2025-07-29…08-02 added 1,695 events to its 8,869 and an ISC row to 1,249 others) and re-rolling every archive. That is
 a deliberate one-off, like a heal, not an automatic step.
+
+## Saturated days
+
+When even a one-day backfill window filled a source's page cap, the walk kept the capped rows (the day is partial for
+that source) and listed the day in its cursor (`saturatedDays` in `knowledge/index/backfill.json`). On 2026-10-04 that
+was KAGSR 2025-07-30 (the day after the M8.8 Kamchatka mainshock), 23 AFAD days of the Sındırgı sequences (2025-08-11
+to 08-25 and 2025-10-28 to 11-12) and IMO 2023-11-11, 2025-04-01 and 2025-05-24. All of them are frozen and rolled
+into `archive-YYYY-MM` Releases, and the feed never rewrites a frozen day or a published asset, so they are not
+repaired in place. The `remediate` workflow (manual, `workflow_dispatch`; `src/remediate.ts`) publishes ADDITIVE day
+editions instead, Kamchatka first, then the Sındırgı days:
+
+- the source's whole day is asked again in 6-hour windows, each halved while its answer fills the cap (down to
+  5 minutes; a window still full there marks the day `partial`), one request at a time, at least 1.1 s apart;
+- the archived day and its two neighbours are read back from their archive asset (read only); AFAD rows the archive
+  holds 3 h early (before 2026-10-01, see *Turkey (AFAD)*) are re-read at their real time and folded, as the one-time
+  correction did for the unfrozen days, so the day has one time base; then the fetched rows go through the ingest
+  screen and backfill's Resolver;
+- the result is the complete day in the day-partition format, published as `events-<day>.e<N>.ndjson.gz` beside
+  `raw-<source>-<day>.ndjson.gz` (a header line, then exactly the rows the source answered) in the Release
+  `remediation-YYYY`. Both are immutable; a later remediation of the same day (another source) is the next edition,
+  built from the archive and every raw asset of the day. Each upload is read back and its checksum compared.
+
+`knowledge/index/remediation.json` lists every raw asset (`provider`, `day`, `rows`, `requests`, `partial`,
+`sha256`, …) and every edition (`day`, `edition`, `url`, `sha256`, `built_on`: the archive asset and its checksum,
+`built_from`: the raw assets, and `stats`: events before and after, new, retired, rows changed / unchanged, AFAD rows
+re-read). The archived day, its `archive-YYYY-MM` asset and `manifest.json` are unchanged: a consumer that wants the
+repaired day reads the current edition (the highest `edition` of the day) instead of the archived day.
 
 ## Deep history (before 2023-07-06)
 

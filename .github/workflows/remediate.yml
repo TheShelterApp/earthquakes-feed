@@ -1,0 +1,129 @@
+name: remediate
+
+# Saturated-day remediation (FEED-DQ-1 / DQ-3; src/remediation.ts, APIs.md "Saturated days"). A backfill day whose
+# one-day window still filled the source's page cap was kept partial and listed in knowledge/index/backfill.json
+# `saturatedDays`. Each such day is asked again in sub-day windows and published as an ADDITIVE, immutable day
+# edition in the Release `remediation-YYYY` (beside the raw answer); the archived day, its archive asset and the
+# manifest are never touched. The data branch gains only knowledge/index/remediation.json, written by the `commit` job.
+# Manual only: a run does at most `max_days` days, one request at a time per source host.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: no Release, no upload, no commit; the produced assets become a 3-day workflow artifact'
+        type: boolean
+        default: true
+      days:
+        description: 'Only these tasks, e.g. kagsr:2025-07-30,afad:2025-08-11 (blank = every saturated day, Kamchatka and Sındırgı first)'
+        required: false
+      max_days:
+        description: 'Days per run (blank = 8)'
+        required: false
+
+concurrency:
+  group: earthquakes-feed-remediate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    # Outside the writer group: fetching and building take minutes and must not hold up the 5-minute aggregate.
+    # It writes nothing to the data branch, only Release assets (immutable, never --clobber).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    outputs:
+      changed: ${{ steps.run.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: data
+          path: .data
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            knowledge/index/backfill.json
+            knowledge/index/archives.json
+            knowledge/index/head.json
+            knowledge/index/remediation.json
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Remediate saturated days
+        id: run
+        env:
+          DATA_DIR: .data
+          REMEDIATION_OUT: remediation-out
+          REMEDIATION_DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          REMEDIATION_DAYS: ${{ inputs.days }}
+          REMEDIATION_MAX_DAYS: ${{ inputs.max_days }}
+          # gh: the archived months (read only) and the remediation assets.
+          GH_TOKEN: ${{ github.token }}
+        run: npx --no-install tsx src/remediate.ts
+      - if: steps.run.outputs.changed == 'true' && !inputs.dry_run
+        uses: actions/upload-artifact@v6
+        with:
+          name: remediation-index
+          path: remediation-out/remediation.json
+          retention-days: 3
+      - if: inputs.dry_run
+        uses: actions/upload-artifact@v6
+        with:
+          name: remediation-dry-run
+          path: remediation-out/
+          retention-days: 3
+
+  commit:
+    needs: collect
+    # Also after a red collect: whatever it uploaded must reach the index.
+    if: ${{ !cancelled() && needs.collect.outputs.changed == 'true' && !inputs.dry_run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: earthquakes-feed-writer
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: data
+          path: .data
+          fetch-depth: 1
+          sparse-checkout: |
+            knowledge/index/remediation.json
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v7
+        with:
+          name: remediation-index
+          path: remediation-out
+      - name: Commit the remediation index (and nothing else)
+        working-directory: .data
+        run: |
+          set -euo pipefail
+          mkdir -p knowledge/index
+          cp ../remediation-out/remediation.json knowledge/index/remediation.json
+          git config user.name  "earthquakes-feed-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add knowledge/index/remediation.json
+          staged=$(git diff --cached --name-only)
+          if [ -z "$staged" ]; then echo 'no changes'; exit 0; fi
+          if [ "$staged" != "knowledge/index/remediation.json" ]; then echo "::error::refusing to commit anything but knowledge/index/remediation.json: $staged"; exit 1; fi
+          git commit -m "remediate: index @ $(date -u +%FT%TZ)"
+          for _ in 1 2 3; do
+            git push origin HEAD:data && exit 0
+            git fetch origin data
+            # `|| true`: with no rebase started --abort exits 128 and bash -e would kill the step
+            # before the annotation is emitted, losing the reason the push died.
+            git rebase origin/data || { git rebase --abort || true; echo '::error::rebase conflict'; exit 1; }
+          done
+          echo '::error::push failed after 3 attempts'; exit 1

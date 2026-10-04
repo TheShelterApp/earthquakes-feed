@@ -488,3 +488,49 @@ test('main: --status-file judges a saved document and writes the step summary', 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- upstream freshness (X-4 / P1 #14): the feed manifest and the config bundle the gateway last read ---
+
+test('freshness: a document without the fields (today\'s gateway) skips both checks', () => {
+  const v = evaluateStatus(HEALTHY, { nowMs: NOW });
+  assert.deepEqual(v.problems, []);
+  assert.match(v.summary, /feed_manifest=n\/a config_bundle=n\/a/);
+  assert.equal(DEFAULT_THRESHOLDS.maxFeedManifestAgeSec, 1_800);
+  assert.equal(DEFAULT_THRESHOLDS.maxConfigBundleAgeSec, 10 * 86_400);
+});
+
+test('freshness: the feed manifest older than 30 min fails; the age is taken from generated_ms when present', () => {
+  const doc = structuredClone(HEALTHY);
+  Object.assign(doc, { feed_manifest_generated_ms: NOW - 1_700_000, feed_manifest_age_s: 1_690, config_bundle_generated_ms: NOW - 86_400_000, config_bundle_age_s: 86_390 });
+  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).problems, []);
+  doc.feed_manifest_generated_ms = NOW - 1_801_000;
+  const v = evaluateStatus(doc, { nowMs: NOW });
+  assert.equal(v.problems.length, 1);
+  assert.match(v.problems[0]!, /earthquakes-feed manifest the gateway last read is 30 min old \(limit 30 min\)/);
+  assert.match(v.summary, /feed_manifest=1801s/);
+});
+
+test('freshness: without generated_ms the published age plus the document\'s own age is used', () => {
+  const doc = structuredClone(HEALTHY);
+  // Published 15 s before NOW with an age of 1,790 s: 1,805 s now.
+  Object.assign(doc, { feed_manifest_age_s: 1_790 });
+  const v = evaluateStatus(doc, { nowMs: NOW });
+  assert.match(v.summary, /feed_manifest=1805s/);
+  assert.equal(v.problems.length, 1);
+});
+
+test('freshness: the config bundle older than 10 days fails; a null age is a warning, not a problem', () => {
+  const doc = structuredClone(HEALTHY);
+  Object.assign(doc, { feed_manifest_generated_ms: null, feed_manifest_age_s: null, config_bundle_generated_ms: NOW - 11 * 86_400_000, config_bundle_age_s: 11 * 86_400 });
+  const v = evaluateStatus(doc, { nowMs: NOW });
+  assert.equal(v.problems.length, 1);
+  assert.match(v.problems[0]!, /signed config bundle is 11\.0 days old \(limit 10 days\)/);
+  assert.equal(v.warnings.length, 1);
+  assert.match(v.warnings[0]!, /feed_manifest_age_s is null/);
+});
+
+test('freshness: the limits can be set on the command line', () => {
+  const o = parseArgs(['--max-feed-manifest-age-sec', '900', '--max-config-bundle-age-sec', '3600']);
+  assert.equal(o.thresholds.maxFeedManifestAgeSec, 900);
+  assert.equal(o.thresholds.maxConfigBundleAgeSec, 3600);
+});

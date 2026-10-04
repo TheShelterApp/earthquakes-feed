@@ -6,6 +6,8 @@ export interface Thresholds {
   providerFailures: number;
   minHeadroomPct: number;
   usageFailPct: number;
+  maxFeedManifestAgeSec: number;
+  maxConfigBundleAgeSec: number;
 }
 
 export const STATUS_URL: string;

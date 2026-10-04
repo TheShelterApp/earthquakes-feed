@@ -120,7 +120,8 @@ curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@<data_commit>
 
 ### `GET /v1/status.json`
 
-Last run's per-provider health, counts, timings, `degraded[]`. Counts include `merged`
+Last run's per-provider health, counts, timings, `degraded[]` (a provider's `via` names the host that answered when it was the
+source's fallback host, see *Greece (NOA)*). Counts include `merged`
 (`op:merge` lines), `bad_coords_dropped`, `coordinateless_dropped` (coordinate-less reports
 refused at ingest), `coordinateless_withdrawn` (those among them that withdrew a known id, see
 below), `coordinateless_retracted`, `late_minted` and `late_withheld` (see *Late publications*);
@@ -240,7 +241,7 @@ A source can publish an event days after its origin: ComCat (the `usgs` source) 
 events only after analyst review, for example in Alaska, Texas, Oklahoma and the Pacific
 Northwest (184 of 693 M ≥ 2.5 events with origins 2026-09-10…20 never reached the feed before
 this rule; a sample of 21 of them had been published 2.1–16.8 days after origin). Each run asks
-the sources for recent origins (the FDSN ones for the last 48 h, NRCan for 7 days), plus ComCat and EMSC for every
+the sources for recent origins (the FDSN ones for the last 48 h, NRCan and NOA for 7 days), plus ComCat and EMSC for every
 event updated since its last complete sweep. A ComCat event the feed has never seen enters
 the feed from that second query when its origin is within the last **7 days** (the window in
 which the feed matches reports by time and place). It is a new event of that run:
@@ -377,8 +378,8 @@ changes.
 
 Left out: EMSC (its QuakeML origins have no creation time and its event `creationTime` is the last update), RESIF and
 RéNaSS (all origins, no creation times), NRCan (creation time is the date only), AusPass (creation time is the import
-day), IMO (`/events/{id}` is the current solution only), KAGSR (no QuakeML), NOA (its node answered every query with
-204 on 2026-10-01), ISC (its origins are the contributing agencies', and its walk is paused), AFAD (an update time only,
+day), IMO (`/events/{id}` is the current solution only), KAGSR (no QuakeML), NOA (its registered node answered every
+query with 204 on 2026-10-01, see *Greece (NOA)*; its second host is not measured yet), ISC (its origins are the contributing agencies', and its walk is paused), AFAD (an update time only,
 already in the rows) and the forward-only custom sources: for them the log is all there is.
 
 **Storage.** One gzip NDJSON chunk per source, event month and run, `fs-<source>-<YYYY-MM>-r<run>.ndjson.gz`, in the
@@ -636,6 +637,37 @@ History is never rewritten: the `nrcan` rows of an event day before the correcti
 and `place` null, in the frozen day partitions and the monthly Release archives alike. A consumer of that history can
 read them from the provenance row's `fields` (`Magnitude`, `MagType`, `EventLocationName`), and a feature whose chosen
 provider is `nrcan` has its magnitude in the chosen row's `fields.Magnitude`.
+
+## Greece (NOA)
+
+The node the FDSN registry lists for the National Observatory of Athens
+([fdsn.org/datacenters/detail/NOA](https://www.fdsn.org/datacenters/detail/NOA/), read 2026-10-01:
+`https://eida.gein.noa.gr/fdsnws/event/1/`) has answered every event query with HTTP 204 since 2026-09-24: its last
+answer with rows reached the feed at 11:46:50 UTC (120 rows), two requests timed out, and from 12:01:43 every run got
+204. The node is up (SeisComP FDSNWS 1.2.4) and its event database is empty: a query for January 2020 gets 204 too, and
+`/catalogs` and `/contributors` are empty lists. No parameter of the feed's query is at fault, and neither NOA's EIDA
+page nor the registry announces a move. The feed counted the 204 as a healthy empty answer (`status.json`
+`providers.noa`: `ok: true, http_status: 204, events_returned: 0`), so nothing reported it.
+
+NOA's second EIDA host, `eida2.gein.noa.gr` (the same "Access to NOA EIDA Services" page, the same certificate
+`*.gein.noa.gr` issued to the National Observatory of Athens, the same server version), serves the catalogue under the
+same event ids: on 2026-10-01 all 524 events it listed for 2026-09-17…23 were the `noa` rows the feed had logged from
+the registered node, with the same id, place and magnitude. Since PF-5j-NOA the registry asks `eida2` (`base`) and
+keeps the registered node as `fallbackBase`: when `base` fails or answers with no rows, the same query goes to the
+fallback, whose answer is used only when it has rows; `status.json` then carries `via` with that host. Whichever host
+answers, a report keeps its id, so the swap never makes a second event. The deep-history and earliest-solutions walks
+ask `base` alone.
+
+**The gap.** From the outage to 2026-10-01 21:00 UTC NOA listed 394 events. 42 of them reached the feed through
+another source (EMSC 35, KOERI 19, AFAD 8, INGV, ComCat and GEOFON 2 each; every one of the 9 of M ≥ 3, the largest
+M4.0), and 352 through no source (the largest M2.8, 59 of M ≥ 2; 30 to 80 a day). NOA's SeisComP service has no
+`updatedafter`, so the live query is the only way one of its rows enters; the feed now asks NOA for the last 7 days
+(`lookbackDays`, the window in which reports are matched by time and place), so the first run after the change takes
+every NOA row with an origin in the last 7 days: in a dry run on 2026-10-01 that was 368 rows, 37 joining another
+source's event and 331 new events (the largest M2.8), each in the day partition and day file of its origin day with
+`feed.first_ingest_time` days after `feed.event_time`. A second run over the same answer changed nothing. NOA events
+with an origin more than 7 days before that run stay missing (from 2026-09-24 11:47 UTC on): older rows are dropped
+at ingest, and frozen days are never rewritten.
 
 ## Recipes
 

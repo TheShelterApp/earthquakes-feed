@@ -7,7 +7,12 @@ name: health
 #            On failure: opens/refreshes the "[health] feed unhealthy" issue and fails the run.
 #   alerts — The Shelter's ALERT PIPELINE (alerts-gateway on Cloudflare): scripts/alerts-watchdog.mjs
 #            reads data.theshelter.app/alerts/status.json (+ optional account usage) and fails the
-#            run; GitHub's failed-workflow email is its alarm (no issue). See README "Health watchdogs".
+#            run; GitHub's failed-workflow email is its alarm (no issue). It also fails when the feed
+#            manifest the gateway last read is over 30 min old or the config bundle over 10 days
+#            (fields of round-13 gateways; absent = skipped). See README "Health watchdogs".
+#   platform — The Shelter's API and config Workers: scripts/platform-watchdog.mjs GETs
+#            api.theshelter.app/v1/health and config.theshelter.app/healthz and fails the run when
+#            either is down (X-4: before 2026-10-04 nothing noticed). Same alarm: the failed-run email.
 on:
   schedule:
     - cron: '25 * * * *'
@@ -165,3 +170,24 @@ jobs:
         # Exit 0 healthy, 1 unhealthy, 2 status.json unreadable after retries (state unknown),
         # 3 watchdog misconfigured. Any non-zero exit fails the run; the ::error:: annotations say which.
         run: node scripts/alerts-watchdog.mjs
+
+  platform:
+    # API and config Workers, up or down. A job of its own, like `alerts`: a red here names the host at a glance,
+    # and it runs from GitHub so it still fires when Cloudflare is the problem.
+    name: api and config
+    runs-on: ubuntu-24.04
+    # 2 GETs x 3 attempts x 15 s + 7 s backoff, in parallel; 3 min leaves room for checkout + setup-node.
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      # Exit 0 healthy, 1 a host is down or unhealthy, 3 misconfigured; the ::error:: annotations say which.
+      - name: Check api.theshelter.app and config.theshelter.app
+        run: node scripts/platform-watchdog.mjs

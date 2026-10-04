@@ -217,7 +217,7 @@ to the Worker goes through a pull request like any other code and is deployed af
 ## Health watchdogs (`.github/workflows/health.yml`)
 
 The heartbeat Worker dispatches `health.yml` every 15 minutes (plus an hourly GitHub cron
-as a fallback). It runs two independent jobs; either one failing turns the run red.
+as a fallback). It runs three independent jobs; any one failing turns the run red.
 
 - **`health` (the feed):** reads the live Pages `v1/manifest.json` and `v1/status.json` and
   fails when the manifest is older than its `stale_after_seconds` contract or a systemic
@@ -239,10 +239,13 @@ as a fallback). It runs two independent jobs; either one failing turns the run r
   | `apns.configured == false` | fan-outs run dry: no push reaches a device |
   | `apns.problems` is a non-empty list | an APNs key is half set: devices in that environment get no push |
   | `apns.mode == "split"` and `apns.production != true` | no production key: every App Store and TestFlight device is skipped |
+  | `feed_manifest_age_s` over 1,800 s (age now, from `feed_manifest_generated_ms` when present) | the feed manifest the gateway reads every minute is stale: the feed stopped publishing (heartbeat Worker, `GH_PAT`, Actions, Pages) |
+  | `config_bundle_age_s` over 10 days (from `config_bundle_generated_ms` when present) | the signed config bundle stopped refreshing; apps fall back to compiled defaults once it expires |
 
   It only **warns** (the run stays green) when today's `fanout.skipped_no_key` or
   `fanout.retry_dropped_budget` is above 0. Fields an older gateway does not publish
-  (`apns.mode`, `apns.production`, `apns.problems`, `fanout`) are never treated as a problem.
+  (`apns.mode`, `apns.production`, `apns.problems`, `fanout`, the two ages) are never treated as a problem;
+  a null age (not read since the gateway deployed) is a warning.
 
   The fetch is retried twice (2 s, then 5 s backoff) before it gives up. A document it cannot
   read is reported as **"could not read status.json"** (state unknown: network, edge or a
@@ -271,6 +274,15 @@ as a fallback). It runs two independent jobs; either one failing turns the run r
   Locally: `node scripts/alerts-watchdog.mjs` (or `--selftest`, `--status-file <doc.json>`,
   `--max-age-sec <n>`, `--min-headroom-pct <n>`, ...); `npm test` covers every condition with
   fixtures in `tests/fixtures/` and never calls the network.
+
+- **`platform` (The Shelter's API and config Workers):** runs
+  [`scripts/platform-watchdog.mjs`](scripts/platform-watchdog.mjs) (dependency-free) against
+  `https://api.theshelter.app/v1/health` and `https://config.theshelter.app/healthz`, each retried twice
+  (2 s, 5 s). It fails when either does not answer 200 with `ok: true`, or when the API reports
+  `sessionKeySource: "ephemeral"` (the session signing key is missing: random 401s in the app); it warns
+  when the API reports `providerTokenEnvelope: "missing"`. Exit codes: `0` healthy, `1` down or unhealthy,
+  `3` misconfigured. Before 2026-10-04 nothing noticed when either Worker stopped answering. Its alarm is
+  the same failed-workflow email as the `alerts` job's.
 
 ## Licensing & takedowns
 

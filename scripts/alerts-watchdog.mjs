@@ -13,6 +13,12 @@
 //   - apns.configured is false (fan-outs run DRY: nothing reaches a phone),
 //   - apns.problems is a non-empty array (a half-set APNs key: that environment's devices get nothing),
 //   - apns.mode is 'split' and apns.production is not true (every production device is skipped).
+//   - feed_manifest_age_s (the earthquakes-feed manifest the detector's backstop reads every minute) is over
+//     1,800 s: the feed has stopped publishing, whatever the heartbeat Worker or GitHub's crons are doing,
+//   - config_bundle_age_s (the signed config bundle's public copy) is over 10 days: the app falls back to its
+//     compiled defaults once the bundle expires.
+// The two ages are published by gateways from round 13 on (X-4, CFG-6); a document without them skips the check, and
+// a null age (not read since the gateway deployed) is a warning.
 // It only warns (exit stays 0) when today's fanout.skipped_no_key or fanout.retry_dropped_budget is above 0.
 // Fields an older gateway does not publish (apns.mode/production/problems, fanout) are never a problem.
 // Optional usage half: when CF_ANALYTICS_TOKEN (Account Analytics: Read) is set, it also reads today's
@@ -28,6 +34,7 @@
 //   node scripts/alerts-watchdog.mjs --selftest             # forces a failing headroom limit (proves the red path)
 //   node scripts/alerts-watchdog.mjs --status-file doc.json # judge a saved document instead of fetching
 //   flags: --url <url> --max-age-sec <n> --provider-failures <n> --min-headroom-pct <n> --usage-fail-pct <n>
+//          --max-feed-manifest-age-sec <n> --max-config-bundle-age-sec <n>
 //
 // Dependency-free (Node >= 22, global fetch). The pure helpers are exported for
 // tests/alerts-watchdog.test.ts, which never touches the network.
@@ -47,6 +54,10 @@ export const DEFAULT_THRESHOLDS = Object.freeze({
   minHeadroomPct: 20,
   /** account usage at or above this share (percent) of a Free daily cap fails. */
   usageFailPct: 80,
+  /** the feed manifest the gateway last read older than this fails (the feed's own freshness contract). */
+  maxFeedManifestAgeSec: 1_800,
+  /** the signed config bundle older than this fails (10 days). */
+  maxConfigBundleAgeSec: 864_000,
 });
 
 /** Workers Free daily caps (account-wide, reset 00:00 UTC). */
@@ -203,6 +214,31 @@ export function evaluateStatus(doc, { nowMs, thresholds = DEFAULT_THRESHOLDS } =
   } else {
     parts.push(fanout === null ? 'fanout=none' : 'fanout=n/a');
   }
+
+  // 8. Upstream freshness (X-4 / P1 #14, round-13 gateways): the detector records when the earthquakes-feed manifest
+  //    and the config bundle it last verified were generated. The age now is (now - *_generated_ms) when present, else
+  //    the published *_age_s plus the document's own age. An absent field (an older gateway) skips the check; null
+  //    (never read since this build deployed) is a warning.
+  const freshness = (label, genKey, ageKey, limitSec, problem) => {
+    if (!Object.hasOwn(doc, genKey) && !Object.hasOwn(doc, ageKey)) {
+      parts.push(`${label}=n/a`);
+      return;
+    }
+    let ageSec = null;
+    if (isNum(doc[genKey])) ageSec = Math.round((nowMs - doc[genKey]) / 1000);
+    else if (isNum(doc[ageKey])) ageSec = Math.round(doc[ageKey] + (isNum(doc.generatedAtMs) ? Math.max(0, nowMs - doc.generatedAtMs) / 1000 : 0));
+    if (ageSec === null) {
+      parts.push(`${label}=?`);
+      warnings.push(`${ageKey} is null: the gateway has not read the ${label} successfully since it was deployed`);
+      return;
+    }
+    parts.push(`${label}=${ageSec}s`);
+    if (ageSec > limitSec) problems.push(problem(ageSec, limitSec));
+  };
+  freshness('feed_manifest', 'feed_manifest_generated_ms', 'feed_manifest_age_s', t.maxFeedManifestAgeSec, (a, l) =>
+    `the earthquakes-feed manifest the gateway last read is ${Math.round(a / 60)} min old (limit ${Math.round(l / 60)} min): the feed has stopped publishing (heartbeat Worker, GH_PAT, Actions or Pages), and the alerts backstop and the app run on stale data`);
+  freshness('config_bundle', 'config_bundle_generated_ms', 'config_bundle_age_s', t.maxConfigBundleAgeSec, (a, l) =>
+    `the signed config bundle is ${(a / 86_400).toFixed(1)} days old (limit ${Math.round(l / 86_400)} days): its refresh has stopped, and installed apps fall back to compiled defaults once it expires`);
 
   if (isObject(doc.budget) && typeof doc.budget.day === 'string') parts.push(`budget-day=${doc.budget.day}`);
   return { problems, warnings, notes, summary: parts.join(' ') };
@@ -382,6 +418,8 @@ const NUMERIC_FLAGS = {
   '--provider-failures': 'providerFailures',
   '--min-headroom-pct': 'minHeadroomPct',
   '--usage-fail-pct': 'usageFailPct',
+  '--max-feed-manifest-age-sec': 'maxFeedManifestAgeSec',
+  '--max-config-bundle-age-sec': 'maxConfigBundleAgeSec',
 };
 
 /** Parse argv + env into options; throws an Error with a readable message on a bad argument. */

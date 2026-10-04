@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseGeosphere, parseJmaCod, parseJmaList, parseKoeri, parsePhivolcs } from '../src/custom.js';
+import { parseGeosphere, parseJmaCod, parseJmaList, parseKoeri, parsePhivolcs, parseTmd } from '../src/custom.js';
 import { parseFdsnText, parseGeoJSON } from '../src/fdsn.js';
 
 test('FDSN text: standard pipe-delimited row', () => {
@@ -198,4 +198,19 @@ test('GeoJSON: features missing coordinates or time are skipped', () => {
     ],
   });
   assert.equal(parseGeoJSON(body, 'x').length, 1);
+});
+
+test('tmd: rows without an eventID (TMD since 2026-08-18) are named by their UTC origin second; a given id is kept', () => {
+  const raw = {
+    events: [
+      { eventID: '', otime: '2026-10-04 05:54:57', lat: 21.646, lon: 93.265, depth: 10, mag: 4.7, region: 'ประเทศเมียนมา', path: 'event-info-' },
+      { eventID: '16977', otime: '2026-08-17 14:54:55', lat: 18.1, lon: 98.4, depth: 3, mag: 1.3, region: 'x', path: 'event-info-16977' },
+      { eventID: '', otime: 'not a time', lat: 1, lon: 2 },
+    ],
+  };
+  const out = parseTmd(raw, 'tmd');
+  assert.deepEqual(out.map((o) => o.providerEventId), ['t20261004055457', '16977']);
+  assert.equal(out[0]!.eventTimeMs, Date.parse('2026-10-04T05:54:57Z'));
+  assert.equal(out[0]!.mag, 4.7);
+  assert.equal(out[0]!.fields['otime'], '2026-10-04 05:54:57', 'the original fields are kept as TMD sent them');
 });

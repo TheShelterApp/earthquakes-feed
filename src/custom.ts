@@ -220,8 +220,11 @@ const tmd: CustomAdapter = async (cfg) => {
   return parseTmd(JSON.parse(await getText(cfg.base, { timeoutMs: 15_000, retries: 2, ca: pinnedCa(cfg) })), cfg.id);
 };
 
-/** TMD's `map-events.json` (`otime` is UTC). A row without an `eventID` is dropped: since 2026-08-18 TMD sends
- *  `eventID: ""` on every row, so nothing of TMD reaches the feed (FEED-3 reports it silent). */
+/** TMD's `map-events.json` (`otime` is UTC). Since 2026-08-18 every row has `eventID: ""` (and `path: "event-info-"`),
+ *  and the adapter dropped every row: TMD sent nothing for 47 days while its fetch looked healthy (FEED-3). A row
+ *  without an id gets one from its origin time, `t` + the UTC digits of `otime` (`t20261004055457`): TMD publishes one
+ *  final solution per event (none of its 184 ids logged 2026-07-05 → 08-17 was ever revised), so the origin second
+ *  names it, and the `t` keeps those ids apart from TMD's old numeric ones. */
 export function parseTmd(raw: unknown, providerId: string): RawObs[] {
   const out: RawObs[] = [];
   for (const e of ((raw as { events?: Record<string, unknown>[] }).events ?? [])) {
@@ -229,8 +232,10 @@ export function parseTmd(raw: unknown, providerId: string): RawObs[] {
     const lat = num(e['lat']);
     const lon = num(e['lon']);
     if (t == null || lat == null || lon == null) continue;
+    const given = String(e['eventID'] ?? '').trim();
+    const id = given || `t${new Date(t).toISOString().slice(0, 19).replace(/\D/g, '')}`;
     out.push({
-      provider: providerId, providerEventId: String(e['eventID'] ?? ''), eventTimeMs: t, providerUpdatedMs: null,
+      provider: providerId, providerEventId: id, eventTimeMs: t, providerUpdatedMs: null,
       status: null, lat, lon, depth: num(e['depth']), mag: num(e['mag']), magType: null,
       place: (e['region'] as string) ?? null, knownAliasIds: [], fields: flattenScalars(e),
     });

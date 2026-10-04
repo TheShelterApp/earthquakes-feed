@@ -220,3 +220,36 @@ test('every run re-homes copies left in the wrong event before the rule (rehomeM
     rmSync(scratch, { recursive: true, force: true });
   }
 });
+
+test('a re-homed copy reported again in the same run (the revision sweep after the live fetch) is found by id', () => {
+  // Review of FEED-2: the re-home left the row's id unregistered until the next run, so the sweep's copy of the same
+  // report went to the space match, which here prefers the event the row left (its representative, CSN's old
+  // solution, is nearer than the new event's, a reviewed ComCat row): the row then stood in two events, and an older
+  // copy was not recognised as older (isOlderThanStored). Chile, synthetic: CSN publishes a revised solution under a
+  // new id (100 → 101, 8 km north) and EMSC's copy follows it.
+  const T = NOW - 3_600_000;
+  const at = (km: number): number => -33 + km / 111.195;
+  const row = (provider: string, id: string, over: Partial<RawObs> = {}): RawObs => ({
+    provider, providerEventId: id, eventTimeMs: T, providerUpdatedMs: null, status: null, lat: -33, lon: -71.5, depth: 30,
+    mag: 3.0, magType: 'ml', place: 'Chile', knownAliasIds: [], fields: {}, ...over,
+  });
+  const map = new Map<string, EventNode>();
+  const r = new Resolver(map, prio, cfg, NOW);
+  const t1 = '2026-10-03T05:30:00.000Z';
+  const comcat = r.ingest(row('usgs', 'us7000chl1', { status: 'reviewed', lat: at(17), eventTimeMs: T + 3_000 }), t1).node;
+  const old = r.ingest(row('csn', '100'), t1).node;
+  assert.equal(r.ingest(row('emsc', '20261003_0000501', { fields: { auth: 'CSN' }, providerUpdatedMs: T + 60_000 }), t1).node, old);
+  assert.equal(r.ingest(row('csn', '101', { lat: at(8), eventTimeMs: T + 2_000 }), t1).node, comcat, 'CSN 101 joins ComCat’s event');
+  const t2 = '2026-10-03T05:35:00.000Z';
+  const revised = row('emsc', '20261003_0000501', { fields: { auth: 'CSN' }, lat: at(8), eventTimeMs: T + 2_000, providerUpdatedMs: T + 300_000 });
+  const moved = r.ingest(revised, t2);
+  assert.ok(moved.rehomed, 'the revision copies CSN 101: re-homed');
+  assert.equal(moved.node, comcat);
+  // The sweep, same run: an older copy of the row is recognised as older, and the same report is a no-op in its new event.
+  assert.equal(r.isOlderThanStored({ ...revised, providerUpdatedMs: T + 200_000 }), true);
+  const again = r.reviseExisting(revised, t2);
+  assert.equal(again?.node, comcat);
+  assert.equal(again?.changed, false);
+  const holders = live(map).filter((n) => n.provenance.some((x) => x.provider === 'emsc')).map((n) => n.feedId);
+  assert.deepEqual(holders, [comcat.feedId], 'the row stands in one event');
+});

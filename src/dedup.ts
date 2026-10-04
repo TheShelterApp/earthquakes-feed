@@ -894,6 +894,10 @@ export class Resolver {
     this.alias.delete(key);
     const from = this.withdrawRow(node, idx, ingestTime);
     const to = this.applyIngest(home.node.feedId, raw, ingestTime);
+    // The row's id now resolves to its new event, in this run too: the revision sweep's copy of the same report, which
+    // comes after the live one, must find the row by id (isOlderThanStored, findById), not by space, where a nearer
+    // event could take it and the row would stand in two events.
+    this.alias.set(key, to.node.feedId);
     const reason = `${REHOMED_REASON_PREFIX} EMSC ${raw.providerEventId} (auth ${String(raw.fields['auth'])}) copies ${copied.provider} ${copied.nativeId}, held by ${to.node.feedId}`;
     this.rehomedCopies.push(`emsc:${raw.providerEventId} ${node.feedId} -> ${to.node.feedId} (${copied.provider}:${copied.nativeId})`);
     return { ...to, rehomed: { from, old, reason } };

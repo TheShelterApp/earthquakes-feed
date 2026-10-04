@@ -16,6 +16,7 @@ archival, redaction).
 | jsDelivr (`@sha`) | `…@<data_commit>/` | immutable frozen partitions | 1 year, immutable |
 | GitHub Releases | `archive-YYYY-MM` assets | very old months (bulk) | immutable, no CORS |
 | GitHub Releases | `first-solutions-YYYY-MM` assets | each source's kept versions per report (*Earliest solutions*) | immutable, no CORS |
+| GitHub Releases | `logs-YYYY-MM` assets | finished months of the run logs: status history and daily change logs (*Run logs*) | immutable, no CORS |
 
 ## Endpoints
 
@@ -304,6 +305,20 @@ day it has left before the target lies in a frozen month already rolled to a Rel
 those 26 monthly archives back (2023-07…2025-08, about 760 days), adding about a fifth more events to them (ISC's own small events: a local test of the window
 2025-07-29…08-02 added 1,695 events to its 8,869 and an ISC row to 1,249 others) and re-rolling every archive. That is
 a deliberate one-off, like a heal, not an automatic step.
+
+## Run logs
+
+Two logs record the runs themselves, beside the observation log: `status/history/YYYY-MM.ndjson` (every aggregate
+run's `status.json`, one line per run, about 25 MB a month) and `changes/YYYY-MM-DD.ndjson` (derive's change log of
+each day; the current day's file is also served as `/v1/changes/<day>.ndjson`). Until 2026-10-04 both stayed on the
+`data` branch forever. Since then (LIVE-2) the current month stays in the tree and, from the second day of the next
+month, the `archive` workflow moves each finished month's files into the Release `logs-YYYY-MM`, one immutable gzip
+asset per file (`status-history-YYYY-MM.ndjson.gz`, `changes-YYYY-MM-DD.ndjson.gz`; gunzip gives the file byte for
+byte). `knowledge/index/log_archives.json` lists every one: `file` (its old path), `tag`, `asset`, `url`, `bytes` and
+`sha256` of the asset, `content_bytes` and `content_sha256` of the file, `lines`, `archived_at`. A tree file goes only
+after its uploaded asset was downloaded back and both hashes matched; an asset is never replaced (an asset of the
+same name left by a run that died before its commit is taken only if its content is identical, otherwise the file
+stays and the run turns red). History is not rewritten: the files stay in the `data` branch's past commits.
 
 ## Deep history (before 2023-07-06)
 

@@ -3,7 +3,9 @@ name: archive
 # Rolls fully-cold event-months (older than the 120-day hot window) into monthly
 # tar.zst GitHub Release assets, then removes them from the tree — keeping the data
 # branch (and consumer clones) bounded while backfill grows history. Releases are
-# un-metered cold storage. Runs monthly + on demand.
+# un-metered cold storage. Runs monthly + on demand. Since 2026-10-04 (LIVE-2) it also
+# moves finished months of status/history and changes/ into immutable gzip assets of
+# the `logs-YYYY-MM` releases (src/log-archive.ts); only the current month stays.
 on:
   schedule:
     # Every 6h so cold months roll promptly while backfill is actively growing history.
@@ -47,7 +49,8 @@ jobs:
         run: |
           git config user.name  "earthquakes-feed-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add events knowledge
+          # status + changes: LIVE-2 removes finished months' run logs (src/log-archive.ts); `git add` stages removals.
+          git add events knowledge status changes
           git commit -m "archive: roll cold months to Releases @ $(date -u +%FT%TZ)" || { echo 'no changes'; exit 0; }
           for i in 1 2 3; do
             git push origin HEAD:data && exit 0

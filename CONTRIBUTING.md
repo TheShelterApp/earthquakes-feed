@@ -33,6 +33,9 @@ Adding one is a single entry in [`providers/registry.json`](providers/registry.j
   window in which reports are matched by time and place).
 - `"fallbackBase": "<query URL>"` for an FDSN source with a second host of the same catalogue
   under the same event ids (NOA) — asked when `base` fails or answers with no rows.
+- `"activityBudgetHours": 72` for a source that is often quiet for a day or two, `null` for one
+  that can go weeks without an event — the hours it may answer with no rows before `status.json`
+  lists it as silent (default 12; see APIs.md *Failing and silent sources*).
 - **License & attribution are required** — put the source's real terms and any DOI.
 
 Once merged and enabled, the source **fills in automatically**: its recent window is

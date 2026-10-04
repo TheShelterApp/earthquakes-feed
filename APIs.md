@@ -138,6 +138,20 @@ asks for the same window again), `epoch` (the catch-up epoch recorded with that 
 (`count`, the first 20 `ids`) the live AEC ids younger than 10 days that AEC's file no longer
 lists (see *Alaska (AEC)*; logged, never retracted).
 
+**Failing and silent sources.** A provider whose fetch failed has `ok: false` and is in `degraded`. An FDSN answer of
+HTTP 204 is an empty success; HTTP 404 is an empty success only for a source whose query asks `nodata=404` (none does
+today) and an error otherwise, because it means the query path is gone (before 2026-10-04 every 404 counted as empty).
+A source can also answer `ok` with no rows while it has stopped publishing: since 2026-10-04 each run records per
+source the last run whose answer had rows (`knowledge/index/provider_activity.json`, seeded once from the status
+history), and a source with no rows for longer than its activity budget is **silent**: listed in `silent` (by id:
+`last_non_empty_at`, null when none was seen since `counted_from`; `silent_hours`; `budget_hours`) and counted in
+`degraded`, while its `providers.<id>.ok` stays true. The budget is 12 h for an active agency (its 2-day query window
+is never empty that long), `activityBudgetHours` in `providers/registry.json` for a quiet one (72 h: ETHZ, IPMA, NRCan,
+USP) and none for KNMI and LMU (regions that go weeks without an event) or a source the live path does not ask (ISC).
+The published v2 status adds `providers.<id>.silent`, `providers.<id>.lastNonEmptyAt` (ms) and `silentProviders`.
+On 2026-10-04 three sources were silent the moment this went live: ENSN Egypt (no rows since 2026-07-29), Geoscience
+Australia (since 07-30) and TMD (since 08-18).
+
 ## The Feature
 
 USGS-GeoJSON superset. Top-level `properties` is the full USGS-standard set (`mag`,

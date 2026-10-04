@@ -82,20 +82,76 @@ jobs:
             const ageS = (Date.now() - m.generated) / 1000;
             const staleAfter = (m.freshness && m.freshness.stale_after_seconds) || 1800;
             const degraded = (s && s.degraded) || [];
+            // FEED-3: a silent source (it answers, with no rows, for longer than its activity budget) is listed in
+            // `silent` and also counted in `degraded`. It is reported in its own issue below and kept out of the
+            // systemic count, so a few long-dead sources cannot push routine flapping over the limit. A silent source
+            // whose fetch FAILS in this run still counts as failing: silence is measured from its last rows, so a
+            // source that has been down past its budget is silent too, and a long systemic outage must not leave the
+            // count once it is 12 h old.
+            const silent = (s && s.silent && typeof s.silent === "object" && !Array.isArray(s.silent)) ? s.silent : {};
+            const silentIds = Object.keys(silent).sort();
+            const failing = degraded.filter((id) => !(id in silent) || (s && s.providers && s.providers[id] && s.providers[id].ok === false));
             const total = Object.keys((s && s.providers) || {}).length || 1;
             // Scale with the roster: a handful of slow national FDSN nodes flap constantly and
             // the feed stays fully covered by the global catalogs — only a systemic share down
             // (~30%, floor 8) signals a real problem. Manifest staleness is the primary signal.
             const degLimit = Math.max(8, Math.ceil(total * 0.3));
-            console.log(`age=${Math.round(ageS)}s (stale_after=${staleAfter}) head_seq=${m.head_seq} events=${m.event_count} degraded=${degraded.length}/${total} limit=${degLimit} [${degraded.join(",")}] queued=${queuedS}s`);
+            console.log(`age=${Math.round(ageS)}s (stale_after=${staleAfter}) head_seq=${m.head_seq} events=${m.event_count} failing=${failing.length}/${total} limit=${degLimit} [${failing.join(",")}] silent=[${silentIds.join(",")}] queued=${queuedS}s`);
+            const hours = (x) => (typeof x === "number" ? Math.round(x) : "?");
+            const silentText = silentIds.map((id) => {
+              const e = silent[id] || {};
+              return `${id}: no rows for ${hours(e.silent_hours)} h (budget ${hours(e.budget_hours)} h, last rows ${e.last_non_empty_at || "not since " + (e.counted_from || "?")})`;
+            });
+            for (const t of silentText) console.log(`::warning::silent provider ${t}`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `status_read=${s ? "1" : ""}\nsilent_set=${silentIds.join(",")}\nsilent=${silentText.join("; ")}\n`);
             const problems = [];
             // Name the queue in the alarm: a stall upstream of us reads as broken publishing.
             const queueNote = queuedS > 600 ? ` — this run itself waited ${Math.round(queuedS / 60)} min in the runner queue` : "";
             if (ageS > staleAfter) problems.push(`live manifest is ${Math.round(ageS / 60)} min stale (contract: ${staleAfter / 60} min)${queueNote}`);
             if (!s) problems.push("status.json unreachable — provider health unknown");
-            else if (degraded.length >= degLimit) problems.push(`${degraded.length}/${total} providers degraded: ${degraded.join(", ")}`);
+            else if (failing.length >= degLimit) problems.push(`${failing.length}/${total} providers failing: ${failing.join(", ")}`);
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `problem=${problems.join("; ")}\n`);
           '
+      - name: Silent providers issue (opened, updated when the set changes, closed when none; never fails the run)
+        # A silent source loses events quietly (NOA, 2026-09-24 → 10-04: 352 Greek events) but is usually one
+        # agency, not an outage of the feed: an issue (GitHub emails it) instead of a red run every 15 minutes.
+        # An unreadable status.json changes nothing (state unknown). The entries are joined with "; " for the
+        # one-line step output and split back into a list here, so an entry itself never contains a semicolon.
+        # continue-on-error: a GitHub API error while filing the issue must not turn a healthy run red.
+        if: steps.check.outputs.status_read == '1'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SILENT: ${{ steps.check.outputs.silent }}
+          SILENT_SET: ${{ steps.check.outputs.silent_set }}
+        run: |
+          TITLE="[health] silent providers"
+          NUM=$(gh issue list --repo "${{ github.repository }}" --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          RUN="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ -n "$SILENT_SET" ]; then
+            BODY="Automated watchdog: these sources answer with no rows for longer than their activity budget (src/activity.ts, providers/registry.json \`activityBudgetHours\`). Their events reach the feed only through other agencies.
+
+          $(printf '%s\n' "$SILENT" | tr ';' '\n' | sed 's/^ */- /')
+
+          silent-set: ${SILENT_SET}
+          Run: ${RUN} ($(date -u +%FT%TZ))"
+            if [ -z "$NUM" ]; then
+              gh issue create --repo "${{ github.repository }}" --title "$TITLE" --body "$BODY" --label bug
+            else
+              # Comment only when the set of silent sources changed: the hours grow every run.
+              LAST=$(gh issue view "$NUM" --repo "${{ github.repository }}" --json body,comments --jq '[.body, (.comments[].body)] | map(select(test("silent-set: "))) | last // ""' | sed -n 's/^ *silent-set: //p' | tail -1)
+              if [ "$LAST" != "$SILENT_SET" ]; then
+                gh issue comment "$NUM" --repo "${{ github.repository }}" --body "$BODY"
+              else
+                echo "issue #$NUM already lists ${SILENT_SET}"
+              fi
+            fi
+          elif [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --repo "${{ github.repository }}" --body "No silent source as of $(date -u +%FT%TZ) (run ${RUN}).
+
+          silent-set: "
+            gh issue close "$NUM" --repo "${{ github.repository }}"
+          fi
       - name: Open/refresh health issue and fail
         if: steps.check.outputs.problem != ''
         env:

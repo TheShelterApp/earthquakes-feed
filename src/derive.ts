@@ -80,11 +80,22 @@ function main(): void {
     const prevHealth: ProviderHealth = existsSync(paths.providerHealth) ? (JSON.parse(readFileSync(paths.providerHealth, 'utf8')) as ProviderHealth) : {};
     const health = updateProviderHealth(prevHealth, raw.providers, generatedMs);
     writeIfChanged(paths.providerHealth, JSON.stringify(health) + '\n');
+    // FEED-3: aggregate's per-source activity index (absent until the first aggregate after 2026-10-04).
+    let lastNonEmpty: Record<string, number | null> | undefined;
+    try {
+      if (existsSync(paths.providerActivity)) {
+        const idx = JSON.parse(readFileSync(paths.providerActivity, 'utf8')) as Record<string, { lastNonEmptyAt?: number | null }>;
+        lastNonEmpty = Object.fromEntries(Object.entries(idx).map(([id, r]) => [id, r.lastNonEmptyAt ?? null]));
+      }
+    } catch {
+      lastNonEmpty = undefined;
+    }
     const v2 = enrichStatusV2(raw, {
       generatedMs,
       expectedIntervalSeconds: FRESHNESS_EXPECTED_INTERVAL_SECONDS,
       staleAfterSeconds: FRESHNESS_STALE_AFTER_SECONDS,
       health,
+      ...(lastNonEmpty ? { lastNonEmpty } : {}),
       ...(process.env.RUN_ID ? { runId: process.env.RUN_ID } : {}),
     });
     writeIfChanged(join(publicV1, 'status.json'), JSON.stringify(v2, null, 2));

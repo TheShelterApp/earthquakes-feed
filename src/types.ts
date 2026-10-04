@@ -116,6 +116,9 @@ export interface ProviderConfig {
    *  that publishes many events days after their origin (NRCan). Capped at HOT_WINDOW_DAYS: an older row is dropped
    *  at ingest anyway (providers.ts liveLookbackMs). */
   lookbackDays?: number;
+  /** Hours the source may answer with no rows before status.json lists it as silent (src/activity.ts, FEED-3):
+   *  missing = 12 (an active agency), a number for a quiet one, null = never silent (a region quiet for weeks). */
+  activityBudgetHours?: number | null;
   refreshSeconds: number;
   license: string;
   attribution: string;

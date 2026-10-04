@@ -21,6 +21,10 @@ interface GetOpts {
   deadlineMs?: number;
 }
 
+/** Certificate-chain errors of a pinned fetch: the pins no longer complete the host's chain. */
+const CHAIN_ERRORS: ReadonlySet<string> = new Set(['UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'UNABLE_TO_GET_ISSUER_CERT']);
+export const PIN_HINT = 'the pinned intermediate no longer completes this host\'s chain: pin the one its leaf names, providers/tls/README.md';
+
 /** Default bound on one getText call, all attempts included (FEED-SEC-1). */
 export const GET_DEADLINE_MS = 45_000;
 
@@ -61,7 +65,10 @@ function once(url: string, timeoutMs: number, ua: string, ca: readonly string[] 
         // regardless of Accept-Encoding, so decode by the header rather than assuming utf8.
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
-        res.on('error', (e) => reject(e));
+        res.on('error', (e) => {
+          clearTimeout(deadline);
+          reject(e);
+        });
         res.on('end', () => {
           clearTimeout(deadline);
           const sc = res.statusCode ?? 0;
@@ -81,8 +88,11 @@ function once(url: string, timeoutMs: number, ua: string, ca: readonly string[] 
     // `timeout` above fires only on an idle socket; a server that trickles bytes would hold the run. This bounds the
     // whole request, connect to last byte.
     const deadline = setTimeout(() => req.destroy(new Error(`timeout: no complete answer in ${timeoutMs} ms`)), timeoutMs);
-    req.on('error', (e) => {
+    req.on('error', (e: Error & { code?: string }) => {
       clearTimeout(deadline);
+      // The host's chain no longer matches the pins (its leaf was renewed under another intermediate): say what to do
+      // in the message status.json shows. The code stays, so callers can still tell the cases apart.
+      if (e.code != null && CHAIN_ERRORS.has(e.code)) e.message += ` (${PIN_HINT})`;
       reject(e);
     });
     req.on('timeout', () => req.destroy(new Error('timeout')));

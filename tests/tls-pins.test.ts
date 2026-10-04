@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { rootCertificates } from 'node:tls';
 import { fileURLToPath } from 'node:url';
-import { getText, pinnedCa } from '../src/custom.js';
+import { PIN_HINT, getText, pinnedCa } from '../src/custom.js';
 import { loadRegistry } from '../src/providers.js';
 
 // FEED-SEC-1: TMD and PHIVOLCS serve their leaf certificate without the intermediate. The feed fetched them with TLS
@@ -97,7 +97,8 @@ test('pinned fetch: a leaf-only server verifies with the pinned intermediate, fa
   try {
     // The test root stands in for a root in Node's store; the intermediate is the pin.
     assert.equal(await getText(`https://localhost:${port}/ok`, { ca: [chain.int, chain.root], retries: 0, timeoutMs: 5_000 }), '{"events":[]}');
-    await assert.rejects(getText(`https://localhost:${port}/ok`, { ca: [chain.root], retries: 0, timeoutMs: 5_000 }), (e: Error & { code?: string }) => e.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    // The status line says what to do: pin the intermediate the leaf now names.
+    await assert.rejects(getText(`https://localhost:${port}/ok`, { ca: [chain.root], retries: 0, timeoutMs: 5_000 }), (e: Error & { code?: string }) => e.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' && e.message.includes(PIN_HINT));
     // Host-name checks stay on: the leaf names localhost only.
     await assert.rejects(getText(`https://127.0.0.1:${port}/ok`, { ca: [chain.int, chain.root], retries: 0, timeoutMs: 5_000 }), (e: Error & { code?: string }) => e.code === 'ERR_TLS_CERT_ALTNAME_INVALID');
     // A server that keeps the socket busy without finishing: the idle timeout never fires, the deadline does.

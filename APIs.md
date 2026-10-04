@@ -518,8 +518,19 @@ then on, without a heal, and older days keep both events (the day partitions 202
 too; drop a live feature whose only row is `emsc` with one of these `auth` codes when another live
 feature holds the agency's row within those limits). A copy of a solution the agency has revised
 since stays a separate event in such a cell. An EMSC event id sometimes moves to another agency
-event (EMSC's `20260910_0000383` copied OVSICORI 1449691, then 1449690, 41 s later): the row
-stays in the event it joined, and the two agency events stay apart.
+event (EMSC's `20260910_0000383` copied OVSICORI 1449691, then 1449690, 41 s later; on 2026-10-03
+near Valencia `20261003_0000060` copied IGN `es2026tiyjb`, then `es2026tiyjg`, then `es2026tiyil`).
+Until FEED-2 the row stayed in the event it joined, which then showed the other quake's solution
+beside the agency's own event of that quake. Now, when a copy (or its revision) copies none of
+the other rows of its event and another live event holds the agency row it copies, the row moves
+there: an `op:tombstone` line for the event it leaves (`reason` "re-homed: EMSC … copies …, held
+by efd_…", the row as it was; that event's id list drops the EMSC id and its solution goes back
+to its other rows) and then the row's `op:observe` line in its new event. A copy of an agency
+solution no live event holds yet stays where it is until that row is in; then the next run's
+listing of the copy, or the pass every run makes over the 7-day hot window (which also moves the
+copies left in the wrong event before this rule), moves it. A copy alone in its event is not
+moved: the merge pass folds that event into the agency's. Status counts the moves as
+`copies_rehomed`.
 
 ## Alaska (AEC)
 

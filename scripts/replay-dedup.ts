@@ -27,7 +27,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { Resolver } from '../src/dedup.js';
+import { REHOMED_REASON_PREFIX, Resolver } from '../src/dedup.js';
 import { haversineKm } from '../src/geo.js';
 import { observationToRaw } from '../src/oplog.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
@@ -88,6 +88,9 @@ function replay(Ctor: ResolverCtor): Run {
   for (const o of lines) {
     const raw = observationToRaw(o);
     if (o.op === 'tombstone') {
+      // A re-homed EMSC copy's withdrawal (Resolver.rehomeCopy, FEED-2) is the effect of the observe line that follows
+      // it: ingesting that line re-homes the row again.
+      if (o.reason?.startsWith(REHOMED_REASON_PREFIX)) continue;
       resolver.tombstoneProvider(raw, o.ingest_time);
       continue;
     }

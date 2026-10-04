@@ -23,7 +23,7 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { loadState } from '../src/bitemporal.js';
 import { EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS } from '../src/config.js';
-import { Resolver } from '../src/dedup.js';
+import { REHOMED_REASON_PREFIX, Resolver } from '../src/dedup.js';
 import { runFeedSideSteps } from '../src/heal.js';
 import { haversineKm } from '../src/geo.js';
 import { LogBuffer } from '../src/oplog.js';
@@ -59,14 +59,17 @@ const log = new LogBuffer(head.seq, ingestTime);
 const scratch = mkdtempSync(join(tmpdir(), 'heal-dryrun-'));
 const side = runFeedSideSteps(scratch, resolver, log, { healDue: true, loadDays, ingestTime });
 rmSync(scratch, { recursive: true, force: true });
-const afterRetraction = log.lines.filter((l) => l.op === 'tombstone').length;
+// op:tombstone lines are the retraction's, or a re-homed EMSC copy's withdrawal (FEED-2, with its own reason).
+const isRehome = (l: Observation): boolean => l.op === 'tombstone' && (l.reason ?? '').startsWith(REHOMED_REASON_PREFIX);
+const rehomes = log.lines.filter(isRehome);
+const afterRetraction = log.lines.filter((l) => l.op === 'tombstone' && !isRehome(l)).length;
 const retractions = log.lines
-  .filter((l) => l.op === 'tombstone')
+  .filter((l) => l.op === 'tombstone' && !isRehome(l))
   .map((l) => ({ raw: { provider: l.provider, eventTimeMs: Date.parse(l.event_time), mag: l.mag, depth: l.depth }, result: { node: state.eventMap.get(l.feed_id)! } }));
 const merges = log.lines
   .filter((l) => l.op === 'merge')
   .map((l) => ({ loser: state.eventMap.get(l.feed_id)!, survivor: state.eventMap.get(l.superseded_by!)!, reason: l.reason ?? '' }));
-if (side.heal?.merged !== merges.length || side.retracted !== retractions.length) throw new Error('dry run: the logged lines disagree with the step result');
+if (side.heal?.merged !== merges.length || side.retracted !== retractions.length || side.rehomed !== rehomes.length) throw new Error('dry run: the logged lines disagree with the step result');
 
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 addFormats(ajv);
@@ -104,6 +107,16 @@ md.push('');
 md.push(`By provider: ${[...byProv].map(([p, n]) => `${p} ${n}`).join(', ') || 'none'}. Nodes left live with other rows: ${stillLive}. Magnitudes: ${[...new Set(retractions.map((r) => String(r.raw.mag)))].join(', ') || 'n/a'}; depths: ${[...new Set(retractions.map((r) => String(r.raw.depth)))].join(', ') || 'n/a'}.`);
 md.push('');
 md.push(`By event day: ${[...byDay].sort().map(([d, n]) => `${d.slice(5)} ${n}`).join(', ') || 'none'}.`);
+md.push('');
+
+// --- EMSC copies re-homed (FEED-2) ---
+md.push(`## EMSC copies re-homed (${rehomes.length})`);
+md.push('');
+for (const t of rehomes) {
+  const next = log.lines[log.lines.indexOf(t) + 1];
+  md.push(`- ${t.provider}:${t.provider_event_id} ${t.event_time} M${t.mag ?? '?'}: ${t.feed_id} → ${next?.feed_id ?? '?'} (${t.reason})`);
+}
+if (!rehomes.length) md.push('None.');
 md.push('');
 
 // --- heal groups ---
@@ -190,4 +203,4 @@ if (invalid.length) {
 const report = md.join('\n');
 if (outPath) writeFileSync(outPath, report + '\n');
 console.log(md.slice(0, 8).join('\n'));
-console.log(`\nretracted=${retractions.length} merges=${merges.length} groups=${rows.length} flagged=${flagged.length} large_apart=${apart.length} invalid=${invalid.length}` + (outPath ? ` → ${outPath}` : ''));
+console.log(`\nretracted=${retractions.length} rehomed=${rehomes.length} merges=${merges.length} groups=${rows.length} flagged=${flagged.length} large_apart=${apart.length} invalid=${invalid.length}` + (outPath ? ` → ${outPath}` : ''));

@@ -73,6 +73,8 @@ export interface FeedSideResult {
   retractedByProvider: Record<string, number>;
   /** The marker written when this run healed, else null. */
   heal: HealMarker | null;
+  /** EMSC copies the re-home pass moved (Resolver.rehomeMisplacedCopies, FEED-2). */
+  rehomed: number;
 }
 
 /** aggregate's feed-side steps, after the provider paths of the run: the coordinate-less
@@ -93,6 +95,11 @@ export function runFeedSideSteps(
     log.record(raw, result, 'tombstone', RETRACTION_REASON);
     retractedByProvider[raw.provider] = (retractedByProvider[raw.provider] ?? 0) + 1;
   }
+  // EMSC copies standing in an event whose rows they do not copy while another event holds the agency row they copy
+  // (Resolver.rehomeMisplacedCopies, FEED-2): an op:tombstone line with a reason, then the row's op:observe line in
+  // its new event. A no-op once nothing is misplaced.
+  const rehomed = resolver.rehomeMisplacedCopies(opts.ingestTime);
+  for (const { raw, result } of rehomed) log.record(raw, result);
   let heal: HealMarker | null = null;
   if (opts.healDue) {
     const { merges, survivors } = resolver.heal(opts.ingestTime);
@@ -110,5 +117,5 @@ export function runFeedSideSteps(
     };
     writeHealMarker(root, heal);
   }
-  return { retracted: retractions.length, retractedByProvider, heal };
+  return { retracted: retractions.length, retractedByProvider, heal, rehomed: rehomed.length };
 }

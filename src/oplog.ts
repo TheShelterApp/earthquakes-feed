@@ -108,6 +108,9 @@ export class LogBuffer {
    *  report's own line, so seq order reads cause → effect and the survivor's ingest_seq is the
    *  last one written. `reason` annotates a feed-side op:tombstone (a retraction). */
   record(raw: RawObs, r: IngestResult, op: Op = 'observe', reason?: string): void {
+    // A re-homed copy (Resolver.rehomeCopy, FEED-2): its withdrawal from the old event comes first, as an op:tombstone
+    // line with the reason, after the op:merge lines that withdrawal caused.
+    if (r.rehomed) this.record(r.rehomed.old, r.rehomed.from, 'tombstone', r.rehomed.reason);
     for (const m of r.merges) this.merge(m);
     this.seq += 1;
     r.node.lastSeq = this.seq;

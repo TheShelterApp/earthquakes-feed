@@ -40,6 +40,8 @@ const LATE_TWIN_KM = LARGE_EVENT_MAX_KM;
  *  pairs whose mutual best formed during the previous one). */
 const HEAL_MAX_PASSES = 4;
 const clamp = (n: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, n));
+/** How the op:tombstone line of a re-homed EMSC copy (Resolver.rehomeCopy, FEED-2) starts its reason. */
+export const REHOMED_REASON_PREFIX = 're-homed:';
 
 /** The ComCat ids a report or row names when it comes from ComCat itself: its own id and every id in its `ids`
  *  (`us7000abc` with ids ",us7000abc,aka2026xyz," names both). Empty for any other provider. */
@@ -116,6 +118,11 @@ export interface IngestResult {
   /** Set when a COMCAT_LIFECYCLE_PROVIDERS report was not minted because another agency's live event sits beside it
    *  (Resolver.ingest, PF-5b); `node` is that event, `changed` false. */
   withheld?: { km: number; dtMs: number };
+  /** Set when this report, a revision of EMSC's copy of an agency solution, left the event it was in for the event
+   *  holding the agency row it now copies (Resolver.rehomeCopy, FEED-2): `from` is that withdrawal (its node is the old
+   *  event, or what it folded into), `old` the withdrawn row as a report, `reason` the op:tombstone line's reason.
+   *  LogBuffer.record writes that line (and its op:merge lines) before this report's own line. */
+  rehomed?: { from: IngestResult; old: RawObs; reason: string };
 }
 
 /** What reviseOrMintInHotWindow did with one sweep row of a late-publishing catalog. */
@@ -139,6 +146,8 @@ export class Resolver {
   /** ComCat id → the live node whose ComCat row names it (comcatIdsNamed), built on first use: a
    *  COMCAT_ID_PROVIDERS report resolves through it when ComCat prefers another network's id (PF-5b). */
   private comcatIndex: Map<string, string> | null = null;
+  /** FEED-2 (rehomeCopy), in order: the EMSC copies this resolver moved to another event. */
+  readonly rehomedCopies: string[] = [];
 
   constructor(
     readonly eventMap: Map<string, EventNode>,
@@ -759,6 +768,10 @@ export class Resolver {
     // finds any COMCAT_ID_PROVIDERS row by the row's own alias as well: findById, comcatIdRowKeys.)
     const comcatKey = COMCAT_LIFECYCLE_PROVIDERS.has(raw.provider) ? `${COMCAT_PROVIDER}:${comcatIdOf(raw.provider, raw.providerEventId)}` : null;
     if (node && comcatKey && Resolver.withdrawnFrom(node, raw)) return { node, changed: false, revision: node.revision, merges: [] };
+    if (node && fold && this.mergePass) {
+      const moved = this.rehomeCopy(node, raw, ingestTime);
+      if (moved) return moved;
+    }
 
     if (!node) {
       const row = this.makeRow(raw);
@@ -848,6 +861,94 @@ export class Resolver {
       return { node: survivor, changed: true, revision: survivor.revision, merges };
     }
     return { node, changed: false, revision: node.revision, merges: [] };
+  }
+
+  /** FEED-2: EMSC's copy of an agency's solution (authoredCopy) that copies no other row of its event, while another
+   *  live event holds the agency row it copies. EMSC sometimes points an event id at another agency event (2026-10-03,
+   *  Valencia: EMSC 20261003_0000060 copied IGN es2026tiyjb at 05:09:14, then es2026tiyjg at 05:09:28, then
+   *  es2026tiyil at 05:08:31); left where it joined, the row carries its event to the other quake's solution while the
+   *  agency's own row of that quake stands beside it as a second event, and the quake the event was vanishes from the
+   *  map. Such a report (a revision, or an unchanged report of a row left in the wrong event before this rule) of a row
+   *  stored in an event with other rows, none of which it copies, moves the row to the event holding the agency row it
+   *  copies (the nearest such row): it leaves its event (an op:tombstone line with a reason, its id taken off the
+   *  event, which re-derives its solution from the rows left and may fold) and joins that event like any report.
+   *  When no live event holds that agency row yet, the report is applied where it stands, as before; the next run,
+   *  which lists it again, or rehomeMisplacedCopies moves it once the agency's row is in. (Holding such a revision
+   *  back instead was measured and dropped: where the feed's agency row lags EMSC's copy, the held event kept the old
+   *  solution and other agencies' reports of the quake no longer joined it.) A report that copies a row of its event,
+   *  or a row alone in its event (the merge pass folds that event into the agency's), stays as before. Only on the
+   *  logged path (fold, merge pass on): backfill and onboard write no log line. null when the report is none of these. */
+  private rehomeCopy(node: EventNode, raw: RawObs, ingestTime: string): IngestResult | null {
+    if (raw.provider !== EMSC_PROVIDER || !Resolver.copyCode(raw)) return null;
+    const idx = node.provenance.findIndex((r) => r.provider === raw.provider && r.nativeId === raw.providerEventId);
+    const stored = node.provenance[idx];
+    if (!stored) return null;
+    const others = node.provenance.filter((_, i) => i !== idx);
+    if (!others.length || others.some((r) => Resolver.authoredCopy(raw, r))) return null;
+    const home = this.copyHome(raw, node);
+    if (!home) return null;
+    const key = `${raw.provider}:${raw.providerEventId}`;
+    const old = rowAsReport(stored);
+    const copied = home.row;
+    node.aliases = node.aliases.filter((a) => a !== key);
+    this.alias.delete(key);
+    const from = this.withdrawRow(node, idx, ingestTime);
+    const to = this.applyIngest(home.node.feedId, raw, ingestTime);
+    const reason = `${REHOMED_REASON_PREFIX} EMSC ${raw.providerEventId} (auth ${String(raw.fields['auth'])}) copies ${copied.provider} ${copied.nativeId}, held by ${to.node.feedId}`;
+    this.rehomedCopies.push(`emsc:${raw.providerEventId} ${node.feedId} -> ${to.node.feedId} (${copied.provider}:${copied.nativeId})`);
+    return { ...to, rehomed: { from, old, reason } };
+  }
+
+  /** FEED-2, every run (heal.ts runFeedSideSteps): each EMSC copy in a live event of the hot window that holds other
+   *  rows, none of which it copies, is presented again as its own unchanged report, so rehomeCopy moves it to the event
+   *  holding the agency row it copies (rows left in the wrong event before the rule, and rows older than the live
+   *  query's lookback, which no listing presents again). Event-time order, then feed id and native id, so the lines
+   *  replay. A no-op when nothing is misplaced, or when merge=false. */
+  rehomeMisplacedCopies(ingestTime: string): { raw: RawObs; result: IngestResult }[] {
+    const out: { raw: RawObs; result: IngestResult }[] = [];
+    if (!this.mergePass) return out;
+    const nodes = [...this.eventMap.values()]
+      .filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor && n.provenance.length > 1 && n.provenance.some((r) => r.provider === EMSC_PROVIDER && Resolver.copyCode(r)))
+      .sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : a.feedId > b.feedId ? 1 : 0));
+    for (const node of nodes) {
+      const copies = node.provenance
+        .filter((r) => r.provider === EMSC_PROVIDER && Resolver.copyCode(r) && !node.provenance.some((o) => o !== r && Resolver.authoredCopy(r, o)))
+        .sort((a, b) => (a.nativeId < b.nativeId ? -1 : a.nativeId > b.nativeId ? 1 : 0));
+      for (const row of copies) {
+        if (node.state !== 'live' || !node.provenance.includes(row)) break;
+        const raw = rowAsReport(row);
+        const result = this.applyIngest(node.feedId, raw, ingestTime);
+        if (result.rehomed) out.push({ raw, result });
+      }
+    }
+    return out;
+  }
+
+  /** The EMSC `auth` code of a report when it names an agency or a ComCat network whose copies count (authoredCopy). */
+  private static copyCode(raw: SourcedSolution): string | null {
+    const auth = raw.fields['auth'];
+    return typeof auth === 'string' && (EMSC_AUTHORED_COPIES.has(auth) || EMSC_COMCAT_NETWORK_COPIES.has(auth)) ? auth : null;
+  }
+
+  /** The live event other than `from` holding a row `copy` is an authored copy of (the nearest row, then the smaller
+   *  feed id) and taking `copy` (no EMSC row of another id that is another solution), or null. Searched within
+   *  LATE_TWIN_KM of the copy, the widest identity window, among the hot window's events. */
+  private copyHome(copy: RawObs, from: EventNode): { node: EventNode; row: ProvenanceRow } | null {
+    let best: { node: EventNode; row: ProvenanceRow; km: number } | null = null;
+    for (const cell of gatherCellKeys(copy.lat, copy.lon, LATE_TWIN_KM, GRID_CELL_DEG)) {
+      for (const fid of this.geo.get(cell) ?? []) {
+        const node = this.eventMap.get(fid);
+        if (!node || node.state !== 'live' || node === from) continue;
+        for (const row of node.provenance) {
+          if (row.provider === EMSC_PROVIDER || !Resolver.authoredCopy(copy, row)) continue;
+          const km = haversineKm(copy.lat, copy.lon, row.lat, row.lon);
+          if (best && (km > best.km || (km === best.km && node.feedId >= best.node.feedId))) continue;
+          if (this.sameProviderDistinct(copy, node)) continue;
+          best = { node, row, km };
+        }
+      }
+    }
+    return best;
   }
 
   /** A ComCat report whose ids name a COMCAT_ID_PROVIDERS report held by another live node foldComcatTwins may join

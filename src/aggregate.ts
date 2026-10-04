@@ -186,6 +186,9 @@ async function main(): Promise<void> {
   const heal = feedSide.heal;
   if (heal) console.log(`aggregate: heal epoch ${heal.epoch}: ${JSON.stringify(heal)}`);
   for (const l of log.lines) if (l.op === 'merge' && heal && l.seq >= (heal.first_seq ?? Infinity)) console.log(`  heal op:merge ${l.feed_id} -> ${l.superseded_by} (${l.reason})`);
+  // EMSC copies that left their event for the one holding the agency row they copy (the reports' path and the
+  // feed-side pass; Resolver.rehomeCopy, FEED-2): status `copies_rehomed`.
+  for (const c of resolver.rehomedCopies) console.log(`  copy re-homed ${c}`);
 
   if (tally.bad_coords) {
     console.warn(
@@ -233,6 +236,7 @@ async function main(): Promise<void> {
     tombstoned,
     comcat_twins_withdrawn: comcatTwinsWithdrawn,
     twin_withheld: twinWithheld.length,
+    copies_rehomed: resolver.rehomedCopies.length,
     absent,
     merged: log.merged,
     ...(heal ? { heal } : {}),

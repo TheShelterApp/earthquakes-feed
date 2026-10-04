@@ -194,7 +194,8 @@ magnitudes are ≥ 4.0, the origins are ≤ 20 s apart, |ΔM| ≤ 0.5 and the di
 shrunk by the magnitude difference like the others. This moderate-event window holds only
 outside dense cells, only when no provider reports both, never for NRCan, and only for each
 other's best match; it is tried after the windows above. A report with the same solution as
-another provider's row already in an event (≤ 2 s, ≤ 2 km, |ΔM| ≤ 0.1) joins that event. Before
+another provider's row already in an event (≤ 2 s, ≤ 2 km, |ΔM| ≤ 0.1), or as a row of its own
+provider under another id (a re-id; not NRCan's, whose new ids are revisions), joins that event. Before
 the change 42 of the 58 live M ≥ 4.5 events of 2026-10-02 had another live event within 60 s
 and 50 km (agencies' solutions of one M4–5.5 quake scatter by 15–40 km); replaying the
 observation log under the new rule leaves about a third with one. A client reconciling a

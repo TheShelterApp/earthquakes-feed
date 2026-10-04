@@ -198,3 +198,21 @@ test('the merge pass folds a moderate pair and says so; a pair kept apart names 
   const y = r2.ingest(obs('geofon', 'gfz2026gggg', { mag: 4.8, eventTimeMs: T0 + 25_000, lat: north(-24.8, 15) }), '2026-10-02T04:35:00Z').node;
   assert.match(r2.whyNotMerged(x, y)!, /^d 15\.0 km > 10\.0 km; moderate: dt 25\.0 s > 20\.0 s$/);
 });
+
+test('a re-id joins the event holding its twin, not another event through the moderate-event window', () => {
+  // FEED-1 review, after INGV 46085191 / 46561932 (one M5.8 solution south of Fiji, 2026-07-15): the first id joined
+  // USGS's event 31 km away through the moderate-event window; the re-id, as far from that event's representative,
+  // went to the next event the window allowed (GeoNet's, 45 km), which holds no INGV row, while its twin stood in
+  // USGS's event.
+  const map = new Map<string, EventNode>();
+  const r = new Resolver(map, prio, cfg, NOW);
+  const usgs = r.ingest(obs('usgs', 'us6000hhhh', { mag: 5.8, status: 'reviewed' }), '2026-10-02T04:35:00Z').node;
+  const twin = { mag: 5.8, magType: 'Mwp', lat: north(-24.8, 31), eventTimeMs: T0 + 2_000 };
+  assert.equal(r.ingest(obs('ingv', '46000001', twin), '2026-10-02T04:36:00Z').node, usgs, 'the first id joins through the moderate-event window');
+  const geonet = r.ingest(obs('geonet', '2026p741999', { mag: 5.7, lat: north(-24.8, 75), eventTimeMs: T0 - 1_000 }), '2026-10-02T04:36:00Z').node;
+  assert.notEqual(geonet, usgs, 'GeoNet’s event is 75 km from USGS’s: its own');
+  const reid = r.ingest(obs('ingv', '46000002', twin), '2026-10-02T04:41:00Z');
+  assert.equal(reid.node, usgs, 'the re-id joins its twin’s event');
+  assert.equal(live(map).length, 2);
+  assert.deepEqual(geonet.provenance.map((x) => x.provider), ['geonet']);
+});

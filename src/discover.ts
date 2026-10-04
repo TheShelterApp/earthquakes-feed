@@ -59,7 +59,8 @@ interface Live {
 
 async function main(): Promise<void> {
   const registry = JSON.parse(readFileSync(REGISTRY_PATH, 'utf8')) as { providers: ProviderConfig[] };
-  const known = new Set(registry.providers.map((p) => hostOf(p.base)));
+  // A source's fallback host (NOA's registered node, PF-5j-NOA) is known too: when it answers again it is not a new source.
+  const known = new Set(registry.providers.flatMap((p) => [p.base, ...(p.fallbackBase ? [p.fallbackBase] : [])]).map(hostOf));
   const cand = new Map<string, { dc: string; url: string }>();
 
   // 1) Newly-registered FDSN event services (the rare, high-value case).

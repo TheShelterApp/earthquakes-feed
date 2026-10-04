@@ -11,6 +11,8 @@ import { activeProviders, configMap, loadRegistry, priorityMap } from './provide
 import { byIngestOrder, emptyTally, screen } from './quality.js';
 import { COMCAT_DELETE_REASON, revisionSweep } from './sweep.js';
 import { vanishedIds } from './absence.js';
+import { correctionFloor } from './correction.js';
+import { PRELIMINARY_SUPERSEDED_REASON, finalsIndex, isPreliminary, supersedingFinal } from './preliminary.js';
 import { fetchRunInputs, loadSweepCursors, nextCursors, saveSweepCursors, sweepOriginFloorMs, sweepSpecs } from './sweep-cursor.js';
 import type { RawObs } from './types.js';
 import { isoFromMs } from './util.js';
@@ -108,7 +110,12 @@ async function main(): Promise<void> {
   // (withdrawZeroedReports below); an unknown one (NCEDC's unlocated placeholder) is dropped.
   const tally = emptyTally();
   const zeroed: RawObs[] = [];
-  const raws = screen(inWindow, tally, undefined, zeroed);
+  const screened = screen(inWindow, tally, undefined, zeroed);
+  // FEED-5: a preliminary report (Mexico's SSN) whose reviewed solution is known, in this answer or in the map, is not
+  // ingested; one already in the map is withdrawn below (withdrawSupersededPreliminaries).
+  const knownFinals = finalsIndex([...screened, ...[...state.eventMap.values()].filter((n) => n.state === 'live').flatMap((n) => n.provenance)]);
+  const preliminarySkipped = screened.filter((r) => isPreliminary(r) && supersedingFinal(r, knownFinals) != null);
+  const raws = preliminarySkipped.length ? screened.filter((r) => !preliminarySkipped.includes(r)) : screened;
   // Deterministic ingest order (idempotency, design §8.10).
   raws.sort(byIngestOrder);
 
@@ -172,6 +179,15 @@ async function main(): Promise<void> {
       comcatTwinsWithdrawn++;
     }
   }
+  // FEED-5: preliminary rows whose reviewed solution is now in the map leave their events (op:tombstone with a reason),
+  // on days the manifest does not call frozen.
+  const preliminarySuperseded = resolver.withdrawSupersededPreliminaries(correctionFloor(nowMs).floorMs, ingestTime);
+  for (const w of preliminarySuperseded) {
+    log.record(w.raw, w.result, 'tombstone', PRELIMINARY_SUPERSEDED_REASON);
+    console.log(`  preliminary superseded ${w.raw.provider}:${w.raw.providerEventId} by ${w.by} (${w.result.node.state === 'tombstoned' ? 'event tombstoned' : `event ${w.result.node.feedId} keeps ${w.result.node.provenance.length} row(s)`})`);
+  }
+  for (const r of preliminarySkipped) console.log(`  preliminary skipped ${r.provider}:${r.providerEventId} (its reviewed solution is known)`);
+
   // Rolling-file ids that vanished (PF-5b, log only; src/absence.ts).
   const absent = vanishedIds(state.eventMap, outcomes, nowMs);
   for (const [p, a] of Object.entries(absent)) {
@@ -233,6 +249,8 @@ async function main(): Promise<void> {
     tombstoned,
     comcat_twins_withdrawn: comcatTwinsWithdrawn,
     twin_withheld: twinWithheld.length,
+    preliminary_superseded: preliminarySuperseded.length,
+    preliminary_skipped: preliminarySkipped.length,
     absent,
     merged: log.merged,
     ...(heal ? { heal } : {}),

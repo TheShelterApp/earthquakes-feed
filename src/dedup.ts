@@ -27,6 +27,7 @@ import {
 } from './config.js';
 import { qualityCount } from './canonical.js';
 import { gatherCellKeys, gridKey, haversineKm } from './geo.js';
+import { finalsIndex, isPreliminary, supersedingFinal } from './preliminary.js';
 import { isCoordinateless } from './quality.js';
 import type { EventNode, Extra, Op, ProvenanceRow, ProviderConfig, RawObs } from './types.js';
 import { deterministicFeedId } from './ulid.js';
@@ -976,6 +977,34 @@ export class Resolver {
     const idx = node.provenance.findIndex((r) => r.provider === raw.provider && r.nativeId === raw.providerEventId);
     if (idx < 0) return null;
     return this.withdrawRow(node, idx, ingestTime);
+  }
+
+  /** FEED-5: withdraw every preliminary row (preliminary.ts `isPreliminary`, Mexico's SSN) whose reviewed solution is
+   *  in the map: a live row of the same provider, another id, origin within 60 s and position within 150 km. Same path
+   *  as an upstream delete (the event is tombstoned when no row is left, else re-derives its solution and runs the merge
+   *  pass). Only events at or after `floorMs` (the first day the manifest does not call frozen), so a frozen day never
+   *  changes. Idempotent; deterministic order (event time, feed id, then row), so the log lines replay through
+   *  tombstoneProvider. Each entry's `raw` is the withdrawn row as a report, `by` the superseding id. */
+  withdrawSupersededPreliminaries(floorMs: number, ingestTime: string): { raw: RawObs; result: IngestResult; by: string }[] {
+    const out: { raw: RawObs; result: IngestResult; by: string }[] = [];
+    const live = [...this.eventMap.values()].filter((n) => n.state === 'live');
+    const finals = finalsIndex(live.flatMap((n) => n.provenance));
+    if (!finals.length) return out;
+    const nodes = live
+      .filter((n) => n.eventTimeMs >= floorMs && n.provenance.some(isPreliminary))
+      .sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : a.feedId > b.feedId ? 1 : 0));
+    for (const node of nodes) {
+      const rows = node.provenance.filter(isPreliminary).sort((a, b) => (a.nativeId < b.nativeId ? -1 : a.nativeId > b.nativeId ? 1 : 0));
+      for (const row of rows) {
+        if (node.state !== 'live') break;
+        const final = supersedingFinal(row, finals);
+        if (!final) continue;
+        const idx = node.provenance.indexOf(row);
+        if (idx < 0) continue;
+        out.push({ raw: rowAsReport(row), result: this.withdrawRow(node, idx, ingestTime), by: final.nativeId });
+      }
+    }
+    return out;
   }
 
   /** The feed's own retraction of coordinate-less rows (quality.ts `isCoordinateless`: exactly

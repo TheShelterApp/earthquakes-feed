@@ -1356,9 +1356,12 @@ export class Resolver {
    *  nodes in event-time order (then feed id), so the pass is deterministic. One `merges` list
    *  for the whole pass, so a node folded early whose survivor folds later has its pending
    *  op:merge re-aimed instead of logged twice. Returns the folds (in order) and the live
-   *  survivors whose revision moved, in event-time order. A no-op when merge=false. */
-  heal(ingestTime: string): { merges: MergeRecord[]; survivors: EventNode[] } {
-    return this.foldPasses(() => [...this.eventMap.values()].filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor), ingestTime);
+   *  survivors whose revision moved, in event-time order. A no-op when merge=false. Since FEED-6 the same pass runs
+   *  every run as the regular heal, with `maxFolds` (config HEAL_MAX_FOLDS_PER_RUN): once that many folds are made
+   *  no further node is visited (a chain already started may add up to MERGE_MAX_ROUNDS − 1 more) and `capped` is
+   *  set; the next run goes on from what is left. */
+  heal(ingestTime: string, maxFolds = Infinity): { merges: MergeRecord[]; survivors: EventNode[]; capped: boolean } {
+    return this.foldPasses(() => [...this.eventMap.values()].filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor), ingestTime, maxFolds);
   }
 
   /** The heal's pass over the live events behind `feedIds` only (each id followed to its live survivor): the
@@ -1392,18 +1395,25 @@ export class Resolver {
   /** mergeAround over the nodes `pick` returns, in event-time order (then feed id), in passes until one folds
    *  nothing: a node visited before its mutual partner formed (that partner was still paired with a better match)
    *  gets another look. Bounded. */
-  private foldPasses(pick: () => EventNode[], ingestTime: string): { merges: MergeRecord[]; survivors: EventNode[] } {
+  private foldPasses(pick: () => EventNode[], ingestTime: string, maxFolds = Infinity): { merges: MergeRecord[]; survivors: EventNode[]; capped: boolean } {
     const merges: MergeRecord[] = [];
-    if (!this.mergePass) return { merges, survivors: [] };
+    if (!this.mergePass) return { merges, survivors: [], capped: false };
     const byTimeThenId = (a: EventNode, b: EventNode): number =>
       a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : a.feedId > b.feedId ? 1 : 0);
-    for (let pass = 0; pass < HEAL_MAX_PASSES; pass++) {
+    let capped = false;
+    for (let pass = 0; pass < HEAL_MAX_PASSES && !capped; pass++) {
       const before = merges.length;
-      for (const node of pick().sort(byTimeThenId)) if (node.state === 'live') this.mergeAround(node, ingestTime, merges);
+      for (const node of pick().sort(byTimeThenId)) {
+        if (merges.length >= maxFolds) {
+          capped = true;
+          break;
+        }
+        if (node.state === 'live') this.mergeAround(node, ingestTime, merges);
+      }
       if (merges.length === before) break;
     }
     const survivors = [...new Set(merges.map((m) => m.survivor))].filter((n) => n.state === 'live').sort(byTimeThenId);
-    return { merges, survivors };
+    return { merges, survivors, capped };
   }
 
   /** Survivor = most providers → higher status → richer chosen solution → lower priority

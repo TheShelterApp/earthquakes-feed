@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { HEAL_EPOCH, dataPaths } from './config.js';
+import { HEAL_EPOCH, HEAL_MAX_FOLDS_PER_RUN, dataPaths } from './config.js';
 import type { Resolver } from './dedup.js';
 import type { LogBuffer } from './oplog.js';
 import { byIngestOrder } from './quality.js';
@@ -75,11 +75,14 @@ export interface FeedSideResult {
   heal: HealMarker | null;
   /** EMSC copies the re-home pass moved (Resolver.rehomeMisplacedCopies, FEED-2). */
   rehomed: number;
+  /** The regular heal of a run without an epoch heal (FEED-6), else null: its op:merge lines, the survivors whose
+   *  revision moved, and whether it stopped at HEAL_MAX_FOLDS_PER_RUN. */
+  regularHeal: { merged: number; survivors: number; capped: boolean } | null;
 }
 
 /** aggregate's feed-side steps, after the provider paths of the run: the coordinate-less
- *  retraction (every run; a no-op once nothing is left) and, when `healDue`, the one-time heal
- *  (Resolver.heal) and its marker. Every change is logged through `log` like the normal path:
+ *  retraction (every run; a no-op once nothing is left), the copy re-home pass (every run, FEED-2) and, when
+ *  `healDue`, the one-time heal (Resolver.heal) and its marker, else the regular heal (FEED-6). Every change is logged through `log` like the normal path:
  *  op:tombstone per withdrawn row (with a reason), op:merge per fold, op:correction per heal
  *  survivor. */
 export function runFeedSideSteps(
@@ -117,5 +120,14 @@ export function runFeedSideSteps(
     };
     writeHealMarker(root, heal);
   }
-  return { retracted: retractions.length, retractedByProvider, heal, rehomed: rehomed.length };
+  // The regular heal (FEED-6, config HEAL_MAX_FOLDS_PER_RUN): the same pass every other run, capped, logged like the
+  // epoch heal (op:merge lines, then one op:correction line per survivor, reason "heal: absorbed …"); the marker is
+  // the epoch heal's only.
+  let regularHeal: FeedSideResult['regularHeal'] = null;
+  if (!opts.healDue) {
+    const { merges, survivors, capped } = resolver.heal(opts.ingestTime, HEAL_MAX_FOLDS_PER_RUN);
+    log.recordFolds(merges, survivors, 'heal');
+    regularHeal = { merged: merges.length, survivors: survivors.length, capped };
+  }
+  return { retracted: retractions.length, retractedByProvider, heal, rehomed: rehomed.length, regularHeal };
 }

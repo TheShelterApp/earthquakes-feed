@@ -220,17 +220,21 @@ earlier of the two. `superseded_by` names the event that was live when the line 
 if that survivor later folds into another event in its turn, every event folded into it
 follows (a new revision and its own `op:merge` line). Folds happen only in the aggregate run
 (the one that writes the observation log — never in backfill or new-source onboarding) and
-only for events within 7 days of their origin time (the hot window): events the feed split
-before a rule change heal on their next revision if it comes within those 7 days, and stay
-split otherwise. On 2026-09-28 a one-time heal ran the same pass over every live event in the
-hot window once (the Loyalty Islands M7.0 of 2026-09-25 was six ids): its folds are ordinary
-`op:merge` lines, and each survivor gets one `op:correction` line carrying its new revision
-(`reason` lists what it absorbed); `knowledge/index/heal.json` on the `data` branch records
-it. A second heal (epoch 2) runs the same pass once more when EMSC's copies of IGN, NC and SCSN
+only for events within 7 days of their origin time (the hot window). Since FEED-6 (2026-10)
+every aggregate run also runs that merge pass over every live event of the hot window, at most
+100 folds a run (the rest fold in the next runs; status `heal_merged`, and `heal_capped` when a
+run stopped at the cap): its folds are ordinary `op:merge` lines, and each survivor gets one
+`op:correction` line carrying its new revision, `reason` "heal: absorbed …". So events the feed
+split before a rule change, or that no later report touched, fold within a run or two while
+inside those 7 days, and stay split once older; a run with nothing to fold writes nothing, and
+the pass never reaches a day the manifest calls frozen (10 days). On 2026-09-28 a one-time heal
+ran the same pass over every live event in the hot window once (the Loyalty Islands M7.0 of
+2026-09-25 was six ids), with `reason` "heal epoch 1: absorbed …"; `knowledge/index/heal.json`
+on the `data` branch records it. A second heal (epoch 2) runs the same pass once more when EMSC's copies of IGN, NC and SCSN
 solutions start counting as the agency's own report (see *EMSC's copies of agencies'
 solutions*). The agencies added to that list on 2026-10-01 and the exact-0.1 magnitude rule
-(see *Realtime + client dedup*) came without a heal: they apply to reports and revisions from then on.
-Historical partitions are never rewritten.
+(see *Realtime + client dedup*) came without a heal: they apply to reports and revisions from then on (since
+FEED-6 the regular heal also folds what they join inside the hot window). Historical partitions are never rewritten.
 
 A report with no location — exactly 0° N, 0° E with magnitude 0 or none (NCEDC publishes such
 placeholders, `MU 0.0`) — is never ingested. When the id is one the feed already holds, the

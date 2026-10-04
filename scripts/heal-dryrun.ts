@@ -5,7 +5,7 @@
  * data directory.
  *
  * Usage:
- *   npx tsx scripts/heal-dryrun.ts --data <data-branch dir> [--now <iso>] [--out <report.md>]
+ *   npx tsx scripts/heal-dryrun.ts --data <data-branch dir> [--now <iso>] [--regular] [--out <report.md>]
  *
  * <data-branch dir> needs knowledge/index (event_map shards + head.json), e.g.
  *   git archive origin/data knowledge/index | tar -x -C /tmp/data
@@ -22,7 +22,7 @@ import { join, resolve } from 'node:path';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { loadState } from '../src/bitemporal.js';
-import { EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS } from '../src/config.js';
+import { EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HEAL_MAX_FOLDS_PER_RUN, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS } from '../src/config.js';
 import { REHOMED_REASON_PREFIX, Resolver } from '../src/dedup.js';
 import { runFeedSideSteps } from '../src/heal.js';
 import { haversineKm } from '../src/geo.js';
@@ -42,10 +42,12 @@ if (!dataDir) {
   process.exit(2);
 }
 const outPath = opt('--out');
+// --regular: a normal run (FEED-6) — the LIVE_INDEX_DAYS load and the regular, capped heal instead of the epoch heal.
+const regular = args.includes('--regular');
 const head = JSON.parse(readFileSync(resolve(dataDir, 'knowledge/index/head.json'), 'utf8')) as { seq: number; ingest_time: string };
 const nowMs = opt('--now') ? Date.parse(opt('--now')!) : Date.parse(head.ingest_time) + 5 * 60_000;
 const ingestTime = isoFromMs(nowMs);
-const loadDays = Math.max(LIVE_INDEX_DAYS, EVENT_MAP_HORIZON_DAYS);
+const loadDays = regular ? LIVE_INDEX_DAYS : Math.max(LIVE_INDEX_DAYS, EVENT_MAP_HORIZON_DAYS);
 
 const registry = loadRegistry(resolve(new URL('../providers/registry.json', import.meta.url).pathname));
 const state = loadState(dataDir, { sinceDays: loadDays, nowMs });
@@ -57,7 +59,7 @@ for (const [k, n] of state.eventMap) before.set(k, JSON.parse(JSON.stringify(n))
 const resolver = new Resolver(state.eventMap, priorityMap(registry), configMap(registry), nowMs);
 const log = new LogBuffer(head.seq, ingestTime);
 const scratch = mkdtempSync(join(tmpdir(), 'heal-dryrun-'));
-const side = runFeedSideSteps(scratch, resolver, log, { healDue: true, loadDays, ingestTime });
+const side = runFeedSideSteps(scratch, resolver, log, { healDue: !regular, loadDays, ingestTime });
 rmSync(scratch, { recursive: true, force: true });
 // op:tombstone lines are the retraction's, or a re-homed EMSC copy's withdrawal (FEED-2, with its own reason).
 const isRehome = (l: Observation): boolean => l.op === 'tombstone' && (l.reason ?? '').startsWith(REHOMED_REASON_PREFIX);
@@ -69,7 +71,7 @@ const retractions = log.lines
 const merges = log.lines
   .filter((l) => l.op === 'merge')
   .map((l) => ({ loser: state.eventMap.get(l.feed_id)!, survivor: state.eventMap.get(l.superseded_by!)!, reason: l.reason ?? '' }));
-if (side.heal?.merged !== merges.length || side.retracted !== retractions.length || side.rehomed !== rehomes.length) throw new Error('dry run: the logged lines disagree with the step result');
+if ((regular ? side.regularHeal?.merged : side.heal?.merged) !== merges.length || side.retracted !== retractions.length || side.rehomed !== rehomes.length) throw new Error('dry run: the logged lines disagree with the step result');
 
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 addFormats(ajv);
@@ -83,7 +85,7 @@ const providersOf = (n: EventNode): string[] => [...new Set(n.provenance.map((r)
 const md: string[] = [];
 const hotFloor = nowMs - HOT_WINDOW_DAYS * 86_400_000;
 const liveBefore = [...before.values()].filter((n) => n.state === 'live');
-md.push(`# Heal dry run (epoch ${HEAL_EPOCH})`);
+md.push(regular ? `# Heal dry run (regular heal, at most ${HEAL_MAX_FOLDS_PER_RUN} folds${side.regularHeal?.capped ? ': CAPPED' : ''})` : `# Heal dry run (epoch ${HEAL_EPOCH})`);
 md.push('');
 md.push(`Data: head seq ${head.seq} @ ${head.ingest_time}; simulated run at ${ingestTime}; event_map days loaded: ${loadDays} (${before.size} nodes, ${liveBefore.length} live); hot window from ${isoFromMs(hotFloor)} (${liveBefore.filter((n) => n.eventTimeMs >= hotFloor).length} live nodes).`);
 md.push('');

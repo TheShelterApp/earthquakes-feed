@@ -4,6 +4,7 @@ import {
   COMCAT_LIFECYCLE_PROVIDERS,
   COMCAT_PROVIDER,
   EMSC_AUTHORED_COPIES,
+  EMSC_COMCAT_NETWORK_COPIES,
   EMSC_PROVIDER,
   GRID_CELL_DEG,
   HOT_WINDOW_DAYS,
@@ -203,13 +204,23 @@ export class Resolver {
   }
 
   /** `copy` is EMSC's copy of `original`: an EMSC row whose `auth` names the provider `original` is the solution of
-   *  (config EMSC_AUTHORED_COPIES, authorsRow) with the same solution (sameSolution). EMSC re-publishes the authoring
+   *  (config EMSC_AUTHORED_COPIES, authorsRow), or the ComCat network whose id `original`, a ComCat row, carries
+   *  (config EMSC_COMCAT_NETWORK_COPIES, FEED-4), with the same solution (sameSolution). EMSC re-publishes the authoring
    *  agency's origin, so the two rows are one agency's one solution, as good as a shared id (PF-5e, PF-5f). */
   private static authoredCopy(copy: SourcedSolution, original: SourcedSolution): boolean {
     if (copy.provider !== EMSC_PROVIDER) return false;
     const auth = copy.fields['auth'];
-    const author = typeof auth === 'string' ? EMSC_AUTHORED_COPIES.get(auth) : undefined;
-    return author != null && Resolver.authorsRow(author, original) && Resolver.sameSolution(copy, original);
+    if (typeof auth !== 'string') return false;
+    const author = EMSC_AUTHORED_COPIES.get(auth);
+    const network = EMSC_COMCAT_NETWORK_COPIES.get(auth);
+    const authors = author != null ? Resolver.authorsRow(author, original) : network != null && Resolver.networkRow(network, original);
+    return authors && Resolver.sameSolution(copy, original);
+  }
+
+  /** `row` is ComCat's row of the network with ComCat id prefix `network` (`hv75048812` for `hv`). */
+  private static networkRow(network: string, row: SourcedSolution): boolean {
+    const id = nativeIdOf(row);
+    return row.provider === COMCAT_PROVIDER && id.length > network.length && id.startsWith(network);
   }
 
   /** `row` is `author`'s own solution: a row of that provider, or, when the provider has a ComCat network prefix

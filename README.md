@@ -158,7 +158,8 @@ open, reachable source appears.
   target), and `archive` rolls cold months (>120 d) to GitHub Releases (un-metered) and
   prunes the tree — so the `data` branch stays bounded. The run logs (`status/history`,
   `changes/`) keep only the current month in the tree; finished months become immutable
-  gzip assets of the `logs-YYYY-MM` releases ([APIs.md](APIs.md#run-logs)). `event_map` is sharded by
+  gzip assets of the `logs-YYYY-MM` releases ([APIs.md](APIs.md#run-logs)). The `health`
+  workflow logs the repository's size and warns above 6 GB (5.48 GB on 2026-10-04). `event_map` is sharded by
   event-day and pruned to a 45-day dedup horizon; identity older than that lives in the
   frozen day partitions. Every source with a time-range query reached the target
   (2023-07-06) in July 2026 except ISC, whose walk is paused; a backfilled row is the
@@ -224,8 +225,7 @@ as a fallback). It runs two independent jobs; either one failing turns the run r
 - **`health` (the feed):** reads the live Pages `v1/manifest.json` and `v1/status.json` and
   fails when the manifest is older than its `stale_after_seconds` contract or a systemic
   share of providers is degraded. It opens (and on recovery closes) the
-  `[health] feed unhealthy` issue. Its last step logs the repository's size and warns above
-  6 GB (5.48 GB on 2026-10-04), without turning the run red.
+  `[health] feed unhealthy` issue.
 - **`alerts` (The Shelter's alert pipeline):** runs
   [`scripts/alerts-watchdog.mjs`](scripts/alerts-watchdog.mjs) (dependency-free Node 22)
   against the alerts-gateway's public `https://data.theshelter.app/alerts/status.json`. It

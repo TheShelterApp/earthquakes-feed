@@ -169,6 +169,10 @@ open, reachable source appears.
   2026-10-01 for its first era, ComCat 2022-07-01 → 2023-07-06) writes
   immutable `history-YYYY` Release assets only, and the `data` branch gains just `knowledge/index/history.json`
   ([APIs.md](APIs.md#deep-history-before-2023-07-06)).
+- **Saturated days:** a backfill day whose one-day window still filled a source's page cap
+  (`saturatedDays`) is asked again in sub-day windows by the manual `remediate` workflow and
+  published as an additive, immutable day edition in a `remediation-YYYY` Release; the
+  archived day is never rewritten ([APIs.md](APIs.md#saturated-days)).
 - **Earliest solutions:** `first-solutions` collects the version histories that ComCat,
   GeoNet, INGV and several SeisComP nodes keep (every solution they still hold, with its
   publication time) into a side index of Release assets, one request per second per

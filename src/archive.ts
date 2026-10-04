@@ -3,17 +3,48 @@ import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { REPO, dataPaths } from './config.js';
-import { gh, ghRetry, ghRetryNet, sleepMs, withinShrinkTolerance } from './gh.js';
-import { archiveLogFiles, ghReleaseIo, loadLogArchives, saveLogArchives } from './log-archive.js';
+import { ghRetry, withinShrinkTolerance } from './gh.js';
+import { type ReleaseIo, archiveLogFiles, ghReleaseIo, loadLogArchives, saveLogArchives } from './log-archive.js';
 import { loadInventory, saveInventory } from './partitions.js';
 import { isoFromMs } from './util.js';
 
 const DAY = 86_400_000;
-const HOT_DAYS = Number(process.env.ARCHIVE_HOT_DAYS ?? 120);
-/** Cap months per run so a run stays short and doesn't hog the shared writer group. */
-const MAX_MONTHS = Number(process.env.ARCHIVE_MAX_MONTHS ?? 12);
-const DRY_RUN = process.env.ARCHIVE_DRY_RUN === '1';
+
+export interface ArchiveOptions {
+  /** Months whose every day is older than this many days are cold (default 120). */
+  hotDays: number;
+  /** Cap months per run so a run stays short and doesn't hog the shared writer group (default 12). */
+  maxMonths: number;
+  /** Plan only: nothing is uploaded, indexed or removed (ARCHIVE_DRY_RUN=1). */
+  dryRun: boolean;
+  /** ARCHIVE_ALLOW_SHRINK=1: a re-roll may publish fewer events (a retracted source). */
+  allowShrink: boolean;
+  /** Where archive-blocked.txt goes (the workspace root, never the data checkout). */
+  markerDir: string;
+}
+
+const optionsFromEnv = (): ArchiveOptions => ({
+  hotDays: Number(process.env.ARCHIVE_HOT_DAYS ?? 120),
+  maxMonths: Number(process.env.ARCHIVE_MAX_MONTHS ?? 12),
+  dryRun: process.env.ARCHIVE_DRY_RUN === '1',
+  allowShrink: process.env.ARCHIVE_ALLOW_SHRINK === '1',
+  markerDir: process.cwd(),
+});
+
+/** The Release operations of the archive passes: the run-log pass's (never replacing) plus the event pass's
+ *  replacing upload (`--clobber`: a re-roll replaces the month's asset). gh in production, a stub in tests. */
+export interface ArchiveIo extends ReleaseIo {
+  replaceAsset(tag: string, file: string): void;
+}
+
+export const ghArchiveIo: ArchiveIo = {
+  ...ghReleaseIo,
+  replaceAsset(tag, file) {
+    ghRetry(['release', 'upload', tag, file, '-R', REPO, '--clobber']);
+  },
+};
 
 interface ArchiveEntry {
   period: string;
@@ -41,25 +72,6 @@ interface Archives {
 
 const dayKey = (ms: number): string => isoFromMs(ms).slice(0, 10);
 const sha256File = (f: string): string => createHash('sha256').update(readFileSync(f)).digest('hex');
-
-/** Ensure a release tag exists — idempotent under create races / eventual consistency. */
-function ensureRelease(tag: string, notes: string): void {
-  try {
-    gh(['release', 'view', tag, '-R', REPO]); // bare: "not created yet" is the normal path
-    return;
-  } catch {
-    /* not visible yet — create below */
-  }
-  try {
-    // Retried: this runs once per month (up to 12/run), and a network blip on create used to
-    // abort the whole archive run. Not-found is excluded — nothing to wait for on a create.
-    ghRetryNet(['release', 'create', tag, '-R', REPO, '--target', 'main', '--title', tag, '--notes', notes]);
-  } catch {
-    // Lost a create race or it materialized post-consistency; tolerate iff it now exists.
-    sleepMs(3_000);
-    ghRetryNet(['release', 'view', tag, '-R', REPO]); // rethrows if genuinely absent
-  }
-}
 
 const HAS_ZSTD = (() => {
   try {
@@ -161,12 +173,12 @@ function observationMonths(obsDir: string): Map<string, { files: string[]; days:
 }
 
 /** Roll fully-cold ingest-months of the observation log into Release tarballs, then prune. */
-function archiveLog(root: string, cutoff: string, archives: Archives, staging: string): number {
+function archiveLog(root: string, cutoff: string, archives: Archives, staging: string, io: ArchiveIo, opts: ArchiveOptions): number {
   const obsDir = dataPaths(root).observationsDir;
   const done = new Set((archives.log_list ?? []).map((a) => a.period));
   let n = 0;
   for (const [month, { files, days, monthDir }] of [...observationMonths(obsDir).entries()].sort()) {
-    if (n >= MAX_MONTHS || done.has(month) || days.some((d) => d >= cutoff)) continue;
+    if (n >= opts.maxMonths || done.has(month) || days.some((d) => d >= cutoff)) continue;
     const memberDir = join(staging, `obs-${month}`);
     mkdirSync(memberDir, { recursive: true });
     for (const f of files) cpSync(f, join(memberDir, f.split('/').slice(-3).join('_'))); // YYYY_MM_DD_HH.ndjson? use DD_HH
@@ -175,41 +187,52 @@ function archiveLog(root: string, cutoff: string, archives: Archives, staging: s
     const tag = `archive-${month}`;
     const bytes = statSync(tarPath).size;
     const sha256 = sha256File(tarPath);
-    if (!DRY_RUN) {
-      ensureRelease(tag, `Archive for ${month}.`);
-      ghRetry(['release', 'upload', tag, tarPath, '-R', REPO, '--clobber']);
+    if (!opts.dryRun) {
+      io.ensureRelease(tag, `Archive for ${month}.`);
+      io.replaceAsset(tag, tarPath);
       const verify = join(staging, `verify-${asset}`);
-      ghRetry(['release', 'download', tag, '-R', REPO, '-p', asset, '-O', verify, '--clobber']);
+      io.download(tag, asset, verify);
       if (sha256File(verify) !== sha256) throw new Error(`log archive verify failed for ${month}`);
     }
     // Same as the event pass: indexing + pruning the log month are the mutating half, so a
     // DRY_RUN preview must not do them (it was deleting the observation hours it only previewed).
-    if (!DRY_RUN) {
+    if (!opts.dryRun) {
       (archives.log_list ??= []).push({ period: month, tag, asset, bytes, sha256, files: files.length });
       rmSync(monthDir, { recursive: true, force: true });
     }
     n++;
-    console.log(`archive-log: ${month} -> ${asset} (${(bytes / 1e6).toFixed(2)} MB, ${files.length} hours)${DRY_RUN ? ' [dry-run]' : ''}`);
+    console.log(`archive-log: ${month} -> ${asset} (${(bytes / 1e6).toFixed(2)} MB, ${files.length} hours)${opts.dryRun ? ' [dry-run]' : ''}`);
   }
   return n;
 }
 
-function main(): void {
-  const root = dataPaths().root;
-  const nowMs = Date.now();
-  const cutoff = dayKey(nowMs - HOT_DAYS * DAY);
+export interface ArchiveResult {
+  archived: string[];
+  logArchived: number;
+  runLogs: number;
+  blocked: string[];
+}
+
+/**
+ * The archive run (archive.yml): cold event months, cold observation-log months, finished run-log months. Every
+ * Release call goes through `io`, so the decisions (which month, verify before index and prune, the shrink guard, dry
+ * run) are tested with a stub (tests/archive.test.ts).
+ */
+export function runArchive(root: string, nowMs: number, io: ArchiveIo, opts: ArchiveOptions): ArchiveResult {
+  const cutoff = dayKey(nowMs - opts.hotDays * DAY);
   const months = eventMonths(dataPaths(root).eventsDir);
   const archives = loadArchives(root);
   const inv = loadInventory(root);
   const shards = shardDays(root);
   const staging = mkdtempSync(join(tmpdir(), 'efd-archive-'));
   let archived = 0;
+  const archivedMonths: string[] = [];
   const blocked: string[] = [];
 
   try {
     for (const [month, { days, files }] of [...months.entries()].sort()) {
-      if (archived >= MAX_MONTHS) {
-        console.log(`archive: reached per-run cap (${MAX_MONTHS}); remaining months roll next run`);
+      if (archived >= opts.maxMonths) {
+        console.log(`archive: reached per-run cap (${opts.maxMonths}); remaining months roll next run`);
         break;
       }
       // Only fully-cold months (every day older than the hot window).
@@ -237,7 +260,7 @@ function main(): void {
         const old = join(staging, 'prior', entry.asset);
         mkdirSync(join(staging, 'prior'), { recursive: true });
         try {
-          ghRetry(['release', 'download', entry.tag, '-R', REPO, '-p', entry.asset, '-O', old, '--clobber']);
+          io.download(entry.tag, entry.asset, old);
           extractTarball(old, memberDir);
           prior = old;
         } catch (e) {
@@ -281,7 +304,7 @@ function main(): void {
       // (2026-07: 2025-12 45181 -> 29319, 2026-01 41818 -> 26264). A retracted source is the
       // only legitimate shrink, hence the escape hatch. Applies under DRY_RUN too — previewing a
       // re-roll without this check is exactly how the truncation looked safe.
-      if (entry?.count && !withinShrinkTolerance(entry.count, count) && process.env.ARCHIVE_ALLOW_SHRINK !== '1') {
+      if (entry?.count && !withinShrinkTolerance(entry.count, count) && !opts.allowShrink) {
         console.error(
           `::error::refusing to re-roll ${month}: ${entry.count} -> ${count} events (-${entry.count - count}); keeping the published asset + index entry (ARCHIVE_ALLOW_SHRINK=1 overrides if the shrink is real)`,
         );
@@ -295,17 +318,17 @@ function main(): void {
       const tag = `archive-${month}`;
       const url = `https://github.com/${REPO}/releases/download/${tag}/${asset}`;
 
-      if (!DRY_RUN) {
-        ensureRelease(tag, `Archived event partitions for ${month}.`);
+      if (!opts.dryRun) {
+        io.ensureRelease(tag, `Archived event partitions for ${month}.`);
         try {
-          ghRetry(['release', 'upload', tag, tarPath, '-R', REPO, '--clobber']);
+          io.replaceAsset(tag, tarPath);
         } catch (e) {
           // `--clobber` DELETES the asset before uploading, so exhausted retries leave the month
           // with NO asset at all (2026-07-07: events-2026-01.tar.zst missing for 10.7h). Put the
           // copy we downloaded back so the release survives; never mask the original failure.
           if (prior && existsSync(prior)) {
             try {
-              ghRetry(['release', 'upload', tag, prior, '-R', REPO, '--clobber']);
+              io.replaceAsset(tag, prior);
               console.warn(`::warning::archive ${month}: upload failed; restored the prior ${entry!.asset}`);
             } catch (e2) {
               console.error(`::error::archive ${month}: upload failed AND restoring the prior ${entry!.asset} failed: ${String(e2)}`);
@@ -314,7 +337,7 @@ function main(): void {
           throw e;
         }
         const verify = join(staging, `verify-${asset}`);
-        ghRetry(['release', 'download', tag, '-R', REPO, '-p', asset, '-O', verify, '--clobber']);
+        io.download(tag, asset, verify);
         if (sha256File(verify) !== sha256) throw new Error(`archive verify failed for ${month}`);
       }
 
@@ -322,7 +345,7 @@ function main(): void {
       // entry (count/bytes/sha256 of a tarball it never uploaded) and deleted the in-tree days,
       // leaving archives.json — which derive copies verbatim into the published manifest —
       // advertising a checksum no consumer could match.
-      if (!DRY_RUN) {
+      if (!opts.dryRun) {
         const next: ArchiveEntry = { period: month, tag, asset, url, bytes, sha256, count, days: allDays, needs_reroll: false };
         const idx = archives.list.findIndex((a) => a.period === month);
         if (idx >= 0) archives.list[idx] = next;
@@ -334,7 +357,8 @@ function main(): void {
         for (const d of days) delete inv[d];
       }
       archived++;
-      console.log(`archive: ${month} -> ${asset} (${(bytes / 1e6).toFixed(2)} MB, ${count} events)${DRY_RUN ? ' [dry-run]' : ''}`);
+      archivedMonths.push(month);
+      console.log(`archive: ${month} -> ${asset} (${(bytes / 1e6).toFixed(2)} MB, ${count} events)${opts.dryRun ? ' [dry-run]' : ''}`);
     }
 
     // A month left stuck (unavailable prior asset, or a refused shrink) keeps needs_reroll and
@@ -345,17 +369,17 @@ function main(): void {
     // commit land, and let a trailing `if: always()` step turn the job red. Workspace root, never
     // .data — a marker under .data would get committed to the data branch.
     // Second pass: roll the observation log's cold ingest-months to Releases too.
-    const logArchived = archiveLog(root, cutoff, archives, staging);
+    const logArchived = archiveLog(root, cutoff, archives, staging, io, opts);
 
     // Third pass (LIVE-2, src/log-archive.ts): the finished months' run logs (status/history, changes/) become
     // immutable gzip assets of `logs-YYYY-MM`, verified before the tree copy goes; only the current month stays.
     const logIndex = loadLogArchives(root);
-    const runLogs = archiveLogFiles(root, logIndex, nowMs, ghReleaseIo, join(staging, 'run-logs'), { dryRun: DRY_RUN });
+    const runLogs = archiveLogFiles(root, logIndex, nowMs, io, join(staging, 'run-logs'), { dryRun: opts.dryRun });
     for (const b of runLogs.blocked) console.error(`::error::log-archive: ${b}`);
     blocked.push(...runLogs.blocked.map((b) => `run log ${b}`));
-    if (!DRY_RUN) saveLogArchives(root, logIndex);
+    if (!opts.dryRun) saveLogArchives(root, logIndex);
 
-    if (blocked.length) writeFileSync(join(process.cwd(), 'archive-blocked.txt'), blocked.join('\n') + '\n');
+    if (blocked.length) writeFileSync(join(opts.markerDir, 'archive-blocked.txt'), blocked.join('\n') + '\n');
 
     saveArchives(root, archives);
     saveInventory(root, inv);
@@ -365,9 +389,10 @@ function main(): void {
         (runLogs.leftoversRemoved.length ? `, ${runLogs.leftoversRemoved.length} leftover(s) removed` : '') +
         (blocked.length ? `, ${blocked.length} blocked` : ''),
     );
+    return { archived: archivedMonths, logArchived, runLogs: runLogs.archived.length, blocked };
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
 }
 
-main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) runArchive(dataPaths().root, Date.now(), ghArchiveIo, optionsFromEnv());

@@ -63,12 +63,6 @@ jobs:
           git add knowledge status status.json .gitignore
           git commit -m "aggregate: seq=$(node -e "process.stdout.write(String(require('./knowledge/index/head.json').seq))") @ $(date -u +%FT%TZ)" \
             || { echo 'no changes'; exit 0; }
-          # Fail-loud push loop: a swallowed rebase conflict here silently loses data (H3).
-          for i in 1 2 3; do
-            git push origin HEAD:data && exit 0
-            git fetch origin data
-            # `|| true`: with no rebase started --abort exits 128 and bash -e would kill the step
-            # before the annotation is emitted, losing the reason the push died.
-            git rebase origin/data || { git rebase --abort || true; echo '::error::rebase conflict pushing to data'; exit 1; }
-          done
-          echo '::error::push to data failed after 3 attempts'; exit 1
+          # Fail-loud push loop: a swallowed rebase conflict here silently loses data (H3). Three attempts, rebasing
+          # onto a concurrent writer's commit; a conflict aborts the rebase and fails (tests/push-data.test.ts).
+          bash "$GITHUB_WORKSPACE/scripts/push-data.sh"

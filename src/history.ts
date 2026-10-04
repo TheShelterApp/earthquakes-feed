@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { readArchivedDays, type ArchiveRef } from './archive-io.js';
 import { featureToNode } from './bitemporal.js';
 import { DATA_DIR, dataPaths } from './config.js';
@@ -23,7 +24,7 @@ import {
   rawAssetName,
   releaseAssetUrl,
 } from './history-config.js';
-import { HISTORY_USER_AGENT, fetchRange } from './history-fetch.js';
+import { type FetchRangeOptions, HISTORY_USER_AGENT, fetchRange } from './history-fetch.js';
 import {
   type EditionEntry,
   type HistoryIndex,
@@ -88,7 +89,8 @@ function setOutput(key: string, value: string): void {
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`);
 }
 
-interface Ctx {
+/** One run's state. Exported with adoptOrphans and fetchUnits for tests/history-run.test.ts (FEED-TEST-1). */
+export interface Ctx {
   cfg: HistoryConfig;
   registry: ProviderConfig[];
   byId: Map<string, ProviderConfig>;
@@ -103,6 +105,8 @@ interface Ctx {
   rawCache: Map<string, RawInput>;
   now: () => string;
   report: { fetched: string[]; sealed: string[]; adopted: string[]; failed: string[]; unused: string[]; blocked: string[] };
+  /** Tests only: the HTTP layer and clock of fetchRange (production uses its defaults). */
+  fetchOptions?: Pick<FetchRangeOptions, 'fetcher' | 'sleep' | 'now'>;
 }
 
 const eraOf = (cfg: HistoryConfig, p: Period): HistoryEra => cfg.eras.find((e) => e.id === p.eraId)!;
@@ -189,7 +193,7 @@ function markUnused(ctx: Ctx, tag: string, asset: string, why: string): void {
  * cancelled while it waited for the writer lock) or whose upload broke. A complete, readable one is adopted; any other
  * is listed as unused and its name is never used again.
  */
-function adoptOrphans(ctx: Ctx): void {
+export function adoptOrphans(ctx: Ctx): void {
   const periods = new Map(allPeriods(ctx.cfg).map((p) => [p.key, p]));
   const tags = [...new Set([...periods.keys()].map(historyTag))];
   const known = new Set([...ctx.idx.raw.map((r) => r.asset), ...ctx.idx.editions.map((e) => e.asset), ...ctx.idx.unused.map((u) => u.asset)]);
@@ -275,7 +279,7 @@ function editionEntryOf(tag: string, asset: string, sha256: string, bytes: numbe
   };
 }
 
-async function fetchUnits(ctx: Ctx, maxUnits: number): Promise<void> {
+export async function fetchUnits(ctx: Ctx, maxUnits: number): Promise<void> {
   const paces = new Map<string, { lastEndMs: number }>();
   const failedSources = new Set<string>();
   let done = 0;
@@ -304,6 +308,7 @@ async function fetchUnits(ctx: Ctx, maxUnits: number): Promise<void> {
       timeoutMs: Math.max(ctx.cfg.timeoutMs, p.timeoutMs ?? 0),
       deadlineMs: ctx.deadline,
       pace,
+      ...ctx.fetchOptions,
     });
     done++;
     if (!res.ok && res.budget) {
@@ -495,7 +500,7 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((err) => {
   console.error('history failed:', err);
   process.exit(1);
 });

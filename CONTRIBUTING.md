@@ -57,8 +57,10 @@ For sources with a bespoke JSON/HTML/RSS format (AFAD, CENC, JMA, IPMA, …), ad
 `CustomAdapter` in [`src/custom.ts`](src/custom.ts) and register it in the
 `CUSTOM_ADAPTERS` map (keyed by the provider `id`); set `"adapter": "custom"` in the
 registry. Return `RawObs[]`, stay fail-open, convert the source's timezone to UTC, and
-reuse the shared `getText` helper (browser UA by default; `insecure: true` for gov
-endpoints with a broken TLS chain). **Set `fields: flattenScalars(rawRecord)`** so the
+reuse the shared `getText` helper (browser UA by default, a 45 s deadline over all attempts).
+TLS verification is never turned off: for a host that serves its leaf certificate without
+the intermediate, pin the intermediate in [`providers/tls/`](providers/tls/README.md), name it in
+the entry's `"tlsIntermediates"` and pass `ca: pinnedCa(cfg)`. **Set `fields: flattenScalars(rawRecord)`** so the
 provider's *entire* original vocabulary is preserved (never an allowlist — the feed's
 promise is that no source field is dropped). The existing adapters (AFAD/CENC/TMD/KAGSR/
 NCS/JMA/IPMA/IGP/mexico/egypt/BGS) are the templates.

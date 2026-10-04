@@ -87,13 +87,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: npx --no-install tsx src/history.ts
       - if: steps.walk.outputs.changed == 'true' && !inputs.dry_run
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: history-index
           path: history-out/history.json
           retention-days: 3
       - if: inputs.dry_run && steps.gate.outputs.on == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: history-dry-run
           path: history-out/
@@ -127,7 +127,7 @@ jobs:
           sparse-checkout: |
             knowledge/index/history.json
           sparse-checkout-cone-mode: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: history-index
           path: history-out

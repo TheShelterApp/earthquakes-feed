@@ -486,6 +486,7 @@ agency's report:
 | `QUI` | `igepn` | 2026-10-01 |
 | `UNA` | `ovsicori` | 2026-10-01 |
 | `UNM` | `mexico` | 2026-10-01 |
+| `HV`, `PR`, `AK`, `TX`, `NN`, `UU`, `UW`, `OK`, `MB` | ComCat's row of that network (`hv…`, `pr…`, `ak…`, `tx…`, `nn…`, `uu…`, `uw…`, `ok…`, `mb…`) | 2026-10 (FEED-4) |
 
 A code is on the list only where EMSC's copy is the agency's solution up to rounding: at least 90 %
 of the copies equal in time and place a version of the agency's solution the feed saw (or, for
@@ -501,8 +502,14 @@ while EMSC copies the ML, so those copies do not count. Not on the list: BMKG (i
 carry another solution), PHIVOLCS and JMA (their lists give the origin to the minute), GFZ,
 ReNaSS, ETHZ, NOA, IMO (too many copies differ from every version the feed saw), GSRAS (not
 KAGSR's solution), CN (the feed's NRCan rows carry no magnitude), the agencies with fewer than 50
-copies (IPMA, IGP, GA, CWA, IPGP's observatories, BGS, USP, KNMI, AEC), and the US networks EMSC
-names (NEIC, PR, HV, TX, …), which reach the feed only through ComCat.
+copies (IPMA, IGP, GA, CWA, IPGP's observatories, BGS, USP, KNMI, AEC), and NEIC (ComCat's `us`
+solutions). The US networks the feed reads only through ComCat count against ComCat's row whose own
+id carries the network's prefix (EMSC's `20261003_0000049`, `auth: "HV"`, is ComCat's `hv75048812`
+to EMSC's rounding); ComCat's row of another network for the same quake (`us…`) is another solution
+and does not count. Their copies equal the network's ComCat row in time and place in 99–100 % of the
+versions the feed saw and in magnitude in 96–100 % (OK and MB had 35 and 11 copies, every one of
+them the network's row); in the dense Kilauea cell the HV copies stood beside ComCat's event 10
+times in the 11 days to 2026-10-04.
 
 This matters where many small quakes fall into one cell (the Granada basin, The Geysers, Sındırgı,
 the Milford Sound and Puntarenas swarms): there the feed joins two reports only on a shared id,

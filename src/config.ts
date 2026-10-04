@@ -231,6 +231,38 @@ export const EMSC_AUTHORED_COPIES: ReadonlyMap<string, string> = new Map([
   ['UNA', 'ovsicori'],
   ['UNM', 'mexico'],
 ]);
+/** EMSC `auth` codes of the US networks the feed reads only through ComCat (FEED-4), each with that network's ComCat id
+ *  prefix: an EMSC row with one of these codes and the same solution (Resolver.sameSolution) as ComCat's row whose own
+ *  id has the prefix shares that row's identity, as an EMSC_AUTHORED_COPIES copy does with its agency's row
+ *  (Resolver.authoredCopy). EMSC re-publishes the network's origin rounded: 2026-10-03, EMSC 20261003_0000049 (auth HV)
+ *  is 04:01:12.66Z, 19.4118 / -155.2803, depth -0.5, ml 2.0, and ComCat hv75048812 is 04:01:12.66Z,
+ *  19.4118328 / -155.2803347, depth -0.54, ml 2.04; in the dense Kilauea cell the two stood as two events, because a
+ *  location join there needs a shared id. ComCat's row of another network (`us…` for an HV quake) is another solution
+ *  and does not count.
+ *
+ *  Checked 2026-10-04 over every version of each row in the observation log (2026-07-05..10-04): EMSC versions with the
+ *  code beside a ComCat row of the network (within 60 s and 50 km), how many equal a version of that row in time
+ *  (≤ 1 s) and place (≤ 1 km), and how many in magnitude too (|ΔM| ≤ 0.1):
+ *  HV 654: 99.8 / 98.6 %. PR 704: 100 / 99.3 %. AK 604: 99.3 / 98.8 %. TX 533: 99.1 / 95.7 %. NN 117: 100 / 100 %.
+ *  UU 101: 100 / 98.0 %. UW 74: 100 / 98.6 %. OK 35: 100 / 97.1 %. MB 11: 100 / 100 % (OK and MB below the 50 copies
+ *  the codes above were held to, kept because every copy is the network's ComCat row).
+ *  No copy is within sameSolution of two distinct ComCat events except TX's: 20 versions match two TexNet ids that are
+ *  one solution published twice (tx2026nbcmeq / tx2026nbcmvr, 22 ms and 1 km apart, both M2.3), which sameSolution
+ *  already treats as one. In the event map's live events of 2026-09-24..10-04 the copies stood beside their ComCat row
+ *  as a separate event 10 times for HV and twice for TX (all in dense cells), and joined it everywhere else.
+ *  Not added: NEIC (`us`, 2,076 versions: 99.9 / 93.0 %, one separate event in those 11 days), AV, SE, NM (fewer than
+ *  30 versions each). */
+export const EMSC_COMCAT_NETWORK_COPIES: ReadonlyMap<string, string> = new Map([
+  ['AK', 'ak'],
+  ['HV', 'hv'],
+  ['MB', 'mb'],
+  ['NN', 'nn'],
+  ['OK', 'ok'],
+  ['PR', 'pr'],
+  ['TX', 'tx'],
+  ['UU', 'uu'],
+  ['UW', 'uw'],
+]);
 /** Rolling-file sources whose ids are watched for disappearing (PF-5b, log only): a row younger than
  *  ABSENCE_WATCH_DAYS that the feed holds and a complete file no longer lists is counted in status `absent`. AEC's
  *  file spans ~14 days, so a younger id that vanishes was most likely deleted upstream; whether to retract on absence

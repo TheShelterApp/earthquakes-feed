@@ -204,6 +204,16 @@ DATA_DIR=.data PUBLIC_DIR=public npm run validate
    own cron fallback. Because GitHub throttles low-activity schedules, an external
    5-minute heartbeat (`workflow_dispatch`) is recommended for tight freshness.
 
+### The heartbeat Worker (`heartbeat/`)
+
+A cron-only Cloudflare Worker that dispatches `aggregate` (every 5 min), `health` (every 15 min),
+`backfill`, `first-solutions` and `history` (hourly) through the Actions API with a fine-grained
+`GH_PAT` (Actions: write). It has no HTTP surface (`workers_dev = false`, `preview_urls = false`).
+**Deploy it only from `main`:** `bash heartbeat/deploy.sh` refuses unless the checkout is exactly
+`origin/main` with no local change under `heartbeat/`, and tags the version with the main commit
+(`wrangler deployments list` lists oldest first; the active version is the last entry). A change
+to the Worker goes through a pull request like any other code and is deployed after the merge.
+
 ## Health watchdogs (`.github/workflows/health.yml`)
 
 The heartbeat Worker dispatches `health.yml` every 15 minutes (plus an hourly GitHub cron

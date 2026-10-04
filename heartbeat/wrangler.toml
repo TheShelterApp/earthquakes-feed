@@ -1,4 +1,6 @@
 name = "earthquakes-feed-heartbeat"
+# Deploy ONLY from main, with `bash heartbeat/deploy.sh` (it refuses any other commit and tags the version with the main
+# commit). Never `wrangler deploy` from a branch: every scheduled workflow of the repository depends on this Worker.
 main = "src/worker.js"
 compatibility_date = "2024-11-01"
 # Cron-only Worker: no workers.dev route and no preview URLs (see src/worker.js fetch). Keep both false so a

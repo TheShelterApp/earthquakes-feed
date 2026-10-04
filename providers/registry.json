@@ -311,7 +311,7 @@
       "attribution": "Thai Meteorological Department (TMD), Earthquake Observation Division — earthquake.tmd.go.th",
       "doi": null,
       "contact": "https://earthquake.tmd.go.th",
-      "notes": "Custom JSON, otime already UTC. Covers Thailand AND Myanmar (Myanmar has no native open feed). The host sends its leaf without the GlobalSign intermediate: pinned in tlsIntermediates (FEED-SEC-1, 2026-10-04; verification was off before). Since 2026-08-18 every row has eventID \"\", so no row passes the adapter."
+      "notes": "Custom JSON, otime already UTC. Covers Thailand AND Myanmar (Myanmar has no native open feed). The host sends its leaf without the GlobalSign intermediate: pinned in tlsIntermediates (FEED-SEC-1, 2026-10-04; verification was off before). Since 2026-08-18 every row has eventID \"\": such a row is named t + the UTC digits of otime (src/custom.ts parseTmd)."
     },
     {
       "id": "kagsr",

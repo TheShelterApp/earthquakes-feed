@@ -204,7 +204,9 @@ for (const g of folded) {
     const merge = after.merges.find((m) => m.loser === rid);
     const how = rid === g.fid ? 'survivor' : merge ? `op:merge (${merge.reason})` : node?.state === 'superseded' ? `superseded by ${node.supersededBy}` : 'joined at first sight';
     for (const k of [...refGroups.get(rid)!].filter((k) => afterGroups.get(g.fid)!.has(k))) {
-      const o = lastLine.get(k)!;
+      // An alias no report line carries (the `usgs:` id an AEC row puts on its event) has no solution of its own.
+      const o = lastLine.get(k);
+      if (!o) continue;
       const d = haversineKm(o.lat, o.lon, n.lat, n.lon);
       const dt = (Date.parse(o.event_time) - n.eventTimeMs) / 1000;
       md.push(`| ${rid} | ${how} | ${k} | ${o.mag ?? ''} ${o.magType ?? ''} | ${o.event_time} | ${o.lat}, ${o.lon} | ${o.depth ?? ''} | ${o.status ?? ''} | ${fmt(d)} km | ${fmt(dt)} s |`);
@@ -226,7 +228,11 @@ for (const s of split) {
   md.push(`### ${s.rid} → ${s.nodes.join(', ')}`);
   md.push('');
   for (const k of refGroups.get(s.rid)!) {
-    const o = lastLine.get(k)!;
+    const o = lastLine.get(k);
+    if (!o) {
+      md.push(`- ${k} → ${after.keyToNode.get(k)}: an alias with no report line of its own`);
+      continue;
+    }
     md.push(`- ${k} → ${after.keyToNode.get(k)}: M${o.mag ?? '?'} ${o.event_time} ${o.lat}, ${o.lon} depth ${o.depth ?? '?'} ${o.status ?? ''}`);
   }
   md.push('');

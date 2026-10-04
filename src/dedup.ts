@@ -524,7 +524,14 @@ export class Resolver {
    *  an AEC row the location-join limits keep apart. A row can sit far from its event's representative once a wider
    *  window joined it there (RéNaSS's M5.34 beside a USGS M6.0, 2026-08-12), and the representative is all the windows
    *  see: without this, RESIF's report of the same RéNaSS solution, M5.24 and 0.76 below the event, minted a second
-   *  event. Measured over the whole log, it keeps 5 groups together that the moderate-event window alone would split. */
+   *  event. Measured over the whole log, it keeps 5 groups together that the moderate-event window alone would split.
+   *  The row may also be the report's own provider's under another id, the re-id sameSolution already calls one event
+   *  (FEED-1 review): the moderate-event window skips an event holding the report's provider, so without this INGV's
+   *  re-id 46561932 of 46085191 (M5.8 south of Fiji, 2026-07-15; one solution, 31 km from the event's USGS
+   *  representative) joined GeoNet's event 45 km away instead, and SSN's second item of its M4.7 of 2026-07-18 (1.4 km
+   *  from the first, which the moderate window had joined to USGS's event 25 km away) minted an event of its own. Not
+   *  for a NEW_ID_PER_REVISION_PROVIDERS provider (NRCan), whose new id is a revision: its rows join as before. Whole log:
+   *  those two and one IPMA re-id join their twin's event, nothing else changes. */
   private findTwinRow(raw: RawObs): string | null {
     if (this.isDense(raw.lat, raw.lon)) return null;
     let best: EventNode | null = null;
@@ -533,7 +540,7 @@ export class Resolver {
       for (const fid of this.geo.get(cell) ?? []) {
         const node = this.eventMap.get(fid);
         if (!node || node.state !== 'live' || this.isDense(node.lat, node.lon)) continue;
-        const twin = node.provenance.find((r) => r.provider !== raw.provider && Resolver.sameSolution(r, raw));
+        const twin = node.provenance.find((r) => (r.provider !== raw.provider || !NEW_ID_PER_REVISION_PROVIDERS.has(r.provider)) && Resolver.sameSolution(r, raw));
         if (!twin) continue;
         if (this.sameProviderDistinct(raw, node)) continue;
         if (Resolver.lifecycleLocationBlocks([raw], raw, node.provenance, node)) continue;
@@ -1002,6 +1009,10 @@ export class Resolver {
     this.alias.delete(key);
     const from = this.withdrawRow(node, idx, ingestTime);
     const to = this.applyIngest(home.node.feedId, raw, ingestTime);
+    // The row's id now resolves to its new event, in this run too: the revision sweep's copy of the same report, which
+    // comes after the live one, must find the row by id (isOlderThanStored, findById), not by space, where a nearer
+    // event could take it and the row would stand in two events.
+    this.alias.set(key, to.node.feedId);
     const reason = `${REHOMED_REASON_PREFIX} EMSC ${raw.providerEventId} (auth ${String(raw.fields['auth'])}) copies ${copied.provider} ${copied.nativeId}, held by ${to.node.feedId}`;
     this.rehomedCopies.push(`emsc:${raw.providerEventId} ${node.feedId} -> ${to.node.feedId} (${copied.provider}:${copied.nativeId})`);
     return { ...to, rehomed: { from, old, reason } };

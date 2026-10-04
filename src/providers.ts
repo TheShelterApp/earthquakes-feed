@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { BACKFILL_FETCH_TIMEOUT_MS, FETCH_LIMIT, FETCH_TIMEOUT_MS, HOT_WINDOW_DAYS, QUERY_LOOKBACK_MS, REGISTRY_PATH } from './config.js';
 import { CUSTOM_ADAPTERS } from './custom.js';
-import { type ParseStats, parseFdsnText, parseGeoJSON } from './fdsn.js';
+import { type ParseStats, isNoData, parseFdsnText, parseGeoJSON } from './fdsn.js';
 import type { ProviderConfig, ProviderStatus, RawObs } from './types.js';
 import { type FetchResult, fetchText, isoFromMs } from './util.js';
 
@@ -77,7 +77,8 @@ async function fetchFdsn(p: ProviderConfig, params: FetchParams, timeoutMs = FET
 async function fetchFdsnAt(p: ProviderConfig, base: string, params: FetchParams, timeoutMs: number, fetcher: Fetcher): Promise<FdsnResult> {
   try {
     const res = await fetcher(buildUrl(p, params, base), timeoutMs);
-    if (res.status === 204 || res.status === 404) {
+    // 204 (or 404 when the query asks nodata=404) is an empty answer; any other 404 falls through to the error below.
+    if (isNoData(p, res.status)) {
       return { obs: [], status: { ok: true, http_status: res.status, latency_ms: res.latencyMs, events_returned: 0 }, overflow: false, rows: 0 };
     }
     if (res.status >= 400) {

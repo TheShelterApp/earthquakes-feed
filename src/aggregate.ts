@@ -11,6 +11,7 @@ import { activeProviders, configMap, loadRegistry, priorityMap } from './provide
 import { byIngestOrder, emptyTally, screen } from './quality.js';
 import { COMCAT_DELETE_REASON, revisionSweep } from './sweep.js';
 import { vanishedIds } from './absence.js';
+import { loadActivity, saveActivity, silentProviders, updateActivity } from './activity.js';
 import { fetchRunInputs, loadSweepCursors, nextCursors, saveSweepCursors, sweepOriginFloorMs, sweepSpecs } from './sweep-cursor.js';
 import type { RawObs } from './types.js';
 import { isoFromMs } from './util.js';
@@ -206,6 +207,14 @@ async function main(): Promise<void> {
     providers[o.provider] = o.status;
     if (!o.status.ok) degraded.push(o.provider);
   }
+  // FEED-3: a source that keeps answering with no rows past its activity budget is silent, listed in `silent` and
+  // counted in `degraded` (src/activity.ts). The first run seeds the index from the status history.
+  const paths = dataPaths(DATA_DIR);
+  const loadedActivity = loadActivity(paths.providerActivity, paths.statusHistoryDir);
+  if (loadedActivity.seeded) console.log(`aggregate: provider activity seeded from the status history (${Object.keys(loadedActivity.index).length} sources)`);
+  const activity = updateActivity(loadedActivity.index, Object.fromEntries(outcomes.map((o) => [o.provider, o.status])), nowMs);
+  const silent = silentProviders(activity, active, nowMs);
+  for (const id of Object.keys(silent)) if (!degraded.includes(id)) degraded.push(id);
   // The sweeps' outcomes and cursors: fail-open like the live fetch, and a sweep that did not
   // complete keeps its cursor, so the next run asks for the same window again. `epoch` is the
   // catch-up epoch (config SWEEP_EPOCH); each sweep's `epoch` is the one its cursor carries.
@@ -239,11 +248,13 @@ async function main(): Promise<void> {
     ...(correction ? { correction } : {}),
     duration_ms: Math.round(Date.now() - nowMs),
     degraded,
+    silent,
     providers,
     sweeps,
   };
   saveEventMap(DATA_DIR, state.eventMap);
   saveMeta(DATA_DIR, state.head, state.watermarks, status);
+  saveActivity(paths.providerActivity, activity);
   saveSweepCursors(DATA_DIR, nextCursors(cursors, sweepRuns));
 
   // Onboard a newly-added source's recent live window [liveDay, now-lookback] into the
@@ -273,6 +284,7 @@ async function main(): Promise<void> {
       (correction?.comcat_id ? ` comcat_id_merged=${correction.comcat_id.merged}` : '') +
       (correction?.nrcan ? ` nrcan_filled=${correction.nrcan.filled} nrcan_chosen=${correction.nrcan.chosen} nrcan_merged=${correction.nrcan.merged}` : '') +
       (degraded.length ? ` degraded=[${degraded.join(',')}]` : '') +
+      (Object.keys(silent).length ? ` silent=[${Object.entries(silent).map(([id, e]) => `${id}:${Math.round(e.silent_hours)}h`).join(',')}]` : '') +
       (sweep.stale ? ` sweep_stale_skipped=${sweep.stale}` : '') +
       ` sweeps_failed=[${sweepsFailed.join(',')}]` +
       (sweepsCatchUp.length ? ` sweeps_catch_up=[${sweepsCatchUp.join(',')}]` : ''),

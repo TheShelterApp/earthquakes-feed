@@ -1,6 +1,15 @@
 import type { Extra, RawObs } from './types.js';
 import { flattenScalars, knownAliasIdsOf, num, parseUtcMs } from './util.js';
 
+/**
+ * An FDSN answer that means "no events match" (FEED-3). The FDSN web-service spec answers 204 by default and 404 only
+ * when the query asks for it with `nodata=404`; any other 404 means the query path itself is gone (a moved or retired
+ * service) and is an error, never a quiet source. Before 2026-10-04 a 404 counted as an empty success everywhere.
+ */
+export function isNoData(p: { params?: Record<string, string> }, status: number): boolean {
+  return status === 204 || (status === 404 && p.params?.['nodata'] === '404');
+}
+
 /** How many records a response held before the parser dropped any (a sweep pages on it). */
 export interface ParseStats {
   rows: number;

@@ -105,7 +105,8 @@ test('enrichStatusV2 is additive: keeps every existing field and adds the v2 sha
   assert.equal(v2.staleAfterSeconds, 1800);
   assert.equal(v2.runId, 'gha:1');
   assert.deepEqual(v2.degradedProviders, ['bmkg']);
-  assert.deepEqual(v2.providers.usgs, { ok: true, http_status: 200, latency_ms: 273, events_returned: 448, observations: 448, lastSuccessAt: generatedMs, lagSeconds: 0, error: null });
+  assert.deepEqual(v2.providers.usgs, { ok: true, http_status: 200, latency_ms: 273, events_returned: 448, observations: 448, lastSuccessAt: generatedMs, silent: false, lagSeconds: 0, error: null });
+  assert.deepEqual(v2.silentProviders, [], 'FEED-3: no silent source in a status without `silent`');
   assert.equal(v2.providers.bmkg.observations, 0);
   assert.equal(v2.providers.bmkg.lagSeconds, 3600);
   assert.deepEqual(v2.providers.bmkg.error, { kind: 'http', message: 'HTTP 503', since: generatedMs - 3600_000 });

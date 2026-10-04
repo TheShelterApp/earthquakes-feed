@@ -221,8 +221,12 @@ as a fallback). It runs two independent jobs; either one failing turns the run r
 
 - **`health` (the feed):** reads the live Pages `v1/manifest.json` and `v1/status.json` and
   fails when the manifest is older than its `stale_after_seconds` contract or a systemic
-  share of providers is degraded. It opens (and on recovery closes) the
-  `[health] feed unhealthy` issue.
+  share of providers is failing (30 %, at least 8). It opens (and on recovery closes) the
+  `[health] feed unhealthy` issue. A **silent** source (it answers, with no rows, for longer
+  than its activity budget: 12 h by default, `activityBudgetHours` in the registry; see
+  [APIs.md](APIs.md#get-v1statusjson)) is not counted as failing: it gets a `::warning::` and
+  the `[health] silent providers` issue, opened when one appears, commented when the set of
+  silent sources changes and closed when none is left. The run does not go red for it.
 - **`alerts` (The Shelter's alert pipeline):** runs
   [`scripts/alerts-watchdog.mjs`](scripts/alerts-watchdog.mjs) (dependency-free Node 22)
   against the alerts-gateway's public `https://data.theshelter.app/alerts/status.json`. It

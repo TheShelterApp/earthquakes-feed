@@ -311,6 +311,7 @@ export function dataPaths(root = DATA_DIR) {
     archivesIndex: join(root, 'knowledge', 'index', 'archives.json'),
     partitionsIndex: join(root, 'knowledge', 'index', 'partitions.json'),
     providerHealth: join(root, 'knowledge', 'index', 'provider_health.json'),
+    providerActivity: join(root, 'knowledge', 'index', 'provider_activity.json'),
     changesCursor: join(root, 'knowledge', 'index', 'changes.json'),
     changesDir: join(root, 'changes'),
     eventsDir: join(root, 'events'),

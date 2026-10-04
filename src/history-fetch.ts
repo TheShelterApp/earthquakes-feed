@@ -1,4 +1,4 @@
-import { type ParseStats, parseFdsnText, parseGeoJSON } from './fdsn.js';
+import { type ParseStats, isNoData, parseFdsnText, parseGeoJSON } from './fdsn.js';
 import type { ProviderConfig, RawObs } from './types.js';
 
 /**
@@ -192,7 +192,7 @@ export async function fetchRange(p: ProviderConfig, startMs: number, endMs: numb
     if (counted) {
       const c = await get(historyQueryUrl(p, ws, we, { limit: o.limit, minMagnitude: o.minMagnitude, count: true }));
       if (c.status == null) return fail(`count ${fdsnTime(ws)}..${fdsnTime(we)}: ${c.error}`);
-      const n = c.status === 200 ? (JSON.parse(c.body) as { count?: unknown }).count : c.status === 204 || c.status === 404 ? 0 : null;
+      const n = c.status === 200 ? (JSON.parse(c.body) as { count?: unknown }).count : isNoData(p, c.status) ? 0 : null;
       if (typeof n !== 'number') return fail(`count ${fdsnTime(ws)}..${fdsnTime(we)}: HTTP ${c.status}`);
       count = n;
       if (count >= o.limit) {
@@ -222,7 +222,7 @@ export async function fetchRange(p: ProviderConfig, startMs: number, endMs: numb
       } catch (e) {
         return fail(`${fdsnTime(ws)}..${fdsnTime(we)}: unreadable answer (${e instanceof Error ? e.message : String(e)})`);
       }
-    } else if (a.status !== 204 && a.status !== 404) {
+    } else if (!isNoData(p, a.status)) {
       // 4xx other than "no data": a query the source refuses (413 / 400 for too many rows on some nodes) splits.
       if (a.status === 413 || a.status === 400) {
         const r = split(`HTTP ${a.status}`);

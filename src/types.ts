@@ -116,6 +116,9 @@ export interface ProviderConfig {
    *  that publishes many events days after their origin (NRCan). Capped at HOT_WINDOW_DAYS: an older row is dropped
    *  at ingest anyway (providers.ts liveLookbackMs). */
   lookbackDays?: number;
+  /** Custom sources whose host serves its leaf certificate without the intermediate: PEM files (paths relative to
+   *  providers/, see providers/tls/README.md) trusted beside Node's root store, verification on (FEED-SEC-1). */
+  tlsIntermediates?: string[];
   refreshSeconds: number;
   license: string;
   attribution: string;

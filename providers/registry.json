@@ -302,12 +302,13 @@
       "queryFormat": "json",
       "base": "https://eq.tmd.go.th/map-events.json",
       "supportsTimeRange": false,
+      "tlsIntermediates": ["tls/globalsign-gcc-r6-alphassl-ca-2025.crt"],
       "refreshSeconds": 300,
       "license": "unknown",
       "attribution": "Thai Meteorological Department (TMD), Earthquake Observation Division — earthquake.tmd.go.th",
       "doi": null,
       "contact": "https://earthquake.tmd.go.th",
-      "notes": "Custom JSON, otime already UTC. Covers Thailand AND Myanmar (Myanmar has no native open feed)."
+      "notes": "Custom JSON, otime already UTC. Covers Thailand AND Myanmar (Myanmar has no native open feed). The host sends its leaf without the GlobalSign intermediate: pinned in tlsIntermediates (FEED-SEC-1, 2026-10-04; verification was off before). Since 2026-08-18 every row has eventID \"\", so no row passes the adapter."
     },
     {
       "id": "kagsr",
@@ -724,6 +725,7 @@
       "queryFormat": "html",
       "base": "https://earthquake.phivolcs.dost.gov.ph/",
       "supportsTimeRange": false,
+      "tlsIntermediates": ["tls/globalsign-rsa-ov-ssl-ca-2018.crt"],
       "refreshSeconds": 600,
       "license": "PHIVOLCS-terms",
       "attribution": "DOST-PHIVOLCS (Philippine Institute of Volcanology and Seismology) — © all rights reserved, attribution requested",

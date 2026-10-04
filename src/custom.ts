@@ -1,6 +1,9 @@
+import { readFileSync } from 'node:fs';
 import { request as httpsRequest } from 'node:https';
+import { dirname, resolve } from 'node:path';
+import { rootCertificates } from 'node:tls';
 import { gunzipSync, strFromU8, unzipSync, unzlibSync } from 'fflate';
-import { QUERY_LOOKBACK_MS } from './config.js';
+import { QUERY_LOOKBACK_MS, REGISTRY_PATH } from './config.js';
 import type { ProviderConfig, RawObs } from './types.js';
 import { flattenScalars, knownAliasIdsOf, num, parseUtcMs } from './util.js';
 
@@ -11,13 +14,32 @@ interface GetOpts {
   timeoutMs?: number;
   retries?: number;
   ua?: string;
-  /** Relax TLS verification for THIS request only — for gov endpoints that serve an
-   *  incomplete certificate chain (e.g. TMD). Scoped, never global. */
-  insecure?: boolean;
+  /** PEM intermediates to trust beside Node's root store, for THIS request only: for a host that serves its leaf
+   *  certificate without the intermediate (TMD, PHIVOLCS; providers/tls/README.md). Verification stays on. */
+  ca?: readonly string[];
+  /** The whole call, every attempt and backoff included (default 45 s): no attempt starts or runs past it. */
+  deadlineMs?: number;
 }
 
-function once(url: string, timeoutMs: number, ua: string, insecure: boolean): Promise<string> {
-  if (!insecure) {
+/** Default bound on one getText call, all attempts included (FEED-SEC-1). */
+export const GET_DEADLINE_MS = 45_000;
+
+/** The registry entry's pinned intermediates (`tlsIntermediates`, paths relative to providers/), read once. */
+const caCache = new Map<string, string[]>();
+export function pinnedCa(cfg: Pick<ProviderConfig, 'id' | 'tlsIntermediates'>, registryPath: string = REGISTRY_PATH): string[] {
+  const files = cfg.tlsIntermediates ?? [];
+  const key = `${registryPath}|${files.join('|')}`;
+  let pems = caCache.get(key);
+  if (!pems) {
+    pems = files.map((f) => readFileSync(resolve(dirname(registryPath), f), 'utf8'));
+    caCache.set(key, pems);
+  }
+  if (!pems.length) throw new Error(`${cfg.id}: no tlsIntermediates in the registry`);
+  return pems;
+}
+
+function once(url: string, timeoutMs: number, ua: string, ca: readonly string[] | undefined): Promise<string> {
+  if (!ca) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     return fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'user-agent': ua, accept: '*/*' } })
@@ -28,16 +50,20 @@ function once(url: string, timeoutMs: number, ua: string, insecure: boolean): Pr
       })
       .finally(() => clearTimeout(timer));
   }
-  return new Promise<string>((resolve, reject) => {
+  return new Promise<string>((resolvePromise, reject) => {
     const u = new URL(url);
+    // Node's roots plus the pinned intermediates: the chain is built leaf → pinned intermediate → root and verified,
+    // and the host name is checked, exactly as for any other request (FEED-SEC-1; before, verification was off).
     const req = httpsRequest(
-      { hostname: u.hostname, port: 443, path: u.pathname + u.search, method: 'GET', headers: { 'user-agent': ua, accept: '*/*' }, rejectUnauthorized: false, timeout: timeoutMs },
+      { hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search, method: 'GET', headers: { 'user-agent': ua, accept: '*/*' }, ca: [...rootCertificates, ...ca], timeout: timeoutMs },
       (res) => {
         // Collect raw bytes — some gov CDNs (e.g. PHIVOLCS) return content-encoding: gzip
         // regardless of Accept-Encoding, so decode by the header rather than assuming utf8.
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('error', (e) => reject(e));
         res.on('end', () => {
+          clearTimeout(deadline);
           const sc = res.statusCode ?? 0;
           if (sc < 200 || sc >= 300) return reject(new Error(`HTTP ${sc}`));
           try {
@@ -45,30 +71,42 @@ function once(url: string, timeoutMs: number, ua: string, insecure: boolean): Pr
             const enc = String(res.headers['content-encoding'] ?? '').toLowerCase();
             if (enc.includes('gzip')) buf = gunzipSync(buf);
             else if (enc.includes('deflate')) buf = unzlibSync(buf);
-            resolve(strFromU8(buf));
+            resolvePromise(strFromU8(buf));
           } catch (e) {
             reject(e instanceof Error ? e : new Error(String(e)));
           }
         });
       },
     );
-    req.on('error', reject);
+    // `timeout` above fires only on an idle socket; a server that trickles bytes would hold the run. This bounds the
+    // whole request, connect to last byte.
+    const deadline = setTimeout(() => req.destroy(new Error(`timeout: no complete answer in ${timeoutMs} ms`)), timeoutMs);
+    req.on('error', (e) => {
+      clearTimeout(deadline);
+      reject(e);
+    });
     req.on('timeout', () => req.destroy(new Error('timeout')));
     req.end();
   });
 }
 
-async function getText(url: string, opts: GetOpts = {}): Promise<string> {
+export async function getText(url: string, opts: GetOpts = {}): Promise<string> {
   // National-agency endpoints commonly UA-gate non-browser clients — default to a browser UA.
-  const { timeoutMs = 10_000, retries = 1, ua = BROWSER_UA, insecure = false } = opts;
+  const { timeoutMs = 10_000, retries = 1, ua = BROWSER_UA, ca, deadlineMs = GET_DEADLINE_MS } = opts;
+  const startedAt = Date.now();
+  const left = (): number => deadlineMs - (Date.now() - startedAt);
   let lastErr: unknown = new Error('no attempt');
   for (let attempt = 0; attempt <= retries; attempt++) {
+    if (left() < 1_000) {
+      lastErr = new Error(`deadline: ${deadlineMs} ms spent after ${attempt} attempt(s); last: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
+      break;
+    }
     try {
-      return await once(url, timeoutMs, ua, insecure);
+      return await once(url, Math.min(timeoutMs, left()), ua, ca);
     } catch (e) {
       lastErr = e;
     }
-    if (attempt < retries) await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+    if (attempt < retries) await new Promise((r) => setTimeout(r, Math.max(0, Math.min(600 * (attempt + 1), left() - 1_000))));
   }
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
@@ -178,22 +216,27 @@ const cenc: CustomAdapter = async (cfg) => {
 
 // --- Thailand + Myanmar: TMD (otime already UTC) ---
 const tmd: CustomAdapter = async (cfg) => {
-  // TMD serves an incomplete TLS chain (missing GlobalSign intermediate) → scoped insecure fetch.
-  const raw = JSON.parse(await getText(cfg.base, { timeoutMs: 15_000, retries: 2, insecure: true })) as { events?: Record<string, unknown>[] };
+  // TMD serves its leaf without the GlobalSign intermediate: the registry pins it (providers/tls), verification on.
+  return parseTmd(JSON.parse(await getText(cfg.base, { timeoutMs: 15_000, retries: 2, ca: pinnedCa(cfg) })), cfg.id);
+};
+
+/** TMD's `map-events.json` (`otime` is UTC). A row without an `eventID` is dropped: since 2026-08-18 TMD sends
+ *  `eventID: ""` on every row, so nothing of TMD reaches the feed (FEED-3 reports it silent). */
+export function parseTmd(raw: unknown, providerId: string): RawObs[] {
   const out: RawObs[] = [];
-  for (const e of raw.events ?? []) {
+  for (const e of ((raw as { events?: Record<string, unknown>[] }).events ?? [])) {
     const t = parseUtcMs(e['otime'] as string);
     const lat = num(e['lat']);
     const lon = num(e['lon']);
     if (t == null || lat == null || lon == null) continue;
     out.push({
-      provider: cfg.id, providerEventId: String(e['eventID'] ?? ''), eventTimeMs: t, providerUpdatedMs: null,
+      provider: providerId, providerEventId: String(e['eventID'] ?? ''), eventTimeMs: t, providerUpdatedMs: null,
       status: null, lat, lon, depth: num(e['depth']), mag: num(e['mag']), magType: null,
       place: (e['region'] as string) ?? null, knownAliasIds: [], fields: flattenScalars(e),
     });
   }
   return out.filter((o) => o.providerEventId);
-};
+}
 
 // --- Russia (Kamchatka/Kurils): KAGSR — non-standard FDSN geojson (UTC), flaky ---
 const kagsr: CustomAdapter = async (cfg, nowMs, window) => {
@@ -851,8 +894,8 @@ export function parsePhivolcs(html: string, providerId: string): RawObs[] {
 }
 
 const phivolcs: CustomAdapter = async (cfg) =>
-  // dost.gov.ph serves an incomplete TLS chain (UNABLE_TO_VERIFY_LEAF_SIGNATURE) — scoped insecure fetch.
-  parsePhivolcs(await getText(cfg.base, { timeoutMs: 20_000, retries: 2, insecure: true }), cfg.id);
+  // dost.gov.ph serves its leaf without the GlobalSign intermediate: the registry pins it (providers/tls), verification on.
+  parsePhivolcs(await getText(cfg.base, { timeoutMs: 20_000, retries: 2, ca: pinnedCa(cfg) }), cfg.id);
 
 // --- Alaska: AEC, the Alaska Earthquake Center (UAF). The JSON behind its public map
 //     (earthquake.alaska.edu → eqMap2 main-config.js): a flat array of `{event:{…}}` rows,

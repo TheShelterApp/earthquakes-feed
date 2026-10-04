@@ -354,6 +354,9 @@ time it named, `attempts[].not_before` in the index), a window that fills the pa
 month that cannot be fetched whole fetched again next run (a source that fails a day of runs turns the run red). ComCat
 is asked for its count first and every window's rows must equal the count. At most `maxUnitsPerRun` source months and
 `maxSecondsPerRun` per hourly run; the collect job runs outside the writer lock and only the index commit takes it.
+The heartbeat Worker dispatches the workflow at `:26` (GitHub delivers this repository's hourly crons only a few times
+a day; the workflow's own `:29` cron is the fallback), and a run does nothing unless `providers/history.json` has
+`enabled: true`.
 
 ## Earliest solutions (side index)
 

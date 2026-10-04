@@ -7,6 +7,10 @@ name: history
 # gains only knowledge/index/history.json, written by the `commit` job below and nothing else.
 # Off unless providers/history.json says `"enabled": true` (then the walk runs hourly, a few source
 # months per run, one request at a time per host).
+# The heartbeat Worker dispatches this workflow hourly at :26 with no inputs (heartbeat/src/worker.js), because GitHub
+# delivers this repository's hourly crons a few times a day (the :29 cron below was not delivered once between
+# 2026-10-01 16:54 and 21:00 UTC); the cron stays as the fallback when the Worker is down. A dispatched run goes through
+# the same gate as a scheduled one: with `enabled` false it stops after the first step.
 on:
   schedule:
     - cron: '29 * * * *'

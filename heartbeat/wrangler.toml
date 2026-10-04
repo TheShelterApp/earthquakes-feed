@@ -1,4 +1,6 @@
 name = "earthquakes-feed-heartbeat"
+# Deploy ONLY from main, with `bash heartbeat/deploy.sh` (it refuses any other commit and tags the version with the main
+# commit). Never `wrangler deploy` from a branch: every scheduled workflow of the repository depends on this Worker.
 main = "src/worker.js"
 compatibility_date = "2024-11-01"
 # Cron-only Worker: no workers.dev route and no preview URLs (see src/worker.js fetch). Keep both false so a
@@ -7,7 +9,8 @@ workers_dev = false
 preview_urls = false
 
 # GitHub throttles/delays low-activity scheduled workflows, so this external tick
-# drives them reliably: aggregate every 5 min, backfill hourly, health every 15 min.
+# drives them reliably: aggregate every 5 min, health every 15 min, and hourly backfill (:41),
+# first-solutions (:48) and history (:26).
 # health's own hourly GitHub cron was delivered ~20x per 48h with 2-4.5h gaps, so a
 # 28-minute Pages outage went entirely unreported (see src/worker.js).
 # ONE per-minute cron (not three): the account is capped at 5 cron triggers on the

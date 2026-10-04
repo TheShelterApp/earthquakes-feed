@@ -242,18 +242,22 @@ export function archiveLogFiles(
 
 /** The production ReleaseIo: gh with the archive pass's retry rules. */
 export const ghReleaseIo: ReleaseIo = {
+  /** Ensure a release tag exists — idempotent under create races / eventual consistency. */
   ensureRelease(tag, notes) {
     try {
-      gh(['release', 'view', tag, '-R', REPO]);
+      gh(['release', 'view', tag, '-R', REPO]); // bare: "not created yet" is the normal path
       return;
     } catch {
-      /* not created yet */
+      /* not visible yet — create below */
     }
     try {
+      // Retried: this runs once per month (up to 12/run), and a network blip on create used to
+      // abort the whole archive run. Not-found is excluded — nothing to wait for on a create.
       ghRetryNet(['release', 'create', tag, '-R', REPO, '--target', 'main', '--title', tag, '--notes', notes]);
     } catch {
+      // Lost a create race or it materialized post-consistency; tolerate iff it now exists.
       sleepMs(3_000);
-      ghRetryNet(['release', 'view', tag, '-R', REPO]);
+      ghRetryNet(['release', 'view', tag, '-R', REPO]); // rethrows if genuinely absent
     }
   },
   assets(tag) {

@@ -1,17 +1,7 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dataPaths } from './config.js';
-import { type BackfillCfg, backfillCfg } from './backfill-cfg.js';
-import {
-  type ProviderCursor,
-  advance,
-  dayStartMs,
-  narrowAfterOverflow,
-  newCursor,
-  nextWindow,
-  recordAnswer,
-  recordFailure,
-  stallLevel,
-} from './backfill-cursor.js';
+import { dayStartMs } from './backfill-cursor.js';
+import { type BackfillCursorFile, applyWindowResult, planJobs, stallReport, windowText } from './backfill-plan.js';
 import { readArchivedDays } from './archive-io.js';
 import { eventDayKey } from './bitemporal.js';
 import { Resolver } from './dedup.js';
@@ -24,16 +14,13 @@ import {
 } from './partitions.js';
 import { activeProviders, fetchProviderWindow, loadRegistry, priorityMap, configMap } from './providers.js';
 import { byIngestOrder, emptyTally, screen } from './quality.js';
-import type { EventNode, Head, ProviderConfig, RawObs } from './types.js';
+import type { EventNode, Head, RawObs } from './types.js';
 import { isoFromMs } from './util.js';
 
 const DAY = 86_400_000;
 const BACKFILL_TARGET_YEARS = Number(process.env.BACKFILL_TARGET_YEARS ?? 3);
 
-interface Cursor {
-  targetStart: string;
-  providers: Record<string, ProviderCursor>;
-}
+type Cursor = BackfillCursorFile;
 
 /** Oldest UTC day owned by the live pipeline (has an event_map shard). Backfill fills
  *  strictly before this, so it never collides with aggregate/derive rewrites. */
@@ -77,32 +64,17 @@ async function main(): Promise<void> {
   const dispatchEnd = process.env.BACKFILL_ENDTIME ? Date.parse(process.env.BACKFILL_ENDTIME) : null;
   const onlyProviders = process.env.BACKFILL_PROVIDERS ? new Set(process.env.BACKFILL_PROVIDERS.split(',')) : null;
 
-  // 1) Decide each provider's window for this run.
-  interface Job {
-    p: ProviderConfig;
-    cfg: BackfillCfg;
-    cur: ProviderCursor | null;
-    startMs: number;
-    endMs: number;
-  }
-  // Dispatch is a one-off fill of an explicit range — it must NOT move the auto-cursor,
-  // or it leaves a gap (the auto-walk would skip the range between it and the live edge).
+  // 1) Decide each provider's window for this run (backfill-plan.ts planJobs). Dispatch is a one-off fill of an
+  // explicit range — it must NOT move the auto-cursor, or it leaves a gap (the auto-walk would skip the range between
+  // it and the live edge).
   const isDispatch = dispatchStart != null && dispatchEnd != null;
-  const jobs: Job[] = [];
-  for (const p of providers) {
-    if (onlyProviders && !onlyProviders.has(p.id)) continue;
-    const cfg = backfillCfg(p);
-    if (!cfg) continue;
-    if (isDispatch) {
-      jobs.push({ p, cfg, cur: null, startMs: dispatchStart, endMs: dispatchEnd });
-      continue;
-    }
-    const cur = (cursor.providers[p.id] ??= newCursor(liveDay, cfg));
-    if (cur.done) continue;
-    const win = nextWindow(cur, cfg, targetMs, liveDayMs);
-    if (!win) continue;
-    jobs.push({ p, cfg, cur, ...win });
-  }
+  const jobs = planJobs(providers, cursor, {
+    liveDay,
+    liveDayMs,
+    targetMs,
+    dispatch: isDispatch ? { startMs: dispatchStart, endMs: dispatchEnd } : null,
+    only: onlyProviders,
+  });
 
   if (!jobs.length) {
     writeFileSync(dataPaths(root).backfillCursor, JSON.stringify(cursor, null, 2) + '\n');
@@ -178,44 +150,35 @@ async function main(): Promise<void> {
   let failedCount = 0;
   // What must turn this run red after its commit (the marker below), besides an unreadable archive.
   const blockers: string[] = [];
-  const windowText = (j: Job): string => `${eventDayKey(j.startMs)}..${eventDayKey(j.endMs)} (${Math.round((j.endMs - j.startMs) / DAY)} d)`;
   for (let i = 0; i < jobs.length; i++) {
     const j = jobs[i]!;
     const res = results[i]!;
-    const cur = j.cur;
-    if (cur) cur.lastRun = ingestTime;
-    // Overflow WITH room to narrow: retry a smaller window next run, ingest nothing
-    // (avoid partial-window gaps). At windowDays<=1 we can't narrow further — fall through.
-    if (res.overflow && (!cur || cur.windowDays > 1)) {
-      if (cur) narrowAfterOverflow(cur);
-      // A dispatched range is asked for once: an overflow there fills nothing, which must not pass as done.
-      else blockers.push(`backfill: dispatched window ${windowText(j)} of ${j.p.id} filled the page cap and was not ingested; dispatch narrower ranges`);
+    // The cursor transitions (backfill-plan.ts applyWindowResult): overflow with room to narrow → retry a smaller
+    // window next run, ingest nothing (no partial-window gaps; at windowDays<=1 it can't narrow, so it falls through
+    // as saturated); a failure counts and halves; an answer advances and adapts the window — unless the window holds a
+    // day we must leave unwritten below, when advancing would walk the cursor past it for good (the 2026-07 truncation
+    // failure mode): the provider then retries the identical window once the Releases are reachable.
+    const { verdict, blocker } = applyWindowResult(j, res, { ingestTime, targetMs, untouchable: windowHasUntouchable(j.startMs, j.endMs) });
+    if (blocker) blockers.push(blocker);
+    if (verdict.kind === 'narrowed') {
       overflowCount++;
       continue;
     }
-    if (!res.status.ok) {
+    if (verdict.kind === 'failed') {
       failedCount++;
-      const error = res.status.error ?? `HTTP ${res.status.http_status ?? '?'}`;
+      const cur = j.cur;
       if (cur) {
-        recordFailure(cur, error, ingestTime);
         console.log(
-          `backfill: ${j.p.id} window ${windowText(j)} failed${res.status.latency_ms != null ? ` after ${res.status.latency_ms} ms` : ''}: ${error} — ` +
+          `backfill: ${j.p.id} window ${windowText(j)} failed${res.status.latency_ms != null ? ` after ${res.status.latency_ms} ms` : ''}: ${verdict.error} — ` +
             `${cur.failures} consecutive failure(s) since ${cur.failingSince}; next window ${cur.windowDays} d`,
         );
-      } else {
-        blockers.push(`backfill: dispatched window ${windowText(j)} of ${j.p.id} failed: ${error}`);
       }
       continue;
     }
-    // Saturated single day (overflow even at a 1-day window): this one day is denser than the
-    // provider's page cap. Never spin — capture the capped rows we got (partial), record the
-    // day for later sub-day remediation, and advance past it below.
-    const saturated = res.overflow;
-    if (saturated && cur) {
-      (cur.saturatedDays ??= []).push(eventDayKey(j.startMs));
-      if (cur.saturatedDays.length > 100) cur.saturatedDays.shift();
-      saturatedCount++;
-    }
+    // Saturated single day (overflow even at a 1-day window): this one day is denser than the provider's page cap.
+    // Never spin — the capped rows are captured (partial), the day is recorded for sub-day remediation, and the
+    // cursor advanced past it.
+    if (verdict.saturated && j.cur) saturatedCount++;
     // The same door as the live path: no out-of-range or coordinate-less report enters history.
     const heldBack: RawObs[] = [];
     for (const o of screen(res.obs, screened, undefined, heldBack)) {
@@ -224,28 +187,11 @@ async function main(): Promise<void> {
       if (day < liveDay) raws.push(o);
     }
     for (const o of heldBack) if (eventDayKey(o.eventTimeMs) < liveDay) zeroed.push(o);
-    if (cur) {
-      recordAnswer(cur, res.obs.length);
-      // Window contains a day we must leave unwritten below: advancing would walk the cursor past
-      // it and it would never be revisited — a silent skip of history, the same failure mode as
-      // the 2026-07 truncation. Freeze this provider (window size included) so the identical
-      // window is retried once Releases are reachable; every other provider keeps advancing.
-      // Advance + adapt the window: reset after a saturated day, else grow when sparse.
-      if (!windowHasUntouchable(j.startMs, j.endMs)) advance(cur, j.cfg, j.startMs, res.obs.length, saturated, targetMs);
-    }
   }
   // A walk that keeps failing is reported, never silent (backfill-cursor.ts stallLevel).
-  for (const j of jobs) {
-    const cur = j.cur;
-    if (!cur) continue;
-    const level = stallLevel(cur);
-    if (level === 'ok') continue;
-    const msg =
-      `backfill: ${j.p.id} has failed ${cur.failures} consecutive runs since ${cur.failingSince} (last error: ${cur.lastError}); ` +
-      `its walk stands at ${cur.filledBackTo} with a ${cur.windowDays}-day window. Fix the source or set its registry backfill.enabled to false`;
-    if (level === 'alarm') blockers.push(msg);
-    else console.log(`::warning::${msg}`);
-  }
+  const stalls = stallReport(jobs);
+  for (const w of stalls.warnings) console.log(`::warning::${w}`);
+  blockers.push(...stalls.blockers);
 
   raws.sort(byIngestOrder);
   zeroed.sort(byIngestOrder);

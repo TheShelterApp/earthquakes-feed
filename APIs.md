@@ -620,6 +620,17 @@ ComCat's late publications, ENSN and GA back with older events, late NRCan and G
 (`provider_activity.json`, `live_silent.json`, `correction.json`) or grew (`history.json`, about 3 commits a day) are
 under 0.1 MB a day; the live index and the detail hours of round 15 are Pages-only.
 
+Replays are not exact. Git 2.54's `receive-pack` starts `git maintenance run --auto` in the background after each push,
+and its default geometric strategy rolled packs together beside the script's own roll-ups (now and then all into one)
+at moments that varied from run to run (`fatal: could not find pack …` in the output, about 10 MB a day between
+repeated replays). The figures in this section include those roll-ups. Since the round-17 review `replay.sh` turns that
+maintenance off (`receive.autogc false`, `maintenance.auto false`): no race, repeated replays of an hour agree within
+about 10 %, and the absolute figures follow the roll-up model alone. The day to 2026-10-06 12:57 UTC replays to 130 MB
+in the layout before round 17 and 83 MB in round 17's (36 % less) with a roll-up every 12 pushes, 168 and 99 MB (41 %
+less) with one after every push, and 85.5 and 65.0 MB (24 % less) with the background maintenance; GitHub counted
+83.4 MB for that day, in the layout before round 17. GitHub's own schedule is not known: compare layouts on one model,
+and take the rate from GitHub's `size` (the `health` log).
+
 Round 17 (LANE G) changes what the commits rewrite, never what consumers read, and rewrites no history:
 
 - The status history is written per day (*Run logs*): a commit rewrites a file of at most about 1.3 MB instead of the

@@ -21,6 +21,11 @@ CLIENT=$(cd "$1" && pwd); BR=$2; BASE=$3; SRV=$4; EVERY=${5:-12}
 rm -rf "$SRV"; git init -q --bare "$SRV"; SRV=$(cd "$SRV" && pwd)
 git -C "$SRV" config receive.unpackLimit 1
 git -C "$SRV" config gc.auto 0
+# receive-pack starts `git maintenance run --auto` in the background after each push (Git 2.54: the geometric
+# strategy, now and then all into one), which raced the roll-ups below ("could not find pack") and made repeated
+# replays differ by about 10 MB a day. Off, so the roll-ups are this script's alone (round 17 review).
+git -C "$SRV" config receive.autogc false
+git -C "$SRV" config maintenance.auto false
 git -C "$SRV" config repack.writeBitmaps false
 git -C "$SRV" config pack.writeBitmaps false
 git -C "$SRV" fetch -q "$CLIENT" "$BASE:refs/heads/data"
@@ -43,7 +48,7 @@ i=0
 for c in $(git -C "$CLIENT" rev-list --reverse --first-parent "$BASE..$BR"); do
   git -C "$CLIENT" push -q "$SRV" "$c:refs/heads/data" 2>/dev/null
   i=$((i + 1))
-  # A roll-up that races its own pack listing is retried once; a failed one only leaves the packs as they are.
+  # A failed roll-up is retried once; a failed retry only leaves the packs as they are.
   if [ $((i % EVERY)) -eq 0 ]; then git -C "$SRV" repack -dq --geometric=2 || git -C "$SRV" repack -dq --geometric=2 || true; fi
   if [ $((i % 50)) -eq 0 ]; then echo "$i $(($(total) - B0))"; fi
 done

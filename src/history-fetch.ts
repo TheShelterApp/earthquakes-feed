@@ -9,7 +9,10 @@ import type { ProviderConfig, RawObs } from './types.js';
  * whose answer fills the page or times out is split in two. A range that cannot be fetched whole fails as a whole:
  * the caller uploads nothing for it and the next run asks again. A source with a count service (ComCat's
  * `fdsnws/event/1/count`) is asked for the count first: a window over the page is split before it is fetched, and
- * the rows of every window must equal the count the source gave for it.
+ * the rows of every window must equal the count the source gave for it. Two sources have one: ComCat
+ * (`fdsnws/event/1/count`, USGS's extension of FDSN) and EMSC (`fdsnws/event/1/count`, the `counts` resource of its
+ * WADL; it answers `{"count":N}` for `format=json`, HTTP 500 for `format=geojson`). Measured 2026-10-06: none of the
+ * other 15 FDSN services the feed reads answers a count (14 answer 404 or 400; INGV was unreachable from the test host).
  */
 
 export interface HttpAnswer {
@@ -46,14 +49,16 @@ export function parseRetryAfter(v: string | null, nowMs: number): number | null 
   return Number.isFinite(t) ? Math.max(0, t - nowMs) : null;
 }
 
-/** Sources with a count service at the query URL with `/query` replaced by `/count` (USGS's extension of FDSN). */
-export const COUNT_SERVICE_PROVIDERS: ReadonlySet<string> = new Set(['usgs']);
+/** Sources with a count service at the query URL with `/query` replaced by `/count`, asked in the source's own query
+ *  format (ComCat `geojson`, EMSC `json`): both answer `{"count":N}`. */
+export const COUNT_SERVICE_PROVIDERS: ReadonlySet<string> = new Set(['usgs', 'emsc']);
 
 /** FDSN-safe timestamp: no fractional seconds, no trailing Z (the live path's form, providers.ts). */
 const fdsnTime = (ms: number): string => new Date(ms).toISOString().slice(0, 19);
 
 export function historyQueryUrl(p: ProviderConfig, startMs: number, endMs: number, opts: { limit: number; minMagnitude: number | null; count?: boolean }): string {
-  const q = new URLSearchParams({ format: opts.count ? 'geojson' : p.queryFormat });
+  // The count is asked in the query's own format: ComCat's count answers `geojson`, EMSC's `json` (500 for geojson).
+  const q = new URLSearchParams({ format: p.queryFormat });
   if (!opts.count && !p.noLimit) q.set('limit', String(opts.limit));
   q.set('starttime', fdsnTime(startMs));
   // FDSN endtime is inclusive and second-precision: ask to the end second, keep only rows before endMs below.
@@ -192,7 +197,12 @@ export async function fetchRange(p: ProviderConfig, startMs: number, endMs: numb
     if (counted) {
       const c = await get(historyQueryUrl(p, ws, we, { limit: o.limit, minMagnitude: o.minMagnitude, count: true }));
       if (c.status == null) return fail(`count ${fdsnTime(ws)}..${fdsnTime(we)}: ${c.error}`);
-      const n = c.status === 200 ? (JSON.parse(c.body) as { count?: unknown }).count : isNoData(p, c.status) ? 0 : null;
+      let n: unknown = null;
+      try {
+        n = c.status === 200 ? (JSON.parse(c.body) as { count?: unknown }).count : isNoData(p, c.status) ? 0 : null;
+      } catch {
+        return fail(`count ${fdsnTime(ws)}..${fdsnTime(we)}: unreadable answer`);
+      }
       if (typeof n !== 'number') return fail(`count ${fdsnTime(ws)}..${fdsnTime(we)}: HTTP ${c.status}`);
       count = n;
       if (count >= o.limit) {

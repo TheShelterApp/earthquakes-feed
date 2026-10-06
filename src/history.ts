@@ -24,7 +24,7 @@ import {
   rawAssetName,
   releaseAssetUrl,
 } from './history-config.js';
-import { type FetchRangeOptions, HISTORY_USER_AGENT, fetchRange } from './history-fetch.js';
+import { type FetchRangeOptions, type FetchRangeResult, HISTORY_USER_AGENT, fetchRange } from './history-fetch.js';
 import {
   type EditionEntry,
   type HistoryIndex,
@@ -38,10 +38,10 @@ import {
   periodsToSeal,
   rawOf,
 } from './history-index.js';
-import { type AssetInfo, GitHubStore, type HistoryStore, LocalStore } from './history-store.js';
+import { type AssetInfo, DryRunStore, GitHubStore, type HistoryStore, LocalStore } from './history-store.js';
 import { verifyEdition } from './history-verify.js';
 import { loadRegistry } from './providers.js';
-import type { ProviderConfig } from './types.js';
+import type { ProviderConfig, RawObs } from './types.js';
 
 /**
  * Deep history walker (PF-5j; design and safety rules: src/history-config.ts and APIs.md, Deep history).
@@ -54,7 +54,11 @@ import type { ProviderConfig } from './types.js';
  *   HISTORY_OUT          output directory (default history-out): history.json (the new index, written when it
  *                        changed), report.json; the commit job copies history.json to the data branch
  *   HISTORY_DRY_RUN=1    no Release is created and nothing is uploaded: assets go to HISTORY_OUT/releases/<tag>/; a
- *                        later dry run continues from HISTORY_OUT/history.json
+ *                        later dry run continues from HISTORY_OUT/history.json. The published assets the index lists
+ *                        are read from the Releases (read only), so a dry run can build a month's next edition
+ *   HISTORY_ONLY_SOURCES dry runs only: fetch the months of these sources (comma-separated provider ids) and no other;
+ *                        a month is sealed only once every source of its era is there, so such a run seals nothing
+ *                        new unless the others are already fetched
  *   HISTORY_FORCE=1      run although providers/history.json has enabled=false (local dry runs only)
  *   HISTORY_MAX_UNITS    override maxUnitsPerRun
  *
@@ -104,7 +108,9 @@ export interface Ctx {
   assetCache: Map<string, AssetInfo[]>;
   rawCache: Map<string, RawInput>;
   now: () => string;
-  report: { fetched: string[]; sealed: string[]; adopted: string[]; failed: string[]; unused: string[]; blocked: string[] };
+  report: { fetched: string[]; sealed: string[]; adopted: string[]; failed: string[]; unused: string[]; blocked: string[]; empty_after_rows: string[] };
+  /** Dry runs only (HISTORY_ONLY_SOURCES): fetch these sources' months and no other. */
+  onlySources?: ReadonlySet<string>;
   /** Tests only: the HTTP layer and clock of fetchRange (production uses its defaults). */
   fetchOptions?: Pick<FetchRangeOptions, 'fetcher' | 'sleep' | 'now'>;
 }
@@ -123,7 +129,11 @@ const assetNames = (ctx: Ctx, tag: string): Set<string> => new Set(assets(ctx, t
 function uploadVerified(ctx: Ctx, tag: string, file: string, sha256: string): void {
   ctx.store.ensureRelease(tag);
   ctx.store.upload(tag, file);
-  ctx.assetCache.delete(tag);
+  // The run's view of the Release gains the asset it just uploaded (no new listing per upload: the GITHUB_TOKEN's
+  // 1,000 REST requests per hour are shared by every workflow of the repository).
+  const name = file.split('/').pop()!;
+  const cached = ctx.assetCache.get(tag);
+  if (cached) cached.push({ name, size: readFileSync(file).length, state: 'uploaded' });
   const back = join(ctx.work, `verify-${Date.now()}`);
   ctx.store.download(tag, file.split('/').pop()!, back);
   if (sha256File(back) !== sha256) throw new Error(`uploaded ${tag}/${file.split('/').pop()} reads back with another checksum`);
@@ -279,12 +289,56 @@ function editionEntryOf(tag: string, asset: string, sha256: string, bytes: numbe
   };
 }
 
-export async function fetchUnits(ctx: Ctx, maxUnits: number): Promise<void> {
+/** Rows of the newer month the check asks for again: its first, middle and last row (by origin time). */
+const PROBE_ROWS = 3;
+const PROBE_HALF_WINDOW_MS = 3_600_000;
+
+/**
+ * Does the source still answer rows it gave for `newer` (its raw asset `newerRaw`)? Asks a two-hour window around up to
+ * PROBE_ROWS of those rows, one at a time, and stops at the first window that answers a row. An error, or no row in any
+ * window, means the source is not answering as it did (a service answering empty while it is broken, or the newer
+ * month's events gone); a run whose time budget ends during the check says so (`budget`).
+ */
+export async function stillAnswersRows(
+  ctx: Ctx,
+  p: ProviderConfig,
+  newer: Period,
+  newerRaw: RawEntry,
+  options: FetchRangeOptions,
+): Promise<{ ok: true; requests: number } | { ok: false; error: string; requests: number; budget?: boolean }> {
+  let rows: RawObs[];
+  try {
+    rows = [...loadRaw(ctx, newerRaw.tag, newerRaw.asset, newerRaw.sha256).rows].sort((a, b) => a.eventTimeMs - b.eventTimeMs);
+  } catch (e) {
+    return { ok: false, error: `could not read ${newerRaw.asset} to check it (${e instanceof Error ? e.message : String(e)})`, requests: 0 };
+  }
+  const picks = [...new Set([0, Math.floor((rows.length - 1) / 2), rows.length - 1])].slice(0, PROBE_ROWS).map((i) => rows[i]!);
+  let requests = 0;
+  for (const r of picks) {
+    const ws = Math.max(newer.startMs, r.eventTimeMs - PROBE_HALF_WINDOW_MS);
+    const we = Math.min(newer.endMs, r.eventTimeMs + PROBE_HALF_WINDOW_MS);
+    const res = await fetchRange(p, ws, we, options);
+    requests += res.requests;
+    if (!res.ok) return { ok: false, error: `checking ${newer.key} again: ${res.error}`, requests, ...(res.budget ? { budget: true } : {}) };
+    if (res.rows.length > 0) return { ok: true, requests };
+  }
+  return {
+    ok: false,
+    error: `${newer.key} answers none either in ${picks.length} two-hour window(s) around rows it answered on ${newerRaw.fetched_at} (a service answering empty; asked again next run)`,
+    requests,
+  };
+}
+
+/** Fetch up to `maxUnits` pending source months. `onMonthComplete` runs when a fetch completes a month (every source of
+ *  its era fetched): the walk seals it there and then, so editions follow the fetches within the run instead of waiting
+ *  for a run whose fetching ends before its time budget does. */
+export async function fetchUnits(ctx: Ctx, maxUnits: number, onMonthComplete?: (p: Period) => void): Promise<void> {
   const paces = new Map<string, { lastEndMs: number }>();
   const failedSources = new Set<string>();
   let done = 0;
   for (const u of pendingUnits(ctx.cfg, ctx.idx)) {
     if (done >= maxUnits || Date.now() > ctx.deadline) break;
+    if (ctx.onlySources && !ctx.onlySources.has(u.source)) continue;
     if (failedSources.has(u.source)) continue;
     const waitUntil = Object.entries(ctx.idx.attempts)
       .filter(([k, v]) => k.startsWith(`${u.source}:`) && v.not_before)
@@ -301,16 +355,37 @@ export async function fetchUnits(ctx: Ctx, maxUnits: number): Promise<void> {
     const fetchedAt = ctx.now();
     const host = new URL(p.base).host;
     const pace = paces.get(host) ?? paces.set(host, { lastEndMs: -Infinity }).get(host)!;
-    const res = await fetchRange(p, u.period.startMs, u.period.endMs, {
+    const fetchOptions = (minMagnitude: number | null): FetchRangeOptions => ({
       limit: ctx.cfg.pageLimits[u.source] ?? FETCH_LIMIT_DEFAULT,
-      minMagnitude: fetchFloorOf(era),
+      minMagnitude,
       spacingMs: ctx.cfg.requestSpacingMs,
       timeoutMs: Math.max(ctx.cfg.timeoutMs, p.timeoutMs ?? 0),
       deadlineMs: ctx.deadline,
       pace,
       ...ctx.fetchOptions,
     });
+    let res: FetchRangeResult = await fetchRange(p, u.period.startMs, u.period.endMs, fetchOptions(fetchFloorOf(era)));
     done++;
+    // An empty month right before one with rows is either where the source's catalogue starts (going back) or a
+    // service that answers empty while it is broken (NOA's registered node answered 204 to every query for ten days,
+    // PF-5j-NOA). A raw asset is immutable and a sealed month is never fetched again, so the empty answer is kept only
+    // once the source still answers rows it gave for the newer month; otherwise the month fails like any other failure
+    // and is asked again next run (round 15 review).
+    let emptyAfter: { newer: string; rows: number } | null = null;
+    if (res.ok && res.rows.length === 0) {
+      const newer = allPeriods(ctx.cfg).find((q) => q.startMs === u.period.endMs);
+      const newerRaw = newer ? rawOf(ctx.idx, u.source, newer.key) : undefined;
+      if (newer && newerRaw && newerRaw.rows > 0) {
+        const check = await stillAnswersRows(ctx, p, newer, newerRaw, fetchOptions(newerRaw.fetch_min_magnitude));
+        const requests = res.requests + check.requests;
+        if (check.ok) {
+          emptyAfter = { newer: newer.key, rows: newerRaw.rows };
+          res = { ...res, requests };
+        } else {
+          res = { ok: false, error: `${key} answered no rows: ${check.error}`, windows: res.windows, requests, ...(check.budget ? { budget: true } : {}) };
+        }
+      }
+    }
     if (!res.ok && res.budget) {
       console.log(`history: ${key} not finished within the run's ${ctx.cfg.maxSecondsPerRun} s; asked again next run`);
       break;
@@ -360,8 +435,13 @@ export async function fetchUnits(ctx: Ctx, maxUnits: number): Promise<void> {
     delete ctx.idx.attempts[key];
     rmSync(file, { force: true });
     const count = res.providerCount != null ? `, the source's count ${res.providerCount}` : '';
+    if (emptyAfter) {
+      ctx.report.empty_after_rows.push(`${key}: no rows, ${emptyAfter.rows} in ${emptyAfter.newer} (which still answers rows: the source's catalogue starts here)`);
+      console.log(`::warning::history: ${key} answered no rows where ${emptyAfter.newer} has ${emptyAfter.rows}, and ${emptyAfter.newer} still answers rows: the start of the catalogue`);
+    }
     ctx.report.fetched.push(`${tag}/${asset}: ${res.rows.length} rows${count}, ${res.windows.length} window(s), ${res.requests} request(s), ${(bytes / 1e6).toFixed(2)} MB`);
     console.log(`history: ${key} -> ${tag}/${asset} (${res.rows.length} rows${count}, ${res.requests} requests)`);
+    if (onMonthComplete && era.sources.every((s) => rawOf(ctx.idx, s, u.period.key))) onMonthComplete(u.period);
   }
 }
 
@@ -385,7 +465,9 @@ function editionContext(ctx: Ctx, e: EditionEntry, day: string): ContextInput {
   return { label: `${e.tag}/${e.asset}#${day.slice(8, 10)}.ndjson`, day, nodes, sha256: e.sha256 };
 }
 
-function sealPeriods(ctx: Ctx): void {
+/** Build, verify and upload the next edition of every month that is complete and stale, newest first (a month waits
+ *  until its newer neighbour is frozen). Exported for tests/history-run.test.ts. */
+export function sealPeriods(ctx: Ctx): void {
   for (const p of periodsToSeal(ctx.cfg, ctx.idx)) {
     if (Date.now() > ctx.deadline) break;
     const nb = newerNeighbour(ctx.cfg, ctx.idx, p);
@@ -449,13 +531,18 @@ async function main(): Promise<void> {
   const before = existsSync(indexIn) ? readFileSync(indexIn, 'utf8') : null;
   const idx = before ? parseIndex(before) : emptyIndex(cfg.boundary);
   if (idx.boundary !== cfg.boundary) throw new Error(`history.json boundary ${idx.boundary} differs from the config's ${cfg.boundary}`);
+  const onlySources = process.env.HISTORY_ONLY_SOURCES?.trim()
+    ? new Set(process.env.HISTORY_ONLY_SOURCES.split(',').map((x) => x.trim()).filter(Boolean))
+    : undefined;
+  if (onlySources && !dryRun) throw new Error('HISTORY_ONLY_SOURCES is for dry runs only (a production run walks every source of the era)');
+  for (const s of onlySources ?? []) if (!cfg.eras.some((e) => e.sources.includes(s))) throw new Error(`HISTORY_ONLY_SOURCES: ${s} is a source of no era`);
   const work = mkdtempSync(join(tmpdir(), 'efd-history-'));
   const ctx: Ctx = {
     cfg,
     registry,
     byId: new Map(registry.map((p) => [p.id, p])),
     idx,
-    store: dryRun ? new LocalStore(join(out, 'releases')) : new GitHubStore(),
+    store: dryRun ? new DryRunStore(new LocalStore(join(out, 'releases')), new GitHubStore()) : new GitHubStore(),
     dryRun,
     work,
     archives,
@@ -464,14 +551,18 @@ async function main(): Promise<void> {
     assetCache: new Map(),
     rawCache: new Map(),
     now: () => new Date().toISOString(),
-    report: { fetched: [], sealed: [], adopted: [], failed: [], unused: [], blocked: [] },
+    report: { fetched: [], sealed: [], adopted: [], failed: [], unused: [], blocked: [], empty_after_rows: [] },
+    ...(onlySources ? { onlySources } : {}),
   };
   console.log(`history: ${ctx.store.label}; index from ${before ? indexIn : 'scratch'}; ${idx.raw.length} raw assets, ${idx.editions.length} editions`);
   let fatal: unknown = null;
   try {
     adoptOrphans(ctx);
     // An empty value (a blank workflow_dispatch input) means the config's number, never 0.
-    await fetchUnits(ctx, process.env.HISTORY_MAX_UNITS ? Number(process.env.HISTORY_MAX_UNITS) : cfg.maxUnitsPerRun);
+    // Months left complete but unsealed by an earlier run first, then each month as its last source arrives: a run
+    // whose fetching uses the whole time budget (era A's walk) still seals what it completed.
+    sealPeriods(ctx);
+    await fetchUnits(ctx, process.env.HISTORY_MAX_UNITS ? Number(process.env.HISTORY_MAX_UNITS) : cfg.maxUnitsPerRun, () => sealPeriods(ctx));
     sealPeriods(ctx);
   } catch (e) {
     fatal = e;
@@ -489,7 +580,7 @@ async function main(): Promise<void> {
   writeFileSync(join(out, 'report.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(
     `history: fetched=${ctx.report.fetched.length} sealed=${ctx.report.sealed.length} adopted=${ctx.report.adopted.length} failed=${ctx.report.failed.length} ` +
-      `unused=${ctx.report.unused.length} pending_units=${pending} unsealed_months=${unsealed} index_changed=${changed} (${Buffer.byteLength(text)} bytes)`,
+      `unused=${ctx.report.unused.length} empty_after_rows=${ctx.report.empty_after_rows.length} pending_units=${pending} unsealed_months=${unsealed} index_changed=${changed} (${Buffer.byteLength(text)} bytes)`,
   );
   const blocked = [...ctx.report.blocked];
   if (fatal) blocked.unshift(`history: ${fatal instanceof Error ? fatal.message : String(fatal)}`);

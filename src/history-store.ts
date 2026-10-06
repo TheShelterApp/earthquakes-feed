@@ -27,6 +27,12 @@ export interface HistoryStore {
 
 export class GitHubStore implements HistoryStore {
   readonly label = `GitHub Releases of ${REPO}`;
+  /** Releases this store has seen or created, and the asset names of each as it last listed them plus its own uploads
+   *  since: a walk that uploads dozens of assets per run asks the API once per Release instead of before every upload
+   *  (the GITHUB_TOKEN allows 1,000 REST requests per hour per repository, shared by every workflow). `list` itself is
+   *  never cached: callers that check an upload read the Release as it is. */
+  private readonly knownReleases = new Set<string>();
+  private readonly knownNames = new Map<string, Set<string>>();
 
   /** `notesFor` names a new release's notes; the default describes a deep-history year (history-YYYY). */
   constructor(private readonly notesFor?: (tag: string) => string) {}
@@ -40,20 +46,25 @@ export class GitHubStore implements HistoryStore {
       if (/HTTP 404|Not Found/i.test(msg)) return [];
       throw e;
     }
+    this.knownReleases.add(tag);
     // The assets endpoint, paginated: a year of the full walk holds a few hundred assets.
     const out = ghRetryNet(['api', '--paginate', `repos/${REPO}/releases/${id}/assets?per_page=100`, '--jq', '.[] | [.name, .size, .state] | @tsv']);
-    return out
+    const assets = out
       .split('\n')
       .filter(Boolean)
       .map((l) => {
         const [name, size, state] = l.split('\t');
         return { name: name!, size: Number(size), state: state ?? '' };
       });
+    this.knownNames.set(tag, new Set(assets.map((a) => a.name)));
+    return assets;
   }
 
   ensureRelease(tag: string): void {
+    if (this.knownReleases.has(tag)) return;
     try {
       gh(['release', 'view', tag, '-R', REPO, '--json', 'tagName']);
+      this.knownReleases.add(tag);
       return;
     } catch {
       /* not created yet */
@@ -70,12 +81,16 @@ export class GitHubStore implements HistoryStore {
       sleepMs(3_000);
       ghRetryNet(['release', 'view', tag, '-R', REPO, '--json', 'tagName']);
     }
+    this.knownReleases.add(tag);
   }
 
   upload(tag: string, file: string): void {
-    if (this.list(tag).some((a) => a.name === basename(file))) throw new Error(`asset ${tag}/${basename(file)} already exists; history never overwrites an asset`);
-    // No --clobber, ever: a name that appeared meanwhile makes the upload fail instead of replacing it.
+    const names = this.knownNames.get(tag) ?? new Set(this.list(tag).map((a) => a.name));
+    if (names.has(basename(file))) throw new Error(`asset ${tag}/${basename(file)} already exists; history never overwrites an asset`);
+    // No --clobber, ever: a name that appeared meanwhile (another writer, after this store listed the Release) makes the
+    // upload fail instead of replacing it.
     ghRetry(['release', 'upload', tag, file, '-R', REPO]);
+    (this.knownNames.get(tag) ?? this.knownNames.set(tag, names).get(tag)!).add(basename(file));
   }
 
   download(tag: string, asset: string, dest: string): void {
@@ -113,5 +128,43 @@ export class LocalStore implements HistoryStore {
     const src = join(this.dir, tag, asset);
     if (!existsSync(src)) throw new Error(`no asset ${tag}/${asset} in ${this.dir}`);
     copyFileSync(src, dest);
+  }
+}
+
+/**
+ * A dry run of a walk that already has assets in production (edition 2 of a month needs the published raw assets of
+ * the sources fetched before): reads the published Releases (read only) and writes only to the local directory.
+ * `list` is both, the local copy winning a name both hold; `download` takes the local copy when there is one, else the
+ * published asset; `ensureRelease` and `upload` touch the local directory only, and an upload under a name the
+ * Release already holds is refused (a dry run never shadows a published asset; the walk takes the next free name).
+ */
+export class DryRunStore implements HistoryStore {
+  constructor(
+    private readonly local: HistoryStore,
+    private readonly published: HistoryStore,
+  ) {}
+
+  get label(): string {
+    return `${this.local.label}, reading the published assets of ${this.published.label} (read only)`;
+  }
+
+  list(tag: string): AssetInfo[] {
+    const mine = this.local.list(tag);
+    const names = new Set(mine.map((a) => a.name));
+    return [...this.published.list(tag).filter((a) => !names.has(a.name)), ...mine].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  }
+
+  ensureRelease(tag: string): void {
+    this.local.ensureRelease(tag);
+  }
+
+  upload(tag: string, file: string): void {
+    if (this.published.list(tag).some((a) => a.name === basename(file))) throw new Error(`asset ${tag}/${basename(file)} is published; history never overwrites an asset`);
+    this.local.upload(tag, file);
+  }
+
+  download(tag: string, asset: string, dest: string): void {
+    if (this.local.list(tag).some((a) => a.name === asset)) this.local.download(tag, asset, dest);
+    else this.published.download(tag, asset, dest);
   }
 }

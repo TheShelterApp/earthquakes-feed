@@ -568,15 +568,18 @@ stays and the run turns red). History is not rewritten: the files stay in the `d
 
 History older than the 3-year layer above is built by a separate walk, `history` (`.github/workflows/history.yml`,
 `src/history*.ts`), that never commits a day partition, never touches an `archive-YYYY-MM` Release and never rewrites a
-frozen day. It runs only while `providers/history.json` says `"enabled": true`; the first era configured is a pilot:
-ComCat (`usgs`), every magnitude, 2022-07-01 up to the boundary 2023-07-06 (the 3-year layer's first day, which must
-equal `knowledge/index/backfill.json` `targetStart`).
+frozen day. It runs only while `providers/history.json` says `"enabled": true`; the first era configured is a pilot,
+every magnitude, 2022-07-01 up to the boundary 2023-07-06 (the 3-year layer's first day, which must equal
+`knowledge/index/backfill.json` `targetStart`): ComCat (`usgs`) alone in its edition 1 (2026-10-01), then the 16 other
+FDSN sources of the 3-year layer (`emsc`, `geofon`, `ingv`, `geonet`, `resif`, `noa`, `usp`, `lmu`, `renass`, `ipgp`,
+`ethz`, `nrcan`, `ncedc`, `scedc`, `knmi`, `auspass`; not ISC, whose walk is paused) in its edition 2. The custom
+adapters (`afad`, `kagsr`, `imo`, `csn`, …) have no history query yet and are in no era.
 
 **Where it lives.** Everything is an immutable asset of a Release `history-YYYY` (the year of the month):
 
 | Asset | What it is |
 |---|---|
-| `raw-<source>-<YYYY-MM>.ndjson.zst` | one source's answer for one month, normalised by the feed's parser: a header line (`kind: "earthquakes-feed/history-raw"`: the range, the queries' windows, the rows each answered, the source's own count where it has a count service (ComCat), `fetched_at`), then one report per line |
+| `raw-<source>-<YYYY-MM>.ndjson.zst` | one source's answer for one month, normalised by the feed's parser: a header line (`kind: "earthquakes-feed/history-raw"`: the range, the queries' windows, the rows each answered, the source's own count where it has a count service (ComCat, EMSC), `fetched_at`), then one report per line |
 | `events-<YYYY-MM>.e<N>.tar.zst` | the month's events: `DD.ndjson` day files in the day partitions' feature format (the same as `archive-YYYY-MM`), plus `_edition.json` (sources, the raw assets it was built from with their checksums, row counts, `joined_newer`) |
 
 An asset is never overwritten or deleted. A failed upload leaves its name behind as `unused` and the walk takes the next
@@ -610,12 +613,29 @@ backfilled rows. `feed.first_ingest_time` / `ingest_time` are that fetch time, a
 **Pace.** One request at a time per host, at least `requestSpacingMs` (1.1 s) apart, HTTP 429 / 5xx answered with
 Retry-After or a doubling pause from 5 s (at most 2 min; a source that asks for a longer pause is left alone until the
 time it named, `attempts[].not_before` in the index), a window that fills the page or times out split in two, a
-month that cannot be fetched whole fetched again next run (a source that fails a day of runs turns the run red). ComCat
-is asked for its count first and every window's rows must equal the count. At most `maxUnitsPerRun` source months and
-`maxSecondsPerRun` per hourly run; the collect job runs outside the writer lock and only the index commit takes it.
+month that cannot be fetched whole fetched again next run (a source that fails a day of runs turns the run red). The
+two sources with a count service, ComCat and EMSC (`fdsnws/event/1/count`, asked in the source's query format: ComCat
+`geojson`, EMSC `json`; measured 2026-10-06, none of the other 15 FDSN services the feed reads answers one), are asked
+for their count first and every window's rows must equal it. A month is sealed (its next edition built, verified and
+uploaded) as soon as its last source arrives, and a run first seals what an earlier run left complete. At most
+`maxUnitsPerRun` source months and `maxSecondsPerRun` per hourly run; neither job holds the writer lock (the index
+commit pushes through `scripts/push-data.sh`, FEED-OPS-4). A month a source answers empty right before a month of the
+same source with rows is either where a catalogue starts (going back) or a service answering empty while it is broken
+(NOA's registered node answered 204 to every query for ten days, PF-5j-NOA). The walk tells the two apart before it
+keeps anything: it asks the source again for a two-hour window around the newer month's first, middle and last row
+(stopping at the first that answers a row). A row there keeps the empty month (the catalogue starts; named in the
+run's `report.json` `empty_after_rows` and as a warning); no row, or an error, fails the month like any other failure,
+so nothing empty is sealed while the service is down and the month is asked again next run.
 The heartbeat Worker dispatches the workflow at `:26` (GitHub delivers this repository's hourly crons only a few times
 a day; the workflow's own `:29` cron is the fallback), and a run does nothing unless `providers/history.json` has
 `enabled: true`.
+
+**Dry runs.** `gh workflow run history.yml -f dry_run=true` (or `HISTORY_DRY_RUN=1 HISTORY_FORCE=1` locally, with
+`DATA_DIR` a copy of the `data` branch's `knowledge/index`) creates no Release, uploads nothing and commits nothing: the
+assets go to `history-out/releases/<tag>/` (a 3-day workflow artifact), and the published assets the index lists are
+read from the Releases, read only, so a dry run can build a month's next edition. A local dry run continues from its own
+`history-out/history.json`. `-f sources=ingv` (`HISTORY_ONLY_SOURCES`) limits a dry run to some sources; it seals
+nothing that needs another source. The dry run stays in the walk's concurrency group: it asks the same hosts.
 
 ## Saturated days
 

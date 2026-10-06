@@ -395,6 +395,27 @@ observation log of 2026-07-05…10-06 folds 7 such pairs (18–46 km, 1–5 s), 
 of 2026-09-30 in Vietnam, 34 km from ComCat's M4.4; TMD beside another agency (NCS, CENC, BMKG)
 keeps the usual windows.
 
+USP (São Paulo) locates moderate quakes of South America and the rest of the world from Brazil. Its origin times and
+magnitudes are close to the other agencies', its places scatter: against ComCat's, 26 km at the median, 75 % within
+52 km and 90 % within 120 km (South America 30 / 70 / 136 km), with no systematic shift (382 USP solutions of M ≥ 4.0,
+2026-06…10). Since round 21 an event that holds USP's rows only and an event holding a USGS, EMSC or GFZ row get the
+moderate-event window with its distance raised to 50 km at every magnitude ≥ 4.0, as for TMD (same 20 s, |ΔM| ≤ 0.5,
+best-match and dense-cell rules). Replaying the observation log of 2026-07-05…10-06 folds 33 such pairs (none split),
+each USP row 22–60 km from ComCat's solution of a quake that ComCat (32) or EMSC (1) lists alone within 60 s and 300 km;
+28 of them are South American, such as the M4.5 of 2026-10-06 in southern Bolivia (USP 29 km and 1.2 s from ComCat's
+`us6000tzva`). A USP solution farther out keeps its own event: of the log's 189 USP rows that have a GEOFON row of the
+same suffix (below), 52 stay in another event than GEOFON's, 39 of them more than 50 km from that event.
+
+USP's event ids share GEOFON's suffix (`usp2026toln`, `gfz2026toln`), and that is no identity link: the four letters
+number a time slot of about 70 s (26⁴ a year) of the first origin each SeisComP system made. One quake's two ids
+usually share it, though not always (7 of the 47 USP rows in one event with a GEOFON row carry the neighbouring slot,
+`usp2026owtj` beside `gfz2026owti`), and two quakes in the same slot anywhere on Earth share it too. Of the 282 USP rows of the day partitions
+2026-06-01…10-06 that have a GEOFON row of the same suffix, ComCat and EMSC show one quake for 279 and two for 3, each
+pair 14,500–17,100 km apart (one row in Chile or the Caribbean, the other on the far side of the Earth). The feed never
+reads the suffix; neither should a consumer. Older days keep the pairs they hold as two events (the frozen days are not
+rewritten): in those partitions 242 such USP rows sit in another event than GEOFON's row, most of them written before
+the moderate-event window existed.
+
 One exception to "one provider's two ids are two quakes": CSN (Chile) publishes a revised solution
 as a new informe, numbered right after the one it replaces, and drops the old one from its day
 page, which the feed never sees as a delete. Since 2026-10 two CSN rows whose origins are ≤ 3 s

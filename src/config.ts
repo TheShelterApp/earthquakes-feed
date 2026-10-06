@@ -101,6 +101,46 @@ export const MODERATE_EVENT_EXCLUDED_PROVIDERS: ReadonlySet<string> = new Set(['
 export const TMD_PROVIDER = 'tmd';
 export const TMD_WINDOW_PARTNERS: ReadonlySet<string> = new Set(['usgs', 'emsc', 'geofon']);
 export const TMD_WINDOW_KM = 50;
+/** USP's identity window (round 21). USP (Centro de Sismologia, Universidade de São Paulo) locates moderate quakes of
+ *  South America and the world from Brazil, with origin times and magnitudes close to the other agencies' but places
+ *  that scatter, and its USP-only event stood beside the other agencies' event of the quake. A pair whose one side holds
+ *  USP's rows only and whose other side holds a USGS, EMSC or GFZ row and no USP row gets the moderate-event window with
+ *  its distance raised to USP_WINDOW_KM, exactly as TMD's (REGIONAL_WINDOWS): both magnitudes ≥ MODERATE_EVENT_MAG,
+ *  origin times ≤ MODERATE_EVENT_MAX_DT_MS apart, |ΔM| ≤ MODERATE_EVENT_MAX_DELTA, neither cell dense, mutual best.
+ *  USP's SeisComP ids share GEOFON's suffix (usp2026toln / gfz2026toln): it is no identity and the rule never reads it.
+ *  The four letters number a time slot of about 70 s (26⁴ a year) of each system's first origin, so one quake's two ids
+ *  mostly share it, and so do two quakes in one slot anywhere on Earth.
+ *  Measured 2026-10-06 (origin/data f91d92f2b0):
+ *  - The day partitions of 2026-06-01..10-06 hold 464 USP rows in live events; 282 have a GEOFON row of the same suffix,
+ *    242 of them in another event (212 alone). ComCat's and EMSC's worldwide lists of ±4 min around each USP row
+ *    (asked that day): 239 of the 242 are one quake (237 by ComCat, 2 by EMSC; 146 of the 148 of M ≥ 5), 3 are two
+ *    quakes 14,500–17,100 km and 18–128 s apart (2026-06-13, 06-22, 08-03: the suffix named a quake on the other side of
+ *    the Earth).
+ *  - USP's place against ComCat's for the 382 USP rows of M ≥ 4.0 with exactly one ComCat quake within 60 s and 300 km:
+ *    26 km at the median, 75 % within 52 km, 90 % within 120 km (South America, 199 rows: 30 / 70 / 136 km; elsewhere,
+ *    183: 23 / 40 / 96 km), the mean offset 2.3 km: a scatter, not TMD's regional shift. Origin times within 20 s in
+ *    95 %, |ΔM| ≤ 0.7, both closer from M5 on (median 23 km at M5.0–5.5, 18 km above).
+ *  - Replaying the observation log (2026-07-05..10-06, 207,888 lines; a fresh Resolver every 6 h with the production hot
+ *    window, each followed by the regular heal): under the rules before, 75 of the 189 same-suffix pairs stand in two
+ *    events, 56 of them kept apart by the moderate-event window's distance (20–40 km below M5.0). With USP_WINDOW_KM = 50
+ *    33 groups fold, none split (per connected group of ids 33 fewer events, 0 more): every USP row 21.7–60.3 km from
+ *    ComCat's solution, ≤ 50 km from the other event, and ComCat (32) or EMSC (1) lists that event's quake and no other
+ *    within 60 s and 300 km of the USP row. Live M ≥ 4.5 events of the last 10 days with a sibling 78/271 → 75/270; rows
+ *    in two live events 0; same-suffix pairs in two events 75 → 52 (39 beyond 50 km, 4 by magnitude, 2 in a dense cell
+ *    or the large-event window, 6 with USP's row beside another agency's, 1 two quakes). 28 of the 33 are South American.
+ *  - 50 km is LARGE_EVENT_MAX_KM, the alerts gateway's fold window, as for TMD. Wider was replayed too and checked the
+ *    same way, without a wrong fold: 75 km folds 54 groups, 100 km 64, 150 km 76, but each regroups 2–3 events of the
+ *    2026-07/08 Chiapas offshore sequence (USP's row leaves SSN's for the partner event, SSN's row then stands alone). */
+export const USP_PROVIDER = 'usp';
+export const USP_WINDOW_PARTNERS: ReadonlySet<string> = new Set(['usgs', 'emsc', 'geofon']);
+export const USP_WINDOW_KM = 50;
+/** The regional windows (Resolver.regionalWindow): a pair whose one side holds the provider's rows only and whose other
+ *  side holds a row of one of its partners and none of the provider's gets the moderate-event window with its distance
+ *  raised to `km`. TMD (round 14) and USP (round 21). */
+export const REGIONAL_WINDOWS: ReadonlyMap<string, { partners: ReadonlySet<string>; km: number }> = new Map([
+  [TMD_PROVIDER, { partners: TMD_WINDOW_PARTNERS, km: TMD_WINDOW_KM }],
+  [USP_PROVIDER, { partners: USP_WINDOW_PARTNERS, km: USP_WINDOW_KM }],
+]);
 /** A provider re-publishing ONE solution under a second native id (INGV 46714321 / 47246702,
  *  2026-09-25) is a re-id, not a distinct event: rows this close fold instead of minting. */
 export const REID_DT_MS = 2_000;

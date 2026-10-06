@@ -66,6 +66,26 @@ export const MODERATE_EVENT_KM_PER_MAG = 20;
 export const MODERATE_EVENT_MAX_DT_MS = 20_000;
 export const MODERATE_EVENT_MAX_DELTA = 0.5;
 export const MODERATE_EVENT_EXCLUDED_PROVIDERS: ReadonlySet<string> = new Set(['nrcan']);
+/** TMD's identity window (round 14). The Thai Meteorological Department locates the region's moderate quakes 20–50 km
+ *  from where USGS, EMSC and GFZ put them (Myanmar, Yunnan, Vietnam, northern Sumatra; origin times within a few
+ *  seconds, magnitudes within a few tenths), beyond the moderate-event window's 20–30 km at M4.0–4.5, so such a TMD
+ *  report stood beside the other agencies' event of the quake (2026-09-30, Vietnam: TMD's M4.7 34 km and 3.4 s from
+ *  USGS's M4.4). A pair whose one side holds TMD's rows only and whose other side holds a USGS, EMSC or GFZ row and no
+ *  TMD row gets the moderate-event window with its distance raised to TMD_WINDOW_KM (no ΔM shrink below it): both
+ *  magnitudes ≥ MODERATE_EVENT_MAG, origin times ≤ MODERATE_EVENT_MAX_DT_MS apart, |ΔM| ≤ MODERATE_EVENT_MAX_DELTA,
+ *  neither cell dense, mutual best, ranked with the moderate-event pairs.
+ *  Measured 2026-10-06 by replaying the observation log (2026-07-05..10-06, 204,335 lines; a fresh Resolver every 6 h
+ *  with the production hot window, each followed by the regular heal): 20 live M ≥ 4.0 events held TMD's rows only, 17
+ *  of them beside another live event within 60 s and 150 km. 9 lay within 20 s and |ΔM| ≤ 0.5 of a USGS, EMSC or GFZ
+ *  event: 7 at 18.5–45.6 km and 1.0–5.2 s, which now fold (none split; live M ≥ 4.5 events of the last 10 days with a
+ *  sibling 86 → 85), and 2 at 87 and 124 km (2026-07-23 M4.2, 07-17 M5.2), which stay apart. In each of the 7 the
+ *  partner is the only quake any agency reports within 60 s and 100 km of TMD's row (2026-07-11: ComCat's M4.5 and EMSC's
+ *  copy of BMKG's M4.2 stand as two events of one quake, and TMD's row joins the nearer, its mutual best; 2026-08-05: NCS's
+ *  M5.0 of the same quake stands 99 km off). Also apart: |ΔM| > 0.5 (2026-07-14 M5.2, 10-05 M4.7) and TMD beside another
+ *  agency (2026-10-04, TMD + NCS 61 km from ComCat). 50 km is LARGE_EVENT_MAX_KM, the alerts gateway's fold window. */
+export const TMD_PROVIDER = 'tmd';
+export const TMD_WINDOW_PARTNERS: ReadonlySet<string> = new Set(['usgs', 'emsc', 'geofon']);
+export const TMD_WINDOW_KM = 50;
 /** A provider re-publishing ONE solution under a second native id (INGV 46714321 / 47246702,
  *  2026-09-25) is a re-id, not a distinct event: rows this close fold instead of minting. */
 export const REID_DT_MS = 2_000;

@@ -408,7 +408,8 @@ same suffix (below), 52 stay in another event than GEOFON's, 39 of them more tha
 
 USP's event ids share GEOFON's suffix (`usp2026toln`, `gfz2026toln`), and that is no identity link: the four letters
 number a time slot of about 70 s (26⁴ a year) of the first origin each SeisComP system made. One quake's two ids
-usually share it, but two quakes in the same slot anywhere on Earth do too. Of the 282 USP rows of the day partitions
+usually share it, though not always (7 of the 47 USP rows in one event with a GEOFON row carry the neighbouring slot,
+`usp2026owtj` beside `gfz2026owti`), and two quakes in the same slot anywhere on Earth share it too. Of the 282 USP rows of the day partitions
 2026-06-01…10-06 that have a GEOFON row of the same suffix, ComCat and EMSC show one quake for 279 and two for 3, each
 pair 14,500–17,100 km apart (one row in Chile or the Caribbean, the other on the far side of the Earth). The feed never
 reads the suffix; neither should a consumer. Older days keep the pairs they hold as two events (the frozen days are not

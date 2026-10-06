@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -92,3 +92,93 @@ test('push-data: an unreachable origin fails with an annotation instead of loopi
   assert.equal(r.status, 1);
   assert.match(r.stdout, /::error::fetching origin\/data failed after a rejected push \(attempt 1\)/);
 });
+
+test('push-data: a conflict names the conflicting files', () => {
+  const s = setup();
+  commit(s, s.b, 'status.json', '{"seq":"b"}\n', 'writer b');
+  s.git(s.b, 'push', '-q', 'origin', 'HEAD:data');
+  commit(s, s.a, 'status.json', '{"seq":"a"}\n', 'writer a');
+  const r = push(s, s.a);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /::error::rebase conflict pushing to data: status\.json/);
+});
+
+test('push-data: PUSH_ATTEMPTS bounds the pushes, and the last rejection is not followed by a useless fetch', () => {
+  const s = setup();
+  // A hook that rejects every push: each attempt is a rejection, then a fetch and a rebase with nothing to do.
+  writeFileSync(join(s.dir, 'origin.git', 'hooks', 'pre-receive'), '#!/bin/sh\necho rejected-by-hook\nexit 1\n', { mode: 0o755 });
+  commit(s, s.a, 'status.json', '{"seq":2}\n', 'aggregate: seq=2');
+  // GIT_TRACE names every git command the script runs: a fetch follows each rejected push but the last one.
+  const trace = join(s.dir, 'git-trace.log');
+  const r = push(s, s.a, { PUSH_ATTEMPTS: '3', GIT_TRACE: trace });
+  assert.equal(r.status, 1);
+  assert.equal((r.stderr.match(/rejected-by-hook/g) ?? []).length, 3, r.stderr);
+  assert.match(r.stdout, /::error::push to data failed after 3 attempts/);
+  const commands = readFileSync(trace, 'utf8').split('\n').filter((l) => /trace: built-in: git (push|fetch)\b/.test(l));
+  assert.deepEqual(
+    commands.map((l) => /built-in: git (push|fetch)/.exec(l)![1]),
+    ['push', 'fetch', 'push', 'fetch', 'push'],
+  );
+});
+
+/**
+ * The checkouts the workflows push from (actions/checkout): `fetch-depth: 1` (aggregate, backfill, archive, derive) and,
+ * for the side-index commit jobs, also sparse and blobless (first-solutions: cone `knowledge/first_solutions`; history /
+ * remediate: one file). Since FEED-OPS-4 those jobs push without the writer lock, so their rebase onto a writer's
+ * commit must work in exactly that kind of checkout.
+ */
+function shallowClone(s: ReturnType<typeof setup>, name: string, sparse: string[] | null): string {
+  const url = `file://${join(s.dir, 'origin.git')}`;
+  const args = ['clone', '-q', '--depth', '1', '--branch', 'data'];
+  if (sparse) args.push('--filter=blob:none', '--sparse');
+  s.git(s.dir, ...args, url, name);
+  const repo = join(s.dir, name);
+  if (sparse) s.git(repo, 'sparse-checkout', 'set', '--no-cone', ...sparse);
+  return repo;
+}
+
+function seedTree(s: ReturnType<typeof setup>): void {
+  // A few commits so the depth-1 clones really are shallow, and the files every writer touches.
+  s.git(s.dir, 'config', '--file', join(s.dir, 'origin.git', 'config'), 'uploadpack.allowFilter', 'true');
+  s.git(s.dir, 'config', '--file', join(s.dir, 'origin.git', 'config'), 'uploadpack.allowAnySHA1InWant', 'true');
+  for (let n = 0; n < 3; n++) {
+    mkdirSync(join(s.b, 'knowledge', 'index'), { recursive: true });
+    mkdirSync(join(s.b, 'knowledge', 'first_solutions'), { recursive: true });
+    writeFileSync(join(s.b, 'knowledge', 'index', 'head.json'), `{"seq":${n}}\n`);
+    writeFileSync(join(s.b, 'knowledge', 'index', 'history.json'), `{"n":${n}}\n`);
+    writeFileSync(join(s.b, 'knowledge', 'first_solutions', 'cursor.json'), `{"n":${n}}\n`);
+    commit(s, s.b, 'status.json', `{"seq":${n}}\n`, `aggregate: seq=${n}`);
+  }
+  s.git(s.b, 'push', '-q', 'origin', 'HEAD:data');
+}
+
+for (const [shape, sparse, file] of [
+  ['first-solutions commit (shallow, blobless, sparse cone)', ['/knowledge/first_solutions/', '/*.json'], 'knowledge/first_solutions/cursor.json'],
+  ['history commit (shallow, blobless, one file)', ['knowledge/index/history.json'], 'knowledge/index/history.json'],
+  ['aggregate (shallow)', null, 'status.json'],
+] as const) {
+  test(`push-data: rebases in a ${shape} checkout onto a writer that pushed first`, () => {
+    const s = setup();
+    seedTree(s);
+    const side = shallowClone(s, 'side', sparse ? [...sparse] : null);
+    assert.equal(s.git(side, 'rev-parse', '--is-shallow-repository').trim(), 'true');
+    if (sparse) assert.equal(s.git(side, 'config', 'remote.origin.promisor').trim(), 'true', 'a blobless (partial) clone');
+    // Meanwhile aggregate (and its derive steps) push: other files, including a root file inside the sparse cone.
+    s.git(s.b, 'pull', '-q', 'origin', 'data');
+    writeFileSync(join(s.b, 'knowledge', 'index', 'head.json'), '{"seq":9}\n');
+    writeFileSync(join(s.b, 'events.ndjson'), '{"day":1}\n');
+    commit(s, s.b, file === 'status.json' ? 'manifest.json' : 'status.json', '{"seq":9}\n', 'aggregate: seq=9');
+    s.git(s.b, 'push', '-q', 'origin', 'HEAD:data');
+    writeFileSync(join(side, file), '{"side":true}\n');
+    s.git(side, 'add', '--sparse', file);
+    s.git(side, 'commit', '-q', '-m', 'side index');
+    const r = push(s, side, { PUSH_ATTEMPTS: '6', PUSH_BACKOFF_S: '0' });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stderr, /rejected/, 'the first push lost the race');
+    const check = join(s.dir, 'check');
+    s.git(s.dir, 'clone', '-q', '--branch', 'data', join(s.dir, 'origin.git'), check);
+    assert.deepEqual(s.git(check, 'log', '-2', '--format=%s').trim().split('\n'), ['side index', 'aggregate: seq=9']);
+    assert.equal(readFileSync(join(check, file), 'utf8'), '{"side":true}\n');
+    assert.equal(readFileSync(join(check, 'knowledge', 'index', 'head.json'), 'utf8'), '{"seq":9}\n');
+  });
+}

@@ -142,6 +142,18 @@ lists (see *Alaska (AEC)*; logged, never retracted). `absent.mexico` does the sa
 last 15 items: only ids younger than the oldest item it still lists are counted. `preliminary_superseded` and
 `preliminary_skipped` count SSN preliminary solutions withdrawn or not ingested (see *Mexico (SSN)*).
 
+**Frozen sources (round 14).** A source whose file is still served but no longer regenerated keeps answering `ok` with
+rows, so it is never silent. Each run records the newest origin every answer lists (`providers.<id>.newest_origin`);
+a source whose answer has rows but whose newest origin is older than its query window (2 days, or `lookbackDays`) plus
+its frozen budget is **frozen**: listed in `frozen` (by id: `newest_origin`, `newest_origin_age_hours`, `window_hours`,
+`budget_hours`, `rows`) and counted in `degraded`. The frozen budget is three activity budgets (36 h for an active agency,
+so 84 h in all), `frozenBudgetHours` for a source that lists its last N events and legitimately stands still for days
+(216 h: BGS, IG-EPN, CWA; their longest quiet spells 2026-07-05 → 10-06 were 180, 168 and 157 h, the longest among the
+other sources without a time window CENC's 59.6 h). An answer limited to a time window can never be frozen. The v2
+status adds `providers.<id>.frozen` and `frozenProviders`; the health workflow lists frozen sources in the silent
+providers issue (`frozen:<id>` in its set line). Pinned sources (FEED-SEC-1) also carry `providers.<id>.tls_leaf` and
+`tls_leaves` (the leaf certificate's `not_after`, `days_left`, `issuer`, `subject`, `seen_at`; providers/tls/README.md).
+
 **Failing and silent sources.** A provider whose fetch failed has `ok: false` and is in `degraded`. An FDSN answer of
 HTTP 204 is an empty success; HTTP 404 is an empty success only for a source whose query asks `nodata=404` (none does
 today) and an error otherwise, because it means the query path is gone (before 2026-10-04 every 404 counted as empty).
@@ -154,7 +166,9 @@ is never empty that long), `activityBudgetHours` in `providers/registry.json` fo
 USP) and none for KNMI and LMU (regions that go weeks without an event) or a source the live path does not ask (ISC).
 The published v2 status adds `providers.<id>.silent`, `providers.<id>.lastNonEmptyAt` (ms) and `silentProviders`.
 On 2026-10-04 three sources were silent the moment this went live: ENSN Egypt (no rows since 2026-07-29), Geoscience
-Australia (since 07-30) and TMD (since 08-18).
+Australia (since 07-30) and TMD (since 08-18). None had stopped publishing: ENSN moved to a new site whose old JSON URL
+lists only stations (the feed now reads its RSS, `/en/events/feed.rss`), GA rewrote its RSS descriptions so no item
+parsed (both read since round 14, issue #59), and TMD's rows had lost their ids (named by origin second since round 13).
 
 ## The Feature
 
@@ -181,6 +195,29 @@ under `properties.feed`:
 | `chosen_provider` | which provenance row won the top-level fields |
 | `aliases[]` | every `provider:native_id` for this event (for realtime dedup) |
 | `provenance[]` | every reporting provider with its solution + `license`/`attribution`/`doi`, and `fields` = that provider's **complete original vocabulary** (nothing dropped). Present in day files + partitions; omitted from the compact rolling summaries |
+
+**What "stable" means for `feed_id`.** Once minted, an event's id never changes; a fold retires
+the loser (`superseded_by`) and its provider ids resolve to the survivor. Which id an event gets is
+fixed by its first report: the id is seeded by that report's 30 s time bucket and 0.02° place
+bucket, so if another agency's report of the quake reaches the feed first, the quake gets another
+id. Replaying the observation log in another arrival order measures this (FEED-DQ-2, 2026-10-06; two
+3-day slices, 2026-09-20…22 and 09-30…10-02, 6,432 and 8,137 lines, 3,906 and 4,894 live events in
+the logged order; each provider id's own lines kept in order):
+
+| arrival order | events grouped as logged | M ≥ 4.5 events grouped as logged | same `feed_id`, events with ≥ 2 providers | same `feed_id`, M ≥ 4.5 |
+|---|---|---|---|---|
+| each provider id 0–2 runs (0–10 min) late, then the feed's own order within a run | 99.73–99.90 % | 120–122 of 123, 85 of 85 | 94.7–96.6 % | 87–94 % |
+| any order (adversarial) | 98.98–99.37 % | 114–117 of 123, 77–80 of 85 | 83.2–87.2 % | 67–83 % |
+
+So a consumer must not derive anything from the id beyond identity, and must not expect a mirror
+built from the same reports in another order to carry the same ids; follow `superseded_by` and
+`aliases[]` instead. The grouping itself moves for a fraction of a percent of events: a fold needs
+each event to be the other's best match, and in a dense cell a join needs a shared id, so the
+outcome can depend on what is already there (2026-09-30, The Geysers: when NCEDC's 75441706 arrives
+before ComCat's nc75441706 and another NC quake's rows join its event first, ComCat's row of the
+same id cannot follow, because that event already holds another ComCat id). Making the id independent
+of arrival order would mean re-keying events after first sight, which would break every consumer
+that keys on it, so the feed keeps the pinned id.
 
 ## Freshness contract
 
@@ -220,6 +257,26 @@ and 50 km (agencies' solutions of one M4–5.5 quake scatter by 15–40 km); rep
 observation log under the new rule leaves about a third with one. A client reconciling a
 realtime source may use the same window; the feed keeps apart what KAGSR's high magnitudes,
 minute-rounded PHIVOLCS and JMA times beyond 20 s, and one provider's two ids keep apart.
+
+TMD (Thailand) locates the region's moderate quakes 20–50 km from where USGS, EMSC and GFZ put
+them (Myanmar, Yunnan, Vietnam, northern Sumatra), with origin times a few seconds and magnitudes
+a few tenths apart. Since 2026-10 an event that holds TMD's rows only and an event holding a
+USGS, EMSC or GFZ row get the moderate-event window with its distance raised to 50 km at every
+magnitude ≥ 4.0 (same 20 s, |ΔM| ≤ 0.5, best-match and dense-cell rules). Replaying the
+observation log of 2026-07-05…10-06 folds 7 such pairs (18–46 km, 1–5 s), among them TMD's M4.7
+of 2026-09-30 in Vietnam, 34 km from ComCat's M4.4; TMD beside another agency (NCS, CENC, BMKG)
+keeps the usual windows.
+
+One exception to "one provider's two ids are two quakes": CSN (Chile) publishes a revised solution
+as a new informe, numbered right after the one it replaces, and drops the old one from its day
+page, which the feed never sees as a delete. Since 2026-10 two CSN rows whose origins are ≤ 3 s
+apart, whose places are ≤ 45 km apart, whose magnitudes differ by ≤ 0.5 and whose informe numbers
+differ by ≤ 2 are one quake: the newer report joins the event holding the older one (before any
+match by time and place), and two events holding such a pair fold (outside dense cells). Of the 24
+pairs of CSN ids within 60 s and 100 km in the observation log of 2026-07-05…10-06, CSN's day pages
+list only one id of 14 (all inside these limits) and both of 10; 3 of those 10 are one quake CSN
+lists twice (EMSC shows one event for each, and no agency a second quake) and fold too; the other
+7 stay apart. The older row stays in the event's provenance.
 
 ## Retired events
 
@@ -526,8 +583,10 @@ does), and the workflow's own `:50` cron is the fallback. The Worker is needed: 
 crons about 4 times a day (backfill, derive and health each got 4 scheduled runs between 2026-09-30 16:40 and
 2026-10-01 16:40 UTC), which would stretch every estimate below about sixfold. The `collect` job holds no
 writer lock (it shares the deep-history walk's group, so the two never ask a host at the same time): up to 30 minutes of
-requests, chunks uploaded, then the `commit` job writes the two small files in seconds under the writer lock (a sparse checkout of `knowledge/first_solutions/`; it refuses to write if they changed since the
-collect job read them). A lane takes no day of a seventh event month in one run (each month is one chunk upload, so the
+requests, chunks uploaded, then the `commit` job writes the two small files in seconds (a sparse checkout of `knowledge/first_solutions/`; it refuses to write if they changed since the
+collect job read them, and refuses to stage any other file). Since round 14 (FEED-OPS-4) it holds no writer lock either:
+no other writer touches those files, so its push rebases onto whatever another writer pushed first
+(`scripts/push-data.sh`). A lane takes no day of a seventh event month in one run (each month is one chunk upload, so the
 uploads stay a few minutes inside the job's 45-minute timeout; a day source would otherwise reach dozens of months a
 run). At one request a second a run does up to about 1,750 requests per lane (ComCat answered 441
 requests of 2026-06-15 in 450 s), so ComCat's 454,000 reports take about 11 days of hourly runs (and about 4 more for
@@ -542,8 +601,9 @@ answered 204 for 2026-08-25, whose one report it no longer lists); with no such 
 node that is down), the day is asked again in the next two runs before it is recorded as missing; any other refusal
 stops the lane; a source failing 24 runs in a row warns, from 72 the run turns
 red about once a day. A run whose upload fails keeps that source's cursor where it was. A run whose commit job never
-lands (GitHub keeps one pending job per concurrency group, so a commit waiting for the writer lock is cancelled when
-another writer queues behind it; run 36909538501 lost its commit that way on 2026-10-01) is taken over by the next run:
+lands (until round 14 GitHub cancelled a commit job waiting for the writer lock whenever another writer queued behind
+it, 10 of 126 runs in the week to 2026-10-06, run 36909538501 first; now only a failed push or job is left) is taken
+over by the next run:
 the collect job reads the newest `first-solutions-out` artifact, and when that output was uploaded, was built on
 exactly the cursor and chunk list `data` still holds, and every chunk it added is in its Release with the listed size,
 the run starts from it, so its commit lands both runs' work and nothing is asked twice.
@@ -571,6 +631,7 @@ agency's report:
 | `UNA` | `ovsicori` | 2026-10-01 |
 | `UNM` | `mexico` | 2026-10-01 |
 | `HV`, `PR`, `AK`, `TX`, `NN`, `UU`, `UW`, `OK`, `MB` | ComCat's row of that network (`hv…`, `pr…`, `ak…`, `tx…`, `nn…`, `uu…`, `uw…`, `ok…`, `mb…`) | 2026-10 (FEED-4) |
+| `NEIC` | ComCat's `us…` row (never moved, see below) | 2026-10 (round 14) |
 
 A code is on the list only where EMSC's copy is the agency's solution up to rounding: at least 90 %
 of the copies equal in time and place a version of the agency's solution the feed saw (or, for
@@ -585,15 +646,16 @@ those limits of the agency's row. Where KOERI gives both ML and Mw the feed's ro
 while EMSC copies the ML, so those copies do not count. Not on the list: BMKG (its public lists
 carry another solution), PHIVOLCS and JMA (their lists give the origin to the minute), GFZ,
 ReNaSS, ETHZ, NOA, IMO (too many copies differ from every version the feed saw), GSRAS (not
-KAGSR's solution), CN (the feed's NRCan rows carry no magnitude), the agencies with fewer than 50
-copies (IPMA, IGP, GA, CWA, IPGP's observatories, BGS, USP, KNMI, AEC), and NEIC (ComCat's `us`
-solutions). The US networks the feed reads only through ComCat count against ComCat's row whose own
+KAGSR's solution), CN (the feed's NRCan rows carry no magnitude) and the agencies with fewer than 50
+copies (IPMA, IGP, GA, CWA, IPGP's observatories, BGS, USP, KNMI, AEC). The US networks the feed reads only through ComCat count against ComCat's row whose own
 id carries the network's prefix (EMSC's `20261003_0000049`, `auth: "HV"`, is ComCat's `hv75048812`
 to EMSC's rounding); ComCat's row of another network for the same quake (`us…`) is another solution
 and does not count. Their copies equal the network's ComCat row in time and place in 99–100 % of the
 versions the feed saw and in magnitude in 96–100 % (OK and MB had 35 and 11 copies, every one of
 them the network's row); in the dense Kilauea cell the HV copies stood beside ComCat's event 10
-times in the 11 days to 2026-10-04.
+times in the 11 days to 2026-10-04. NEIC's copies count against ComCat's `us…` row in the same way
+(99.9 % of 2,107 versions equal in time and place, 93.0 % in magnitude too; in the dense cell of the
+August 2026 Flores sequence 29 M4.4–5.8 quakes stood as an EMSC event and a ComCat event each).
 
 This matters where many small quakes fall into one cell (the Granada basin, The Geysers, Sındırgı,
 the Milford Sound and Puntarenas swarms): there the feed joins two reports only on a shared id,
@@ -618,7 +680,9 @@ solution no live event holds yet stays where it is until that row is in; then th
 listing of the copy, or the pass every run makes over the 7-day hot window (which also moves the
 copies left in the wrong event before this rule), moves it. A copy alone in its event is not
 moved: the merge pass folds that event into the agency's. Status counts the moves as
-`copies_rehomed`.
+`copies_rehomed`. A NEIC copy is never moved: EMSC often takes an event's solution first from the
+regional agency (SSN, JMA, CENC) and then from NEIC, which is the same quake under two agencies'
+solutions; the row stays, its event moves to NEIC's solution and ComCat's event folds into it.
 
 EMSC also re-points its own event ids, and copies of agencies outside these lists (JMA, INPRES
 under EMSC's code `NSNA`, GSRAS, BMKG), to another quake. Since 2026-10 such a row moves too. The

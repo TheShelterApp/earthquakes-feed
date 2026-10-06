@@ -5,6 +5,7 @@ import {
   COMCAT_PROVIDER,
   EMSC_AUTHORED_COPIES,
   EMSC_COMCAT_NETWORK_COPIES,
+  EMSC_COPIES_KEPT_IN_PLACE,
   EMSC_PROVIDER,
   EMSC_STRANDED_MIN_DT_MS,
   GRID_CELL_DEG,
@@ -29,9 +30,13 @@ import {
   REID_KM,
   REID_MAG_DELTA,
   REID_MAG_TOLERANCE,
+  REVISED_ID_WINDOWS,
   SPATIAL_KM,
   SWARM_CELL_ABSOLUTE,
   TEMPORAL_MS,
+  TMD_PROVIDER,
+  TMD_WINDOW_KM,
+  TMD_WINDOW_PARTNERS,
 } from './config.js';
 import { qualityCount } from './canonical.js';
 import { gatherCellKeys, gridKey, haversineKm } from './geo.js';
@@ -267,11 +272,46 @@ export class Resolver {
     return Math.abs(a.mag - b.mag) <= REID_MAG_DELTA + REID_MAG_TOLERANCE;
   }
 
+  /** Two rows of a REVISED_ID_WINDOWS provider under different ids within its window (time, place, magnitude and the
+   *  numeric ids' gap): one quake re-located under a new id (CSN, round 14). */
+  private static revisedIdPair(a: SourcedSolution, b: SourcedSolution): boolean {
+    if (a.provider !== b.provider) return false;
+    const w = REVISED_ID_WINDOWS.get(a.provider);
+    if (!w || nativeIdOf(a) === nativeIdOf(b)) return false;
+    const ia = Number(nativeIdOf(a));
+    const ib = Number(nativeIdOf(b));
+    if (!Number.isSafeInteger(ia) || !Number.isSafeInteger(ib) || Math.abs(ia - ib) > w.maxIdGap) return false;
+    if (Math.abs(a.eventTimeMs - b.eventTimeMs) > w.dtMs) return false;
+    if (haversineKm(a.lat, a.lon, b.lat, b.lon) > w.km) return false;
+    return a.mag != null && b.mag != null && Math.abs(a.mag - b.mag) <= w.maxDeltaMag + REID_MAG_TOLERANCE;
+  }
+
+  /** The best-scored revisedIdPair between the two nodes' rows (d/km + |dt|/dtMs of the twin rows), or null. */
+  private static revisedScore(a: EventNode, b: EventNode): number | null {
+    let best: number | null = null;
+    for (const ra of a.provenance) {
+      const w = REVISED_ID_WINDOWS.get(ra.provider);
+      if (!w) continue;
+      for (const rb of b.provenance) {
+        if (!Resolver.revisedIdPair(ra, rb)) continue;
+        const s = haversineKm(ra.lat, ra.lon, rb.lat, rb.lon) / w.km + Math.abs(ra.eventTimeMs - rb.eventTimeMs) / w.dtMs;
+        if (best == null || s < best) best = s;
+      }
+    }
+    return best;
+  }
+
+  /** Whether the merge pass may fold two nodes through a revisedIdPair of their rows: neither cell dense. */
+  private revisedPair(a: EventNode, b: EventNode): boolean {
+    if (this.isDense(a.lat, a.lon) || this.isDense(b.lat, b.lon)) return false;
+    return Resolver.revisedScore(a, b) != null;
+  }
+
   /** A provider re-reporting the SAME event resolves via alias; the same provider using a
    *  DIFFERENT native id means its pipeline considers these distinct events — never merge —
    *  unless the provider itself links the two ids (USGS `ids`, read from either side: the
    *  report's own list, or a node row that names the report) or the two rows are one solution
-   *  under two ids (sameSolution). */
+   *  under two ids (sameSolution) or one quake re-located under a new id (revisedIdPair). */
   private sameProviderDistinct(raw: RawObs, node: EventNode): boolean {
     const key = `${raw.provider}:${raw.providerEventId}`;
     return node.provenance.some(
@@ -280,7 +320,8 @@ export class Resolver {
         r.nativeId !== raw.providerEventId &&
         !raw.knownAliasIds.includes(`${r.provider}:${r.nativeId}`) &&
         !knownAliasIdsOf(r.provider, r.nativeId, r.fields).includes(key) &&
-        !Resolver.sameSolution(r, raw),
+        !Resolver.sameSolution(r, raw) &&
+        !Resolver.revisedIdPair(r, raw),
     );
   }
 
@@ -294,7 +335,7 @@ export class Resolver {
         if (rb.provider !== ra.provider || rb.nativeId === ra.nativeId) continue;
         if (linked.includes(`${rb.provider}:${rb.nativeId}`)) continue;
         if (knownAliasIdsOf(rb.provider, rb.nativeId, rb.fields).includes(`${ra.provider}:${ra.nativeId}`)) continue;
-        if (Resolver.sameSolution(ra, rb)) continue;
+        if (Resolver.sameSolution(ra, rb) || Resolver.revisedIdPair(ra, rb)) continue;
         return true;
       }
     }
@@ -327,7 +368,7 @@ export class Resolver {
   /** The widest spatial window `s` can get against any neighbour — the candidate gather radius. */
   private static maxWindowKm(s: Solution): number {
     if (s.mag == null) return SPATIAL_KM;
-    const moderate = s.mag >= MODERATE_EVENT_MAG ? Resolver.moderateEventKm(s.mag) : 0;
+    const moderate = s.mag >= MODERATE_EVENT_MAG ? Math.max(Resolver.moderateEventKm(s.mag), TMD_WINDOW_KM) : 0;
     return Math.max(s.mag < LARGE_EVENT_MAG ? SPATIAL_KM : Resolver.largeEventKm(s.mag), moderate);
   }
 
@@ -336,12 +377,31 @@ export class Resolver {
     return clamp(MODERATE_EVENT_BASE_KM + MODERATE_EVENT_KM_PER_MAG * (minMag - MODERATE_EVENT_MAG), MODERATE_EVENT_BASE_KM, LARGE_EVENT_MAX_KM);
   }
 
-  /** The moderate-event window of a pair (FEED-1), or null when its magnitudes keep it out of the tier. */
-  private static moderateWindow(a: Solution, b: Solution): { km: number; ms: number } | null {
+  /** The moderate-event window of a pair (FEED-1), or null when its magnitudes keep it out of the tier. `tmd`: the pair
+   *  gets TMD's distance (config TMD_WINDOW_KM, tmdPair). */
+  private static moderateWindow(a: Solution, b: Solution, tmd = false): { km: number; ms: number } | null {
     if (a.mag == null || b.mag == null || a.mag < MODERATE_EVENT_MAG || b.mag < MODERATE_EVENT_MAG) return null;
     const dM = Math.abs(a.mag - b.mag);
     if (dM > MODERATE_EVENT_MAX_DELTA + REID_MAG_TOLERANCE) return null;
-    return { km: Resolver.moderateEventKm(Math.min(a.mag, b.mag)) * clamp(1 - 0.3 * dM, 0.3, 1), ms: MODERATE_EVENT_MAX_DT_MS };
+    const km = Resolver.moderateEventKm(Math.min(a.mag, b.mag)) * clamp(1 - 0.3 * dM, 0.3, 1);
+    return { km: tmd ? Math.max(km, TMD_WINDOW_KM) : km, ms: MODERATE_EVENT_MAX_DT_MS };
+  }
+
+  /** Whether two sides (their providers) get TMD's window (config TMD_WINDOW_KM): one side holds TMD's rows only, the
+   *  other a USGS, EMSC or GFZ row and no TMD row. */
+  private static tmdPair(a: readonly string[], b: readonly string[]): boolean {
+    const tmdOnly = (s: readonly string[]): boolean => s.length > 0 && s.every((p) => p === TMD_PROVIDER);
+    const partner = (s: readonly string[]): boolean => !s.includes(TMD_PROVIDER) && s.some((p) => TMD_WINDOW_PARTNERS.has(p));
+    return (tmdOnly(a) && partner(b)) || (tmdOnly(b) && partner(a));
+  }
+
+  private static providersOf(n: EventNode): string[] {
+    return [...new Set(n.provenance.map((r) => r.provider))];
+  }
+
+  /** tmdPair of two nodes. */
+  private static tmdNodes(a: EventNode, b: EventNode): boolean {
+    return Resolver.tmdPair(Resolver.providersOf(a), Resolver.providersOf(b));
   }
 
   /** Whether two sides (their providers) may use the moderate-event window: no provider on both, none excluded. */
@@ -351,8 +411,8 @@ export class Resolver {
   }
 
   /** null when the pair is one event through the moderate-event window, else why not. */
-  private rejectModerate(a: Solution, b: Solution, d: number): string | null {
-    const w = Resolver.moderateWindow(a, b);
+  private rejectModerate(a: Solution, b: Solution, d: number, tmd = false): string | null {
+    const w = Resolver.moderateWindow(a, b, tmd);
     if (!w) return 'moderate: magnitudes';
     const dt = Math.abs(a.eventTimeMs - b.eventTimeMs);
     if (dt > w.ms) return `moderate: dt ${(dt / 1000).toFixed(1)} s > ${(w.ms / 1000).toFixed(1)} s`;
@@ -364,7 +424,7 @@ export class Resolver {
   /** Whether the moderate-event window may judge the two nodes: neither cell dense, providers allowed. */
   private moderatePair(a: EventNode, b: EventNode): boolean {
     if (this.isDense(a.lat, a.lon) || this.isDense(b.lat, b.lon)) return false;
-    return Resolver.moderateProviders([...new Set(a.provenance.map((r) => r.provider))], [...new Set(b.provenance.map((r) => r.provider))]);
+    return Resolver.moderateProviders(Resolver.providersOf(a), Resolver.providersOf(b));
   }
 
   /** The widened spatial base for a pair whose smaller magnitude is `minMag` (≥ LARGE_EVENT_MAG). */
@@ -425,6 +485,19 @@ export class Resolver {
       if (set) for (const fid of set) cand.add(fid);
     }
     return cand;
+  }
+
+  /** Live feed ids whose representative is close enough to hold a revisedIdPair of `row` (a REVISED_ID_WINDOWS provider's
+   *  row): within the provider's window plus the widest identity window (an event's rows lie within that of its
+   *  representative). Empty for any other provider. */
+  private revisedCandidates(row: SourcedSolution): Set<string> {
+    const out = new Set<string>();
+    const w = REVISED_ID_WINDOWS.get(row.provider);
+    if (!w) return out;
+    for (const cell of gatherCellKeys(row.lat, row.lon, w.km + LARGE_EVENT_MAX_KM, GRID_CELL_DEG)) {
+      for (const fid of this.geo.get(cell) ?? []) out.add(fid);
+    }
+    return out;
   }
 
   /** Resolve to an existing feed_id (alias → cross-alias → spatial), or null. Never mints. */
@@ -497,6 +570,11 @@ export class Resolver {
   private findNear(raw: RawObs): string | null {
     const key = `${raw.provider}:${raw.providerEventId}`;
     if (raw.eventTimeMs >= this.hotFloor) {
+      const revised = this.findRevisedTwin(raw);
+      if (revised) {
+        this.alias.set(key, revised);
+        return revised;
+      }
       const dense = this.isDense(raw.lat, raw.lon);
       let best: string | null = null;
       let bestKm = Infinity;
@@ -558,6 +636,31 @@ export class Resolver {
     return best?.feedId ?? null;
   }
 
+  /** The first step of findNear for a REVISED_ID_WINDOWS provider (round 14): the live event (neither cell dense) holding
+   *  a row of the report's provider under another id that the report re-locates (revisedIdPair), the nearest such row
+   *  first, unless that event holds another id of the provider the report is not a revision of (sameProviderDistinct).
+   *  Identity before proximity: the old id's event may sit beyond the windows (its representative is another agency's
+   *  solution), and a nearer event of another quake must not take the report. */
+  private findRevisedTwin(raw: RawObs): string | null {
+    if (!REVISED_ID_WINDOWS.has(raw.provider) || this.isDense(raw.lat, raw.lon)) return null;
+    let best: EventNode | null = null;
+    let bestKm = Infinity;
+    for (const fid of this.revisedCandidates(raw)) {
+      const node = this.eventMap.get(fid);
+      if (!node || node.state !== 'live' || this.isDense(node.lat, node.lon)) continue;
+      for (const r of node.provenance) {
+        if (!Resolver.revisedIdPair(r, raw)) continue;
+        const km = haversineKm(raw.lat, raw.lon, r.lat, r.lon);
+        if (km > bestKm || (km === bestKm && best && node.feedId >= best.feedId)) continue;
+        if (this.sameProviderDistinct(raw, node)) continue;
+        if (Resolver.lifecycleLocationBlocks([raw], raw, node.provenance, node)) continue;
+        best = node;
+        bestKm = km;
+      }
+    }
+    return best?.feedId ?? null;
+  }
+
   /** The moderate-event half of findNear (FEED-1), asked only when no event is within the base windows: the live
    *  event the report is one quake with through the moderate-event window (neither cell dense, the event holds no
    *  row of the report's provider, no excluded provider on either side), best score first; and only when the report
@@ -571,11 +674,13 @@ export class Resolver {
       const node = this.eventMap.get(fid);
       if (!node || node.state !== 'live') continue;
       if (this.isDense(node.lat, node.lon)) continue;
-      if (!Resolver.moderateProviders([raw.provider], [...new Set(node.provenance.map((r) => r.provider))])) continue;
+      const providers = Resolver.providersOf(node);
+      if (!Resolver.moderateProviders([raw.provider], providers)) continue;
+      const tmd = Resolver.tmdPair([raw.provider], providers);
       const d = haversineKm(raw.lat, raw.lon, node.lat, node.lon);
-      if (this.rejectModerate(raw, node, d)) continue;
+      if (this.rejectModerate(raw, node, d, tmd)) continue;
       if (Resolver.lifecycleLocationBlocks([raw], raw, node.provenance, node)) continue;
-      const w = Resolver.moderateWindow(raw, node)!;
+      const w = Resolver.moderateWindow(raw, node, tmd)!;
       const score = d / w.km + Math.abs(raw.eventTimeMs - node.eventTimeMs) / w.ms;
       if (score < bestScore || (score === bestScore && best && node.feedId < best.feedId)) {
         best = node;
@@ -1137,10 +1242,12 @@ export class Resolver {
     return out;
   }
 
-  /** The EMSC `auth` code of a report when it names an agency or a ComCat network whose copies count (authoredCopy). */
+  /** The EMSC `auth` code of a report when it names an agency or a ComCat network whose copies count (authoredCopy) and
+   *  move to the row they copy (rehomeCopy; not EMSC_COPIES_KEPT_IN_PLACE). */
   private static copyCode(raw: SourcedSolution): string | null {
     const auth = raw.fields['auth'];
-    return typeof auth === 'string' && (EMSC_AUTHORED_COPIES.has(auth) || EMSC_COMCAT_NETWORK_COPIES.has(auth)) ? auth : null;
+    if (typeof auth !== 'string' || EMSC_COPIES_KEPT_IN_PLACE.has(auth)) return null;
+    return EMSC_AUTHORED_COPIES.has(auth) || EMSC_COMCAT_NETWORK_COPIES.has(auth) ? auth : null;
   }
 
   /** The live event other than `from` holding a row `copy` is an authored copy of (the nearest row, then the smaller
@@ -1393,9 +1500,9 @@ export class Resolver {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
     const dense = this.pairDense(a, b);
     const gate = this.reject(a, b, d, dense);
-    if (gate) {
+    if (gate && !this.revisedPair(a, b)) {
       if (!this.moderatePair(a, b)) return gate;
-      const moderate = this.rejectModerate(a, b, d);
+      const moderate = this.rejectModerate(a, b, d, Resolver.tmdNodes(a, b));
       if (moderate) return `${gate}; ${moderate}`;
     }
     if (Resolver.lifecycleLocationBlocks(a.provenance, a, b.provenance, b)) {
@@ -1416,7 +1523,9 @@ export class Resolver {
   private score(a: EventNode, b: EventNode): number {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
     const dense = this.pairDense(a, b);
-    const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b) : null;
+    const revised = this.revisedOnly(a, b, d, dense);
+    if (revised != null) return MODERATE_SCORE_OFFSET + revised;
+    const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b, Resolver.tmdNodes(a, b)) : null;
     const { km, ms } = moderate ?? this.windows(a, b, dense);
     return (moderate ? MODERATE_SCORE_OFFSET : 0) + d / km + Math.abs(a.eventTimeMs - b.eventTimeMs) / ms;
   }
@@ -1426,7 +1535,9 @@ export class Resolver {
   private mergeableNeighbours(node: EventNode): { node: EventNode; score: number }[] {
     if (node.eventTimeMs < this.hotFloor) return [];
     const out: { node: EventNode; score: number }[] = [];
-    for (const fid of this.candidates(node)) {
+    const cands = this.candidates(node);
+    for (const r of node.provenance) for (const fid of this.revisedCandidates(r)) cands.add(fid);
+    for (const fid of cands) {
       if (fid === node.feedId) continue;
       const other = this.eventMap.get(fid);
       if (!other || other.state !== 'live') continue;
@@ -1453,14 +1564,31 @@ export class Resolver {
     return null;
   }
 
+  /** The revisedScore of a pair the merge pass accepts only through a revisedIdPair of its rows (the windows and the
+   *  moderate-event window reject it), else null. */
+  private revisedOnly(a: EventNode, b: EventNode, d: number, dense: boolean): number | null {
+    if (!this.reject(a, b, d, dense) || !this.revisedPair(a, b)) return null;
+    if (this.moderatePair(a, b) && !this.rejectModerate(a, b, d, Resolver.tmdNodes(a, b))) return null;
+    return Resolver.revisedScore(a, b);
+  }
+
   private foldReason(a: EventNode, b: EventNode): string {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
     const dense = this.pairDense(a, b);
-    const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b) : null;
+    if (this.revisedOnly(a, b, d, dense) != null) {
+      const pair = a.provenance.flatMap((ra) => b.provenance.filter((rb) => Resolver.revisedIdPair(ra, rb)).map((rb) => [ra, rb] as const))[0]!;
+      const [ra, rb] = pair;
+      const rd = haversineKm(ra.lat, ra.lon, rb.lat, rb.lon);
+      const rdt = Math.abs(ra.eventTimeMs - rb.eventTimeMs) / 1000;
+      return `revised id: ${ra.provider} ${ra.nativeId} / ${rb.nativeId} d=${rd.toFixed(1)} km dt=${rdt.toFixed(1)} s (events ${d.toFixed(1)} km apart)`;
+    }
+    const tmd = Resolver.tmdNodes(a, b);
+    const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b, tmd) : null;
     const { km, ms } = moderate ?? this.windows(a, b, dense);
     const dt = Math.abs(a.eventTimeMs - b.eventTimeMs) / 1000;
     const dM = a.mag != null && b.mag != null ? Math.abs(a.mag - b.mag).toFixed(2) : 'n/a';
-    return `proximity: d=${d.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} ${moderate ? 'moderate window' : 'window'}=${km.toFixed(1)} km/${(ms / 1000).toFixed(0)} s`;
+    const label = moderate ? (tmd ? 'TMD window' : 'moderate window') : 'window';
+    return `proximity: d=${d.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} ${label}=${km.toFixed(1)} km/${(ms / 1000).toFixed(0)} s`;
   }
 
   /** After a live node changed, match it against its live neighbours with the first-sight

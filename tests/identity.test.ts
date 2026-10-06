@@ -102,5 +102,7 @@ test('a scattered large event clusters the same way under every first-sighting o
 
 // Still open: the surviving feed_id itself. op:merge makes the event, its rows and its
 // representative order-independent (above), not the id — that would need re-keying a node
-// after first sight, which the pinned-identity design (ulid.ts) rules out today.
+// after first sight, which the pinned-identity design (ulid.ts) rules out today. Measured
+// over the observation log (FEED-DQ-2, APIs.md "What stable means for feed_id"): with each
+// provider id 0–2 runs late, 3.4–5.3 % of the multi-provider events get another id.
 test.todo('feed_id is byte-identical under adversarial first-sighting reordering (needs re-keying beyond op:merge)');

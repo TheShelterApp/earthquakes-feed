@@ -153,7 +153,13 @@ open, reachable source appears.
 - Everything consumers read (summaries, day partitions, `manifest.json`) is a
   **rebuildable derived view** of that log.
 - **Two phases:** `aggregate` (fetch → dedup → append the log) → `derive` (rebuild
-  views, publish). Each source fetch is fail-open — one dead source loses nothing.
+  views, publish), both in every `aggregate` run, one after the other on the same checkout. Each source fetch is
+  fail-open — one dead source loses nothing.
+- **One writer at a time:** `aggregate`, `backfill`, `archive` (and `derive` dispatched by hand) share the concurrency
+  group `earthquakes-feed-writer` with `queue: max`, so a run waits its turn instead of being cancelled by the next
+  one; every commit to `data` goes through `scripts/push-data.sh` (fetch, rebase, retry, fail loudly on a conflict). The
+  side-index commits of `history`, `first-solutions` and `remediate` write only their own files and push without the
+  lock. `scripts/writer-group-sim.ts` replays a week of runs under GitHub's queue rules.
 - **History & growth:** `backfill` walks each source backward (paced, idempotent, ~3-yr
   target), and `archive` rolls cold months (>120 d) to GitHub Releases (un-metered) and
   prunes the tree — so the `data` branch stays bounded. The run logs (`status/history`,
@@ -207,9 +213,8 @@ DATA_DIR=.data PUBLIC_DIR=public npm run validate
 1. **Bootstrap the data branch:** `bash scripts/bootstrap-data-branch.sh && git push -u origin data`
 2. **Cloudflare Pages** (for the live surface): create a Direct-Upload Pages project,
    point your domain at it, and add repo secrets `CF_API_TOKEN` + `CF_ACCOUNT_ID`.
-3. **Enable Actions.** `aggregate` runs on a cron; `derive` runs after it and on its
-   own cron fallback. Because GitHub throttles low-activity schedules, an external
-   5-minute heartbeat (`workflow_dispatch`) is recommended for tight freshness.
+3. **Enable Actions.** `aggregate` (with its derive steps) runs on a cron. Because GitHub throttles low-activity
+   schedules, an external 5-minute heartbeat (`workflow_dispatch`) is recommended for tight freshness.
 
 ### The heartbeat Worker (`heartbeat/`)
 

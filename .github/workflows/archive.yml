@@ -12,9 +12,11 @@ on:
     - cron: '17 */6 * * *'
   workflow_dispatch:
 
+# The writer lock, runs waiting in arrival order (FEED-OPS-4; aggregate.yml explains the group).
 concurrency:
   group: earthquakes-feed-writer
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: write
@@ -26,17 +28,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: data
           path: .data
           fetch-depth: 1
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       - name: Archive cold months to Releases
@@ -52,14 +54,9 @@ jobs:
           # status + changes: LIVE-2 removes finished months' run logs (src/log-archive.ts); `git add` stages removals.
           git add events knowledge status changes
           git commit -m "archive: roll cold months to Releases @ $(date -u +%FT%TZ)" || { echo 'no changes'; exit 0; }
-          for i in 1 2 3; do
-            git push origin HEAD:data && exit 0
-            git fetch origin data
-            # `|| true`: with no rebase started --abort exits 128 and bash -e would kill the step
-            # before the annotation is emitted, losing the reason the push died.
-            git rebase origin/data || { git rebase --abort || true; echo '::error::rebase conflict'; exit 1; }
-          done
-          echo '::error::push failed after 3 attempts'; exit 1
+          # Fail-loud push loop (H3; tests/push-data.test.ts): a concurrent writer's commit is rebased onto, a conflict
+          # aborts the rebase and fails.
+          bash "$GITHUB_WORKSPACE/scripts/push-data.sh"
       # LAST, and `always()`: a blocked month must not stop the commit above from landing. The
       # script deliberately exits 0 and leaves a marker instead, so the durable state (index
       # entries for uploaded assets, pruned tree) is safe on the data branch before the job goes

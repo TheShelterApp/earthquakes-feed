@@ -66,6 +66,26 @@ export const MODERATE_EVENT_KM_PER_MAG = 20;
 export const MODERATE_EVENT_MAX_DT_MS = 20_000;
 export const MODERATE_EVENT_MAX_DELTA = 0.5;
 export const MODERATE_EVENT_EXCLUDED_PROVIDERS: ReadonlySet<string> = new Set(['nrcan']);
+/** TMD's identity window (round 14). The Thai Meteorological Department locates the region's moderate quakes 20–50 km
+ *  from where USGS, EMSC and GFZ put them (Myanmar, Yunnan, Vietnam, northern Sumatra; origin times within a few
+ *  seconds, magnitudes within a few tenths), beyond the moderate-event window's 20–30 km at M4.0–4.5, so such a TMD
+ *  report stood beside the other agencies' event of the quake (2026-09-30, Vietnam: TMD's M4.7 34 km and 3.4 s from
+ *  USGS's M4.4). A pair whose one side holds TMD's rows only and whose other side holds a USGS, EMSC or GFZ row and no
+ *  TMD row gets the moderate-event window with its distance raised to TMD_WINDOW_KM (no ΔM shrink below it): both
+ *  magnitudes ≥ MODERATE_EVENT_MAG, origin times ≤ MODERATE_EVENT_MAX_DT_MS apart, |ΔM| ≤ MODERATE_EVENT_MAX_DELTA,
+ *  neither cell dense, mutual best, ranked with the moderate-event pairs.
+ *  Measured 2026-10-06 by replaying the observation log (2026-07-05..10-06, 204,335 lines; a fresh Resolver every 6 h
+ *  with the production hot window, each followed by the regular heal): 20 live M ≥ 4.0 events held TMD's rows only, 17
+ *  of them beside another live event within 60 s and 150 km. 9 lay within 20 s and |ΔM| ≤ 0.5 of a USGS, EMSC or GFZ
+ *  event: 7 at 18.5–45.6 km and 1.0–5.2 s, which now fold (none split; live M ≥ 4.5 events of the last 10 days with a
+ *  sibling 86 → 85), and 2 at 87 and 124 km (2026-07-23 M4.2, 07-17 M5.2), which stay apart. In each of the 7 the
+ *  partner is the only quake any agency reports within 60 s and 100 km of TMD's row (2026-07-11: ComCat's M4.5 and EMSC's
+ *  copy of BMKG's M4.2 stand as two events of one quake, and TMD's row joins the nearer, its mutual best; 2026-08-05: NCS's
+ *  M5.0 of the same quake stands 99 km off). Also apart: |ΔM| > 0.5 (2026-07-14 M5.2, 10-05 M4.7) and TMD beside another
+ *  agency (2026-10-04, TMD + NCS 61 km from ComCat). 50 km is LARGE_EVENT_MAX_KM, the alerts gateway's fold window. */
+export const TMD_PROVIDER = 'tmd';
+export const TMD_WINDOW_PARTNERS: ReadonlySet<string> = new Set(['usgs', 'emsc', 'geofon']);
+export const TMD_WINDOW_KM = 50;
 /** A provider re-publishing ONE solution under a second native id (INGV 46714321 / 47246702,
  *  2026-09-25) is a re-id, not a distinct event: rows this close fold instead of minting. */
 export const REID_DT_MS = 2_000;
@@ -87,6 +107,31 @@ export const REID_MAG_TOLERANCE = 1e-9;
  *  replaying the whole observation log (2026-07-05..10-01: 44 version pairs within 2 s and 2 km, magnitudes up to 0.6
  *  apart) split 9 events in two. */
 export const NEW_ID_PER_REVISION_PROVIDERS: ReadonlySet<string> = new Set(['nrcan']);
+/** Providers that re-locate a quake under a new native id (round 14): two of their rows of different ids are one quake when
+ *  their origin times are at most `dtMs` apart, their places at most `km`, their magnitudes at most `maxDeltaMag` and
+ *  their ids, both whole numbers, at most `maxIdGap` apart (Resolver.revisedIdPair). The pair is then not "the same provider under distinct native ids" (sameProviderDistinct,
+ *  nodesDistinct): a report of the new id joins the live event holding the old one ahead of any proximity match
+ *  (findRevisedTwin), and the merge pass folds two events holding such a pair whatever their representatives' distance,
+ *  ranked behind every pair the base and large-event windows accept (neither cell dense in either case).
+ *
+ *  CSN (Chile) publishes a revised solution as a new informe numbered right after the one it replaces and, mostly, drops
+ *  the old one from its day page; the feed sees no delete, so the old row stays, and since the moderate-event window keeps
+ *  the same provider's two ids apart, the two stood as two events, EMSC's copy (auth CSN, which follows CSN's newest id)
+ *  moving between them (FEED-2). Measured 2026-10-06 over the observation log (2026-07-05..10-06): 24 pairs of CSN ids
+ *  within 60 s and 100 km. CSN's day pages (read 2026-10-06) list only one id of 14 of them: a revision, 0–3 s, 2.1–41.5
+ *  km, |ΔM| ≤ 0.4 apart, the two informe numbers adjacent in every one. Both ids stay listed for the other 10: 4 are 9–57
+ *  s apart (outside the window); 377064/377065 are 85 km apart; 377265/377266, 376152/376154 and 376495/376497 (0–2 s,
+ *  11–32 km, informes 1–2 apart) are one quake CSN lists twice (EMSC's one event id copied both ids of the first and the
+ *  third in turn, and the copy of 376154 is EMSC's only event there; no agency reports a second quake), and they fold;
+ *  377484/377490 and 378915/378921 (informes 6 apart, the second published 85 and 30 minutes after the first; CSN now
+ *  lists 378915 12 s before 378921) stay apart. Replaying the log (a fresh Resolver every 6 h with the production hot window
+ *  and the regular heal) against the rules before: the 17 pairs fold, 2 quakes keep two events with their rows grouped
+ *  otherwise (2026-07-30 and 08-22: CSN's two ids now share an event, while EMSC's own solution with INPRES's, or ComCat's,
+ *  45 and 52 km from CSN's newer one, stays the quake's second event as before); per connected group of ids 15 fewer events, 0 more; rows in two live
+ *  events 0. */
+export const REVISED_ID_WINDOWS: ReadonlyMap<string, { dtMs: number; km: number; maxDeltaMag: number; maxIdGap: number }> = new Map([
+  ['csn', { dtMs: 3_000, km: 45, maxDeltaMag: 0.5, maxIdGap: 2 }],
+]);
 /** Bound on the post-revision merge chain one ingest may trigger (each round retires a node). */
 export const MERGE_MAX_ROUNDS = 8;
 /** A retired event (superseded by an op:merge, or tombstoned: an upstream delete, a provider's
@@ -317,8 +362,20 @@ export const EMSC_AUTHORED_COPIES: ReadonlyMap<string, string> = new Map([
  *  one solution published twice (tx2026nbcmeq / tx2026nbcmvr, 22 ms and 1 km apart, both M2.3), which sameSolution
  *  already treats as one. In the event map's live events of 2026-09-24..10-04 the copies stood beside their ComCat row
  *  as a separate event 10 times for HV and twice for TX (all in dense cells), and joined it everywhere else.
- *  Not added: NEIC (`us`, 2,076 versions: 99.9 / 93.0 %, one separate event in those 11 days), AV, SE, NM (fewer than
- *  30 versions each). */
+ *  Not added: AV, SE, NM (fewer than 30 versions each).
+ *
+ *  NEIC (`us`, round 14): the National Earthquake Information Center's solution is ComCat's `us…` row, and EMSC copies it
+ *  like a network's (2026-08-19, EMSC 20260819_0000150, auth NEIC, is 00:11:39.549Z, -8.264 / 121.4067, 35 km, mb 4.8,
+ *  as ComCat us6000tls7; in the dense cell of the Flores sequence the two stood as two events). Checked 2026-10-06 over the
+ *  observation log (2026-07-05..10-06, 204,335 lines): 2,107 EMSC versions with the code stand beside a ComCat `us` row
+ *  (within 60 s and 50 km); 2,105 (99.9 %) equal a version of that row in time (≤ 1 s) and place (≤ 1 km), 1,959
+ *  (93.0 %) in magnitude too (the rest carry a magnitude ComCat has replaced: they stay unlinked, as before). No version
+ *  is within sameSolution of two distinct `us` ids. No other source carries NEIC as an author. Replaying the log (a fresh
+ *  Resolver every 6 h with the production hot window and the regular heal) against the rules before: 29 groups fold,
+ *  every one an EMSC copy and ComCat's row of one quake (≤ 22.9 km, ≤ 7.2 s; all in the Flores swarm of
+ *  2026-08-16..22); live events 112,499 → 112,469; 2 Flores groups regroup in the dense cell (GFZ's and BMKG's rows had
+ *  reached EMSC's event through a cell boundary; per connected group of ids 31 fewer events, 1 more); rows in two live
+ *  events 0. NEIC copies are not re-homed (EMSC_COPIES_KEPT_IN_PLACE). */
 export const EMSC_COMCAT_NETWORK_COPIES: ReadonlyMap<string, string> = new Map([
   ['AK', 'ak'],
   ['HV', 'hv'],
@@ -329,7 +386,16 @@ export const EMSC_COMCAT_NETWORK_COPIES: ReadonlyMap<string, string> = new Map([
   ['TX', 'tx'],
   ['UU', 'uu'],
   ['UW', 'uw'],
+  ['NEIC', 'us'],
 ]);
+/** Copy codes whose copies count as the original's identity (authoredCopy: the dense-cell join, the merge pass) but are
+ *  never moved to the event holding the row they copy (Resolver.rehomeCopy, FEED-2). EMSC often takes an event's
+ *  solution first from the regional agency and then from NEIC: the same quake, under two agencies' solutions. Moving
+ *  the row then left the regional agency's row behind as an event of its own whenever the two solutions lie beyond
+ *  each other's windows (round 14 replay: SSN's M4.3 of 2026-08-22 off Chiapas 33 km from ComCat's, JMA's M4.2 of
+ *  2026-08-20 with its minute-rounded time, CENC's M3.9 of 2026-08-01 in Qinghai: each one event without the move, two
+ *  with it). Left in place, the row moves its event to NEIC's solution and the merge pass folds ComCat's event in. */
+export const EMSC_COPIES_KEPT_IN_PLACE: ReadonlySet<string> = new Set(['NEIC']);
 /** Rolling-file sources whose ids are watched for disappearing (PF-5b, log only): a row younger than
  *  ABSENCE_WATCH_DAYS that the feed holds and a complete file no longer lists is counted in status `absent`. AEC's
  *  file spans ~14 days, so a younger id that vanishes was most likely deleted upstream; whether to retract on absence

@@ -55,13 +55,14 @@ test('heartbeat: a history dispatch is a plain workflow_dispatch on main, and th
   assert.deepEqual(calls[0]!.body, { ref: 'main' });
 
   // The dispatched run is gated by the workflow's first step, which reads providers/history.json; the walk is in its
-  // own concurrency group, and only the short commit job takes the writer lock.
+  // own concurrency group, and no job takes the writer lock (FEED-OPS-4: the commit job pushes through
+  // scripts/push-data.sh, tests/writer-group.test.ts).
   const yml = readFileSync(here('../.github/workflows/history.yml'), 'utf8');
   assert.match(yml, /workflow_dispatch:/);
   assert.match(yml, /jq -r '\.enabled' providers\/history\.json/);
   const top = yml.slice(0, yml.indexOf('\njobs:'));
   assert.match(top, /concurrency:\n {2}group: earthquakes-feed-history\n {2}cancel-in-progress: false/);
-  assert.equal((yml.match(/group: earthquakes-feed-writer/g) ?? []).length, 1);
+  assert.equal((yml.match(/group: earthquakes-feed-writer/g) ?? []).length, 0);
 });
 
 test('heartbeat: the Worker has no HTTP surface', async () => {

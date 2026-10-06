@@ -4,10 +4,13 @@ name: first-solutions
 # version history (ComCat, GeoNet, INGV, ETHZ, USP, GEOFON, KNMI, IPGP, LMU) for the history of the reports the feed
 # holds, one source per lane, at most one request per second per host, and uploads what it gets as gzip NDJSON chunks
 # to the Release `first-solutions-YYYY-MM` of the event month. The `data` branch gets only the walk's cursor and the
-# chunk list (knowledge/first_solutions/), written by the short `commit` job under the writer lock; the `collect` job,
-# which spends up to 30 minutes on requests, holds no writer lock, so the 5-minute aggregate is never kept waiting. It
-# shares the deep-history walk's group instead, so the two never query a source at the same time. A commit job that is
-# cancelled while it waits for the writer lock loses nothing: the next run's collect job takes its output over.
+# chunk list (knowledge/first_solutions/), written by the short `commit` job; the `collect` job, which spends up to 30
+# minutes on requests, shares the deep-history walk's group, so the two never query a source at the same time. Neither
+# job holds the writer lock (FEED-OPS-4, round 14): no other writer touches knowledge/first_solutions/, so the commit
+# pushes on its own and rebases onto any writer that got there first. Until then the commit job waited for the lock
+# and GitHub cancelled it whenever another writer queued behind it (10 of 126 runs in the week 2026-09-29 → 10-06,
+# each after 31 minutes of requests); a commit job that fails anyway loses nothing: the next run's collect job takes
+# its output over.
 #
 # Off until enabled: the scheduled runs go ahead only when the repository variable FIRST_SOLUTIONS_SCHEDULE is `on`
 # (gh variable set FIRST_SOLUTIONS_SCHEDULE --body on -R TheShelterApp/earthquakes-feed); a manual dispatch always runs.
@@ -57,19 +60,19 @@ jobs:
       group: earthquakes-feed-history
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # Read only: the day partitions (the work list), the cursor, archives.json and backfill.json.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: data
           path: .data
           fetch-depth: 1
           persist-credentials: false
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       - name: Collect
@@ -83,7 +86,7 @@ jobs:
           # gh: archived months (release download), the chunk uploads and the previous run's artifact.
           GH_TOKEN: ${{ github.token }}
         run: npx --no-install tsx src/first-solutions-collect.ts
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: first-solutions-out
           path: |
@@ -100,16 +103,20 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # The only part that writes `data`: a sparse checkout of knowledge/first_solutions/ (blobs fetched on demand), two
-    # small files, a commit. Seconds inside the writer lock.
-    concurrency:
-      group: earthquakes-feed-writer
-      cancel-in-progress: false
+    # small files, a commit. No writer lock (see the top of this file).
     steps:
-      - uses: actions/download-artifact@v7
+      # The main checkout holds only scripts/push-data.sh, the push loop every writer shares. First: checkout empties a
+      # directory that is not yet a repository, so it must not run after the artifact download.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/push-data.sh
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: first-solutions-out
           path: fs-out
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: data
           path: .data
@@ -130,16 +137,14 @@ jobs:
           git config user.name  "earthquakes-feed-bot"
           git config user.email "bot@users.noreply.github.com"
           git add "$dir"
+          # Without the writer lock this commit must touch nothing another writer writes.
+          staged=$(git diff --cached --name-only | grep -v -x -e "$dir/cursor.json" -e "$dir/chunks.ndjson" || true)
+          if [ -n "$staged" ]; then echo "::error::refusing to commit anything but $dir/cursor.json and chunks.ndjson: $staged"; exit 1; fi
           git commit -m "first-solutions: $(jq -r '[.sources | to_entries[] | "\(.key) \(.value.records // 0)"] | join(", ")' ../fs-out/summary.json) @ $(date -u +%FT%TZ)" \
             || { echo 'no changes'; exit 0; }
-          for _ in 1 2 3; do
-            git push origin HEAD:data && exit 0
-            git fetch origin data
-            # `|| true`: with no rebase started --abort exits 128 and bash -e would kill the step
-            # before the annotation is emitted, losing the reason the push died.
-            git rebase origin/data || { git rebase --abort || true; echo '::error::rebase conflict'; exit 1; }
-          done
-          echo '::error::push failed after 3 attempts'; exit 1
+          # No writer lock (FEED-OPS-4): only this workflow writes these files, so a push that loses the race to another
+          # writer fetches, rebases this one commit onto it (no conflict possible) and tries again (scripts/push-data.sh).
+          PUSH_ATTEMPTS=6 PUSH_BACKOFF_S=3 bash "$GITHUB_WORKSPACE/scripts/push-data.sh"
       # After the commit, so a stalled source does not hold back the others' progress.
       - name: Fail if a source's walk is stalled
         if: always()

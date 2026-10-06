@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { rootCertificates } from 'node:tls';
 import { fileURLToPath } from 'node:url';
-import { PIN_HINT, getText, pinnedCa } from '../src/custom.js';
+import { PIN_HINT, getText, pinnedCa, pinnedLeaf } from '../src/custom.js';
 import { loadRegistry } from '../src/providers.js';
 
 // FEED-SEC-1: TMD and PHIVOLCS serve their leaf certificate without the intermediate. The feed fetched them with TLS
@@ -109,6 +109,35 @@ test('pinned fetch: a leaf-only server verifies with the pinned intermediate, fa
     const t1 = Date.now();
     await assert.rejects(getText(`https://localhost:${port}/slow`, { ca: [chain.int, chain.root], retries: 5, timeoutMs: 600, deadlineMs: 1_500 }), /deadline|timeout/);
     assert.ok(Date.now() - t1 < 3_000, `retries stop at the call deadline (${Date.now() - t1} ms)`);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
+test('pinned fetch: the leaf a pinned host presented is kept by host name (status.json tls_leaves, round 14)', async (t) => {
+  const chain = makeChain();
+  if (!chain) {
+    t.skip('openssl CLI not available');
+    return;
+  }
+  const server = createServer({ key: chain.leafKey, cert: chain.leaf }, (_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('ok');
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    // A handshake that fails its chain changes nothing (the test above may have kept another chain's leaf).
+    const before = pinnedLeaf('localhost');
+    await assert.rejects(getText(`https://localhost:${port}/`, { ca: [chain.root], retries: 0, timeoutMs: 5_000 }));
+    assert.equal(pinnedLeaf('localhost'), before);
+    assert.equal(await getText(`https://localhost:${port}/`, { ca: [chain.int, chain.root], retries: 0, timeoutMs: 5_000 }), 'ok');
+    const leaf = pinnedLeaf('localhost');
+    assert.ok(leaf);
+    assert.equal(leaf.notAfterMs, Date.parse(new X509Certificate(chain.leaf).validTo));
+    assert.equal(leaf.issuer, 'Feed Test Intermediate');
+    assert.equal(leaf.subject, 'localhost');
   } finally {
     server.closeAllConnections();
     await new Promise<void>((r) => server.close(() => r()));

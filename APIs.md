@@ -638,7 +638,9 @@ rewritten less often, which changes what the `data` branch shows between runs: a
 written at most every 3 hours (Pages, the live index and the summaries unchanged) replays the days to 10-04, 10-05 and
 10-06 to 19, 30 and 40 MB. That, and how large the repository may grow (GitHub's on-disk limit is 10 GB,
 [Repository limits](https://docs.github.com/en/repositories/creating-and-managing-repositories/repository-limits),
-read 2026-10-06), are owner decisions.
+read 2026-10-06), are owner decisions. So is a full repack on GitHub's side, which only GitHub can run: the whole
+repository repacked locally (`git repack -adf` of a mirror clone of 2026-10-06, all 808,450 objects, default window and
+depth) is 0.69 GiB, against the 5.38 GiB GitHub serves and counts.
 
 ## Deep history (before 2023-07-06)
 

@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSyn
 import { dirname, join } from 'node:path';
 import { EXTRA_CANON_KEYS, NULLABLE_STD_KEYS, mergeCanonical } from './canonical.js';
 import { reviewStatusOfNode, reviewStatusOfRow } from './review-status.js';
-import { GRID_CELL_DEG, SCHEMA_VERSION, dataPaths } from './config.js';
+import { EVENT_MAP_SHARD_HOURS, GRID_CELL_DEG, SCHEMA_VERSION, dataPaths } from './config.js';
 import { gridKey } from './geo.js';
 import type { EventNode, Extra, Head, Observation, ProvenanceRow, State, Watermarks } from './types.js';
 import { isoFromMs, round6 } from './util.js';
@@ -24,66 +24,126 @@ export function writeIfChanged(file: string, data: string): boolean {
 
 export const eventDayKey = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
-// --- event_map: sharded by UTC event-day (fixes C1: no unbounded single file) ---
+// --- event_map: sharded by UTC event-day (fixes C1: no unbounded single file), and since round 17 by hours of it ---
+
+/**
+ * An event_map shard file: `YYYY-MM-DD-HH.ndjson` (the event-day's EVENT_MAP_SHARD_HOURS hours from HH, since round 17)
+ * or `YYYY-MM-DD.ndjson` (the whole event-day: the layout until round 17, and EVENT_MAP_SHARD_HOURS = 24). Every reader
+ * takes the event-day from the name's first 10 characters, as the code before round 17 did, so both layouts read the
+ * same everywhere (loadEventMap, pruneEventMapShards, earliestEventMapDay, backfill's live floor, archive's refusal).
+ */
+const EVENT_MAP_SHARD = /^(\d{4}-\d{2}-\d{2})(?:-(\d{2}))?\.ndjson$/;
+
+/** The shard file name of a node of `day` at `eventTimeMs` (see EVENT_MAP_SHARD). */
+export function eventMapShardName(day: string, eventTimeMs: number, hours: number = EVENT_MAP_SHARD_HOURS): string {
+  if (hours >= 24) return `${day}.ndjson`;
+  const h = new Date(eventTimeMs).getUTCHours();
+  return `${day}-${String(h - (h % hours)).padStart(2, '0')}.ndjson`;
+}
 
 /** Load the event_map, optionally limited to the last `sinceDays` of event-days.
- *  Reads day shards if present; falls back to the legacy monolithic file (migration). */
+ *  Reads day shards if present; falls back to the legacy monolithic file (migration). A feed id found in two shard
+ *  files (only after a layout change was rolled back, or a node moved to a day no run rewrote since) keeps the node with
+ *  the higher `lastSeq`; on a tie the file read later (name order) wins, as before round 17.
+ *
+ *  The map's order is the same in either shard layout: event-day by event-day, each day's nodes in feed-id order (the
+ *  order of a day file, which saveEventMap writes sorted by feed id). The Resolver indexes the map in this order and
+ *  some of its tie-breaks follow it (the first candidate at an equal distance wins), so hour shards read in name order
+ *  (hour, then feed id) would change which node an equidistant report joins (round 17 review). */
 export function loadEventMap(root: string, opts: { sinceDays?: number; nowMs?: number } = {}): Map<string, EventNode> {
   const p = dataPaths(root);
   const nowMs = opts.nowMs ?? Date.now();
   const cutoffDay = opts.sinceDays != null ? eventDayKey(nowMs - opts.sinceDays * 86_400_000) : null;
   const map = new Map<string, EventNode>();
-  const add = (line: string): void => {
-    const t = line.trim();
-    if (!t) return;
-    const node = JSON.parse(t) as EventNode;
+  const add = (node: EventNode): void => {
+    const held = map.get(node.feedId);
+    if (held && (held.lastSeq ?? -1) > (node.lastSeq ?? -1)) return;
     map.set(node.feedId, node);
   };
+  const parse = (text: string, into: EventNode[]): void => {
+    for (const line of text.split('\n')) {
+      const t = line.trim();
+      if (t) into.push(JSON.parse(t) as EventNode);
+    }
+  };
   if (existsSync(p.eventMapDir)) {
+    let day: string | null = null;
+    let nodes: EventNode[] = [];
+    // A stable sort: lines of one feed id keep their file order, so the later file still wins a lastSeq tie.
+    const flush = (): void => {
+      nodes.sort((a, b) => (a.feedId < b.feedId ? -1 : a.feedId > b.feedId ? 1 : 0));
+      for (const n of nodes) add(n);
+      nodes = [];
+    };
     for (const f of readdirSync(p.eventMapDir).sort()) {
       if (!f.endsWith('.ndjson')) continue;
       if (cutoffDay && f.slice(0, 10) < cutoffDay) continue;
-      for (const line of readFileSync(join(p.eventMapDir, f), 'utf8').split('\n')) add(line);
+      if (f.slice(0, 10) !== day) {
+        flush();
+        day = f.slice(0, 10);
+      }
+      parse(readFileSync(join(p.eventMapDir, f), 'utf8'), nodes);
     }
+    flush();
   } else if (existsSync(p.eventMapLegacy)) {
     // One-time migration: read the whole legacy file regardless of `sinceDays`, so the
     // narrow (aggregate) load can't drop older events before they're written as shards.
-    for (const line of readFileSync(p.eventMapLegacy, 'utf8').split('\n')) add(line);
+    const nodes: EventNode[] = [];
+    parse(readFileSync(p.eventMapLegacy, 'utf8'), nodes);
+    for (const n of nodes) add(n);
   }
   return map;
 }
 
-/** Persist the in-memory event_map as per-event-day shards (byte-compare writes).
- *  Only days present in `map` are (re)written; other shards are left untouched.
- *  Retires the legacy monolithic file once shards exist. */
-export function saveEventMap(root: string, map: Map<string, EventNode>): void {
+/** Persist the in-memory event_map as shards of `hours` hours of each event-day (EVENT_MAP_SHARD_HOURS; byte-compare
+ *  writes, lines in feed-id order). Only days present in `map` are (re)written, and each of those loses the shard files
+ *  it no longer fills (an hour every node left, or the other layout's files after a change of `hours`); other days'
+ *  shards are left untouched. Retires the legacy monolithic file once shards exist.
+ *
+ *  Round 17 (LANE G): each aggregate commit rewrote ~2.3 day shards of ~1.7 MB, and GitHub's incremental repacks keep
+ *  about one compressed copy of every rewritten file per repack (APIs.md, Repository size): ~30 MB a day of the
+ *  repository's growth. A run's changes fall into 1–3 hours of a day, so hour shards rewrite ~70 KB files instead. */
+export function saveEventMap(root: string, map: Map<string, EventNode>, hours: number = EVENT_MAP_SHARD_HOURS): void {
   const p = dataPaths(root);
   const byDay = new Map<string, EventNode[]>();
   for (const node of map.values()) {
     const key = eventDayKey(node.eventTimeMs);
     (byDay.get(key) ?? byDay.set(key, []).get(key)!).push(node);
   }
+  const existing = new Map<string, string[]>();
+  if (existsSync(p.eventMapDir)) {
+    for (const f of readdirSync(p.eventMapDir)) {
+      const m = EVENT_MAP_SHARD.exec(f);
+      if (m) (existing.get(m[1]!) ?? existing.set(m[1]!, []).get(m[1]!)!).push(f);
+    }
+  }
   for (const [day, nodes] of byDay) {
     nodes.sort((a, b) => (a.feedId < b.feedId ? -1 : 1));
-    writeIfChanged(join(p.eventMapDir, `${day}.ndjson`), nodes.map((n) => JSON.stringify(n)).join('\n') + '\n');
+    const files = new Map<string, string[]>();
+    for (const n of nodes) {
+      const f = eventMapShardName(day, n.eventTimeMs, hours);
+      (files.get(f) ?? files.set(f, []).get(f)!).push(JSON.stringify(n));
+    }
+    for (const [f, lines] of files) writeIfChanged(join(p.eventMapDir, f), lines.join('\n') + '\n');
+    for (const f of existing.get(day) ?? []) if (!files.has(f)) rmSync(join(p.eventMapDir, f));
   }
   if (existsSync(p.eventMapLegacy)) rmSync(p.eventMapLegacy);
 }
 
 /** Delete event_map shards for event-days strictly before `beforeMs`
- *  (their identity is preserved in the frozen day partitions). Returns pruned days. */
+ *  (their identity is preserved in the frozen day partitions). Returns the pruned days, each once. */
 export function pruneEventMapShards(root: string, beforeMs: number): string[] {
   const p = dataPaths(root);
   if (!existsSync(p.eventMapDir)) return [];
   const cutoffDay = eventDayKey(beforeMs);
-  const pruned: string[] = [];
+  const pruned = new Set<string>();
   for (const f of readdirSync(p.eventMapDir)) {
     if (f.endsWith('.ndjson') && f.slice(0, 10) < cutoffDay) {
       rmSync(join(p.eventMapDir, f));
-      pruned.push(f.slice(0, 10));
+      pruned.add(f.slice(0, 10));
     }
   }
-  return pruned;
+  return [...pruned].sort();
 }
 
 /** Oldest UTC event-day that still has an event_map shard — the live-window floor.

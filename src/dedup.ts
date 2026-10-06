@@ -28,6 +28,7 @@ import {
   REID_KM,
   REID_MAG_DELTA,
   REID_MAG_TOLERANCE,
+  REVISED_ID_WINDOWS,
   SPATIAL_KM,
   SWARM_CELL_ABSOLUTE,
   TEMPORAL_MS,
@@ -267,11 +268,46 @@ export class Resolver {
     return Math.abs(a.mag - b.mag) <= REID_MAG_DELTA + REID_MAG_TOLERANCE;
   }
 
+  /** Two rows of a REVISED_ID_WINDOWS provider under different ids within its window (time, place, magnitude and the
+   *  numeric ids' gap): one quake re-located under a new id (CSN, round 14). */
+  private static revisedIdPair(a: SourcedSolution, b: SourcedSolution): boolean {
+    if (a.provider !== b.provider) return false;
+    const w = REVISED_ID_WINDOWS.get(a.provider);
+    if (!w || nativeIdOf(a) === nativeIdOf(b)) return false;
+    const ia = Number(nativeIdOf(a));
+    const ib = Number(nativeIdOf(b));
+    if (!Number.isSafeInteger(ia) || !Number.isSafeInteger(ib) || Math.abs(ia - ib) > w.maxIdGap) return false;
+    if (Math.abs(a.eventTimeMs - b.eventTimeMs) > w.dtMs) return false;
+    if (haversineKm(a.lat, a.lon, b.lat, b.lon) > w.km) return false;
+    return a.mag != null && b.mag != null && Math.abs(a.mag - b.mag) <= w.maxDeltaMag + REID_MAG_TOLERANCE;
+  }
+
+  /** The best-scored revisedIdPair between the two nodes' rows (d/km + |dt|/dtMs of the twin rows), or null. */
+  private static revisedScore(a: EventNode, b: EventNode): number | null {
+    let best: number | null = null;
+    for (const ra of a.provenance) {
+      const w = REVISED_ID_WINDOWS.get(ra.provider);
+      if (!w) continue;
+      for (const rb of b.provenance) {
+        if (!Resolver.revisedIdPair(ra, rb)) continue;
+        const s = haversineKm(ra.lat, ra.lon, rb.lat, rb.lon) / w.km + Math.abs(ra.eventTimeMs - rb.eventTimeMs) / w.dtMs;
+        if (best == null || s < best) best = s;
+      }
+    }
+    return best;
+  }
+
+  /** Whether the merge pass may fold two nodes through a revisedIdPair of their rows: neither cell dense. */
+  private revisedPair(a: EventNode, b: EventNode): boolean {
+    if (this.isDense(a.lat, a.lon) || this.isDense(b.lat, b.lon)) return false;
+    return Resolver.revisedScore(a, b) != null;
+  }
+
   /** A provider re-reporting the SAME event resolves via alias; the same provider using a
    *  DIFFERENT native id means its pipeline considers these distinct events — never merge —
    *  unless the provider itself links the two ids (USGS `ids`, read from either side: the
    *  report's own list, or a node row that names the report) or the two rows are one solution
-   *  under two ids (sameSolution). */
+   *  under two ids (sameSolution) or one quake re-located under a new id (revisedIdPair). */
   private sameProviderDistinct(raw: RawObs, node: EventNode): boolean {
     const key = `${raw.provider}:${raw.providerEventId}`;
     return node.provenance.some(
@@ -280,7 +316,8 @@ export class Resolver {
         r.nativeId !== raw.providerEventId &&
         !raw.knownAliasIds.includes(`${r.provider}:${r.nativeId}`) &&
         !knownAliasIdsOf(r.provider, r.nativeId, r.fields).includes(key) &&
-        !Resolver.sameSolution(r, raw),
+        !Resolver.sameSolution(r, raw) &&
+        !Resolver.revisedIdPair(r, raw),
     );
   }
 
@@ -294,7 +331,7 @@ export class Resolver {
         if (rb.provider !== ra.provider || rb.nativeId === ra.nativeId) continue;
         if (linked.includes(`${rb.provider}:${rb.nativeId}`)) continue;
         if (knownAliasIdsOf(rb.provider, rb.nativeId, rb.fields).includes(`${ra.provider}:${ra.nativeId}`)) continue;
-        if (Resolver.sameSolution(ra, rb)) continue;
+        if (Resolver.sameSolution(ra, rb) || Resolver.revisedIdPair(ra, rb)) continue;
         return true;
       }
     }
@@ -446,6 +483,19 @@ export class Resolver {
     return cand;
   }
 
+  /** Live feed ids whose representative is close enough to hold a revisedIdPair of `row` (a REVISED_ID_WINDOWS provider's
+   *  row): within the provider's window plus the widest identity window (an event's rows lie within that of its
+   *  representative). Empty for any other provider. */
+  private revisedCandidates(row: SourcedSolution): Set<string> {
+    const out = new Set<string>();
+    const w = REVISED_ID_WINDOWS.get(row.provider);
+    if (!w) return out;
+    for (const cell of gatherCellKeys(row.lat, row.lon, w.km + LARGE_EVENT_MAX_KM, GRID_CELL_DEG)) {
+      for (const fid of this.geo.get(cell) ?? []) out.add(fid);
+    }
+    return out;
+  }
+
   /** Resolve to an existing feed_id (alias → cross-alias → spatial), or null. Never mints. */
   private findExisting(raw: RawObs): string | null {
     return this.findById(raw) ?? this.findNear(raw);
@@ -516,6 +566,11 @@ export class Resolver {
   private findNear(raw: RawObs): string | null {
     const key = `${raw.provider}:${raw.providerEventId}`;
     if (raw.eventTimeMs >= this.hotFloor) {
+      const revised = this.findRevisedTwin(raw);
+      if (revised) {
+        this.alias.set(key, revised);
+        return revised;
+      }
       const dense = this.isDense(raw.lat, raw.lon);
       let best: string | null = null;
       let bestKm = Infinity;
@@ -572,6 +627,31 @@ export class Resolver {
           best = node;
           bestKm = km;
         }
+      }
+    }
+    return best?.feedId ?? null;
+  }
+
+  /** The first step of findNear for a REVISED_ID_WINDOWS provider (round 14): the live event (neither cell dense) holding
+   *  a row of the report's provider under another id that the report re-locates (revisedIdPair), the nearest such row
+   *  first, unless that event holds another id of the provider the report is not a revision of (sameProviderDistinct).
+   *  Identity before proximity: the old id's event may sit beyond the windows (its representative is another agency's
+   *  solution), and a nearer event of another quake must not take the report. */
+  private findRevisedTwin(raw: RawObs): string | null {
+    if (!REVISED_ID_WINDOWS.has(raw.provider) || this.isDense(raw.lat, raw.lon)) return null;
+    let best: EventNode | null = null;
+    let bestKm = Infinity;
+    for (const fid of this.revisedCandidates(raw)) {
+      const node = this.eventMap.get(fid);
+      if (!node || node.state !== 'live' || this.isDense(node.lat, node.lon)) continue;
+      for (const r of node.provenance) {
+        if (!Resolver.revisedIdPair(r, raw)) continue;
+        const km = haversineKm(raw.lat, raw.lon, r.lat, r.lon);
+        if (km > bestKm || (km === bestKm && best && node.feedId >= best.feedId)) continue;
+        if (this.sameProviderDistinct(raw, node)) continue;
+        if (Resolver.lifecycleLocationBlocks([raw], raw, node.provenance, node)) continue;
+        best = node;
+        bestKm = km;
       }
     }
     return best?.feedId ?? null;
@@ -1324,7 +1404,7 @@ export class Resolver {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
     const dense = this.pairDense(a, b);
     const gate = this.reject(a, b, d, dense);
-    if (gate) {
+    if (gate && !this.revisedPair(a, b)) {
       if (!this.moderatePair(a, b)) return gate;
       const moderate = this.rejectModerate(a, b, d, Resolver.tmdNodes(a, b));
       if (moderate) return `${gate}; ${moderate}`;
@@ -1347,6 +1427,8 @@ export class Resolver {
   private score(a: EventNode, b: EventNode): number {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
     const dense = this.pairDense(a, b);
+    const revised = this.revisedOnly(a, b, d, dense);
+    if (revised != null) return MODERATE_SCORE_OFFSET + revised;
     const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b, Resolver.tmdNodes(a, b)) : null;
     const { km, ms } = moderate ?? this.windows(a, b, dense);
     return (moderate ? MODERATE_SCORE_OFFSET : 0) + d / km + Math.abs(a.eventTimeMs - b.eventTimeMs) / ms;
@@ -1357,7 +1439,9 @@ export class Resolver {
   private mergeableNeighbours(node: EventNode): { node: EventNode; score: number }[] {
     if (node.eventTimeMs < this.hotFloor) return [];
     const out: { node: EventNode; score: number }[] = [];
-    for (const fid of this.candidates(node)) {
+    const cands = this.candidates(node);
+    for (const r of node.provenance) for (const fid of this.revisedCandidates(r)) cands.add(fid);
+    for (const fid of cands) {
       if (fid === node.feedId) continue;
       const other = this.eventMap.get(fid);
       if (!other || other.state !== 'live') continue;
@@ -1384,9 +1468,24 @@ export class Resolver {
     return null;
   }
 
+  /** The revisedScore of a pair the merge pass accepts only through a revisedIdPair of its rows (the windows and the
+   *  moderate-event window reject it), else null. */
+  private revisedOnly(a: EventNode, b: EventNode, d: number, dense: boolean): number | null {
+    if (!this.reject(a, b, d, dense) || !this.revisedPair(a, b)) return null;
+    if (this.moderatePair(a, b) && !this.rejectModerate(a, b, d, Resolver.tmdNodes(a, b))) return null;
+    return Resolver.revisedScore(a, b);
+  }
+
   private foldReason(a: EventNode, b: EventNode): string {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
     const dense = this.pairDense(a, b);
+    if (this.revisedOnly(a, b, d, dense) != null) {
+      const pair = a.provenance.flatMap((ra) => b.provenance.filter((rb) => Resolver.revisedIdPair(ra, rb)).map((rb) => [ra, rb] as const))[0]!;
+      const [ra, rb] = pair;
+      const rd = haversineKm(ra.lat, ra.lon, rb.lat, rb.lon);
+      const rdt = Math.abs(ra.eventTimeMs - rb.eventTimeMs) / 1000;
+      return `revised id: ${ra.provider} ${ra.nativeId} / ${rb.nativeId} d=${rd.toFixed(1)} km dt=${rdt.toFixed(1)} s (events ${d.toFixed(1)} km apart)`;
+    }
     const tmd = Resolver.tmdNodes(a, b);
     const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b, tmd) : null;
     const { km, ms } = moderate ?? this.windows(a, b, dense);

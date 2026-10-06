@@ -244,6 +244,17 @@ observation log of 2026-07-05…10-06 folds 7 such pairs (18–46 km, 1–5 s), 
 of 2026-09-30 in Vietnam, 34 km from ComCat's M4.4; TMD beside another agency (NCS, CENC, BMKG)
 keeps the usual windows.
 
+One exception to "one provider's two ids are two quakes": CSN (Chile) publishes a revised solution
+as a new informe, numbered right after the one it replaces, and drops the old one from its day
+page, which the feed never sees as a delete. Since 2026-10 two CSN rows whose origins are ≤ 3 s
+apart, whose places are ≤ 45 km apart, whose magnitudes differ by ≤ 0.5 and whose informe numbers
+differ by ≤ 2 are one quake: the newer report joins the event holding the older one (before any
+match by time and place), and two events holding such a pair fold (outside dense cells). Of the 24
+pairs of CSN ids within 60 s and 100 km in the observation log of 2026-07-05…10-06, CSN's day pages
+list only one id of 14 (all inside these limits) and both of 10; 3 of those 10 are one quake CSN
+lists twice (EMSC shows one event for each, and no agency a second quake) and fold too; the other
+7 stay apart. The older row stays in the event's provenance.
+
 ## Retired events
 
 An event can leave the live set in two ways: an upstream delete (`state: "tombstoned"`,

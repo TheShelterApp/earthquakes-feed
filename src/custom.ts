@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { request as httpsRequest } from 'node:https';
 import { dirname, resolve } from 'node:path';
-import { rootCertificates } from 'node:tls';
+import { type TLSSocket, rootCertificates } from 'node:tls';
 import { gunzipSync, strFromU8, unzipSync, unzlibSync } from 'fflate';
 import { QUERY_LOOKBACK_MS, REGISTRY_PATH } from './config.js';
 import type { ProviderConfig, RawObs } from './types.js';
@@ -27,6 +27,16 @@ export const PIN_HINT = 'the pinned intermediate no longer completes this host\'
 
 /** Default bound on one getText call, all attempts included (FEED-SEC-1). */
 export const GET_DEADLINE_MS = 45_000;
+
+/** The leaf certificate each pinned host presented in this process, by host name: status.json shows its expiry (FEED-SEC-1;
+ *  TMD's leaf expires 2026-10-09 01:59 UTC). Read from every pinned response whose chain verified. */
+export interface PinnedLeaf {
+  notAfterMs: number;
+  issuer: string | null;
+  subject: string | null;
+}
+const pinnedLeaves = new Map<string, PinnedLeaf>();
+export const pinnedLeaf = (host: string): PinnedLeaf | undefined => pinnedLeaves.get(host);
 
 /** The registry entry's pinned intermediates (`tlsIntermediates`, paths relative to providers/), read once. */
 const caCache = new Map<string, string[]>();
@@ -61,6 +71,12 @@ function once(url: string, timeoutMs: number, ua: string, ca: readonly string[] 
     const req = httpsRequest(
       { hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search, method: 'GET', headers: { 'user-agent': ua, accept: '*/*' }, ca: [...rootCertificates, ...ca], timeout: timeoutMs },
       (res) => {
+        const cert = (res.socket as TLSSocket).getPeerCertificate?.();
+        const notAfterMs = cert?.valid_to ? Date.parse(cert.valid_to) : NaN;
+        if (Number.isFinite(notAfterMs)) {
+          const cn = (x: unknown): string | null => (x && typeof x === 'object' && typeof (x as { CN?: unknown }).CN === 'string' ? (x as { CN: string }).CN : null);
+          pinnedLeaves.set(u.hostname, { notAfterMs, issuer: cn(cert.issuer), subject: cn(cert.subject) });
+        }
         // Collect raw bytes — some gov CDNs (e.g. PHIVOLCS) return content-encoding: gzip
         // regardless of Accept-Encoding, so decode by the header rather than assuming utf8.
         const chunks: Buffer[] = [];

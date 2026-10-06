@@ -4,7 +4,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_ACTIVITY_BUDGET_HOURS, activityBudgetHours, loadActivity, saveActivity, seedActivity, silentProviders, updateActivity } from '../src/activity.js';
+import {
+  DEFAULT_ACTIVITY_BUDGET_HOURS,
+  FROZEN_BUDGET_FACTOR,
+  activityBudgetHours,
+  frozenBudgetHours,
+  frozenProviders,
+  loadActivity,
+  saveActivity,
+  seedActivity,
+  silentProviders,
+  tlsLeafStatus,
+  updateActivity,
+} from '../src/activity.js';
 import { isNoData } from '../src/fdsn.js';
 import { fetchProvider, loadRegistry } from '../src/providers.js';
 import { enrichStatusV2 } from '../src/status-v2.js';
@@ -158,4 +170,80 @@ test('status v2: a silent source keeps ok, gains silent + lastNonEmptyAt, and is
   assert.equal(v2.providers.tmd.lastNonEmptyAt, Date.parse('2026-08-18T03:56:48.419Z'));
   assert.equal(v2.providers.bmkg.silent, false);
   assert.equal(v2.silent.tmd.budget_hours, 12, 'the raw silent object passes through');
+});
+
+// Round 14: FEED-3's blind spot, a source whose file stands still but still lists old rows (frozen).
+
+test('frozen budget: three activity budgets by default, the registry value for a last-N list, none where silence has none', () => {
+  assert.equal(FROZEN_BUDGET_FACTOR, 3);
+  assert.equal(frozenBudgetHours(fdsn()), 36);
+  assert.equal(frozenBudgetHours(fdsn({ activityBudgetHours: 72 })), 216);
+  assert.equal(frozenBudgetHours(fdsn({ frozenBudgetHours: 216 })), 216);
+  assert.equal(frozenBudgetHours(fdsn({ activityBudgetHours: null })), null);
+  assert.equal(frozenBudgetHours(fdsn({ frozenBudgetHours: null })), null);
+  assert.equal(frozenBudgetHours(fdsn({ liveActive: false })), null);
+  const byId = new Map(registry.map((p) => [p.id, p]));
+  for (const id of ['bgs', 'igepn', 'cwa']) assert.equal(frozenBudgetHours(byId.get(id)!), 216, id);
+  for (const id of ['cenc', 'geosphere', 'bmkg', 'egypt', 'ga', 'tmd']) assert.equal(frozenBudgetHours(byId.get(id)!), 36, id);
+  assert.deepEqual(registry.filter((p) => p.frozenBudgetHours !== undefined).map((p) => p.id).sort(), ['bgs', 'cwa', 'igepn']);
+});
+
+test('frozenProviders: rows whose newest origin stands past window + frozen budget; never an empty, failed or windowed answer', () => {
+  const list = fdsn({ id: 'list', supportsTimeRange: false });
+  const lastN = fdsn({ id: 'lastn', supportsTimeRange: false, frozenBudgetHours: 216 });
+  const late = fdsn({ id: 'late', lookbackDays: 8 });
+  const providers = [list, lastN, late, fdsn({ id: 'empty' }), fdsn({ id: 'failed' }), fdsn({ id: 'exempt', activityBudgetHours: null })];
+  const frozen = frozenProviders(
+    {
+      list: { ok: true, events_returned: 30, newestOriginMs: NOW - 85 * HOUR },
+      lastn: { ok: true, events_returned: 32, newestOriginMs: NOW - 180 * HOUR },
+      late: { ok: true, events_returned: 4, newestOriginMs: NOW - 200 * HOUR },
+      empty: { ok: true, events_returned: 0, newestOriginMs: null },
+      failed: { ok: false, newestOriginMs: null },
+      exempt: { ok: true, events_returned: 3, newestOriginMs: NOW - 900 * HOUR },
+    },
+    providers,
+    NOW,
+  );
+  assert.deepEqual(frozen, { list: { newest_origin: new Date(NOW - 85 * HOUR).toISOString(), newest_origin_age_hours: 85, window_hours: 48, budget_hours: 36, rows: 30 } });
+  // At the threshold itself it is not frozen yet; a source the registry stopped asking is not reported.
+  assert.deepEqual(frozenProviders({ list: { ok: true, events_returned: 1, newestOriginMs: NOW - 84 * HOUR } }, [list], NOW), {});
+  assert.deepEqual(frozenProviders({ gone: { ok: true, events_returned: 1, newestOriginMs: 0 } }, [list], NOW), {});
+  // An 8-day window: frozen only past 192 + 36 h.
+  assert.deepEqual(Object.keys(frozenProviders({ late: { ok: true, events_returned: 4, newestOriginMs: NOW - 229 * HOUR } }, [late], NOW)), ['late']);
+});
+
+test('updateActivity: a pinned leaf read in this run replaces the kept one; a run without one keeps it', () => {
+  const prev = { tmd: { lastNonEmptyAt: NOW - HOUR, sinceMs: 0, tlsLeaf: { notAfterMs: 1, issuer: 'old', subject: 'old', seenAt: 0 } } };
+  const leaf = { notAfterMs: Date.parse('2026-10-09T01:59:47Z'), issuer: 'GlobalSign GCC R6 AlphaSSL CA 2025', subject: '*.tmd.go.th' };
+  const next = updateActivity(prev, { tmd: { ok: true, events_returned: 20 } }, NOW, { tmd: leaf });
+  assert.deepEqual(next.tmd, { lastNonEmptyAt: NOW, sinceMs: 0, tlsLeaf: { ...leaf, seenAt: NOW } });
+  const kept = updateActivity(next, { tmd: { ok: false } }, NOW + HOUR);
+  assert.deepEqual(kept.tmd!.tlsLeaf, { ...leaf, seenAt: NOW });
+  assert.deepEqual(tlsLeafStatus(kept.tmd!.tlsLeaf!, Date.parse('2026-10-06T00:00:00Z')), {
+    not_after: '2026-10-09T01:59:47.000Z',
+    days_left: 3.1,
+    issuer: 'GlobalSign GCC R6 AlphaSSL CA 2025',
+    subject: '*.tmd.go.th',
+    seen_at: new Date(NOW).toISOString(),
+  });
+});
+
+test('status v2: a frozen source keeps ok, gains frozen, and is listed in frozenProviders; tls_leaves pass through', () => {
+  const raw = {
+    generated: '2026-10-06T00:00:00.000Z',
+    head_seq: 1,
+    degraded: ['bgs'],
+    silent: {},
+    frozen: { bgs: { newest_origin: '2026-09-25T00:00:00.000Z', newest_origin_age_hours: 264.5, window_hours: 48, budget_hours: 216, rows: 40 } },
+    tls_leaves: { tmd: { not_after: '2026-10-09T01:59:47.000Z', days_left: 3.1, issuer: 'x', subject: 'y', seen_at: '2026-10-06T00:00:00.000Z' } },
+    providers: { bgs: { ok: true, events_returned: 40, newest_origin: '2026-09-25T00:00:00.000Z' }, usgs: { ok: true, events_returned: 400 } },
+  };
+  const v2 = enrichStatusV2(raw, { generatedMs: Date.parse(raw.generated), expectedIntervalSeconds: 300, staleAfterSeconds: 1800, health: {} }) as Record<string, any>;
+  assert.deepEqual(v2['frozenProviders'], ['bgs']);
+  assert.equal(v2['providers'].bgs.frozen, true);
+  assert.equal(v2['providers'].bgs.ok, true);
+  assert.equal(v2['providers'].bgs.newest_origin, '2026-09-25T00:00:00.000Z');
+  assert.equal(v2['providers'].usgs.frozen, false);
+  assert.deepEqual(v2['tls_leaves'], raw.tls_leaves);
 });

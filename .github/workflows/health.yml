@@ -95,20 +95,44 @@ jobs:
             // count once it is 12 h old.
             const silent = (s && s.silent && typeof s.silent === "object" && !Array.isArray(s.silent)) ? s.silent : {};
             const silentIds = Object.keys(silent).sort();
-            const failing = degraded.filter((id) => !(id in silent) || (s && s.providers && s.providers[id] && s.providers[id].ok === false));
+            // Round 14: a FROZEN source answers with rows whose newest origin stands still past its window plus budget
+            // (src/activity.ts). Reported with the silent ones, kept out of the systemic count the same way.
+            const frozen = (s && s.frozen && typeof s.frozen === "object" && !Array.isArray(s.frozen)) ? s.frozen : {};
+            const frozenIds = Object.keys(frozen).sort();
+            const quiet = (id) => id in silent || id in frozen;
+            const failing = degraded.filter((id) => !quiet(id) || (s && s.providers && s.providers[id] && s.providers[id].ok === false));
             const total = Object.keys((s && s.providers) || {}).length || 1;
             // Scale with the roster: a handful of slow national FDSN nodes flap constantly and
             // the feed stays fully covered by the global catalogs — only a systemic share down
             // (~30%, floor 8) signals a real problem. Manifest staleness is the primary signal.
             const degLimit = Math.max(8, Math.ceil(total * 0.3));
-            console.log(`age=${Math.round(ageS)}s (stale_after=${staleAfter}) head_seq=${m.head_seq} events=${m.event_count} failing=${failing.length}/${total} limit=${degLimit} [${failing.join(",")}] silent=[${silentIds.join(",")}] queued=${queuedS}s`);
+            console.log(`age=${Math.round(ageS)}s (stale_after=${staleAfter}) head_seq=${m.head_seq} events=${m.event_count} failing=${failing.length}/${total} limit=${degLimit} [${failing.join(",")}] silent=[${silentIds.join(",")}] frozen=[${frozenIds.join(",")}] queued=${queuedS}s`);
             const hours = (x) => (typeof x === "number" ? Math.round(x) : "?");
             const silentText = silentIds.map((id) => {
               const e = silent[id] || {};
               return `${id}: no rows for ${hours(e.silent_hours)} h (budget ${hours(e.budget_hours)} h, last rows ${e.last_non_empty_at || "not since " + (e.counted_from || "?")})`;
             });
             for (const t of silentText) console.log(`::warning::silent provider ${t}`);
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, `status_read=${s ? "1" : ""}\nsilent_set=${silentIds.join(",")}\nsilent=${silentText.join("; ")}\n`);
+            const frozenText = frozenIds.map((id) => {
+              const e = frozen[id] || {};
+              return `${id}: frozen, ${e.rows ?? "?"} rows whose newest origin (${e.newest_origin || "?"}) is ${hours(e.newest_origin_age_hours)} h old (window ${hours(e.window_hours)} h + budget ${hours(e.budget_hours)} h)`;
+            });
+            for (const t of frozenText) console.log(`::warning::frozen provider ${t}`);
+            // The issue below lists both kinds; its set marker names a frozen one as frozen:<id>.
+            const quietSet = [...silentIds, ...frozenIds.map((id) => `frozen:${id}`)].join(",");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `status_read=${s ? "1" : ""}\nsilent_set=${quietSet}\nsilent=${[...silentText, ...frozenText].join("; ")}\n`);
+            // FEED-SEC-1: the leaf certificate of each pinned source (status.json tls_leaves, round 14). Under 7 days a
+            // warning and the "[health] pinned certificate expiring" issue below; never a red run (the source itself
+            // fails once the leaf expires, and the failing count sees that).
+            const leaves = (s && s.tls_leaves && typeof s.tls_leaves === "object") ? s.tls_leaves : {};
+            const expiring = Object.keys(leaves).sort().filter((id) => typeof leaves[id].days_left === "number" && leaves[id].days_left < 7);
+            const leafText = expiring.map((id) => {
+              const l = leaves[id];
+              return `${id}: leaf ${l.subject || "?"} (issuer ${l.issuer || "?"}) expires ${l.not_after}, in ${l.days_left} days (read ${l.seen_at})`;
+            });
+            for (const t of leafText) console.log(`::warning::pinned certificate ${t}`);
+            console.log(`tls_leaf_days=[${Object.keys(leaves).sort().map((id) => `${id}:${leaves[id].days_left}`).join(",")}]`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `tls_set=${expiring.join(",")}\ntls=${leafText.join("; ")}\n`);
             const problems = [];
             // Name the queue in the alarm: a stall upstream of us reads as broken publishing.
             const queueNote = queuedS > 600 ? ` — this run itself waited ${Math.round(queuedS / 60)} min in the runner queue` : "";
@@ -119,7 +143,8 @@ jobs:
           '
       - name: Silent providers issue (opened, updated when the set changes, closed when none; never fails the run)
         # A silent source loses events quietly (NOA, 2026-09-24 → 10-04: 352 Greek events) but is usually one
-        # agency, not an outage of the feed: an issue (GitHub emails it) instead of a red run every 15 minutes.
+        # agency, not an outage of the feed: an issue (GitHub emails it) instead of a red run every 15 minutes. Frozen
+        # sources (rows, but the newest origin stands still; round 14) are listed here too, as frozen:<id> in the set.
         # An unreadable status.json changes nothing (state unknown). The entries are joined with "; " for the
         # one-line step output and split back into a list here, so an entry itself never contains a semicolon.
         # continue-on-error: a GitHub API error while filing the issue must not turn a healthy run red.
@@ -134,7 +159,7 @@ jobs:
           NUM=$(gh issue list --repo "${{ github.repository }}" --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
           RUN="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           if [ -n "$SILENT_SET" ]; then
-            BODY="Automated watchdog: these sources answer with no rows for longer than their activity budget (src/activity.ts, providers/registry.json \`activityBudgetHours\`). Their events reach the feed only through other agencies.
+            BODY="Automated watchdog: these sources answer with no rows for longer than their activity budget, or (frozen) with rows whose newest origin has stood still past their query window plus their frozen budget (src/activity.ts, providers/registry.json \`activityBudgetHours\` / \`frozenBudgetHours\`). Their events reach the feed only through other agencies.
 
           $(printf '%s\n' "$SILENT" | tr ';' '\n' | sed 's/^ */- /')
 
@@ -155,6 +180,43 @@ jobs:
             gh issue comment "$NUM" --repo "${{ github.repository }}" --body "No silent source as of $(date -u +%FT%TZ) (run ${RUN}).
 
           silent-set: "
+            gh issue close "$NUM" --repo "${{ github.repository }}"
+          fi
+      - name: Pinned certificate issue (opened when a pinned leaf has under 7 days, closed when none; never fails the run)
+        # FEED-SEC-1: TMD and PHIVOLCS serve their leaf without the intermediate, so the feed pins the intermediate
+        # (providers/tls). A renewed leaf under the same intermediate needs nothing; under another one the source fails
+        # until the new intermediate is pinned (providers/tls/README.md). This gives a week's notice.
+        if: steps.check.outputs.status_read == '1'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TLS: ${{ steps.check.outputs.tls }}
+          TLS_SET: ${{ steps.check.outputs.tls_set }}
+        run: |
+          TITLE="[health] pinned certificate expiring"
+          NUM=$(gh issue list --repo "${{ github.repository }}" --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          RUN="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ -n "$TLS_SET" ]; then
+            BODY="Automated watchdog: the leaf certificate of these pinned sources expires within 7 days (status.json \`tls_leaves\`). When the host renews it, check its issuer: a new intermediate must be pinned (providers/tls/README.md), the same one needs nothing.
+
+          $(printf '%s\n' "$TLS" | tr ';' '\n' | sed 's/^ */- /')
+
+          tls-set: ${TLS_SET}
+          Run: ${RUN} ($(date -u +%FT%TZ))"
+            if [ -z "$NUM" ]; then
+              gh issue create --repo "${{ github.repository }}" --title "$TITLE" --body "$BODY" --label bug
+            else
+              LAST=$(gh issue view "$NUM" --repo "${{ github.repository }}" --json body,comments --jq '[.body, (.comments[].body)] | map(select(test("tls-set: "))) | last // ""' | sed -n 's/^ *tls-set: //p' | tail -1)
+              if [ "$LAST" != "$TLS_SET" ]; then
+                gh issue comment "$NUM" --repo "${{ github.repository }}" --body "$BODY"
+              else
+                echo "issue #$NUM already lists ${TLS_SET}"
+              fi
+            fi
+          elif [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --repo "${{ github.repository }}" --body "No pinned leaf expires within 7 days as of $(date -u +%FT%TZ) (run ${RUN}).
+
+          tls-set: "
             gh issue close "$NUM" --repo "${{ github.repository }}"
           fi
       - name: Open/refresh health issue and fail

@@ -122,6 +122,10 @@ export interface ProviderConfig {
   /** Hours the source may answer with no rows before status.json lists it as silent (src/activity.ts, FEED-3):
    *  missing = 12 (an active agency), a number for a quiet one, null = never silent (a region quiet for weeks). */
   activityBudgetHours?: number | null;
+  /** Hours past its query window that the newest origin a source still lists may stand still before status.json lists
+   *  it as frozen (src/activity.ts): missing = 3 x its activity budget, null = never frozen. Longer for a source that
+   *  lists its last N events, whose list legitimately stands still for days in a quiet spell (BGS, IG-EPN, CWA). */
+  frozenBudgetHours?: number | null;
   refreshSeconds: number;
   license: string;
   attribution: string;
@@ -153,6 +157,19 @@ export interface ProviderStatus {
   error?: string;
   /** The host that answered, when it was the source's `fallbackBase` and not its `base`. */
   via?: string;
+  /** ISO time of the newest origin the answer listed (aggregate, FEED-3 frozen check); absent with no rows. */
+  newest_origin?: string;
+  /** Pinned sources (tlsIntermediates): the leaf certificate the host presented (custom.ts, FEED-SEC-1). */
+  tls_leaf?: TlsLeafStatus;
+}
+
+export interface TlsLeafStatus {
+  not_after: string;
+  days_left: number;
+  issuer: string | null;
+  subject: string | null;
+  /** When the leaf was read: this run, or an earlier run when this one could not complete the handshake. */
+  seen_at: string;
 }
 
 export interface State {

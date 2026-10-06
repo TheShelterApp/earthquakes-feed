@@ -12,9 +12,10 @@ import { activeProviders, configMap, loadRegistry, priorityMap } from './provide
 import { byIngestOrder, emptyTally, screen } from './quality.js';
 import { COMCAT_DELETE_REASON, revisionSweep } from './sweep.js';
 import { vanishedIds } from './absence.js';
-import { loadActivity, saveActivity, silentProviders, updateActivity } from './activity.js';
+import { frozenProviders, loadActivity, saveActivity, silentProviders, tlsLeafStatus, updateActivity } from './activity.js';
+import { pinnedLeaf } from './custom.js';
 import { fetchRunInputs, loadSweepCursors, nextCursors, saveSweepCursors, sweepOriginFloorMs, sweepSpecs } from './sweep-cursor.js';
-import type { RawObs } from './types.js';
+import type { ProviderStatus, RawObs } from './types.js';
 import { isoFromMs } from './util.js';
 
 const FUTURE_LEEWAY_MS = 10 * 60_000;
@@ -220,10 +221,16 @@ async function main(): Promise<void> {
   if (newObs.length) appendObservations(DATA_DIR, newObs);
   state.head = { seq, ingest_time: ingestTime };
 
-  const providers: Record<string, unknown> = {};
+  // The newest origin each answer lists (future rows excluded): status `newest_origin`, and the frozen check below.
+  const newestOrigin = new Map<string, number>();
+  for (const o of outcomes) {
+    for (const r of o.obs) if (r.eventTimeMs <= futureCeil && r.eventTimeMs > (newestOrigin.get(o.provider) ?? -Infinity)) newestOrigin.set(o.provider, r.eventTimeMs);
+  }
+  const providers: Record<string, ProviderStatus> = {};
   const degraded: string[] = [];
   for (const o of outcomes) {
-    providers[o.provider] = o.status;
+    const newest = newestOrigin.get(o.provider);
+    providers[o.provider] = newest != null ? { ...o.status, newest_origin: isoFromMs(newest) } : o.status;
     if (!o.status.ok) degraded.push(o.provider);
   }
   // FEED-3: a source that keeps answering with no rows past its activity budget is silent, listed in `silent` and
@@ -231,9 +238,32 @@ async function main(): Promise<void> {
   const paths = dataPaths(DATA_DIR);
   const loadedActivity = loadActivity(paths.providerActivity, paths.statusHistoryDir);
   if (loadedActivity.seeded) console.log(`aggregate: provider activity seeded from the status history (${Object.keys(loadedActivity.index).length} sources)`);
-  const activity = updateActivity(loadedActivity.index, Object.fromEntries(outcomes.map((o) => [o.provider, o.status])), nowMs);
+  // Pinned sources (FEED-SEC-1): the leaf each host presented in this run, kept in the index so a failed handshake still
+  // shows when it expired; status.json carries it per source (`tls_leaf`) and in `tls_leaves`, health warns under 7 days.
+  const leaves = Object.fromEntries(
+    active.filter((p) => p.tlsIntermediates?.length).flatMap((p) => {
+      const leaf = pinnedLeaf(new URL(p.base).hostname);
+      return leaf ? [[p.id, leaf] as const] : [];
+    }),
+  );
+  const activity = updateActivity(loadedActivity.index, Object.fromEntries(outcomes.map((o) => [o.provider, o.status])), nowMs, leaves);
   const silent = silentProviders(activity, active, nowMs);
   for (const id of Object.keys(silent)) if (!degraded.includes(id)) degraded.push(id);
+  // FEED-3, round 14: a source that answers with rows whose newest origin stands still past its window plus budget is
+  // frozen (src/activity.ts), listed in `frozen` and counted in `degraded` like a silent one.
+  const frozen = frozenProviders(
+    Object.fromEntries(outcomes.map((o) => [o.provider, { ok: o.status.ok, events_returned: o.status.events_returned, newestOriginMs: newestOrigin.get(o.provider) ?? null }])),
+    active,
+    nowMs,
+  );
+  for (const id of Object.keys(frozen)) if (!degraded.includes(id)) degraded.push(id);
+  const tlsLeaves: Record<string, ReturnType<typeof tlsLeafStatus>> = {};
+  for (const p of active) {
+    const leaf = p.tlsIntermediates?.length ? activity[p.id]?.tlsLeaf : undefined;
+    if (!leaf) continue;
+    tlsLeaves[p.id] = tlsLeafStatus(leaf, nowMs);
+    if (providers[p.id]) providers[p.id] = { ...providers[p.id]!, tls_leaf: tlsLeaves[p.id] };
+  }
   // The sweeps' outcomes and cursors: fail-open like the live fetch, and a sweep that did not
   // complete keeps its cursor, so the next run asks for the same window again. `epoch` is the
   // catch-up epoch (config SWEEP_EPOCH); each sweep's `epoch` is the one its cursor carries.
@@ -272,6 +302,8 @@ async function main(): Promise<void> {
     duration_ms: Math.round(Date.now() - nowMs),
     degraded,
     silent,
+    frozen,
+    tls_leaves: tlsLeaves,
     providers,
     sweeps,
   };
@@ -308,6 +340,8 @@ async function main(): Promise<void> {
       (correction?.nrcan ? ` nrcan_filled=${correction.nrcan.filled} nrcan_chosen=${correction.nrcan.chosen} nrcan_merged=${correction.nrcan.merged}` : '') +
       (degraded.length ? ` degraded=[${degraded.join(',')}]` : '') +
       (Object.keys(silent).length ? ` silent=[${Object.entries(silent).map(([id, e]) => `${id}:${Math.round(e.silent_hours)}h`).join(',')}]` : '') +
+      (Object.keys(frozen).length ? ` frozen=[${Object.entries(frozen).map(([id, e]) => `${id}:${Math.round(e.newest_origin_age_hours)}h`).join(',')}]` : '') +
+      (Object.keys(tlsLeaves).length ? ` tls_leaf_days=[${Object.entries(tlsLeaves).map(([id, l]) => `${id}:${l.days_left}`).join(',')}]` : '') +
       (sweep.stale ? ` sweep_stale_skipped=${sweep.stale}` : '') +
       ` sweeps_failed=[${sweepsFailed.join(',')}]` +
       (sweepsCatchUp.length ? ` sweeps_catch_up=[${sweepsCatchUp.join(',')}]` : ''),

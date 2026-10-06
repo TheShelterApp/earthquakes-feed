@@ -1096,10 +1096,12 @@ Pelée, Mayotte, the Mont Blanc massif, aftershock zones) the feed joins two rep
 rows of one id were published as two events: in the day partitions of 2026-06-01…10-06, 420 ids (403 of them in
 June, written by the feed's first run on 2026-07-05). Those days are frozen and keep both events: drop a live
 `resif`-only feature whose `resif:<id>` has a twin `renass:<id>` in another live feature's `feed.aliases`, or the
-other way round. The deep-history editions sealed before the change keep theirs too (2022-01 e1: 186 ids; 2022-06
-e1: 0; 2023-01 e2: 18); a month sealed after it is built with the rule (rebuilt offline, 2022-01 gives 26,061 events
-instead of 26,245, every row of another source in the same event as before). A later edition of a sealed month would
-pick it up; nothing builds one automatically.
+other way round. The deep-history editions sealed before the change (merged 2026-10-06 about 13:10 UTC: the pilot
+year's `e1` and `e2` and era A's `e1` of 2022-06 back to 2021-01) keep theirs too (2021-04 e1: 296 ids; 2022-01 e1:
+186; 2023-01 e2: 18; 2022-06 e1: 0), and the same consumer rule drops them; a month sealed after it is built with the
+rule (rebuilt offline, 2022-01 gives 26,061 events instead of 26,245 and 2021-04 26,437 instead of 26,733, every row
+of another source in the same event as before). A later edition of a sealed month would pick it up; nothing builds
+one automatically.
 
 ## Recipes
 

@@ -266,8 +266,21 @@ export const COMCAT_ID_PROVIDERS: ReadonlySet<string> = new Set(COMCAT_ID_PREFIX
  *  (Montagne Pelée, Mayotte, the Mont Blanc massif, an aftershock zone) each became an event of its own; and a RESIF
  *  row that joined an event holding RéNaSS's other id of a quake left RéNaSS's row of its own id in a second event.
  *  Both rows stay in the event (each source's own attribution and licence), and the twin is derived, never stored
- *  (knownAliasIds go into the deep-history raw assets): nothing about the published or stored shape changes. */
-export const CATALOGUE_MIRRORS: ReadonlyMap<string, string> = new Map([['resif', 'renass']]);
+ *  (knownAliasIds go into the deep-history raw assets): nothing about the published or stored shape changes.
+ *  AusPass (round 20) serves Geoscience Australia's catalogue under GA's ids with a prefix (CATALOGUE_MIRROR_ID_PREFIX):
+ *  AusPass `smi:local/ga2026tgusvy` is GA `ga2026tgusvy`. Measured 2026-10-06: AusPass's 6,811 events of 2024-01 →
+ *  2026-09 all carry `Author` "GA (via ANU)", `Contributor` "Geoscience Australia" and an id `smi:local/ga…`; the 214
+ *  AusPass ids of 2026-07-05 → 07-28 (while GA's RSS was read) are all among GA's 219; the 12 ids the feed holds from
+ *  both (origins 2026-09-29/30) are 12 events with both rows; the solutions of one id differ only where one source is a
+ *  revision behind (of the 214 July pairs, GA's RSS solution against AusPass's today: 6 more than 10 km apart, up to
+ *  31.7 km). */
+export const CATALOGUE_MIRRORS: ReadonlyMap<string, string> = new Map([
+  ['resif', 'renass'],
+  ['auspass', 'ga'],
+]);
+/** The prefix a catalogue mirror (CATALOGUE_MIRRORS) puts before the catalogue's own event id (round 20): AusPass serves
+ *  GA's `ga2026tgusvy` as `smi:local/ga2026tgusvy`. A mirror not listed uses the catalogue's ids as they are (RESIF). */
+export const CATALOGUE_MIRROR_ID_PREFIX: ReadonlyMap<string, string> = new Map([['auspass', 'smi:local/']]);
 /** The COMCAT_ID_PROVIDERS whose event list follows ComCat's lifecycle and is mostly automatic solutions (AEC,
  *  PF-5b). The node that holds such a report carries the alias `usgs:<its id>`; an unmatched report beside another
  *  agency's event is withheld (Resolver.lateTwin); a ComCat delete of the id withdraws their row as well, and a row

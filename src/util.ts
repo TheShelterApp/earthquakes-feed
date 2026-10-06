@@ -1,4 +1,4 @@
-import { CATALOGUE_MIRRORS, COMCAT_ID_PREFIX, COMCAT_PROVIDER } from './config.js';
+import { CATALOGUE_MIRRORS, CATALOGUE_MIRROR_ID_PREFIX, COMCAT_ID_PREFIX, COMCAT_PROVIDER } from './config.js';
 
 export const round6 = (n: number): number => Math.round(n * 1e6) / 1e6;
 
@@ -111,8 +111,8 @@ export function catalogueOf(provider: string): string {
   return CATALOGUE_MIRRORS.get(provider) ?? provider;
 }
 
-/** The other sources serving `provider`'s catalogue under the same ids (`renass` for `resif` and `resif` for
- *  `renass`); empty for a source without a mirror. */
+/** The other sources serving `provider`'s catalogue (`renass` for `resif` and `resif` for `renass`, `auspass` for
+ *  `ga`); empty for a source without a mirror. */
 export function mirrorsOf(provider: string): string[] {
   const own = catalogueOf(provider);
   const out = own === provider ? [] : [own];
@@ -120,9 +120,26 @@ export function mirrorsOf(provider: string): string[] {
   return out;
 }
 
-/** The alias keys of the same report at the other sources of its catalogue (`renass:<id>` for `resif` and `<id>`). */
+/** A source's event id in its catalogue's own form (config CATALOGUE_MIRROR_ID_PREFIX): GA's `ga2026tgusvy` for AusPass's
+ *  `smi:local/ga2026tgusvy`; the id itself for every other source, and for a mirror's id without the prefix. */
+export function catalogueIdOf(provider: string, nativeId: string): string {
+  const prefix = CATALOGUE_MIRROR_ID_PREFIX.get(provider);
+  return prefix && nativeId.length > prefix.length && nativeId.startsWith(prefix) ? nativeId.slice(prefix.length) : nativeId;
+}
+
+/** The alias keys of the same report at the other sources of its catalogue (`renass:<id>` for `resif` and `<id>`;
+ *  `ga:<id>` for `auspass` and `smi:local/<id>`, `auspass:smi:local/<id>` for `ga` and `<id>`). */
 export function mirrorKeys(provider: string, nativeId: string): string[] {
-  return nativeId ? mirrorsOf(provider).map((p) => `${p}:${nativeId}`) : [];
+  if (!nativeId) return [];
+  const id = catalogueIdOf(provider, nativeId);
+  return mirrorsOf(provider).map((p) => `${p}:${CATALOGUE_MIRROR_ID_PREFIX.get(p) ?? ''}${id}`);
+}
+
+/** Whether two rows are one event of one catalogue: the same catalogue (catalogueOf) and the same id in the catalogue's
+ *  own form (catalogueIdOf), so AusPass's `smi:local/<id>` and GA's `<id>` are one event, and RESIF's and RéNaSS's
+ *  `<id>`. */
+export function sameCatalogueEvent(providerA: string, idA: string, providerB: string, idB: string): boolean {
+  return catalogueOf(providerA) === catalogueOf(providerB) && catalogueIdOf(providerA, idA) === catalogueIdOf(providerB, idB);
 }
 
 /** Same-provider alias ids carried in a report's own vocabulary: USGS lists every contributing

@@ -1189,6 +1189,39 @@ rule (rebuilt offline, 2022-01 gives 26,061 events instead of 26,245 and 2021-04
 of another source in the same event as before). A later edition of a sealed month would pick it up; nothing builds
 one automatically.
 
+## Australia (GA, AusPass)
+
+The `ga` source reads Geoscience Australia's RSS of its last 7 days (`earthquakes.ga.gov.au`, ids `ga2026tgusvy`) and
+the `auspass` source reads AusPass's FDSN event service (`auspass.edu.au`, ANU), which serves GA's catalogue under GA's
+ids with the prefix `smi:local/` (`smi:local/ga2026tgusvy`). Measured on 2026-10-06: AusPass's 6,811 events of 2024-01 →
+2026-09 all carry `Author` "GA (via ANU)", `Contributor` "Geoscience Australia" and an id `smi:local/ga…`; the 214
+AusPass ids of 2026-07-05 → 07-28 (while the feed read GA's RSS) are all among GA's 219 ids of those days (GA's RSS
+listed 5 more); the 12 ids both sources gave the feed (origins 2026-09-29/30) are 12 events holding both rows. The two
+solutions of one id can differ, one source holding an earlier one: of the 214 July pairs, GA's RSS solution and
+AusPass's today are 0.05 km apart at the median, 63 more than 1 km and 6 more than 10 km (up to 31.7 km, an M5.0 south
+of the Kermadec Islands); GA's FIRST RSS solution of those ids was 2.3 km from AusPass's at the median, 30 more than
+10 km and up to 83.4 km (an M5.0 off Honshu, revised to AusPass's position by the RSS the next day; review). AusPass imports GA's solutions in batches days after the origin, and the feed asks it for the
+last 2 days, so few of its events reach the feed through it: 18 ids since 2026-07-05, against 689 AusPass events of
+2026-07-05 → 09-30. GA's RSS is the source that carries GA's catalogue in time (silent from 2026-07-30 until the parser
+fix of 2026-10-06, issue #59; of the 71 Australian events of 2026-07-05 → 09-30 with neither row, 65 reached the feed
+through another source, 63 of them through EMSC, and 6 small ones, at most M2.8, did not). The deep history reads
+AusPass alone (GA has no event service for the past), so its editions hold AusPass rows and no GA row.
+
+Since round 20 (`CATALOGUE_MIRRORS` with `CATALOGUE_MIRROR_ID_PREFIX`, src/config.ts) the feed treats AusPass's and GA's
+rows of one GA id as one report, as it treats RESIF's and RéNaSS's (*France*): a report joins the event its twin is in
+however far a revision has moved it and however dense the cell, the merge pass may fold two events holding the twins,
+and an id is compared in GA's own form, so AusPass's row of one GA id beside GA's row of another is that catalogue's
+other quake. Before, the two rows joined only by place: a replay of the whole observation log (2026-07-05 → 10-06,
+210,615 lines) gives the same events either way, since the 12 pairs it holds joined by place; with AusPass's 214 July
+rows added to it (each 24 h after its origin, as AusPass imports late), the rules before round 20 leave 5 GA ids in two
+events each (four AusPass rows in an event of their own: two 24 and 32 km from GA's RSS solution, two 3 and 7 km from it
+in dense cells, the Taupō area and the Kumamoto aftershock zone; and one in the other event of an M6.3 off Mexico the
+feed holds as two), these rules none, and no event holds two GA ids either way; nothing else changes but the event GA's
+row of the Kermadec M5.0 sits in (AusPass's twin instead of GeoNet's M4.5, one quake in two events either way). Both
+rows stay in the event, each with its own attribution and licence; count them once when you count independent agencies.
+Nothing about the published or stored shape changes, and the deep-history editions build as before (no GA row to pair
+with).
+
 ## Sources looked at and not added
 
 The monthly discovery (`discover.yml`, src/discover.ts) lists every FDSN event service in the

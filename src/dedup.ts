@@ -45,7 +45,7 @@ import { finalsIndex, isPreliminary, supersedingFinal } from './preliminary.js';
 import { isCoordinateless } from './quality.js';
 import type { EventNode, Extra, Op, ProvenanceRow, ProviderConfig, RawObs } from './types.js';
 import { deterministicFeedId } from './ulid.js';
-import { catalogueOf, comcatIdOf, knownAliasIdsOf, mirrorKeys, nativeIdOfComcat, statusRank } from './util.js';
+import { catalogueIdOf, catalogueOf, comcatIdOf, knownAliasIdsOf, mirrorKeys, nativeIdOfComcat, sameCatalogueEvent, statusRank } from './util.js';
 
 const REVIEWED_DT_HARD_MS = 30_000;
 /** How far lateTwin looks for the event a late report duplicates: the widest identity window. */
@@ -324,14 +324,16 @@ export class Resolver {
    *  report's own list, or a node row that names the report) or the two rows are one solution
    *  under two ids (sameSolution) or one quake re-located under a new id (revisedIdPair). "The same provider" is the
    *  same catalogue (config CATALOGUE_MIRRORS, round 17): a RESIF report is distinct from a node holding RéNaSS's row of
-   *  another id, as from one holding RESIF's. */
+   *  another id, as from one holding RESIF's; and an id is compared in the catalogue's own form (util.ts catalogueIdOf,
+   *  round 20), so AusPass's `smi:local/<id>` is GA's `<id>`, not another of GA's quakes. */
   private sameProviderDistinct(raw: RawObs, node: EventNode): boolean {
     const key = `${raw.provider}:${raw.providerEventId}`;
     const catalogue = catalogueOf(raw.provider);
+    const catalogueId = catalogueIdOf(raw.provider, raw.providerEventId);
     return node.provenance.some(
       (r) =>
         catalogueOf(r.provider) === catalogue &&
-        r.nativeId !== raw.providerEventId &&
+        catalogueIdOf(r.provider, r.nativeId) !== catalogueId &&
         !raw.knownAliasIds.includes(`${r.provider}:${r.nativeId}`) &&
         !knownAliasIdsOf(r.provider, r.nativeId, r.fields).includes(key) &&
         !Resolver.sameSolution(r, raw) &&
@@ -344,7 +346,8 @@ export class Resolver {
    *  are one re-published solution. Two ComCat rows are linked when any ComCat row of either node lists the other's id
    *  (round 15): every id a ComCat event lists is that one event, so Utah's uu80158431 and NEIC's us6000tzcn, both
    *  listed by Nevada's nn00925220, are one quake although neither lists the other. A provider is its catalogue here too
-   *  (config CATALOGUE_MIRRORS): RESIF's row in one node and RéNaSS's row of another id in the other block the fold. */
+   *  (config CATALOGUE_MIRRORS): RESIF's row in one node and RéNaSS's row of another id in the other block the fold, and
+   *  AusPass's `smi:local/<id>` against GA's `<id>` is one id (util.ts sameCatalogueEvent, round 20). */
   private static nodesDistinct(a: EventNode, b: EventNode): boolean {
     const comcatNamed = (n: EventNode): Set<string> => new Set(n.provenance.flatMap((r) => comcatIdsNamed(r.provider, r.nativeId, r.fields)));
     let namedA: Set<string> | null = null;
@@ -352,7 +355,7 @@ export class Resolver {
     for (const ra of a.provenance) {
       const linked = knownAliasIdsOf(ra.provider, ra.nativeId, ra.fields);
       for (const rb of b.provenance) {
-        if (catalogueOf(rb.provider) !== catalogueOf(ra.provider) || rb.nativeId === ra.nativeId) continue;
+        if (catalogueOf(rb.provider) !== catalogueOf(ra.provider) || sameCatalogueEvent(ra.provider, ra.nativeId, rb.provider, rb.nativeId)) continue;
         if (linked.includes(`${rb.provider}:${rb.nativeId}`)) continue;
         if (ra.provider === COMCAT_PROVIDER && ((namedA ??= comcatNamed(a)).has(rb.nativeId) || (namedB ??= comcatNamed(b)).has(ra.nativeId))) continue;
         if (knownAliasIdsOf(rb.provider, rb.nativeId, rb.fields).includes(`${ra.provider}:${ra.nativeId}`)) continue;

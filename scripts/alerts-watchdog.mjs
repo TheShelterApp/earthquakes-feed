@@ -6,7 +6,8 @@
 // publishes the public, no-store document https://data.theshelter.app/alerts/status.json once a minute
 // from its tick; this script reads it and exits non-zero when:
 //   - generatedAtMs is older than 300 s (the detector stopped ticking or cannot publish),
-//   - a detector provider is ok:false with consecutiveFailures >= 3,
+//   - a detector provider is ok:false with consecutiveFailures >= 3 (the message names the gateway's
+//     lastError and consecutiveTimeouts when the document carries them),
 //   - policy.fallback is true (the restrictive compiled policy runs instead of the signed one),
 //   - degraded.active is true (the free-tier degradation ladder is shedding alert tiers),
 //   - budget.headroomPct is below 20 (checked only when present),
@@ -80,6 +81,36 @@ const errMsg = (e) => {
 };
 const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** What the gateway's `lastError` values mean (alerts-gateway status.ts, round 14). */
+export const PROVIDER_ERRORS = Object.freeze({
+  timeout: "slower than the gateway's fetch timeout",
+  http: 'an HTTP error status',
+  network: 'a network failure before the timeout',
+  invalid: 'a body that does not parse or verify',
+});
+
+/**
+ * Why a failing provider fails, from the fields the gateway publishes since round 14 while a provider fails:
+ * `lastError` (timeout | http | network | invalid) and `consecutiveTimeouts` (how many of the latest failures in a
+ * row were timeouts). '' when the gateway does not publish them (a healthy provider, an older gateway, a streak
+ * recorded before round 14), so the message is then exactly what it was. An unknown `lastError` string is shown as
+ * is (cut to 32 characters: the document is public input).
+ */
+export function failureReason(p) {
+  if (!isObject(p)) return '';
+  const parts = [];
+  if (typeof p.lastError === 'string' && p.lastError !== '') {
+    const code = p.lastError.slice(0, 32);
+    const gloss = Object.hasOwn(PROVIDER_ERRORS, code) ? ` (${PROVIDER_ERRORS[code]})` : '';
+    parts.push(`last error ${code}${gloss}`);
+  }
+  if (isNum(p.consecutiveTimeouts) && p.consecutiveTimeouts > 0) {
+    const n = p.consecutiveTimeouts;
+    parts.push(`${n} timeout${n === 1 ? '' : 's'} in a row`);
+  }
+  return parts.length > 0 ? `, ${parts.join(', ')}` : '';
+}
+
 /**
  * Judge a parsed status.json. Pure: `nowMs` is injected.
  * @returns {{ problems: string[], warnings: string[], notes: string[], summary: string }}
@@ -126,10 +157,11 @@ export function evaluateStatus(doc, { nowMs, thresholds = DEFAULT_THRESHOLDS } =
       tags.push(`${id}:${p.ok === false ? `FAIL(${fails ?? '?'})` : 'ok'}`);
       if (p.ok !== false) continue;
       const http = isNum(p.httpStatus) ? `, last HTTP ${p.httpStatus}` : '';
+      const why = failureReason(p);
       if (fails !== null && fails >= t.providerFailures) {
-        problems.push(`provider ${id} is down: ok:false with ${fails} consecutive failures (limit ${t.providerFailures})${http}`);
+        problems.push(`provider ${id} is down: ok:false with ${fails} consecutive failures (limit ${t.providerFailures})${http}${why}`);
       } else {
-        notes.push(`provider ${id} is ok:false with ${fails ?? 'an unknown number of'} consecutive failures (below the limit of ${t.providerFailures})${http}`);
+        notes.push(`provider ${id} is ok:false with ${fails ?? 'an unknown number of'} consecutive failures (below the limit of ${t.providerFailures})${http}${why}`);
       }
     }
     parts.push(`providers=${tags.join(',') || 'none'}`);

@@ -255,6 +255,34 @@ export const LOCATION_JOIN_MAX_DM = 1.5;
  *  of those 2 days with its own solution (as it does with most of them later: a replaced copy is EMSC's own solution
  *  again and no longer counts). */
 export const EMSC_PROVIDER = 'emsc';
+/** The EMSC re-point guard (round 14, Resolver.rehomeStranded). EMSC re-points one of its own event ids to another quake
+ *  now and then; when the row stays in the event it joined, that event shows the other quake while the quake it was
+ *  stands apart. An EMSC row that is not an authored copy (rehomeCopy's, FEED-2) and is reported again unchanged (by
+ *  EMSC's listing, or by the every-run pass rehomeStrandedRows) moves to another live event when it is not one quake with
+ *  any other row of its event (the identity windows, the moderate-event window, an authored copy, the same solution),
+ *  its origin is more than EMSC_STRANDED_MIN_DT_MS from every other row's, and the first-sight identity windows place it
+ *  in that other event, which holds a row it is one quake with. A revision itself never moves: the merge pass after it
+ *  may still fold the other quake's event into this one (EMSC switching from JMA's minute-rounded copy to NEIC's solution
+ *  of the same quake, 2026-08-20, is 41 s and 36 km from JMA's row). The time gap keeps relocations out: a row that one
+ *  agency re-locates stays within seconds of the quake's other rows.
+ *
+ *  Designed from the observation log (2026-07-05..10-06, 204,335 lines; replayed with a fresh Resolver every 6 h, the
+ *  production hot window and the regular heal) and the event map of origin/data f66de1e570:
+ *  - round 13's guard (move a row out whenever a revision leaves every window) split 643 groups;
+ *  - moving an EMSC row at its revision when the origin moved more than 10 s moved 7 rows, at least one of them wrongly
+ *    (the JMA case above); without the time gap, 27, most of them EMSC taking one quake's solution from another agency
+ *    (the Chiapas M4.5 of 2026-08-22: SSN's, then NEIC's);
+ *  - moving any provider's row that is one quake with no other row of its event but with another event would move 30
+ *    rows, most of them between two events of one quake (GFZ's and INGV's solutions of the Kermadec M5.9 of 2026-07-29 and
+ *    the Chiapas M5.3 of 09-06, JMA's minute-rounded rows);
+ *  - this rule moves 3 rows in the replay (EMSC copies of JMA's 20260728201106 and of INPRES's 20260814203051 and
+ *    20260820173334, 38–90 s from the other quake left in their event, which the agency itself lists under its own id;
+ *    per connected group of ids 0 more events, rows in two live events 0) and, on the event map's hot window, 5 more on the next run (2026-10-02 to 10-05: an EMSC id re-pointed 16–32 s
+ *    and up to 300 km to a quake NOA, KAGSR, ComCat, AFAD/KOERI or BMKG holds), then none.
+ *  Not covered: the Oregon residual of round 13 (2026-09-07, EMSC's M5.3 re-pointed to its M3.9 foreshock), where the
+ *  foreshock's own event did not exist yet at the revision, so EMSC's row took the event with it and GFZ's row of the
+ *  mainshock is the one left behind. */
+export const EMSC_STRANDED_MIN_DT_MS = 10_000;
 export const EMSC_AUTHORED_COPIES: ReadonlyMap<string, string> = new Map([
   ['AFAD', 'afad'],
   ['CENC', 'cenc'],

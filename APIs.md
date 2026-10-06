@@ -620,6 +620,19 @@ copies left in the wrong event before this rule), moves it. A copy alone in its 
 moved: the merge pass folds that event into the agency's. Status counts the moves as
 `copies_rehomed`.
 
+EMSC also re-points its own event ids, and copies of agencies outside these lists (JMA, INPRES
+under EMSC's code `NSNA`, GSRAS, BMKG), to another quake. Since 2026-10 such a row moves too. The
+move needs the row to be one quake with none of its event's other rows, more than 10 s from every
+one of them, and placed by the usual time-and-place rules in another event holding a row it is
+one quake with. The same `op:tombstone` / `op:observe` lines record it, with a reason ending in
+"re-pointed, … one quake with efd_…", and status counts these moves as `rows_rehomed`. A revision
+never moves at once, only the next listing of the unchanged row or the every-run pass over the
+hot window, so a merge the revision causes comes first: when EMSC switches from JMA's
+minute-rounded copy to NEIC's solution of the same quake, ComCat's event folds in and nothing
+moves. On 2026-10-06 the pass would move 5 rows of the hot window, each an EMSC id 16–32 s and up
+to 300 km from the quake its event shows. The observation log of 2026-07-05…10-06 replays to 3
+such moves (38–90 s).
+
 ## Alaska (AEC)
 
 The `aec` source reads the file behind the Alaska Earthquake Center's public map: about 14 days

@@ -572,7 +572,10 @@ since then a line is about 4.5 KB, so a month file is about 40 MB at 12 runs an 
 August and September, when a line was about 3.8–4.2 KB). Every aggregate commit rewrites the current month's file, and
 GitHub warns on a pushed file above 50 MiB and rejects one above 100 MiB: the aggregate run prints a warning once the
 file passes 45 MB (`HISTORY_FILE_WARN_BYTES`, src/bitemporal.ts), the signal to slim the line again before the month
-ends.
+ends. The `health` watchdog checks the same from outside every 15 minutes (round 17): it reads the `data` branch's tree
+from the API, logs the files under `status/history/` (count, total, largest, whatever their layout) and opens the
+`[health] data file size` issue while a status-history day file (`YYYY-MM-DD.ndjson`) is over 5 MB or any other file
+on the branch over 45 MB (closed when none is; never a red run).
 
 ## Deep history (before 2023-07-06)
 

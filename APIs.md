@@ -584,6 +584,45 @@ compressed copy of the file in the repository's storage per GitHub repack (*Repo
 prints a warning once the day file passes 5 MB (`HISTORY_FILE_WARN_BYTES`, src/bitemporal.ts): the line has grown about
 fourfold.
 
+## Repository size
+
+GitHub counts the repository's git objects (Release assets are not counted): 5,498,152 KB on 2026-10-04 11:52 UTC,
+5,631,151 KB on 2026-10-06 11:07 UTC (the `health` workflow logs it), about 67 MB a day; the 24 hours to 10-05 12:07
+grew 64 MB, those to 10-06 00:07 87 MB, those to 10-06 11:07 79 MB. Nearly all of it is the `data` branch: about 576
+commits a day (an aggregate commit and a derive commit per run), each rewriting a few large files whole. The derive
+commit rewrites about 2.3 day partitions (`events/YYYY/MM/DD.ndjson`, about 2.4 MB each), the aggregate commit about
+2.3 event_map day shards (about 1.7 MB each) and, until round 17, the status history's month file (up to about 40 MB
+at a month's end).
+
+Git itself stores such a rewrite as a small delta: a full repack (`git repack -adf`, default window and depth) of the
+`data` branch's commits of 2026-09-27 … 10-06 takes about 8 MB a day. GitHub stores a busy repository differently. Each
+push becomes a pack, and maintenance rolls the newest packs together from time to time, reusing the deltas the packs
+hold. In such a roll-up the oldest version of every rewritten file has its delta base in an older pack, outside the
+new one, and the newer versions in the roll-up are deltas on it, so it cannot become a delta of them: it is stored
+whole or as a delta against another file of similar name and size, usually another day's partition (25–55 % of its
+compressed size). The cost is about one compressed copy of every distinct large file rewritten between two roll-ups,
+whatever changed in it.
+
+`scripts/repo-growth/replay.sh` measures that locally: it pushes real `data` commits one by one into a bare repository
+that keeps every pushed pack and runs `git repack -d --geometric=2` after every 12 pushes (about hourly), then
+attributes the growth by path (`attribute.sh`; `relayout.py` re-creates a range of commits from a shallow checkout,
+optionally in another layout). Three days of commits, 24 hours each, ending 10-04, 10-05 and 10-06 11:47 UTC: 45, 52
+and 88 MB (GitHub: 64 MB for the day to 10-05 12:07, 79 MB to 10-06 11:07). After an all-into-one repack the day to
+10-06 holds 50 MB of day partitions, 32 MB of event_map shards, 1 MB of status history, 1 MB of the observation log and
+1 MB of everything else (trees, commits, indexes, change log). The rate follows the number of distinct large files
+rewritten per hour, which grew from 2.8 partitions an hour on 10-03 to 4.8 on 10-05/06: more events landed in, or were
+revised in, days 2–9 days old (43 rewrites of such partitions on 10-03, 216 on 10-05/06: ComCat's late publications,
+ENSN and GA back with older events, late NRCan and GeoSphere events, revisions). Rounds 13–16 did not add commits
+(derive committed separately before round 14 too), and the files they added (`provider_activity.json`,
+`live_silent.json`, `correction.json`) or grew (`history.json`, about 3 commits a day) are under 0.1 MB a day; the
+live index and the detail hours of round 15 are Pages-only.
+
+Round 17 (LANE G) changes what the commits rewrite, never what consumers read, and rewrites no history:
+
+- The status history is written per day (*Run logs*): a commit rewrites a file of at most about 1.3 MB instead of the
+  month file. Replayed, the three days grow 6–14 % less (41.6, 48.8 and 76.0 MB); with the month file as large as it is
+  late in a month (31 MB), 107 MB a day becomes 79.
+
 ## Deep history (before 2023-07-06)
 
 History older than the 3-year layer above is built by a separate walk, `history` (`.github/workflows/history.yml`,

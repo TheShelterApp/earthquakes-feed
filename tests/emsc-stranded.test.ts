@@ -145,3 +145,51 @@ test('a row within 10 s of another row of its event, a copy FEED-2 handles, or m
   assert.deepEqual(groups(setup({ eventTimeMs: T + 39_000, fields: { auth: 'IGN' } })), ['emsc:e1 inpres:1', 'inpres:2'], 'an authored-copy code: FEED-2’s');
   assert.deepEqual(groups(setup({ eventTimeMs: T + 39_000 }, { merge: false })), ['emsc:e1 inpres:1', 'inpres:2'], 'merge=false');
 });
+
+test('a NEIC copy, which FEED-2 keeps in place, still moves when it is stranded (Nevada 2026-10-03)', () => {
+  // EMSC 20261003_0000160 first copied the Utah network's automatic uu80158431 (auth UU, 37.94 N 114.20 W, 13:58:36), then
+  // took NEIC's us6000tzcn (auth NEIC, 38.96 N 115.30 W, 13:58:12; ComCat later lists uu80158431 in its ids). That revision
+  // moved nothing in its event, whose representative is ComCat's uu row, so no line logged it (APIs.md: a revision of a
+  // row that represents nothing); the stored row below is the event map's. The re-home leaves NEIC copies where they
+  // are (EMSC_COPIES_KEPT_IN_PLACE); the re-point guard moves this one to the event holding us6000tzcn, which it copies.
+  const lines = LINES.filter((o) => o.event_time.startsWith('2026-10-03T13:58'));
+  assert.deepEqual(
+    lines.map((o) => o.seq),
+    [201221, 201222, 201223, 201403, 207005],
+  );
+  const map = new Map<string, EventNode>();
+  const nowMs = Date.parse('2026-10-05T21:12:23.153Z');
+  const r = new Resolver(map, prio, cfg, nowMs);
+  for (const o of lines.filter((l) => l.seq <= 201403)) r.ingest(observationToRaw(o), o.ingest_time);
+  const neic: RawObs = {
+    provider: 'emsc',
+    providerEventId: '20261003_0000160',
+    eventTimeMs: Date.parse('2026-10-03T13:58:12.786Z'),
+    providerUpdatedMs: Date.parse('2026-10-03T16:25:57.104Z'),
+    status: null,
+    lat: 38.9639,
+    lon: -115.3046,
+    depth: 5,
+    mag: 3.3,
+    magType: 'ml',
+    place: 'NEVADA',
+    knownAliasIds: [],
+    fields: { auth: 'NEIC', evtype: 'ke', lastupdate: '2026-10-03T16:25:57.104541Z', unid: '20261003_0000160' },
+  };
+  const revised = r.ingest(neic, '2026-10-03T16:31:59.000Z');
+  assert.equal(revised.rehomed, undefined, 'the revision itself moves nothing');
+  for (const o of lines.filter((l) => l.seq > 201403)) r.ingest(observationToRaw(o), o.ingest_time);
+  assert.deepEqual(groups(map), ['emsc:20261003_0000160 usgs:uu80158431', 'usgs:nn00925220 usgs:us6000tzcn']);
+  const scratch = mkdtempSync(join(tmpdir(), 'stranded-'));
+  try {
+    const it = new Date(nowMs + 300_000).toISOString();
+    const log = new LogBuffer(500_000, it);
+    const side = runFeedSideSteps(scratch, new Resolver(map, prio, cfg, nowMs + 300_000), log, { healDue: false, loadDays: 10, ingestTime: it });
+    assert.equal(side.rehomed, 0, 'not FEED-2’s: NEIC copies stay in place there');
+    assert.equal(side.stranded, 1);
+    assert.deepEqual(groups(map), ['emsc:20261003_0000160 usgs:nn00925220 usgs:us6000tzcn', 'usgs:uu80158431']);
+    assert.match(log.lines[0]!.reason!, /^re-homed: EMSC 20261003_0000160 re-pointed, 23\.6 s or more/);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});

@@ -1127,8 +1127,9 @@ export class Resolver {
     return { ...to, rehomed: { from, old, reason } };
   }
 
-  /** The EMSC re-point guard (round 14, config EMSC_STRANDED_MIN_DT_MS): `raw`, an unchanged report of an EMSC row that is
-   *  not an authored copy, stored in `node` with other rows, moves to another live event when it is stranded there:
+  /** The EMSC re-point guard (round 14, config EMSC_STRANDED_MIN_DT_MS): `raw`, an unchanged report of an EMSC row that
+   *  rehomeCopy does not move (copyCode null: no copy code, or one of EMSC_COPIES_KEPT_IN_PLACE), stored in `node` with
+   *  other rows, moves to another live event when it is stranded there:
    *  one quake with none of the node's other rows (sameQuakeRow both ways), more than EMSC_STRANDED_MIN_DT_MS from
    *  every one of them, and placed by the first-sight identity windows in another live event (repointHome) that holds a
    *  row it is one quake with. Same lines and alias handling as rehomeCopy. Only on the logged path (fold, merge pass

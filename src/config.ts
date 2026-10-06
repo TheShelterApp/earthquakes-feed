@@ -302,14 +302,14 @@ export const LOCATION_JOIN_MAX_DM = 1.5;
 export const EMSC_PROVIDER = 'emsc';
 /** The EMSC re-point guard (round 14, Resolver.rehomeStranded). EMSC re-points one of its own event ids to another quake
  *  now and then; when the row stays in the event it joined, that event shows the other quake while the quake it was
- *  stands apart. An EMSC row that is not an authored copy (rehomeCopy's, FEED-2) and is reported again unchanged (by
- *  EMSC's listing, or by the every-run pass rehomeStrandedRows) moves to another live event when it is not one quake with
- *  any other row of its event (the identity windows, the moderate-event window, an authored copy, the same solution),
- *  its origin is more than EMSC_STRANDED_MIN_DT_MS from every other row's, and the first-sight identity windows place it
- *  in that other event, which holds a row it is one quake with. A revision itself never moves: the merge pass after it
- *  may still fold the other quake's event into this one (EMSC switching from JMA's minute-rounded copy to NEIC's solution
- *  of the same quake, 2026-08-20, is 41 s and 36 km from JMA's row). The time gap keeps relocations out: a row that one
- *  agency re-locates stays within seconds of the quake's other rows.
+ *  stands apart. An EMSC row FEED-2 does not move (no copy code, or one of EMSC_COPIES_KEPT_IN_PLACE) and is reported
+ *  again unchanged (by EMSC's listing, or by the every-run pass rehomeStrandedRows) moves to another live event when it
+ *  is not one quake with any other row of its event (the identity windows, the moderate-event window, an authored copy,
+ *  the same solution), its origin is more than EMSC_STRANDED_MIN_DT_MS from every other row's, and the first-sight
+ *  identity windows place it in that other event, which holds a row it is one quake with. A revision itself never
+ *  moves: the merge pass after it may still fold the other quake's event into this one (EMSC switching from JMA's
+ *  minute-rounded copy to NEIC's solution of the same quake, 2026-08-20, is 41 s and 36 km from JMA's row). The time gap
+ *  keeps relocations out: a row that one agency re-locates stays within seconds of the quake's other rows.
  *
  *  Designed from the observation log (2026-07-05..10-06, 204,335 lines; replayed with a fresh Resolver every 6 h, the
  *  production hot window and the regular heal) and the event map of origin/data f66de1e570:
@@ -394,7 +394,10 @@ export const EMSC_COMCAT_NETWORK_COPIES: ReadonlyMap<string, string> = new Map([
  *  the row then left the regional agency's row behind as an event of its own whenever the two solutions lie beyond
  *  each other's windows (round 14 replay: SSN's M4.3 of 2026-08-22 off Chiapas 33 km from ComCat's, JMA's M4.2 of
  *  2026-08-20 with its minute-rounded time, CENC's M3.9 of 2026-08-01 in Qinghai: each one event without the move, two
- *  with it). Left in place, the row moves its event to NEIC's solution and the merge pass folds ComCat's event in. */
+ *  with it). Left in place, the row moves its event to NEIC's solution and the merge pass folds ComCat's event in.
+ *  The re-point guard (Resolver.rehomeStranded, EMSC_STRANDED_MIN_DT_MS) still moves such a copy when it is one quake
+ *  with none of its event's rows (Nevada, 2026-10-03: EMSC 20261003_0000160 copied Utah's automatic uu80158431, then
+ *  NEIC's us6000tzcn 148 km and 23.6 s away, and stayed with the uu row). */
 export const EMSC_COPIES_KEPT_IN_PLACE: ReadonlySet<string> = new Set(['NEIC']);
 /** Rolling-file sources whose ids are watched for disappearing (PF-5b, log only): a row younger than
  *  ABSENCE_WATCH_DAYS that the feed holds and a complete file no longer lists is counted in status `absent`. AEC's

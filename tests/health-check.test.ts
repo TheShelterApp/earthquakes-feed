@@ -95,12 +95,12 @@ const sizesScript = (() => {
   return body.slice(0, body.indexOf("\n          '\n"));
 })();
 
-function runSizes(tree: unknown, limit = '45000000'): { out: Record<string, string>; stdout: string; status: number | null } {
+function runSizes(tree: unknown, limit = '45000000', dayLimit = '5000000'): { out: Record<string, string>; stdout: string; status: number | null } {
   const dir = mkdtempSync(join(tmpdir(), 'health-sizes-'));
   writeFileSync(join(dir, 'data-tree.json'), typeof tree === 'string' ? tree : JSON.stringify(tree));
   const outFile = join(dir, 'out.txt');
   writeFileSync(outFile, '');
-  const r = spawnSync(process.execPath, ['-e', sizesScript], { cwd: dir, env: { ...process.env, DATA_FILE_WARN_BYTES: limit, GITHUB_OUTPUT: outFile }, encoding: 'utf8' });
+  const r = spawnSync(process.execPath, ['-e', sizesScript], { cwd: dir, env: { ...process.env, DATA_FILE_WARN_BYTES: limit, HISTORY_DAY_FILE_WARN_BYTES: dayLimit, GITHUB_OUTPUT: outFile }, encoding: 'utf8' });
   const out: Record<string, string> = {};
   for (const line of readFileSync(outFile, 'utf8').split('\n')) {
     const i = line.indexOf('=');
@@ -130,7 +130,7 @@ const todaysTree = (historySize = 6_495_366, extra: object[] = []) => ({
 test('data file sizes: today\'s tree is logged, nothing is warned and the issue set is empty', () => {
   const r = runSizes(todaysTree());
   assert.equal(r.status, 0);
-  assert.match(r.stdout, /status history: 1 file\(s\), 6\.5 MB, largest status\/history\/2026-10\.ndjson 6\.5 MB \(warning above 45\.0 MB a file\)/);
+  assert.match(r.stdout, /status history: 1 file\(s\) \(0 day file\(s\)\), 6\.5 MB, largest status\/history\/2026-10\.ndjson 6\.5 MB \(warning above 5\.0 MB a day file, 45\.0 MB any other file\)/);
   assert.match(r.stdout, /data tree: 4 files, 10\.0 MB \(status 6\.5 MB, events 2\.4 MB, knowledge 0\.9 MB, \(root\) 0\.1 MB\)/);
   assert.doesNotMatch(r.stdout, /::warning/);
   assert.deepEqual([r.out['tree_read'], r.out['size_set'], r.out['size']], ['1', '', '']);
@@ -139,8 +139,8 @@ test('data file sizes: today\'s tree is logged, nothing is warned and the issue 
 test('data file sizes: a run-log file past 45 MB and any other large file on data warn and name the issue set, largest first', () => {
   const r = runSizes(todaysTree(46_200_000, [blob('knowledge/index/huge.json', 52_000_000)]));
   assert.equal(r.status, 0, 'a warning, never a failed step');
-  assert.match(r.stdout, /::warning title=Data file size::knowledge\/index\/huge\.json: 52\.0 MB \(a file on the data branch\), over 45\.0 MB: GitHub rejects a pushed file above 100 MiB/);
-  assert.match(r.stdout, /::warning title=Data file size::status\/history\/2026-10\.ndjson: 46\.2 MB \(the run log, rewritten by every aggregate commit\), over 45\.0 MB/);
+  assert.match(r.stdout, /::warning title=Data file size::knowledge\/index\/huge\.json: 52\.0 MB, over 45\.0 MB \(a file on the data branch\): every rewrite of a large file grows the repository, and GitHub rejects a pushed file above 100 MiB/);
+  assert.match(r.stdout, /::warning title=Data file size::status\/history\/2026-10\.ndjson: 46\.2 MB, over 45\.0 MB \(the run log, rewritten by every aggregate commit\)/);
   assert.equal(r.out['size_set'], 'knowledge/index/huge.json,status/history/2026-10.ndjson');
   assert.equal(r.out['size']!.split('; ').length, 2);
   assert.ok(!r.out['size']!.split('; ').some((e) => e.includes(';')), 'one entry per file for the issue body');
@@ -149,15 +149,31 @@ test('data file sizes: a run-log file past 45 MB and any other large file on dat
   assert.equal(runSizes(todaysTree(45_000_001)).out['size_set'], 'status/history/2026-10.ndjson');
 });
 
-test('data file sizes: any layout under status/history is summed and its largest file named (one file a day, gzip, sub-folders)', () => {
+test('data file sizes: round 17\'s day files (YYYY-MM-DD.ndjson) warn past 5 MB, the month file of before only past 45 MB', () => {
+  // Lane G's layout: October's month file keeps the lines before the switch (6.5 MB, frozen), then one file a UTC day
+  // (about 1.3 MB). The aggregate warns past 5 MB for a day file (HISTORY_FILE_WARN_BYTES of that branch).
+  const days = Array.from({ length: 3 }, (_, i) => blob(`status/history/2026-10-${String(i + 7).padStart(2, '0')}.ndjson`, 1_300_000 + i * 1000));
+  const calm = runSizes(todaysTree(6_495_366, days));
+  assert.match(calm.stdout, /status history: 4 file\(s\) \(3 day file\(s\)\), 10\.4 MB, largest status\/history\/2026-10\.ndjson 6\.5 MB/);
+  assert.equal(calm.out['size_set'], '', 'a 6.5 MB month file is under its 45 MB limit');
+  const grown = runSizes(todaysTree(6_495_366, [...days, blob('status/history/2026-10-10.ndjson', 5_200_000)]));
+  assert.equal(grown.out['size_set'], 'status/history/2026-10-10.ndjson');
+  assert.match(grown.stdout, /::warning title=Data file size::status\/history\/2026-10-10\.ndjson: 5\.2 MB, over 5\.0 MB \(the run log/);
+  // Exactly the limit does not warn; the limit is the step's HISTORY_DAY_FILE_WARN_BYTES.
+  assert.equal(runSizes(todaysTree(1, [blob('status/history/2026-10-10.ndjson', 5_000_000)])).out['size_set'], '');
+  // Only a day file's name gets the day limit: a 6 MB file of another name under status/history is judged at 45 MB.
+  assert.equal(runSizes(todaysTree(1, [blob('status/history/2026-10-10.ndjson.gz', 6_000_000), blob('status/history/notes.txt', 6_000_000)])).out['size_set'], '');
+});
+
+test('data file sizes: any layout under status/history is summed and its largest file named (gzip, sub-folders)', () => {
   const days = Array.from({ length: 6 }, (_, i) => blob(`status/history/2026-10/${String(i + 1).padStart(2, '0')}.ndjson`, 1_300_000 + i * 1000));
   const tree = { truncated: false, tree: [dirEntry('status/history'), dirEntry('status/history/2026-10'), ...days, blob('status/history/2026-09.ndjson.gz', 4_000_000), blob('status.json', 9_000)] };
   const r = runSizes(tree);
-  assert.match(r.stdout, /status history: 7 file\(s\), 11\.8 MB, largest status\/history\/2026-09\.ndjson\.gz 4\.0 MB/);
+  assert.match(r.stdout, /status history: 7 file\(s\) \(0 day file\(s\)\), 11\.8 MB, largest status\/history\/2026-09\.ndjson\.gz 4\.0 MB/);
   assert.equal(r.out['size_set'], '');
   // No status/history at all (the log moved elsewhere): said, and the other files are still judged.
   const moved = runSizes({ truncated: false, tree: [blob('logs/status/2026-10.ndjson', 47_000_000)] });
-  assert.match(moved.stdout, /status history: 0 file\(s\), 0\.0 MB, largest none/);
+  assert.match(moved.stdout, /status history: 0 file\(s\) \(0 day file\(s\)\), 0\.0 MB, largest none/);
   assert.equal(moved.out['size_set'], 'logs/status/2026-10.ndjson');
 });
 
@@ -174,7 +190,7 @@ test('data file sizes: a truncated listing warns; an unreadable answer changes n
   // Entries without a numeric size (submodules, odd shapes) are skipped, not counted.
   const odd = runSizes({ truncated: false, tree: [null, { path: 'status/history/x', type: 'blob' }, { type: 'blob', size: 99_000_000 }, blob('status/history/2026-10.ndjson', 10)] });
   assert.equal(odd.status, 0);
-  assert.match(odd.stdout, /status history: 1 file\(s\)/);
+  assert.match(odd.stdout, /status history: 1 file\(s\) \(0 day file\(s\)\)/);
   assert.equal(odd.out['size_set'], '');
 });
 
@@ -182,6 +198,7 @@ test('health.yml: the size steps run after a red feed check, never fail the run,
   assert.match(sizesStep, /id: sizes\n\s+if: always\(\)\n\s+continue-on-error: true/);
   assert.match(sizesStep, /gh api "repos\/\$\{\{ github\.repository \}\}\/git\/trees\/data\?recursive=1" > data-tree\.json/);
   assert.match(sizesStep, /DATA_FILE_WARN_BYTES: '45000000'/);
+  assert.match(sizesStep, /HISTORY_DAY_FILE_WARN_BYTES: '5000000'/);
   assert.doesNotMatch(sizesStep, /exit 1/);
   const issue = yml.slice(yml.indexOf('- name: Data file size issue'), yml.indexOf('\n  alerts:'));
   assert.match(issue, /if: always\(\) && steps\.sizes\.outputs\.tree_read == '1'/);

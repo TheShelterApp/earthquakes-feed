@@ -574,7 +574,8 @@ GitHub warns on a pushed file above 50 MiB and rejects one above 100 MiB: the ag
 file passes 45 MB (`HISTORY_FILE_WARN_BYTES`, src/bitemporal.ts), the signal to slim the line again before the month
 ends. The `health` watchdog checks the same from outside every 15 minutes (round 17): it reads the `data` branch's tree
 from the API, logs the files under `status/history/` (count, total, largest, whatever their layout) and opens the
-`[health] data file size` issue while any file on the branch is over 45 MB (closed when none is; never a red run).
+`[health] data file size` issue while a status-history day file (`YYYY-MM-DD.ndjson`) is over 5 MB or any other file
+on the branch over 45 MB (closed when none is; never a red run).
 
 ## Deep history (before 2023-07-06)
 

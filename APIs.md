@@ -182,6 +182,29 @@ under `properties.feed`:
 | `aliases[]` | every `provider:native_id` for this event (for realtime dedup) |
 | `provenance[]` | every reporting provider with its solution + `license`/`attribution`/`doi`, and `fields` = that provider's **complete original vocabulary** (nothing dropped). Present in day files + partitions; omitted from the compact rolling summaries |
 
+**What "stable" means for `feed_id`.** Once minted, an event's id never changes; a fold retires
+the loser (`superseded_by`) and its provider ids resolve to the survivor. Which id an event gets is
+fixed by its first report: the id is seeded by that report's 30 s time bucket and 0.02° place
+bucket, so if another agency's report of the quake reaches the feed first, the quake gets another
+id. Replaying the observation log in another arrival order measures this (FEED-DQ-2, 2026-10-06; two
+3-day slices, 2026-09-20…22 and 09-30…10-02, 6,432 and 8,137 lines, 3,906 and 4,894 live events in
+the logged order; each provider id's own lines kept in order):
+
+| arrival order | events grouped as logged | M ≥ 4.5 events grouped as logged | same `feed_id`, events with ≥ 2 providers | same `feed_id`, M ≥ 4.5 |
+|---|---|---|---|---|
+| each provider id 0–2 runs (0–10 min) late, then the feed's own order within a run | 99.73–99.90 % | 120–122 of 123, 85 of 85 | 94.7–96.6 % | 87–94 % |
+| any order (adversarial) | 98.98–99.37 % | 114–117 of 123, 77–80 of 85 | 83.2–87.2 % | 67–83 % |
+
+So a consumer must not derive anything from the id beyond identity, and must not expect a mirror
+built from the same reports in another order to carry the same ids; follow `superseded_by` and
+`aliases[]` instead. The grouping itself moves for a fraction of a percent of events: a fold needs
+each event to be the other's best match, and in a dense cell a join needs a shared id, so the
+outcome can depend on what is already there (2026-09-30, The Geysers: when NCEDC's 75441706 arrives
+before ComCat's nc75441706 and another NC quake's rows join its event first, ComCat's row of the
+same id cannot follow, because that event already holds another ComCat id). Making the id independent
+of arrival order would mean re-keying events after first sight, which would break every consumer
+that keys on it, so the feed keeps the pinned id.
+
 ## Freshness contract
 
 Scheduled runs are best-effort. A consumer should compute

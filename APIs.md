@@ -642,9 +642,12 @@ for their count first and every window's rows must equal it. A month is sealed (
 uploaded) as soon as its last source arrives, and a run first seals what an earlier run left complete. At most
 `maxUnitsPerRun` source months and `maxSecondsPerRun` per hourly run; neither job holds the writer lock (the index
 commit pushes through `scripts/push-data.sh`, FEED-OPS-4). A month a source answers empty right before a month of the
-same source with rows is named in the run's `report.json` (`empty_after_rows`) and as a warning: going back, that is
-where a catalogue starts, or a service answering empty while it is broken (NOA's registered node answered 204 for ten
-days, PF-5j-NOA); the asset stays as fetched.
+same source with rows is either where a catalogue starts (going back) or a service answering empty while it is broken
+(NOA's registered node answered 204 to every query for ten days, PF-5j-NOA). The walk tells the two apart before it
+keeps anything: it asks the source again for a two-hour window around the newer month's first, middle and last row
+(stopping at the first that answers a row). A row there keeps the empty month (the catalogue starts; named in the
+run's `report.json` `empty_after_rows` and as a warning); no row, or an error, fails the month like any other failure,
+so nothing empty is sealed while the service is down and the month is asked again next run.
 The heartbeat Worker dispatches the workflow at `:26` (GitHub delivers this repository's hourly crons only a few times
 a day; the workflow's own `:29` cron is the fallback), and a run does nothing unless `providers/history.json` has
 `enabled: true`.

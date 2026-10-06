@@ -8,6 +8,8 @@ export interface Thresholds {
   usageFailPct: number;
   maxFeedManifestAgeSec: number;
   maxConfigBundleAgeSec: number;
+  /** a provider's deletions query failing this many times in a row warns (never fails). */
+  deletionsFailures: number;
 }
 
 export const STATUS_URL: string;
@@ -28,6 +30,10 @@ export function evaluateStatus(doc: unknown, opts: { nowMs: number; thresholds?:
 export const PROVIDER_ERRORS: Readonly<Record<'timeout' | 'http' | 'network' | 'invalid', string>>;
 /** ", last error …, N timeouts in a row" for a failing provider entry; '' when it carries neither field. */
 export function failureReason(provider: unknown): string;
+/** How far back the gateway's USGS deletions query reaches (7 days). */
+export const DELETIONS_MAX_WINDOW_MS: number;
+/** The failing deletions query of a provider entry (round-16 gateways); null when it carries no positive streak. */
+export function deletionsFailure(provider: unknown): { failures: number; why: string } | null;
 
 export type FetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
 export type FetchResult =

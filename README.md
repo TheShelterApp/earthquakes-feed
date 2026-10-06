@@ -267,9 +267,15 @@ as a fallback). It runs three independent jobs; any one failing turns the run re
   | `config_bundle_age_s` over 10 days (from `config_bundle_generated_ms` when present) | the signed config bundle stopped refreshing; apps fall back to compiled defaults once it expires |
 
   It only **warns** (the run stays green) when today's `fanout.skipped_no_key` or
-  `fanout.retry_dropped_budget` is above 0. Fields an older gateway does not publish
+  `fanout.retry_dropped_budget` is above 0, and when a provider's `deletionsConsecutiveFailures`
+  is 3 or more (`--deletions-failures <n>`): the gateway's separate USGS deletions query
+  (`includedeleted=only`, published from 2026-10-06 only while it fails, with `deletionsLastError`)
+  is failing, so a quake USGS deletes is not withdrawn while the provider itself stays `ok`. The
+  message gives the age of the provider's `watermarkMs`, the cursor the gateway asks from again once
+  the query succeeds (at most 7 days back, so a shorter gap recovers by itself); a shorter streak is a
+  log line. Fields an older gateway does not publish
   (`apns.mode`, `apns.production`, `apns.problems`, `fanout`, the two ages, a provider's `lastError` /
-  `consecutiveTimeouts`) are never treated as a problem;
+  `consecutiveTimeouts` / `deletionsConsecutiveFailures` / `deletionsLastError`) are never treated as a problem;
   a null age (not read since the gateway deployed) is a warning.
 
   The fetch is retried twice (2 s, then 5 s backoff) before it gives up. A document it cannot

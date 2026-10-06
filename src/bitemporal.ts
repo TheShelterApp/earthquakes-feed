@@ -152,9 +152,42 @@ export function readObservations(root: string, fromDay: string): Observation[] {
 /** The per-provider fields status.json carries for the current run only, left out of its status/history line. */
 export const HISTORY_OMITTED_PROVIDER_FIELDS = ['newest_origin', 'tls_leaf'] as const;
 
-/** A status/history month file past this size draws a warning (GitHub warns on a pushed file above 50 MiB and rejects
- *  one above 100 MiB; every aggregate commit rewrites the current month's file). */
-export const HISTORY_FILE_WARN_BYTES = 45_000_000;
+/** A status/history day file past this size draws a warning. A day is about 1.3 MB (288 runs at about 4.5 KB a line);
+ *  5 MB means the line has grown about fourfold, which grows every aggregate commit's rewrite of the day file and the
+ *  month asset it rolls into (APIs.md Run logs). Until round 17 this guarded the month file (45 MB, against GitHub's
+ *  50 MiB warning and 100 MiB rejection of a pushed file). */
+export const HISTORY_FILE_WARN_BYTES = 5_000_000;
+
+/** A status/history file name: `YYYY-MM-DD.ndjson` (one UTC day, since round 17) or `YYYY-MM.ndjson` (one month, the
+ *  layout until round 17: the October 2026 file holds the lines before the switch). */
+const STATUS_HISTORY_NAME = /^(\d{4}-\d{2})(?:-(\d{2}))?\.ndjson$/;
+
+export interface StatusHistoryFile {
+  /** Absolute path. */
+  path: string;
+  /** YYYY-MM the file belongs to. */
+  month: string;
+  /** YYYY-MM-DD for a day file, null for a month file. */
+  day: string | null;
+}
+
+/**
+ * The status/history files in the order their lines were written: month by month, a month file (written until round
+ * 17) before the day files of that month, the day files by day. Concatenated in this order they are the month file the
+ * layout before round 17 would have written, byte for byte (a line goes to the file of its run's ingest time, which only
+ * moves forward).
+ */
+export function statusHistoryFiles(dir: string): StatusHistoryFile[] {
+  if (!existsSync(dir)) return [];
+  const out: (StatusHistoryFile & { key: string })[] = [];
+  for (const f of readdirSync(dir)) {
+    const m = STATUS_HISTORY_NAME.exec(f);
+    if (!m) continue;
+    const day = m[2] ? `${m[1]}-${m[2]}` : null;
+    out.push({ path: join(dir, f), month: m[1]!, day, key: day ?? `${m[1]}-00` });
+  }
+  return out.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)).map(({ key: _k, ...f }) => f);
+}
 
 /**
  * The status/history line of a run (FEED-R15-1, round 16): status.json without `providers.<id>.newest_origin` and
@@ -181,7 +214,10 @@ export function historyStatus(status: unknown): unknown {
 }
 
 /** head + watermarks + status + status/history (event_map is written separately). status.json is the full status; the
- *  history line is `historyStatus(status)`. Returns the history file and its size after the append. */
+ *  history line is `historyStatus(status)`, appended to the day file of the head's ingest time,
+ *  `status/history/YYYY-MM-DD.ndjson` (round 17, LANE G: every aggregate commit used to rewrite the whole month file,
+ *  up to ~40 MB at a month's end; a day file stays near 1.3 MB). Returns the history file and its size after the
+ *  append. */
 export function saveMeta(root: string, head: Head, watermarks: Watermarks, status: unknown): { historyFile: string; historyBytes: number } {
   const p = dataPaths(root);
   ensureDir(p.head);
@@ -189,7 +225,7 @@ export function saveMeta(root: string, head: Head, watermarks: Watermarks, statu
   writeFileSync(p.watermarks, JSON.stringify(watermarks, null, 2) + '\n');
   writeFileSync(p.status, JSON.stringify(status, null, 2) + '\n');
   const now = new Date(head.ingest_time || Date.now());
-  const histFile = join(p.statusHistoryDir, `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}.ndjson`);
+  const histFile = join(p.statusHistoryDir, `${now.toISOString().slice(0, 10)}.ndjson`);
   ensureDir(histFile);
   appendFileSync(histFile, JSON.stringify(historyStatus(status)) + '\n');
   return { historyFile: histFile, historyBytes: statSync(histFile).size };

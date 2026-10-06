@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { seedActivity } from '../src/activity.js';
-import { HISTORY_OMITTED_PROVIDER_FIELDS, historyStatus, saveMeta } from '../src/bitemporal.js';
+import { HISTORY_OMITTED_PROVIDER_FIELDS, historyStatus, saveMeta, statusHistoryFiles } from '../src/bitemporal.js';
 import { dataPaths } from '../src/config.js';
 
 // FEED-R15-1 (round 16): the status/history line leaves out the per-provider fields of the current run
@@ -59,7 +59,7 @@ test('historyStatus passes a status without a providers object through as is', (
   assert.deepEqual(historyStatus(odd), { providers: { a: null, b: 'x', c: { ok: true } } });
 });
 
-test('saveMeta: status.json is the full status, the month line is the slim one, and the size is returned', () => {
+test('saveMeta: status.json is the full status, the day file gets the slim line, and the size is returned', () => {
   const root = mkdtempSync(join(tmpdir(), 'efd-status-history-'));
   const p = dataPaths(root);
   const s1 = status('2026-10-06T01:00:00.000Z');
@@ -67,7 +67,8 @@ test('saveMeta: status.json is the full status, the month line is the slim one, 
   saveMeta(root, { seq: 7, ingest_time: s1.generated }, {}, s1);
   const r = saveMeta(root, { seq: 8, ingest_time: s2.generated }, {}, s2);
   assert.deepEqual(JSON.parse(readFileSync(p.status, 'utf8')), s2);
-  assert.equal(r.historyFile, join(p.statusHistoryDir, '2026-10.ndjson'));
+  // Round 17 (LANE G): one file per UTC day of the head's ingest time, never the whole month.
+  assert.equal(r.historyFile, join(p.statusHistoryDir, '2026-10-06.ndjson'));
   const text = readFileSync(r.historyFile, 'utf8');
   assert.equal(r.historyBytes, Buffer.byteLength(text));
   const lines = text.trim().split('\n');
@@ -76,9 +77,60 @@ test('saveMeta: status.json is the full status, the month line is the slim one, 
   assert.equal(lines[1]!.includes('newest_origin_age_hours'), true, 'frozen stays in the line');
   assert.equal(lines[1]!.includes('"tls_leaf"'), false);
   assert.equal(lines[1]!.length < JSON.stringify(s2).length, true);
-  // The month follows the head's ingest time.
-  const r3 = saveMeta(root, { seq: 9, ingest_time: '2026-11-01T00:00:00.000Z' }, {}, status('2026-11-01T00:00:00.000Z'));
-  assert.equal(r3.historyFile, join(p.statusHistoryDir, '2026-11.ndjson'));
+  // The day follows the head's ingest time (UTC), across a month's end too.
+  const r3 = saveMeta(root, { seq: 9, ingest_time: '2026-10-31T23:59:59.999Z' }, {}, status('2026-10-31T23:59:59.999Z'));
+  assert.equal(r3.historyFile, join(p.statusHistoryDir, '2026-10-31.ndjson'));
+  const r4 = saveMeta(root, { seq: 10, ingest_time: '2026-11-01T00:00:00.000Z' }, {}, status('2026-11-01T00:00:00.000Z'));
+  assert.equal(r4.historyFile, join(p.statusHistoryDir, '2026-11-01.ndjson'));
+  assert.equal(readFileSync(r4.historyFile, 'utf8').trim().split('\n').length, 1);
+  assert.equal(existsSync(join(p.statusHistoryDir, '2026-10.ndjson')), false, 'no month file is written');
+});
+
+test('statusHistoryFiles: write order — a month file before its day files, days by date, other names ignored', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'efd-status-history-order-'));
+  for (const f of ['2026-10-06.ndjson', '2026-11-01.ndjson', '2026-10.ndjson', '2026-09.ndjson', '2026-10-31.ndjson', 'notes.txt', '2026-10-6.ndjson'])
+    writeFileSync(join(dir, f), '');
+  assert.deepEqual(
+    statusHistoryFiles(dir).map((f) => [f.path.slice(dir.length + 1), f.month, f.day]),
+    [
+      ['2026-09.ndjson', '2026-09', null],
+      ['2026-10.ndjson', '2026-10', null],
+      ['2026-10-06.ndjson', '2026-10', '2026-10-06'],
+      ['2026-10-31.ndjson', '2026-10', '2026-10-31'],
+      ['2026-11-01.ndjson', '2026-11', '2026-11-01'],
+    ],
+  );
+  assert.deepEqual(statusHistoryFiles(join(dir, 'missing')), []);
+});
+
+test('the activity seed reads the month file written before the switch and the day files after it, in write order', () => {
+  // October 2026: the month file holds the lines before round 17, the day files the lines after it. `sinceMs` is the
+  // first line a source appears in, so a day file read before the month file would move it forward.
+  const split = mkdtempSync(join(tmpdir(), 'efd-status-history-split-'));
+  const one = mkdtempSync(join(tmpdir(), 'efd-status-history-one-'));
+  const times = ['2026-10-01T00:00:00.000Z', '2026-10-06T11:55:00.000Z', '2026-10-06T12:00:00.000Z', '2026-10-07T00:00:00.000Z'];
+  const lines = times.map((t, i) => {
+    const s = status(t);
+    if (i > 0) s.providers.quiet = { ok: true, http_status: 200, events_returned: 3 } as never;
+    return JSON.stringify(historyStatus(s));
+  });
+  mkdirSync(dataPaths(split).statusHistoryDir, { recursive: true });
+  mkdirSync(dataPaths(one).statusHistoryDir, { recursive: true });
+  const dir = dataPaths(split).statusHistoryDir;
+  writeFileSync(join(dir, '2026-10.ndjson'), lines.slice(0, 2).join('\n') + '\n');
+  writeFileSync(join(dir, '2026-10-06.ndjson'), lines[2] + '\n');
+  writeFileSync(join(dir, '2026-10-07.ndjson'), lines[3] + '\n');
+  writeFileSync(join(dataPaths(one).statusHistoryDir, '2026-10.ndjson'), lines.join('\n') + '\n');
+  const a = seedActivity(dataPaths(one).statusHistoryDir);
+  const b = seedActivity(dir);
+  assert.deepEqual(b, a);
+  assert.equal(b['usgs']!.sinceMs, Date.parse(times[0]!));
+  assert.equal(b['quiet']!.lastNonEmptyAt, Date.parse(times[3]!));
+  // The concatenation in write order is the month file the earlier layout would have written.
+  assert.deepEqual(
+    Buffer.concat(statusHistoryFiles(dir).map((f) => readFileSync(f.path))),
+    readFileSync(join(dataPaths(one).statusHistoryDir, '2026-10.ndjson')),
+  );
 });
 
 test('the activity seed reads slim lines as it read full ones', () => {

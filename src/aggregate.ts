@@ -317,7 +317,7 @@ async function main(): Promise<void> {
   const history = saveMeta(DATA_DIR, state.head, state.watermarks, status);
   if (history.historyBytes > HISTORY_FILE_WARN_BYTES) {
     console.warn(
-      `::warning title=Status history size::${relative(DATA_DIR, history.historyFile)} is ${(history.historyBytes / 1e6).toFixed(1)} MB, over ${HISTORY_FILE_WARN_BYTES / 1e6} MB: every aggregate commit rewrites it and GitHub rejects a pushed file above 100 MiB (APIs.md Run logs)`,
+      `::warning title=Status history size::${relative(DATA_DIR, history.historyFile)} is ${(history.historyBytes / 1e6).toFixed(1)} MB, over ${HISTORY_FILE_WARN_BYTES / 1e6} MB (a day is about 1.3 MB): the status line has grown, and every aggregate commit rewrites the day file and the month asset it rolls into grows with it (APIs.md Run logs)`,
     );
   }
   saveActivity(paths.providerActivity, activity);

@@ -107,6 +107,31 @@ export const REID_MAG_TOLERANCE = 1e-9;
  *  replaying the whole observation log (2026-07-05..10-01: 44 version pairs within 2 s and 2 km, magnitudes up to 0.6
  *  apart) split 9 events in two. */
 export const NEW_ID_PER_REVISION_PROVIDERS: ReadonlySet<string> = new Set(['nrcan']);
+/** Providers that re-locate a quake under a new native id (round 14): two of their rows of different ids are one quake when
+ *  their origin times are at most `dtMs` apart, their places at most `km`, their magnitudes at most `maxDeltaMag` and
+ *  their ids, both whole numbers, at most `maxIdGap` apart (Resolver.revisedIdPair). The pair is then not "the same provider under distinct native ids" (sameProviderDistinct,
+ *  nodesDistinct): a report of the new id joins the live event holding the old one ahead of any proximity match
+ *  (findRevisedTwin), and the merge pass folds two events holding such a pair whatever their representatives' distance,
+ *  ranked behind every pair the base and large-event windows accept (neither cell dense in either case).
+ *
+ *  CSN (Chile) publishes a revised solution as a new informe numbered right after the one it replaces and, mostly, drops
+ *  the old one from its day page; the feed sees no delete, so the old row stays, and since the moderate-event window keeps
+ *  the same provider's two ids apart, the two stood as two events, EMSC's copy (auth CSN, which follows CSN's newest id)
+ *  moving between them (FEED-2). Measured 2026-10-06 over the observation log (2026-07-05..10-06): 24 pairs of CSN ids
+ *  within 60 s and 100 km. CSN's day pages (read 2026-10-06) list only one id of 14 of them: a revision, 0–3 s, 2.1–41.5
+ *  km, |ΔM| ≤ 0.4 apart, the two informe numbers adjacent in every one. Both ids stay listed for the other 10: 4 are 9–57
+ *  s apart (outside the window); 377064/377065 are 85 km apart; 377265/377266, 376152/376154 and 376495/376497 (0–2 s,
+ *  11–32 km, informes 1–2 apart) are one quake CSN lists twice (EMSC's one event id copied both ids of the first and the
+ *  third in turn, and the copy of 376154 is EMSC's only event there; no agency reports a second quake), and they fold;
+ *  377484/377490 and 378915/378921 (informes 6 apart, the second published 85 and 30 minutes after the first; CSN now
+ *  lists 378915 12 s before 378921) stay apart. Replaying the log (a fresh Resolver every 6 h with the production hot window
+ *  and the regular heal) against the rules before: the 17 pairs fold, 2 quakes keep two events with their rows grouped
+ *  otherwise (2026-07-30 and 08-22: CSN's two ids now share an event, while EMSC's own solution with INPRES's, or ComCat's,
+ *  45 and 52 km from CSN's newer one, stays the quake's second event as before); per connected group of ids 15 fewer events, 0 more; rows in two live
+ *  events 0. */
+export const REVISED_ID_WINDOWS: ReadonlyMap<string, { dtMs: number; km: number; maxDeltaMag: number; maxIdGap: number }> = new Map([
+  ['csn', { dtMs: 3_000, km: 45, maxDeltaMag: 0.5, maxIdGap: 2 }],
+]);
 /** Bound on the post-revision merge chain one ingest may trigger (each round retires a node). */
 export const MERGE_MAX_ROUNDS = 8;
 /** A retired event (superseded by an op:merge, or tombstoned: an upstream delete, a provider's

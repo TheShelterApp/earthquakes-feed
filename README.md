@@ -172,7 +172,8 @@ open, reachable source appears.
   source's solution when it was fetched, while the log holds each report as first seen
   since 2026-07-05 (`scripts/first-observations.ts`; [APIs.md](APIs.md#history-and-backfill)).
   History before 2023-07-06 goes elsewhere: the `history` walk (switched by `providers/history.json` `enabled`; on since
-  2026-10-01 for its first era, ComCat 2022-07-01 → 2023-07-06) writes
+  2026-10-01 for its first era, 2022-07-01 → 2023-07-06: ComCat in edition 1, the 17 FDSN sources that reached the 3-year
+  target in edition 2) writes
   immutable `history-YYYY` Release assets only, and the `data` branch gains just `knowledge/index/history.json`
   ([APIs.md](APIs.md#deep-history-before-2023-07-06)).
 - **Saturated days:** a backfill day whose one-day window still filled a source's page cap

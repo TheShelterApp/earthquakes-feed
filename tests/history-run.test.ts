@@ -228,4 +228,9 @@ test('fetch + seal: a month is sealed as soon as its last source arrives, newest
     ['2022-11', 1, 'history-2022/events-2022-12.e1.tar.zst#01.ndjson'],
   ]);
   assert.deepEqual(ctx.report.sealed.length, 2);
+  // The run's view of the Release follows its own uploads without listing it again after each one.
+  assert.deepEqual(
+    ctx.assetCache.get('history-2022')!.map((a) => a.name).sort(),
+    ctx.store.list('history-2022').map((a) => a.name),
+  );
 });

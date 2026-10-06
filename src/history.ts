@@ -129,7 +129,11 @@ const assetNames = (ctx: Ctx, tag: string): Set<string> => new Set(assets(ctx, t
 function uploadVerified(ctx: Ctx, tag: string, file: string, sha256: string): void {
   ctx.store.ensureRelease(tag);
   ctx.store.upload(tag, file);
-  ctx.assetCache.delete(tag);
+  // The run's view of the Release gains the asset it just uploaded (no new listing per upload: the GITHUB_TOKEN's
+  // 1,000 REST requests per hour are shared by every workflow of the repository).
+  const name = file.split('/').pop()!;
+  const cached = ctx.assetCache.get(tag);
+  if (cached) cached.push({ name, size: readFileSync(file).length, state: 'uploaded' });
   const back = join(ctx.work, `verify-${Date.now()}`);
   ctx.store.download(tag, file.split('/').pop()!, back);
   if (sha256File(back) !== sha256) throw new Error(`uploaded ${tag}/${file.split('/').pop()} reads back with another checksum`);

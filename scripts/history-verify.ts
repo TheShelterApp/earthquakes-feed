@@ -8,7 +8,7 @@
  *                   Releases downloaded with `gh release download history-YYYY -D <dir>/history-YYYY`
  *   <history.json>  the index that lists them (HISTORY_OUT/history.json, or the data branch's
  *                   knowledge/index/history.json)
- *   --recount       ask each source with a count service (ComCat) again, one request per raw asset 1.1 s apart, for
+ *   --recount       ask each source with a count service (ComCat, EMSC) again, one request per raw asset 1.1 s apart, for
  *                   its count of the asset's range today, and compare it with the count recorded at fetch time
  *
  * For every current events edition: every line against schema/feature.schema.json, the day of every event, one event

@@ -241,7 +241,10 @@ windows shrink with the magnitude difference. Those are the feed's own identity 
 (`src/dedup.ts`): agencies' preliminary epicentres of one M6–7 quake scatter by tens of
 km, and a provider re-publishing one solution under a second id (≤ 2 s, ≤ 2 km,
 |ΔM| ≤ 0.1) is the same event, not a new one. Exactly 0.1 counts, for every pair of magnitudes (since 2026-10-01;
-before, floating point made 2.3 vs 2.2 count and 1.5 vs 1.4 not). When the feed folds two existing ids it
+before, floating point made 2.3 vs 2.2 count and 1.5 vs 1.4 not). Every other magnitude limit below counts exactly
+the same way since 2026-10-06 (the 1.0 of the large-event window, the 0.8 between two reviewed solutions, the 1.5 and
+the 1.0 of AEC's location join and withheld reports; before, 5.4 vs 4.6 was more than 0.8 and 8.3 vs 7.3 more than
+1.0). When the feed folds two existing ids it
 folds a pair only when each is the other's best match (distance and time, relative to the
 pair's window), so a report is never welded to a neighbour while its own twin stays apart.
 

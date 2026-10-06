@@ -24,7 +24,7 @@ import {
   rawAssetName,
   releaseAssetUrl,
 } from './history-config.js';
-import { type FetchRangeOptions, HISTORY_USER_AGENT, fetchRange } from './history-fetch.js';
+import { type FetchRangeOptions, type FetchRangeResult, HISTORY_USER_AGENT, fetchRange } from './history-fetch.js';
 import {
   type EditionEntry,
   type HistoryIndex,
@@ -41,7 +41,7 @@ import {
 import { type AssetInfo, DryRunStore, GitHubStore, type HistoryStore, LocalStore } from './history-store.js';
 import { verifyEdition } from './history-verify.js';
 import { loadRegistry } from './providers.js';
-import type { ProviderConfig } from './types.js';
+import type { ProviderConfig, RawObs } from './types.js';
 
 /**
  * Deep history walker (PF-5j; design and safety rules: src/history-config.ts and APIs.md, Deep history).
@@ -289,6 +289,46 @@ function editionEntryOf(tag: string, asset: string, sha256: string, bytes: numbe
   };
 }
 
+/** Rows of the newer month the check asks for again: its first, middle and last row (by origin time). */
+const PROBE_ROWS = 3;
+const PROBE_HALF_WINDOW_MS = 3_600_000;
+
+/**
+ * Does the source still answer rows it gave for `newer` (its raw asset `newerRaw`)? Asks a two-hour window around up to
+ * PROBE_ROWS of those rows, one at a time, and stops at the first window that answers a row. An error, or no row in any
+ * window, means the source is not answering as it did (a service answering empty while it is broken, or the newer
+ * month's events gone); a run whose time budget ends during the check says so (`budget`).
+ */
+export async function stillAnswersRows(
+  ctx: Ctx,
+  p: ProviderConfig,
+  newer: Period,
+  newerRaw: RawEntry,
+  options: FetchRangeOptions,
+): Promise<{ ok: true; requests: number } | { ok: false; error: string; requests: number; budget?: boolean }> {
+  let rows: RawObs[];
+  try {
+    rows = [...loadRaw(ctx, newerRaw.tag, newerRaw.asset, newerRaw.sha256).rows].sort((a, b) => a.eventTimeMs - b.eventTimeMs);
+  } catch (e) {
+    return { ok: false, error: `could not read ${newerRaw.asset} to check it (${e instanceof Error ? e.message : String(e)})`, requests: 0 };
+  }
+  const picks = [...new Set([0, Math.floor((rows.length - 1) / 2), rows.length - 1])].slice(0, PROBE_ROWS).map((i) => rows[i]!);
+  let requests = 0;
+  for (const r of picks) {
+    const ws = Math.max(newer.startMs, r.eventTimeMs - PROBE_HALF_WINDOW_MS);
+    const we = Math.min(newer.endMs, r.eventTimeMs + PROBE_HALF_WINDOW_MS);
+    const res = await fetchRange(p, ws, we, options);
+    requests += res.requests;
+    if (!res.ok) return { ok: false, error: `checking ${newer.key} again: ${res.error}`, requests, ...(res.budget ? { budget: true } : {}) };
+    if (res.rows.length > 0) return { ok: true, requests };
+  }
+  return {
+    ok: false,
+    error: `${newer.key} answers none either in ${picks.length} two-hour window(s) around rows it answered on ${newerRaw.fetched_at} (a service answering empty; asked again next run)`,
+    requests,
+  };
+}
+
 /** Fetch up to `maxUnits` pending source months. `onMonthComplete` runs when a fetch completes a month (every source of
  *  its era fetched): the walk seals it there and then, so editions follow the fetches within the run instead of waiting
  *  for a run whose fetching ends before its time budget does. */
@@ -315,16 +355,37 @@ export async function fetchUnits(ctx: Ctx, maxUnits: number, onMonthComplete?: (
     const fetchedAt = ctx.now();
     const host = new URL(p.base).host;
     const pace = paces.get(host) ?? paces.set(host, { lastEndMs: -Infinity }).get(host)!;
-    const res = await fetchRange(p, u.period.startMs, u.period.endMs, {
+    const fetchOptions = (minMagnitude: number | null): FetchRangeOptions => ({
       limit: ctx.cfg.pageLimits[u.source] ?? FETCH_LIMIT_DEFAULT,
-      minMagnitude: fetchFloorOf(era),
+      minMagnitude,
       spacingMs: ctx.cfg.requestSpacingMs,
       timeoutMs: Math.max(ctx.cfg.timeoutMs, p.timeoutMs ?? 0),
       deadlineMs: ctx.deadline,
       pace,
       ...ctx.fetchOptions,
     });
+    let res: FetchRangeResult = await fetchRange(p, u.period.startMs, u.period.endMs, fetchOptions(fetchFloorOf(era)));
     done++;
+    // An empty month right before one with rows is either where the source's catalogue starts (going back) or a
+    // service that answers empty while it is broken (NOA's registered node answered 204 to every query for ten days,
+    // PF-5j-NOA). A raw asset is immutable and a sealed month is never fetched again, so the empty answer is kept only
+    // once the source still answers rows it gave for the newer month; otherwise the month fails like any other failure
+    // and is asked again next run (round 15 review).
+    let emptyAfter: { newer: string; rows: number } | null = null;
+    if (res.ok && res.rows.length === 0) {
+      const newer = allPeriods(ctx.cfg).find((q) => q.startMs === u.period.endMs);
+      const newerRaw = newer ? rawOf(ctx.idx, u.source, newer.key) : undefined;
+      if (newer && newerRaw && newerRaw.rows > 0) {
+        const check = await stillAnswersRows(ctx, p, newer, newerRaw, fetchOptions(newerRaw.fetch_min_magnitude));
+        const requests = res.requests + check.requests;
+        if (check.ok) {
+          emptyAfter = { newer: newer.key, rows: newerRaw.rows };
+          res = { ...res, requests };
+        } else {
+          res = { ok: false, error: `${key} answered no rows: ${check.error}`, windows: res.windows, requests, ...(check.budget ? { budget: true } : {}) };
+        }
+      }
+    }
     if (!res.ok && res.budget) {
       console.log(`history: ${key} not finished within the run's ${ctx.cfg.maxSecondsPerRun} s; asked again next run`);
       break;
@@ -374,16 +435,9 @@ export async function fetchUnits(ctx: Ctx, maxUnits: number, onMonthComplete?: (
     delete ctx.idx.attempts[key];
     rmSync(file, { force: true });
     const count = res.providerCount != null ? `, the source's count ${res.providerCount}` : '';
-    // An empty month right before one with rows is either where the source's catalogue starts (going back) or a
-    // service that answers empty while it is broken (NOA's registered node answered 204 for ten days, PF-5j-NOA). The
-    // asset stays as fetched; the run names it so a reviewer can tell the two apart (APIs.md, Deep history).
-    if (res.rows.length === 0) {
-      const newer = allPeriods(ctx.cfg).find((q) => q.startMs === u.period.endMs);
-      const newerRaw = newer ? rawOf(ctx.idx, u.source, newer.key) : undefined;
-      if (newerRaw && newerRaw.rows > 0) {
-        ctx.report.empty_after_rows.push(`${key}: no rows, ${newerRaw.rows} in ${newer!.key}`);
-        console.log(`::warning::history: ${key} answered no rows where ${newer!.key} has ${newerRaw.rows} (the start of the catalogue, or a service answering empty)`);
-      }
+    if (emptyAfter) {
+      ctx.report.empty_after_rows.push(`${key}: no rows, ${emptyAfter.rows} in ${emptyAfter.newer} (which still answers rows: the source's catalogue starts here)`);
+      console.log(`::warning::history: ${key} answered no rows where ${emptyAfter.newer} has ${emptyAfter.rows}, and ${emptyAfter.newer} still answers rows: the start of the catalogue`);
     }
     ctx.report.fetched.push(`${tag}/${asset}: ${res.rows.length} rows${count}, ${res.windows.length} window(s), ${res.requests} request(s), ${(bytes / 1e6).toFixed(2)} MB`);
     console.log(`history: ${key} -> ${tag}/${asset} (${res.rows.length} rows${count}, ${res.requests} requests)`);

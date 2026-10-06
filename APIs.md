@@ -575,6 +575,29 @@ FDSN sources of the 3-year layer (`emsc`, `geofon`, `ingv`, `geonet`, `resif`, `
 `ethz`, `nrcan`, `ncedc`, `scedc`, `knmi`, `auspass`; not ISC, whose walk is paused) in its edition 2. The custom
 adapters (`afad`, `kagsr`, `imo`, `csn`, …) have no history query yet and are in no era.
 
+**Era A** (owner-approved, round 15) continues with the same 17 sources, every magnitude, from 2022-07-01 back to
+2000-01-01: 270 months, walked newest first after the pilot's edition 2, one edition per month. Some catalogues start
+later than 2000 (measured 2026-10-06 in the sampled months: NOA's `eida2` has no rows before 2011-03, GEOFON none in
+2000-01 and 2004-12, IPGP none before 2018 and a dozen a month in 2018–2019, USP a few a month before 2016); their
+earlier months are empty raw assets; the first of them is kept once the source still answers rows of the newer month
+(*Pace* below) and is named in the run's `empty_after_rows`. Projection from
+the round-15 measurements (ComCat's and EMSC's monthly counts for all 270 months, INGV fetched for all 270, the other 14
+sources measured in 35 months and interpolated, about ±30 % for those):
+
+| | Era A (2000-01 → 2022-06) |
+|---|---|
+| Source rows | about 6.7 M (ComCat 2,834,028, EMSC 1,063,994, INGV 372,513, the other 14 about 2.4 M) |
+| Events | about 4.9 M (0.73 events per row, as in the measured months) |
+| Release assets | 18 per month, 216 per `history-YYYY` (`history-2022` 222 with the pilot's; the limit is 1,000) |
+| Size | raw about 0.37 GB + editions about 0.68 GB; the largest asset about 9 MB (2019-07, Ridgecrest) |
+| Requests | about 5,200 (ComCat 558, EMSC 540, INGV 310, the others 270–282 each), one at a time, ≥ 1.1 s apart per host |
+| Walk time | about 4 min per month on a runner (requests, 18 uploads read back, the build): about 18 h, about 110 hourly runs, about 5 days; about ten swarm months build for 6–9 min each |
+| `knowledge/index/history.json` | about 9.6 KB per month: about 2.7 MB at the end (the commit job's cap is 8 MB) |
+
+The side index of earliest solutions follows the editions back (*Earliest solutions* below): era A gives it about
+2.8 M more ComCat reports (one request each), about 1.2 M NCEDC / SCEDC reports read through ComCat and about 0.37 M
+INGV reports, at its own hourly pace (about 43,000 ComCat reports a day: about three months).
+
 **Where it lives.** Everything is an immutable asset of a Release `history-YYYY` (the year of the month):
 
 | Asset | What it is |

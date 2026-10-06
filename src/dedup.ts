@@ -6,6 +6,7 @@ import {
   EMSC_AUTHORED_COPIES,
   EMSC_COMCAT_NETWORK_COPIES,
   EMSC_PROVIDER,
+  EMSC_STRANDED_MIN_DT_MS,
   GRID_CELL_DEG,
   HOT_WINDOW_DAYS,
   LARGE_EVENT_BASE_KM,
@@ -158,6 +159,8 @@ export class Resolver {
   private comcatIndex: Map<string, string> | null = null;
   /** FEED-2 (rehomeCopy), in order: the EMSC copies this resolver moved to another event. */
   readonly rehomedCopies: string[] = [];
+  /** Round 14 (rehomeStranded), in order: the EMSC rows this resolver moved after EMSC re-pointed their id. */
+  readonly rehomedStranded: string[] = [];
 
   constructor(
     readonly eventMap: Map<string, EventNode>,
@@ -885,7 +888,7 @@ export class Resolver {
     const comcatKey = COMCAT_LIFECYCLE_PROVIDERS.has(raw.provider) ? `${COMCAT_PROVIDER}:${comcatIdOf(raw.provider, raw.providerEventId)}` : null;
     if (node && comcatKey && Resolver.withdrawnFrom(node, raw)) return { node, changed: false, revision: node.revision, merges: [] };
     if (node && fold && this.mergePass) {
-      const moved = this.rehomeCopy(node, raw, ingestTime);
+      const moved = this.rehomeCopy(node, raw, ingestTime) ?? this.rehomeStranded(node, raw, ingestTime);
       if (moved) return moved;
     }
 
@@ -1017,6 +1020,96 @@ export class Resolver {
     const reason = `${REHOMED_REASON_PREFIX} EMSC ${raw.providerEventId} (auth ${String(raw.fields['auth'])}) copies ${copied.provider} ${copied.nativeId}, held by ${to.node.feedId}`;
     this.rehomedCopies.push(`emsc:${raw.providerEventId} ${node.feedId} -> ${to.node.feedId} (${copied.provider}:${copied.nativeId})`);
     return { ...to, rehomed: { from, old, reason } };
+  }
+
+  /** The EMSC re-point guard (round 14, config EMSC_STRANDED_MIN_DT_MS): `raw`, an unchanged report of an EMSC row that is
+   *  not an authored copy, stored in `node` with other rows, moves to another live event when it is stranded there:
+   *  one quake with none of the node's other rows (sameQuakeRow both ways), more than EMSC_STRANDED_MIN_DT_MS from
+   *  every one of them, and placed by the first-sight identity windows in another live event (repointHome) that holds a
+   *  row it is one quake with. Same lines and alias handling as rehomeCopy. Only on the logged path (fold, merge pass
+   *  on). null when the report is none of these. */
+  private rehomeStranded(node: EventNode, raw: RawObs, ingestTime: string): IngestResult | null {
+    if (raw.provider !== EMSC_PROVIDER || Resolver.copyCode(raw)) return null;
+    const idx = node.provenance.findIndex((r) => r.provider === raw.provider && r.nativeId === raw.providerEventId);
+    const stored = node.provenance[idx];
+    if (!stored || !Resolver.solutionEqual(stored, raw)) return null;
+    const others = node.provenance.filter((_, i) => i !== idx);
+    if (!others.length || !others.every((r) => Math.abs(r.eventTimeMs - raw.eventTimeMs) > EMSC_STRANDED_MIN_DT_MS)) return null;
+    if (others.some((r) => this.sameQuakeRow(raw, r) || this.sameQuakeRow(rowAsReport(r), stored))) return null;
+    const home = this.repointHome(raw, node);
+    if (!home || !home.provenance.some((r) => this.sameQuakeRow(raw, r))) return null;
+    const key = `${raw.provider}:${raw.providerEventId}`;
+    const old = rowAsReport(stored);
+    node.aliases = node.aliases.filter((a) => a !== key);
+    this.alias.delete(key);
+    const from = this.withdrawRow(node, idx, ingestTime);
+    const to = this.applyIngest(home.feedId, raw, ingestTime);
+    this.alias.set(key, to.node.feedId);
+    const dt = Math.min(...others.map((r) => Math.abs(r.eventTimeMs - raw.eventTimeMs))) / 1000;
+    const reason = `${REHOMED_REASON_PREFIX} EMSC ${raw.providerEventId} re-pointed, ${dt.toFixed(1)} s or more from every other row of ${node.feedId}; one quake with ${to.node.feedId}`;
+    this.rehomedStranded.push(`emsc:${raw.providerEventId} ${node.feedId} -> ${to.node.feedId} (${dt.toFixed(1)} s)`);
+    return { ...to, rehomed: { from, old, reason } };
+  }
+
+  /** Whether `raw` and the row `r` are one quake by the rules that put rows in one event: an authored copy, the same
+   *  solution, the identity windows, or the moderate-event window (outside dense cells, another provider, not one the
+   *  moderate-event window leaves out). */
+  private sameQuakeRow(raw: RawObs, r: ProvenanceRow): boolean {
+    if (Resolver.authoredCopy(raw, r) || Resolver.sameSolution(raw, r)) return true;
+    const d = haversineKm(raw.lat, raw.lon, r.lat, r.lon);
+    const dense = this.isDense(raw.lat, raw.lon);
+    if (!this.reject(raw, r, d, dense)) return true;
+    if (dense || raw.provider === r.provider) return false;
+    return Resolver.moderateProviders([raw.provider], [r.provider]) && !this.rejectModerate(raw, r, d);
+  }
+
+  /** The live event other than `from` the first-sight identity windows place `raw` in (findNear's first step: the
+   *  nearest event within the windows, no other id of the report's provider, a shared id in a dense cell), or null. */
+  private repointHome(raw: RawObs, from: EventNode): EventNode | null {
+    if (raw.eventTimeMs < this.hotFloor) return null;
+    const dense = this.isDense(raw.lat, raw.lon);
+    let best: EventNode | null = null;
+    let bestKm = Infinity;
+    for (const fid of this.candidates(raw)) {
+      const node = this.eventMap.get(fid);
+      if (!node || node.state !== 'live' || node === from) continue;
+      const d = haversineKm(raw.lat, raw.lon, node.lat, node.lon);
+      if (this.reject(raw, node, d, dense)) continue;
+      if (Resolver.lifecycleLocationBlocks([raw], raw, node.provenance, node)) continue;
+      if (this.sameProviderDistinct(raw, node)) continue;
+      if (dense && !this.sharesIdentity(raw, node)) continue;
+      if (d < bestKm || (d === bestKm && best && node.feedId < best.feedId)) {
+        best = node;
+        bestKm = d;
+      }
+    }
+    return best;
+  }
+
+  /** The guard's every-run pass (heal.ts runFeedSideSteps): each EMSC row that is not an authored copy, in a live event
+   *  of the hot window with other rows all more than EMSC_STRANDED_MIN_DT_MS from it, is presented again as its own
+   *  unchanged report, so rehomeStranded moves it when it is stranded (rows older than the live query's lookback, which
+   *  no listing presents again). Event-time order, then feed id and native id, so the lines replay. A no-op when nothing
+   *  is stranded, or when merge=false. */
+  rehomeStrandedRows(ingestTime: string): { raw: RawObs; result: IngestResult }[] {
+    const out: { raw: RawObs; result: IngestResult }[] = [];
+    if (!this.mergePass) return out;
+    const far = (row: ProvenanceRow, node: EventNode): boolean =>
+      node.provenance.every((o) => o === row || Math.abs(o.eventTimeMs - row.eventTimeMs) > EMSC_STRANDED_MIN_DT_MS);
+    const pick = (node: EventNode): ProvenanceRow[] =>
+      node.provenance.filter((r) => r.provider === EMSC_PROVIDER && !Resolver.copyCode(r) && far(r, node));
+    const nodes = [...this.eventMap.values()]
+      .filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor && n.provenance.length > 1 && pick(n).length > 0)
+      .sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : a.feedId > b.feedId ? 1 : 0));
+    for (const node of nodes) {
+      for (const row of pick(node).sort((a, b) => (a.nativeId < b.nativeId ? -1 : a.nativeId > b.nativeId ? 1 : 0))) {
+        if (node.state !== 'live' || !node.provenance.includes(row)) break;
+        const raw = rowAsReport(row);
+        const result = this.applyIngest(node.feedId, raw, ingestTime);
+        if (result.rehomed) out.push({ raw, result });
+      }
+    }
+    return out;
   }
 
   /** FEED-2, every run (heal.ts runFeedSideSteps): each EMSC copy in a live event of the hot window that holds other

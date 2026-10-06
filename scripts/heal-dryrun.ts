@@ -61,7 +61,8 @@ const log = new LogBuffer(head.seq, ingestTime);
 const scratch = mkdtempSync(join(tmpdir(), 'heal-dryrun-'));
 const side = runFeedSideSteps(scratch, resolver, log, { healDue: !regular, loadDays, ingestTime });
 rmSync(scratch, { recursive: true, force: true });
-// op:tombstone lines are the retraction's, or a re-homed EMSC copy's withdrawal (FEED-2, with its own reason).
+// op:tombstone lines are the retraction's, or a re-homed EMSC row's withdrawal (FEED-2's copies and round 14's re-pointed
+// rows, Resolver.rehomeStranded, with their own reason).
 const isRehome = (l: Observation): boolean => l.op === 'tombstone' && (l.reason ?? '').startsWith(REHOMED_REASON_PREFIX);
 const rehomes = log.lines.filter(isRehome);
 const afterRetraction = log.lines.filter((l) => l.op === 'tombstone' && !isRehome(l)).length;
@@ -71,7 +72,7 @@ const retractions = log.lines
 const merges = log.lines
   .filter((l) => l.op === 'merge')
   .map((l) => ({ loser: state.eventMap.get(l.feed_id)!, survivor: state.eventMap.get(l.superseded_by!)!, reason: l.reason ?? '' }));
-if ((regular ? side.regularHeal?.merged : side.heal?.merged) !== merges.length || side.retracted !== retractions.length || side.rehomed !== rehomes.length) throw new Error('dry run: the logged lines disagree with the step result');
+if ((regular ? side.regularHeal?.merged : side.heal?.merged) !== merges.length || side.retracted !== retractions.length || side.rehomed + side.stranded !== rehomes.length) throw new Error('dry run: the logged lines disagree with the step result');
 
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 addFormats(ajv);
@@ -112,7 +113,7 @@ md.push(`By event day: ${[...byDay].sort().map(([d, n]) => `${d.slice(5)} ${n}`)
 md.push('');
 
 // --- EMSC copies re-homed (FEED-2) ---
-md.push(`## EMSC copies re-homed (${rehomes.length})`);
+md.push(`## EMSC rows re-homed (${rehomes.length}: ${side.rehomed} copies, ${side.stranded} re-pointed rows)`);
 md.push('');
 for (const t of rehomes) {
   const next = log.lines[log.lines.indexOf(t) + 1];

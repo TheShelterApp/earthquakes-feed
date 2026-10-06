@@ -206,6 +206,8 @@ async function main(): Promise<void> {
   // EMSC copies that left their event for the one holding the agency row they copy (the reports' path and the
   // feed-side pass; Resolver.rehomeCopy, FEED-2): status `copies_rehomed`.
   for (const c of resolver.rehomedCopies) console.log(`  copy re-homed ${c}`);
+  // EMSC rows moved by the re-point guard (Resolver.rehomeStranded, round 14): status `rows_rehomed`.
+  for (const c of resolver.rehomedStranded) console.log(`  re-pointed row re-homed ${c}`);
 
   if (tally.bad_coords) {
     console.warn(
@@ -266,6 +268,7 @@ async function main(): Promise<void> {
     absent,
     merged: log.merged,
     copies_rehomed: resolver.rehomedCopies.length,
+    rows_rehomed: resolver.rehomedStranded.length,
     ...(feedSide.regularHeal ? { heal_merged: feedSide.regularHeal.merged, ...(feedSide.regularHeal.capped ? { heal_capped: true } : {}) } : {}),
     ...(heal ? { heal } : {}),
     ...(correction ? { correction } : {}),

@@ -631,7 +631,11 @@ Round 17 (LANE G) changes what the commits rewrite, never what consumers read, a
   src/config.ts; 24 writes one file a day again). A run's changes fall into 1–3 hours of a day, so a commit rewrites
   shards of about 70 KB instead of 1.7 MB days: 777 MB a day of rewritten bytes become 65 (10-05/06). Every reader
   takes the event-day from the name's first 10 characters, as the code before round 17 did, so a reverted deploy still
-  reads the hour shards. Replayed alone, the event_map's share of the days to 10-04, 10-05 and 10-06 falls from 13, 20
+  reads the hour shards. `loadEventMap` inserts each event-day's nodes in feed-id order whatever the layout, so the map
+  iterates exactly as it did with day files (the same 57,991 nodes in the same order on the `data` copy of 10-06 13:02
+  UTC); the Resolver's equal-distance tie-break follows that order. The code before round 17 reads hour shards in name
+  order (hour, then feed id): the same nodes, another order, so the rollback is `EVENT_MAP_SHARD_HOURS=24` rather than
+  a revert. Replayed alone, the event_map's share of the days to 10-04, 10-05 and 10-06 falls from 13, 20
   and 32 MB to 6, 7.5 and 10.
 
 Both together replay to 45 MB a day on average over the eight days instead of 63 (23–42 % less a day, 28 % in all); at

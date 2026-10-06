@@ -44,30 +44,53 @@ export function eventMapShardName(day: string, eventTimeMs: number, hours: numbe
 /** Load the event_map, optionally limited to the last `sinceDays` of event-days.
  *  Reads day shards if present; falls back to the legacy monolithic file (migration). A feed id found in two shard
  *  files (only after a layout change was rolled back, or a node moved to a day no run rewrote since) keeps the node with
- *  the higher `lastSeq`; on a tie the file read later (name order) wins, as before round 17. */
+ *  the higher `lastSeq`; on a tie the file read later (name order) wins, as before round 17.
+ *
+ *  The map's order is the same in either shard layout: event-day by event-day, each day's nodes in feed-id order (the
+ *  order of a day file, which saveEventMap writes sorted by feed id). The Resolver indexes the map in this order and
+ *  some of its tie-breaks follow it (the first candidate at an equal distance wins), so hour shards read in name order
+ *  (hour, then feed id) would change which node an equidistant report joins (round 17 review). */
 export function loadEventMap(root: string, opts: { sinceDays?: number; nowMs?: number } = {}): Map<string, EventNode> {
   const p = dataPaths(root);
   const nowMs = opts.nowMs ?? Date.now();
   const cutoffDay = opts.sinceDays != null ? eventDayKey(nowMs - opts.sinceDays * 86_400_000) : null;
   const map = new Map<string, EventNode>();
-  const add = (line: string): void => {
-    const t = line.trim();
-    if (!t) return;
-    const node = JSON.parse(t) as EventNode;
+  const add = (node: EventNode): void => {
     const held = map.get(node.feedId);
     if (held && (held.lastSeq ?? -1) > (node.lastSeq ?? -1)) return;
     map.set(node.feedId, node);
   };
+  const parse = (text: string, into: EventNode[]): void => {
+    for (const line of text.split('\n')) {
+      const t = line.trim();
+      if (t) into.push(JSON.parse(t) as EventNode);
+    }
+  };
   if (existsSync(p.eventMapDir)) {
+    let day: string | null = null;
+    let nodes: EventNode[] = [];
+    // A stable sort: lines of one feed id keep their file order, so the later file still wins a lastSeq tie.
+    const flush = (): void => {
+      nodes.sort((a, b) => (a.feedId < b.feedId ? -1 : a.feedId > b.feedId ? 1 : 0));
+      for (const n of nodes) add(n);
+      nodes = [];
+    };
     for (const f of readdirSync(p.eventMapDir).sort()) {
       if (!f.endsWith('.ndjson')) continue;
       if (cutoffDay && f.slice(0, 10) < cutoffDay) continue;
-      for (const line of readFileSync(join(p.eventMapDir, f), 'utf8').split('\n')) add(line);
+      if (f.slice(0, 10) !== day) {
+        flush();
+        day = f.slice(0, 10);
+      }
+      parse(readFileSync(join(p.eventMapDir, f), 'utf8'), nodes);
     }
+    flush();
   } else if (existsSync(p.eventMapLegacy)) {
     // One-time migration: read the whole legacy file regardless of `sinceDays`, so the
     // narrow (aggregate) load can't drop older events before they're written as shards.
-    for (const line of readFileSync(p.eventMapLegacy, 'utf8').split('\n')) add(line);
+    const nodes: EventNode[] = [];
+    parse(readFileSync(p.eventMapLegacy, 'utf8'), nodes);
+    for (const n of nodes) add(n);
   }
   return map;
 }

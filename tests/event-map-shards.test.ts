@@ -178,3 +178,33 @@ test('prune removes every shard of a day before the horizon and names each day o
     rmSync(r, { recursive: true, force: true });
   }
 });
+
+test('the map iterates in the same order in either layout: day by day, feed ids in order (round 17 review)', () => {
+  // The Resolver indexes the map in its iteration order and keeps the first candidate at an equal distance, so the
+  // order must not follow the hour shards' names (hour, then feed id): efd_a at 13h and efd_b at 01h read as b, a.
+  const day = root();
+  const hours = root();
+  try {
+    const m = mapOf(
+      node('efd_a', at('13:00')),
+      node('efd_b', at('01:00')),
+      node('efd_c', at('01:30')),
+      node('efd_0', Date.parse('2026-10-04T23:00:00Z')),
+      node('efd_z', Date.parse('2026-10-06T00:30:00Z')),
+    );
+    saveEventMap(day, m, 24);
+    saveEventMap(hours, m, 1);
+    assert.deepEqual(files(hours), [`2026-10-04-23.ndjson`, `${DAY}-01.ndjson`, `${DAY}-13.ndjson`, `2026-10-06-00.ndjson`]);
+    const order = (r: string): string[] => [...loadEventMap(r).keys()];
+    assert.deepEqual(order(day), ['efd_0', 'efd_a', 'efd_b', 'efd_c', 'efd_z']);
+    assert.deepEqual(order(hours), order(day));
+    assert.deepEqual(order(hours), [...loadEventMapBeforeRound17(day, { nowMs: Date.now() }).keys()], 'the order of the code before round 17');
+    // Two copies of one feed id in a day keep the lastSeq rule and, on a tie, the later file.
+    writeFileSync(join(dataPaths(hours).eventMapDir, `${DAY}.ndjson`), JSON.stringify(node('efd_b', at('01:00'), 1, 'day file')) + '\n');
+    assert.equal(loadEventMap(hours).get('efd_b')!.place, 'day file');
+    assert.deepEqual(order(hours), order(day));
+  } finally {
+    rmSync(day, { recursive: true, force: true });
+    rmSync(hours, { recursive: true, force: true });
+  }
+});

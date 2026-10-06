@@ -131,10 +131,13 @@ because `metadata.generated` does. The index lists:
 How to use it: keep the features of the days you fetched and the `head_seq` you got them at (your cursor).
 
 1. Fetch the index (about 4 KB, 1 KB compressed). If its `generated` is the one you hold, you are current.
-2. If you have a cursor and some delta has `from_seq <= cursor`, fetch the smallest such delta, upsert its features by
-   `id`, drop the ones whose `feed.state` is not `live` (as from `all_week`), and set the cursor to the delta's
-   `head_seq`. That is exactly the window as of the index's `head_seq`. Do this for every new `generated`, even when
-   `head_seq` did not move: a run can change an event without a new seq (below), and its delta carries it.
+2. If you have a cursor and some delta has `from_seq <= cursor`, fetch the smallest such delta, check that it hashes to
+   the index's `sha256` (a deploy between the two requests serves another run's delta, which may start after your
+   cursor: go to step 3 instead), upsert **all** its features by `id` (a silent change, below, keeps its older
+   `ingest_seq`, at or below `from_seq`), drop the ones whose `feed.state` is not `live` (as from `all_week`), and set
+   the cursor to the delta's `head_seq`. That is exactly the window as of the index's `head_seq`. Do this for every new
+   `generated`, even when `head_seq` did not move: a run can change an event without a new seq (below), and its delta
+   carries it.
 3. Otherwise (no cursor, or more than a day behind) compare each day's `sha256` with the copy you hold, fetch only the
    days that differ, replace those days' features with the file's, drop days that left the window, and set the cursor
    to the index's `head_seq`. If a day file you fetched does not hash to the index's `sha256` (a deploy landed between
@@ -956,7 +959,7 @@ const stale = (Date.now() - fc.metadata.generated) / 1000 > 1800;
 const m0 = await (await fetch('https://earthquakes-feed.theshelter.app/v1/manifest.json')).json();
 const idx = await (await fetch(m0.live.url)).json();
 const delta = cursor != null ? idx.deltas.find(d => d.from_seq <= cursor) : null; // smallest first
-// delta ? upsert (await fetch(delta.url)).json() features by id : refetch the days whose sha256 changed; cursor = idx.head_seq
+// delta (its body hashing to delta.sha256) ? upsert all its features by id : refetch the days whose sha256 changed; cursor = idx.head_seq
 
 // One event's full detail: its UTC hour
 const hour = new Date(eventTimeMs).toISOString().slice(0, 13);

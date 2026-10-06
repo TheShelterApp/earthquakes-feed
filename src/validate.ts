@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { DATA_DIR, MAX_PUBLISHED_BYTES, PUBLIC_DIR, SCHEMA_DIR, dataPaths } from './config.js';
+import { deltaBoundViolations, readSilentLog } from './live-sync.js';
 
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 addFormats(ajv);
@@ -127,7 +128,8 @@ for (const file of walk(p.eventsDir, (f) => f.endsWith('.ndjson'))) {
 }
 
 // 4. The live index (PRB-2, live-sync.ts): every day file and delta it lists exists with the listed bytes and sha256,
-//    the days are consecutive, and a delta holds only features above its from_seq (a client applies it on that bound).
+//    the days are consecutive, and a delta holds only features above its from_seq (a client applies it on that bound)
+//    or silent changes the log names (live-sync.ts: such a feature keeps its older seq).
 const liveIndexFile = join(publicV1, 'live', 'index.json');
 if (existsSync(liveIndexFile)) {
   const idx = JSON.parse(readFileSync(liveIndexFile, 'utf8')) as {
@@ -149,6 +151,7 @@ if (existsSync(liveIndexFile)) {
     if (createHash('sha256').update(body).digest('hex') !== sha) fail(`live index: ${what} ${rel} sha256 differs from the index`);
     return body;
   };
+  const silentLog = readSilentLog(DATA_DIR);
   if (!vLiveIndex(idx)) fail(`live index: ${ajv.errorsText(vLiveIndex.errors)}`);
   const days = idx.days ?? [];
   if (!days.length) fail('live index: no days');
@@ -162,9 +165,12 @@ if (existsSync(liveIndexFile)) {
     if (d.head_seq !== idx.head_seq || d.from_seq > d.head_seq) fail(`live index: delta ${d.name} seq bounds ${d.from_seq}..${d.head_seq} (head ${idx.head_seq})`);
     const body = check('delta', d.path, d.bytes, d.sha256);
     if (!body) continue;
-    const fc = JSON.parse(body) as { features?: { properties?: { feed?: { ingest_seq?: number } } }[] };
-    const low = (fc.features ?? []).find((f) => (f.properties?.feed?.ingest_seq ?? -1) <= d.from_seq);
-    if (low) fail(`live index: delta ${d.name} holds a feature at or below its from_seq ${d.from_seq}`);
+    const fc = JSON.parse(body) as { features?: { id?: string; properties?: { feed?: { ingest_seq?: number } } }[] };
+    // A feature at or below from_seq is a silent change (live-sync.ts) only when the log derive just wrote names it.
+    const low = deltaBoundViolations(fc.features ?? [], d.from_seq, silentLog);
+    if (low.length) {
+      fail(`live index: delta ${d.name} holds ${low.length} feature(s) at or below its from_seq ${d.from_seq} that the silent log does not name (${low.slice(0, 5).join(', ')})`);
+    }
     if ((fc.features ?? []).length !== d.count) fail(`live index: delta ${d.name} count ${d.count} != ${(fc.features ?? []).length} features`);
   }
 }

@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { Resolver } from '../src/dedup.js';
 import {
   LIVE_DELTAS,
+  deltaBoundViolations,
   deltaFromSeq,
   detectSilentChanges,
   liveWindowDays,
@@ -239,6 +240,17 @@ test('a revision of a row that represents nothing changes the feature without a 
     const carried = parse(out.files[delta.path]!).features.find((f) => f.id === today.feedId);
     assert.ok(carried, 'the covering delta carries the silently changed feature');
     assert.match(JSON.stringify(carried), /GFZ-rev/);
+    // It keeps its older seq, at or below the delta's from_seq: validate accepts it because the silent log names it
+    // (round 15 review: without the log check validate failed the run and blocked derive while the entry lived).
+    assert.ok(carried.properties.feed.ingest_seq <= delta.from_seq, 'setup: the silent feature sits at or below from_seq');
+    const deltaFeatures = parse(out.files[delta.path]!).features;
+    assert.deepEqual(deltaBoundViolations(deltaFeatures, delta.from_seq, silent), []);
+    assert.deepEqual(deltaBoundViolations(deltaFeatures, delta.from_seq, []), [today.feedId]);
+    assert.deepEqual(
+      deltaBoundViolations(deltaFeatures, delta.from_seq, [{ id: today.feedId, head_before: delta.from_seq - 1, at: nowMs }]),
+      [today.feedId],
+      'an entry older than the bound does not excuse it',
+    );
     // Without the silent log the same delta would have missed it: the client would keep the old author.
     const bare = writeLiveIndex(summaryFeats(nodes, nowMs), nodes, { publicV1: join(root, 'pub2', 'v1'), nowMs, headSeq: s.seq });
     const bareDelta = bare.index.deltas.find((d) => d.from_seq <= cursor)!;

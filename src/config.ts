@@ -44,7 +44,8 @@ export const LARGE_EVENT_MAX_DELTA = 1.0;
  *  pair the windows above keep apart is still one event when all of these hold:
  *  - distance ≤ clamp(MODERATE_EVENT_BASE_KM + MODERATE_EVENT_KM_PER_MAG · (min(M) − MODERATE_EVENT_MAG),
  *    MODERATE_EVENT_BASE_KM, LARGE_EVENT_MAX_KM), shrunk by ΔM like the others (M4.0 → 20 km, M4.5 → 30, M5.0 → 40,
- *    M5.5 → 50; the cap is the alerts gateway's own fold window);
+ *    M5.5 → 50; the cap is the alerts gateway's own fold window); since round 15 LARGE_EVENT_MAX_KM unshrunk from
+ *    MODERATE_EVENT_FULL_KM_MAG on;
  *  - origin times ≤ MODERATE_EVENT_MAX_DT_MS apart and |ΔM| ≤ MODERATE_EVENT_MAX_DELTA;
  *  - no provider on both sides, none of MODERATE_EVENT_EXCLUDED_PROVIDERS on either (Earthquakes Canada's splits with
  *    ComCat are left alone: owner decision 2026-10-02), neither cell dense;
@@ -64,6 +65,20 @@ export const MODERATE_EVENT_MAG = 4.0;
 export const MODERATE_EVENT_BASE_KM = 20;
 export const MODERATE_EVENT_KM_PER_MAG = 20;
 export const MODERATE_EVENT_MAX_DT_MS = 20_000;
+/** From this smaller magnitude on, the moderate-event window reaches LARGE_EVENT_MAX_KM whatever |ΔM| (round 15, PF-5h
+ *  (5)), instead of 40–50 km shrunk by up to 15 % for |ΔM| ≤ 0.5. Regional agencies locate distant M5 quakes 38–48 km from
+ *  where USGS, EMSC and GFZ put them, within a few seconds and a few tenths (GeoNet, Geoscience Australia, RéNaSS /
+ *  RESIF, USP, IGP, BMKG, SSN), beyond the window's 37–42 km at M5.0–5.2: on 2026-10-06 the hot window held 7 such pairs
+ *  as two live events each (2026-09-29 Tonga, GeoNet's M5.1 47.4 km from the M5.4; 2026-10-03 Sumbawa, USP's M5.44
+ *  45.4 km from the M5.9; three of the Kamchatka sequence of 2026-10-02/03, GA's or RéNaSS's solution against USGS's). Every other condition of the window holds (both ≥ M5.0, ≤ MODERATE_EVENT_MAX_DT_MS,
+ *  |ΔM| ≤ MODERATE_EVENT_MAX_DELTA, no provider on both sides, no NRCan, neither cell dense, mutual best).
+ *  Measured by replaying the observation log (2026-07-05..10-06, 204,665 lines; a fresh Resolver every 6 h with the
+ *  production hot window, each followed by the regular heal): 34 groups fold (32 fewer events per connected group of
+ *  ids, 0 more, 3 regroupings), each side's providers disjoint; every fold the 50 km window made was ≤ 49.7 km,
+ *  ≤ 12.8 s and |ΔM| ≤ 0.5 apart when made; live M ≥ 4.5 events of the last 10 days with a sibling within 60 s / 50 km
+ *  91/287 → 84/283; 0 rows in two live events. The regular heal folds the 7 pairs of the hot window in one run, then
+ *  nothing. */
+export const MODERATE_EVENT_FULL_KM_MAG = 5.0;
 export const MODERATE_EVENT_MAX_DELTA = 0.5;
 export const MODERATE_EVENT_EXCLUDED_PROVIDERS: ReadonlySet<string> = new Set(['nrcan']);
 /** TMD's identity window (round 14). The Thai Meteorological Department locates the region's moderate quakes 20–50 km

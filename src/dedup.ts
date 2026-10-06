@@ -24,6 +24,7 @@ import {
   MODERATE_EVENT_KM_PER_MAG,
   MODERATE_EVENT_MAG,
   MODERATE_EVENT_MAX_DELTA,
+  MODERATE_EVENT_FULL_KM_MAG,
   MODERATE_EVENT_MAX_DT_MS,
   NEW_ID_PER_REVISION_PROVIDERS,
   REID_DT_MS,
@@ -393,12 +394,13 @@ export class Resolver {
   }
 
   /** The moderate-event window of a pair (FEED-1), or null when its magnitudes keep it out of the tier. `tmd`: the pair
-   *  gets TMD's distance (config TMD_WINDOW_KM, tmdPair). */
+   *  gets TMD's distance (config TMD_WINDOW_KM, tmdPair). From MODERATE_EVENT_FULL_KM_MAG on the distance is
+   *  LARGE_EVENT_MAX_KM, not shrunk by ΔM (round 15). */
   private static moderateWindow(a: Solution, b: Solution, tmd = false): { km: number; ms: number } | null {
     if (a.mag == null || b.mag == null || a.mag < MODERATE_EVENT_MAG || b.mag < MODERATE_EVENT_MAG) return null;
     const dM = Math.abs(a.mag - b.mag);
     if (dM > MODERATE_EVENT_MAX_DELTA + REID_MAG_TOLERANCE) return null;
-    const km = Resolver.moderateEventKm(Math.min(a.mag, b.mag)) * clamp(1 - 0.3 * dM, 0.3, 1);
+    const km = Math.min(a.mag, b.mag) >= MODERATE_EVENT_FULL_KM_MAG ? LARGE_EVENT_MAX_KM : Resolver.moderateEventKm(Math.min(a.mag, b.mag)) * clamp(1 - 0.3 * dM, 0.3, 1);
     return { km: tmd ? Math.max(km, TMD_WINDOW_KM) : km, ms: MODERATE_EVENT_MAX_DT_MS };
   }
 

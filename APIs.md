@@ -380,6 +380,10 @@ and 50 km (agencies' solutions of one M4–5.5 quake scatter by 15–40 km); rep
 observation log under the new rule leaves about a third with one. A client reconciling a
 realtime source may use the same window; the feed keeps apart what KAGSR's high magnitudes,
 minute-rounded PHIVOLCS and JMA times beyond 20 s, and one provider's two ids keep apart.
+Since 2026-10-06 the window is 50 km whatever |ΔM| when both magnitudes are ≥ 5.0: regional agencies locate distant M5
+quakes 38–48 km from where USGS, EMSC and GFZ put them (GeoNet near Tonga and Fiji, Geoscience Australia and RéNaSS in
+Kamchatka, USP near Sumbawa), and on that day the hot window held 7 such quakes as two events each. Replaying the
+observation log of 2026-07-05…10-06 folds 34 groups (none split), each pair's providers disjoint.
 
 TMD (Thailand) locates the region's moderate quakes 20–50 km from where USGS, EMSC and GFZ put
 them (Myanmar, Yunnan, Vietnam, northern Sumatra), with origin times a few seconds and magnitudes

@@ -12,7 +12,7 @@ publishes at the leaf's AIA URL, converted to PEM:
 | File | Subject | Issuer (root in Node's store) | Valid until | Used by | Downloaded from |
 |---|---|---|---|---|---|
 | `globalsign-gcc-r6-alphassl-ca-2025.crt` | GlobalSign GCC R6 AlphaSSL CA 2025 | GlobalSign Root CA - R6 | 2027-05-21 | `tmd` (`*.tmd.go.th`, leaf valid to 2026-10-09) | http://secure.globalsign.com/cacert/gsgccr6alphasslca2025.crt (2026-10-04) |
-| `globalsign-rsa-ov-ssl-ca-2018.crt` | GlobalSign RSA OV SSL CA 2018 | GlobalSign Root CA - R3 | 2028-11-21 | `phivolcs` (`*.phivolcs.dost.gov.ph`, leaf valid to 2026-11-19; on 2026-10-06 the host served an Amazon RSA 2048 M04 leaf valid to 2027-04-16 with its full chain, which verifies without the pin: the pin stays for the GlobalSign leaf) | http://secure.globalsign.com/cacert/gsrsaovsslca2018.crt (2026-10-04) |
+| `globalsign-rsa-ov-ssl-ca-2018.crt` | GlobalSign RSA OV SSL CA 2018 | GlobalSign Root CA - R3 | 2028-11-21 | `phivolcs` (`*.phivolcs.dost.gov.ph`, leaf valid to 2026-11-19, the one served on IPv4 and so to the GitHub runners; its AAAA records point at CloudFront, which serves an Amazon RSA 2048 M04 leaf valid to 2027-04-16 with its full chain and needs no pin: checked 2026-10-06, the pin stays for the IPv4 host) | http://secure.globalsign.com/cacert/gsrsaovsslca2018.crt (2026-10-04) |
 
 `tests/tls-pins.test.ts` checks that each file is a CA certificate signed by a root in Node's store and that it is
 not past its end date.

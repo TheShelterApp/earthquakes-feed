@@ -39,9 +39,17 @@ for (const f of files(dataPaths(DATA_DIR).observationsDir)) {
     if (Number.isFinite(at) && Number.isFinite(ev)) (seen.get(o.provider) ?? seen.set(o.provider, []).get(o.provider)!).push([at, ev]);
   }
 }
-const all = [...seen.values()].flat().map(([at]) => at);
-const start = fromArg ? Date.parse(fromArg) : Math.ceil((Math.min(...all) + 24 * HOUR) / HOUR) * HOUR;
-const end = toArg ? Date.parse(toArg) : Math.floor(Math.max(...all) / HOUR) * HOUR;
+// A loop, not Math.min(...xs): three months of the log are about a million rows, past the argument limit of a spread.
+let first = Infinity;
+let last = -Infinity;
+for (const xs of seen.values()) {
+  for (const [at] of xs) {
+    if (at < first) first = at;
+    if (at > last) last = at;
+  }
+}
+const start = fromArg ? Date.parse(fromArg) : Math.ceil((first + 24 * HOUR) / HOUR) * HOUR;
+const end = toArg ? Date.parse(toArg) : Math.floor(last / HOUR) * HOUR;
 console.log(`observation log ${new Date(start).toISOString()} .. ${new Date(end).toISOString()}, hourly`);
 
 const rows: string[] = [];

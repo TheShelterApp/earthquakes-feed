@@ -247,6 +247,11 @@ as a fallback). It runs three independent jobs; any one failing turns the run re
   [APIs.md](APIs.md#get-v1statusjson)) is not counted as failing: it gets a `::warning::` and
   the `[health] silent providers` issue, opened when one appears, commented when the set of
   silent sources changes and closed when none is left. The run does not go red for it.
+  Two size checks never turn the run red either: the repository's size (a warning above 6 GB),
+  and every file on the `data` branch, read from the API's tree listing: the status history under
+  `status/history/` (whatever its layout) is summed and its largest file named, and any file over
+  45 MB gets a warning and the `[health] data file size` issue (GitHub rejects a pushed file above
+  100 MiB, which would stop the feed publishing; see [APIs.md](APIs.md#run-logs)).
 - **`alerts` (The Shelter's alert pipeline):** runs
   [`scripts/alerts-watchdog.mjs`](scripts/alerts-watchdog.mjs) (dependency-free Node 22)
   against the alerts-gateway's public `https://data.theshelter.app/alerts/status.json`. It

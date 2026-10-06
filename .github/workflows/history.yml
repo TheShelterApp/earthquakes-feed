@@ -4,7 +4,8 @@ name: history
 # (knowledge/index/backfill.json targetStart) into immutable `history-YYYY` Release assets: one raw
 # asset per source month, one events edition per month, built offline by the backfill's Resolver.
 # No day partition is committed and no existing archive or frozen day is touched: the data branch
-# gains only knowledge/index/history.json, written by the `commit` job below and nothing else.
+# gains only knowledge/index/history.json, written by the `commit` job below and nothing else. That job holds no
+# writer lock (FEED-OPS-4, round 14): no other writer touches the file, so its push rebases onto theirs.
 # Off unless providers/history.json says `"enabled": true` (then the walk runs hourly, a few source
 # months per run, one request at a time per host).
 # The heartbeat Worker dispatches this workflow hourly at :26 with no inputs (heartbeat/src/worker.js), because GitHub
@@ -25,7 +26,7 @@ on:
         default: false
 
 # Runs never overlap, so the index each run reads is the one the previous run committed (or, when that
-# commit was cancelled while waiting for the writer lock, the next run adopts the uploaded assets).
+# commit failed, the next run adopts the uploaded assets).
 concurrency:
   group: earthquakes-feed-history
   cancel-in-progress: false
@@ -109,16 +110,20 @@ jobs:
 
   commit:
     needs: collect
-    # Also after a red collect: whatever it uploaded must reach the index.
+    # Also after a red collect: whatever it uploaded must reach the index. No writer lock: see the top of this file.
     if: ${{ !cancelled() && needs.collect.outputs.changed == 'true' && !inputs.dry_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    concurrency:
-      group: earthquakes-feed-writer
-      cancel-in-progress: false
     permissions:
       contents: write
     steps:
+      # The main checkout holds only scripts/push-data.sh, the push loop every writer shares. First: checkout empties a
+      # directory that is not yet a repository, so it must not run after the artifact download.
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/push-data.sh
+          sparse-checkout-cone-mode: false
       - uses: actions/checkout@v5
         with:
           ref: data
@@ -147,11 +152,6 @@ jobs:
           if [ -z "$staged" ]; then echo 'no changes'; exit 0; fi
           if [ "$staged" != "knowledge/index/history.json" ]; then echo "::error::refusing to commit anything but knowledge/index/history.json: $staged"; exit 1; fi
           git commit -m "history: index @ $(date -u +%FT%TZ)"
-          for _ in 1 2 3; do
-            git push origin HEAD:data && exit 0
-            git fetch origin data
-            # `|| true`: with no rebase started --abort exits 128 and bash -e would kill the step
-            # before the annotation is emitted, losing the reason the push died.
-            git rebase origin/data || { git rebase --abort || true; echo '::error::rebase conflict'; exit 1; }
-          done
-          echo '::error::push failed after 3 attempts'; exit 1
+          # No writer lock (FEED-OPS-4): only this workflow writes these files, so a push that loses the race to another
+          # writer fetches, rebases this one commit onto it (no conflict possible) and tries again (scripts/push-data.sh).
+          PUSH_ATTEMPTS=6 PUSH_BACKOFF_S=3 bash "$GITHUB_WORKSPACE/scripts/push-data.sh"

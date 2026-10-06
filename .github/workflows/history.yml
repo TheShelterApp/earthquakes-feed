@@ -43,7 +43,11 @@ jobs:
     # Outside the writer group: fetching takes minutes and must not hold up the 5-minute aggregate.
     # It writes nothing to the data branch, only Release assets (immutable, never --clobber).
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # maxSecondsPerRun (600 s) bounds when new work may start, not how long a month's build takes once started: a typical
+    # month of 17 sources builds in 2-3 s, but the Resolver is quadratic inside a swarm's dense cells (measured locally,
+    # round 15: 2019-07 Ridgecrest 90k rows 6.0 min, 2018-07 Kilauea 6.2 min). 40 minutes covers such a build started at
+    # the end of the budget on a slower runner; an interrupted run is taken over by the next (adoptOrphans).
+    timeout-minutes: 40
     permissions:
       contents: write
     outputs:

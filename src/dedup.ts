@@ -35,9 +35,7 @@ import {
   SPATIAL_KM,
   SWARM_CELL_ABSOLUTE,
   TEMPORAL_MS,
-  TMD_PROVIDER,
-  TMD_WINDOW_KM,
-  TMD_WINDOW_PARTNERS,
+  REGIONAL_WINDOWS,
 } from './config.js';
 import { qualityCount } from './canonical.js';
 import { gatherCellKeys, gridKey, haversineKm } from './geo.js';
@@ -56,6 +54,10 @@ const HEAL_MAX_PASSES = 4;
 /** Added to the merge-pass score of a pair that is one event only through the moderate-event window (FEED-1), so
  *  every pair the base and large-event windows accept (score < 2) ranks ahead of it: the tier only adds folds. */
 const MODERATE_SCORE_OFFSET = 2;
+/** A regional window (config REGIONAL_WINDOWS) a pair gets: its provider and distance. */
+type RegionalWindow = { provider: string; km: number };
+/** The widest regional window: part of the candidate gather radius (maxWindowKm). */
+const REGIONAL_WINDOW_MAX_KM = Math.max(0, ...[...REGIONAL_WINDOWS.values()].map((w) => w.km));
 const clamp = (n: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, n));
 /** |a − b| > limit for two magnitudes, with REID_MAG_TOLERANCE of floating-point slack: a difference of exactly the
  *  limit in published steps passes whatever its float error (5.4 − 4.6 = 0.8000000000000007, 8.3 − 7.3 =
@@ -392,7 +394,7 @@ export class Resolver {
   /** The widest spatial window `s` can get against any neighbour — the candidate gather radius. */
   private static maxWindowKm(s: Solution): number {
     if (s.mag == null) return SPATIAL_KM;
-    const moderate = s.mag >= MODERATE_EVENT_MAG ? Math.max(Resolver.moderateEventKm(s.mag), TMD_WINDOW_KM) : 0;
+    const moderate = s.mag >= MODERATE_EVENT_MAG ? Math.max(Resolver.moderateEventKm(s.mag), REGIONAL_WINDOW_MAX_KM) : 0;
     return Math.max(s.mag < LARGE_EVENT_MAG ? SPATIAL_KM : Resolver.largeEventKm(s.mag), moderate);
   }
 
@@ -401,32 +403,36 @@ export class Resolver {
     return clamp(MODERATE_EVENT_BASE_KM + MODERATE_EVENT_KM_PER_MAG * (minMag - MODERATE_EVENT_MAG), MODERATE_EVENT_BASE_KM, LARGE_EVENT_MAX_KM);
   }
 
-  /** The moderate-event window of a pair (FEED-1), or null when its magnitudes keep it out of the tier. `tmd`: the pair
-   *  gets TMD's distance (config TMD_WINDOW_KM, tmdPair). From MODERATE_EVENT_FULL_KM_MAG on the distance is
-   *  LARGE_EVENT_MAX_KM, not shrunk by ΔM (round 15). */
-  private static moderateWindow(a: Solution, b: Solution, tmd = false): { km: number; ms: number } | null {
+  /** The moderate-event window of a pair (FEED-1), or null when its magnitudes keep it out of the tier. `regional`: the
+   *  pair's regional window (config REGIONAL_WINDOWS, regionalWindow), whose distance it gets when that is wider. From
+   *  MODERATE_EVENT_FULL_KM_MAG on the distance is LARGE_EVENT_MAX_KM, not shrunk by ΔM (round 15). */
+  private static moderateWindow(a: Solution, b: Solution, regional: RegionalWindow | null = null): { km: number; ms: number } | null {
     if (a.mag == null || b.mag == null || a.mag < MODERATE_EVENT_MAG || b.mag < MODERATE_EVENT_MAG) return null;
     const dM = Math.abs(a.mag - b.mag);
     if (dM > MODERATE_EVENT_MAX_DELTA + REID_MAG_TOLERANCE) return null;
     const km = Math.min(a.mag, b.mag) >= MODERATE_EVENT_FULL_KM_MAG ? LARGE_EVENT_MAX_KM : Resolver.moderateEventKm(Math.min(a.mag, b.mag)) * clamp(1 - 0.3 * dM, 0.3, 1);
-    return { km: tmd ? Math.max(km, TMD_WINDOW_KM) : km, ms: MODERATE_EVENT_MAX_DT_MS };
+    return { km: regional ? Math.max(km, regional.km) : km, ms: MODERATE_EVENT_MAX_DT_MS };
   }
 
-  /** Whether two sides (their providers) get TMD's window (config TMD_WINDOW_KM): one side holds TMD's rows only, the
-   *  other a USGS, EMSC or GFZ row and no TMD row. */
-  private static tmdPair(a: readonly string[], b: readonly string[]): boolean {
-    const tmdOnly = (s: readonly string[]): boolean => s.length > 0 && s.every((p) => p === TMD_PROVIDER);
-    const partner = (s: readonly string[]): boolean => !s.includes(TMD_PROVIDER) && s.some((p) => TMD_WINDOW_PARTNERS.has(p));
-    return (tmdOnly(a) && partner(b)) || (tmdOnly(b) && partner(a));
+  /** The regional window two sides (their providers) get (config REGIONAL_WINDOWS), or null: one side holds a listed
+   *  provider's rows only, the other a row of one of that provider's partners and none of its rows. TMD (round 14) and
+   *  USP (round 21), each against USGS, EMSC or GFZ. */
+  private static regionalWindow(a: readonly string[], b: readonly string[]): RegionalWindow | null {
+    for (const [provider, w] of REGIONAL_WINDOWS) {
+      const only = (s: readonly string[]): boolean => s.length > 0 && s.every((p) => p === provider);
+      const partner = (s: readonly string[]): boolean => !s.includes(provider) && s.some((p) => w.partners.has(p));
+      if ((only(a) && partner(b)) || (only(b) && partner(a))) return { provider, km: w.km };
+    }
+    return null;
   }
 
   private static providersOf(n: EventNode): string[] {
     return [...new Set(n.provenance.map((r) => r.provider))];
   }
 
-  /** tmdPair of two nodes. */
-  private static tmdNodes(a: EventNode, b: EventNode): boolean {
-    return Resolver.tmdPair(Resolver.providersOf(a), Resolver.providersOf(b));
+  /** regionalWindow of two nodes. */
+  private static regionalNodes(a: EventNode, b: EventNode): RegionalWindow | null {
+    return Resolver.regionalWindow(Resolver.providersOf(a), Resolver.providersOf(b));
   }
 
   /** Whether two sides (their providers) may use the moderate-event window: no provider on both, none excluded. */
@@ -436,8 +442,8 @@ export class Resolver {
   }
 
   /** null when the pair is one event through the moderate-event window, else why not. */
-  private rejectModerate(a: Solution, b: Solution, d: number, tmd = false): string | null {
-    const w = Resolver.moderateWindow(a, b, tmd);
+  private rejectModerate(a: Solution, b: Solution, d: number, regional: RegionalWindow | null = null): string | null {
+    const w = Resolver.moderateWindow(a, b, regional);
     if (!w) return 'moderate: magnitudes';
     const dt = Math.abs(a.eventTimeMs - b.eventTimeMs);
     if (dt > w.ms) return `moderate: dt ${(dt / 1000).toFixed(1)} s > ${(w.ms / 1000).toFixed(1)} s`;
@@ -704,11 +710,11 @@ export class Resolver {
       if (!Resolver.moderateProviders([raw.provider], providers)) continue;
       // A catalogue mirror's row of another id (config CATALOGUE_MIRRORS) is that catalogue's other quake.
       if (this.sameProviderDistinct(raw, node)) continue;
-      const tmd = Resolver.tmdPair([raw.provider], providers);
+      const regional = Resolver.regionalWindow([raw.provider], providers);
       const d = haversineKm(raw.lat, raw.lon, node.lat, node.lon);
-      if (this.rejectModerate(raw, node, d, tmd)) continue;
+      if (this.rejectModerate(raw, node, d, regional)) continue;
       if (Resolver.lifecycleLocationBlocks([raw], raw, node.provenance, node)) continue;
-      const w = Resolver.moderateWindow(raw, node, tmd)!;
+      const w = Resolver.moderateWindow(raw, node, regional)!;
       const score = d / w.km + Math.abs(raw.eventTimeMs - node.eventTimeMs) / w.ms;
       if (score < bestScore || (score === bestScore && best && node.feedId < best.feedId)) {
         best = node;
@@ -1566,7 +1572,7 @@ export class Resolver {
     const gate = this.reject(a, b, d, dense);
     if (gate && !this.revisedPair(a, b)) {
       if (!this.moderatePair(a, b)) return gate;
-      const moderate = this.rejectModerate(a, b, d, Resolver.tmdNodes(a, b));
+      const moderate = this.rejectModerate(a, b, d, Resolver.regionalNodes(a, b));
       if (moderate) return `${gate}; ${moderate}`;
     }
     if (Resolver.lifecycleLocationBlocks(a.provenance, a, b.provenance, b)) {
@@ -1589,7 +1595,7 @@ export class Resolver {
     const dense = this.pairDense(a, b);
     const revised = this.revisedOnly(a, b, d, dense);
     if (revised != null) return MODERATE_SCORE_OFFSET + revised;
-    const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b, Resolver.tmdNodes(a, b)) : null;
+    const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b, Resolver.regionalNodes(a, b)) : null;
     const { km, ms } = moderate ?? this.windows(a, b, dense);
     return (moderate ? MODERATE_SCORE_OFFSET : 0) + d / km + Math.abs(a.eventTimeMs - b.eventTimeMs) / ms;
   }
@@ -1632,7 +1638,7 @@ export class Resolver {
    *  moderate-event window reject it), else null. */
   private revisedOnly(a: EventNode, b: EventNode, d: number, dense: boolean): number | null {
     if (!this.reject(a, b, d, dense) || !this.revisedPair(a, b)) return null;
-    if (this.moderatePair(a, b) && !this.rejectModerate(a, b, d, Resolver.tmdNodes(a, b))) return null;
+    if (this.moderatePair(a, b) && !this.rejectModerate(a, b, d, Resolver.regionalNodes(a, b))) return null;
     return Resolver.revisedScore(a, b);
   }
 
@@ -1646,12 +1652,14 @@ export class Resolver {
       const rdt = Math.abs(ra.eventTimeMs - rb.eventTimeMs) / 1000;
       return `revised id: ${ra.provider} ${ra.nativeId} / ${rb.nativeId} d=${rd.toFixed(1)} km dt=${rdt.toFixed(1)} s (events ${d.toFixed(1)} km apart)`;
     }
-    const tmd = Resolver.tmdNodes(a, b);
-    const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b, tmd) : null;
+    const regional = Resolver.regionalNodes(a, b);
+    const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b, regional) : null;
     const { km, ms } = moderate ?? this.windows(a, b, dense);
     const dt = Math.abs(a.eventTimeMs - b.eventTimeMs) / 1000;
     const dM = a.mag != null && b.mag != null ? Math.abs(a.mag - b.mag).toFixed(2) : 'n/a';
-    const label = moderate ? (tmd ? 'TMD window' : 'moderate window') : 'window';
+    // A regional window names itself only where it widened the moderate-event window (from M5.0 on both are 50 km).
+    const widenedBy = moderate && regional && moderate.km > Resolver.moderateWindow(a, b)!.km ? regional.provider : null;
+    const label = moderate ? (widenedBy ? `${widenedBy.toUpperCase()} window` : 'moderate window') : 'window';
     return `proximity: d=${d.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} ${label}=${km.toFixed(1)} km/${(ms / 1000).toFixed(0)} s`;
   }
 

@@ -29,6 +29,13 @@ curl -s https://earthquakes-feed.theshelter.app/v1/all_day.geojson
 # live window — a partition's pages_url in manifest.json tells you it exists):
 curl -s https://earthquakes-feed.theshelter.app/v1/events/2026-07-04.geojson
 
+# The week kept current without re-downloading it: per-day files with sha256 fingerprints plus
+# head_seq deltas (APIs.md, Live index):
+curl -s https://earthquakes-feed.theshelter.app/v1/live/index.json
+
+# One event's full detail: the live events of its UTC hour, full-fat (APIs.md, Event detail):
+curl -s https://earthquakes-feed.theshelter.app/v1/detail/2026-10-05T09.geojson
+
 # Any historical day as NDJSON, straight from the data branch (full history):
 curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2026/07/04.ndjson
 ```
@@ -204,7 +211,7 @@ npm run typecheck
 
 # Run the pipeline against a scratch dir (hits live public APIs, read-only):
 DATA_DIR=.data npm run aggregate                 # fetch → dedup → append log
-DATA_DIR=.data PUBLIC_DIR=public npm run derive  # summaries + day files + partitions + manifest
+DATA_DIR=.data PUBLIC_DIR=public npm run derive  # summaries + day files + partitions + live index + detail hours + manifest
 DATA_DIR=.data PUBLIC_DIR=public npm run validate
 ```
 

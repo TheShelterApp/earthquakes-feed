@@ -26,6 +26,9 @@ export const CACHE_CONTROL = {
   changes: 'public, max-age=0, s-maxage=60, stale-while-revalidate=300, stale-if-error=86400',
   /** The v2 manifest (signed envelope, ~KBs): clients revalidate with ETag, the edge absorbs it. */
   v2: 'public, max-age=0, s-maxage=60, stale-while-revalidate=120, stale-if-error=86400',
+  /** The live index's day files (live-sync.ts): stable bytes that a client fetches when the index's sha256 for the day
+   *  differs from its copy, so a cached copy must never be served without asking (an ETag revalidation is a 304). */
+  liveDay: 'public, max-age=0, must-revalidate',
 } as const;
 
 const DAY_MS = 86_400_000;
@@ -46,10 +49,15 @@ export function pagesHeaders(nowMs: number, dayKeys: Iterable<string>): string {
     rule('/v1/:file', CACHE_CONTROL.top),
     rule('/v1/changes/:file', CACHE_CONTROL.changes),
     rule('/v2/*', CACHE_CONTROL.v2),
+    // The live index (index.json + the deltas, rewritten every run) and its day files (live-sync.ts).
+    rule('/v1/live/:file', CACHE_CONTROL.top),
+    rule('/v1/live/days/:file', CACHE_CONTROL.liveDay),
+    // The per-hour detail files (event-detail.ts): recent hours still fill, like the hot day files.
+    rule('/v1/detail/:file', CACHE_CONTROL.hotDay),
   ];
   const perDay = fixed.length + days.length <= PAGES_HEADER_RULE_LIMIT;
   const dayRules = perDay
     ? days.map((d) => rule(`/v1/events/${d}.geojson`, d >= hotFrom ? CACHE_CONTROL.hotDay : CACHE_CONTROL.coldDay))
     : [rule('/v1/events/:file', CACHE_CONTROL.hotDay)];
-  return [...fixed[0]!, ...dayRules.flat(), ...fixed[1]!, ...fixed[2]!, ''].join('\n');
+  return [...fixed[0]!, ...dayRules.flat(), ...fixed.slice(1).flat(), ''].join('\n');
 }

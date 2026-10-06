@@ -1,4 +1,5 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
@@ -13,6 +14,7 @@ const compile = (name: string): ValidateFunction =>
 const vObs = compile('observation.schema.json');
 const vFeat = compile('feature.schema.json');
 const vManifest = compile('manifest.schema.json');
+const vLiveIndex = compile('live-index.schema.json');
 
 let errors = 0;
 const fail = (msg: string): void => {
@@ -79,7 +81,8 @@ for (const file of walk(publicV1, (f) => f.endsWith('.geojson'))) {
   }
   const fc = JSON.parse(readFileSync(file, 'utf8')) as { metadata?: { generated?: unknown }; features?: { properties?: { time?: number; feed?: { state?: string; provenance?: unknown[] } } }[] };
   if (typeof fc.metadata?.generated !== 'number') fail(`${file}: metadata.generated must be ms-epoch int`);
-  const isDayFile = file.includes(join(publicV1, 'events'));
+  // The per-hour detail files (EVT-5) are full-fat like the day files, live events only.
+  const isDayFile = file.includes(join(publicV1, 'events')) || file.includes(join(publicV1, 'detail'));
   for (const [i, feat] of (fc.features ?? []).entries()) {
     if (i < 200 && !vFeat(feat)) {
       fail(`${file}: feature ${ajv.errorsText(vFeat.errors)}`);
@@ -123,7 +126,50 @@ for (const file of walk(p.eventsDir, (f) => f.endsWith('.ndjson'))) {
   }
 }
 
-// 4. Manifest (canonical Pages copy).
+// 4. The live index (PRB-2, live-sync.ts): every day file and delta it lists exists with the listed bytes and sha256,
+//    the days are consecutive, and a delta holds only features above its from_seq (a client applies it on that bound).
+const liveIndexFile = join(publicV1, 'live', 'index.json');
+if (existsSync(liveIndexFile)) {
+  const idx = JSON.parse(readFileSync(liveIndexFile, 'utf8')) as {
+    head_seq?: number;
+    days?: { date: string; path: string; bytes: number; sha256: string; count: number }[];
+    deltas?: { name: string; path: string; bytes: number; sha256: string; from_seq: number; head_seq: number; count: number }[];
+  };
+  const read = (rel: string): string | null => {
+    const f = join(PUBLIC_DIR, rel);
+    return existsSync(f) ? readFileSync(f, 'utf8') : null;
+  };
+  const check = (what: string, rel: string, bytes: number, sha: string): string | null => {
+    const body = read(rel);
+    if (body == null) {
+      fail(`live index: ${what} ${rel} is missing`);
+      return null;
+    }
+    if (Buffer.byteLength(body) !== bytes) fail(`live index: ${what} ${rel} has ${Buffer.byteLength(body)} bytes, the index says ${bytes}`);
+    if (createHash('sha256').update(body).digest('hex') !== sha) fail(`live index: ${what} ${rel} sha256 differs from the index`);
+    return body;
+  };
+  if (!vLiveIndex(idx)) fail(`live index: ${ajv.errorsText(vLiveIndex.errors)}`);
+  const days = idx.days ?? [];
+  if (!days.length) fail('live index: no days');
+  for (const [i, d] of days.entries()) {
+    if (i > 0 && Date.parse(`${d.date}T00:00:00Z`) - Date.parse(`${days[i - 1]!.date}T00:00:00Z`) !== 86_400_000) {
+      fail(`live index: days not consecutive at ${d.date}`);
+    }
+    check('day', d.path, d.bytes, d.sha256);
+  }
+  for (const d of idx.deltas ?? []) {
+    if (d.head_seq !== idx.head_seq || d.from_seq > d.head_seq) fail(`live index: delta ${d.name} seq bounds ${d.from_seq}..${d.head_seq} (head ${idx.head_seq})`);
+    const body = check('delta', d.path, d.bytes, d.sha256);
+    if (!body) continue;
+    const fc = JSON.parse(body) as { features?: { properties?: { feed?: { ingest_seq?: number } } }[] };
+    const low = (fc.features ?? []).find((f) => (f.properties?.feed?.ingest_seq ?? -1) <= d.from_seq);
+    if (low) fail(`live index: delta ${d.name} holds a feature at or below its from_seq ${d.from_seq}`);
+    if ((fc.features ?? []).length !== d.count) fail(`live index: delta ${d.name} count ${d.count} != ${(fc.features ?? []).length} features`);
+  }
+}
+
+// 5. Manifest (canonical Pages copy).
 try {
   if (!vManifest(JSON.parse(readFileSync(join(publicV1, 'manifest.json'), 'utf8')))) {
     fail(`manifest: ${ajv.errorsText(vManifest.errors)}`);

@@ -9,6 +9,13 @@ on:
 permissions:
   contents: read
 
+# One CI run per ref at a time, in arrival order. `queue: max` here also proves on every pull request that GitHub accepts
+# the key the writer workflows depend on (FEED-OPS-4; actionlint 1.7.12 does not know it yet).
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   ci:
     # Pinned, not ubuntu-latest: ubuntu-latest moves to Ubuntu 26.04 from 2026-10-19

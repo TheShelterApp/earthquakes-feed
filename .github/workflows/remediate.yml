@@ -4,7 +4,8 @@ name: remediate
 # one-day window still filled the source's page cap was kept partial and listed in knowledge/index/backfill.json
 # `saturatedDays`. Each such day is asked again in sub-day windows and published as an ADDITIVE, immutable day
 # edition in the Release `remediation-YYYY` (beside the raw answer); the archived day, its archive asset and the
-# manifest are never touched. The data branch gains only knowledge/index/remediation.json, written by the `commit` job.
+# manifest are never touched. The data branch gains only knowledge/index/remediation.json, written by the `commit` job,
+# which holds no writer lock (FEED-OPS-4, round 14): no other writer touches the file, so its push rebases onto theirs.
 # Manual only: a run does at most `max_days` days, one request at a time per source host.
 on:
   workflow_dispatch:
@@ -90,12 +91,16 @@ jobs:
     if: ${{ !cancelled() && needs.collect.outputs.changed == 'true' && !inputs.dry_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    concurrency:
-      group: earthquakes-feed-writer
-      cancel-in-progress: false
     permissions:
       contents: write
     steps:
+      # The main checkout holds only scripts/push-data.sh, the push loop every writer shares. First: checkout empties a
+      # directory that is not yet a repository, so it must not run after the artifact download.
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/push-data.sh
+          sparse-checkout-cone-mode: false
       - uses: actions/checkout@v5
         with:
           ref: data
@@ -121,11 +126,6 @@ jobs:
           if [ -z "$staged" ]; then echo 'no changes'; exit 0; fi
           if [ "$staged" != "knowledge/index/remediation.json" ]; then echo "::error::refusing to commit anything but knowledge/index/remediation.json: $staged"; exit 1; fi
           git commit -m "remediate: index @ $(date -u +%FT%TZ)"
-          for _ in 1 2 3; do
-            git push origin HEAD:data && exit 0
-            git fetch origin data
-            # `|| true`: with no rebase started --abort exits 128 and bash -e would kill the step
-            # before the annotation is emitted, losing the reason the push died.
-            git rebase origin/data || { git rebase --abort || true; echo '::error::rebase conflict'; exit 1; }
-          done
-          echo '::error::push failed after 3 attempts'; exit 1
+          # No writer lock (FEED-OPS-4): only this workflow writes these files, so a push that loses the race to another
+          # writer fetches, rebases this one commit onto it (no conflict possible) and tries again (scripts/push-data.sh).
+          PUSH_ATTEMPTS=6 PUSH_BACKOFF_S=3 bash "$GITHUB_WORKSPACE/scripts/push-data.sh"

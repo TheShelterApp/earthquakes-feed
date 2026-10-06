@@ -145,3 +145,31 @@ test('comcat siblings: a ComCat report whose `ids` alone changed is stored and f
   assert.equal(res.node.feedId, NEIC_EVENT);
   assert.equal(map.get(NEIC_EVENT)!.provenance.find((x) => x.nativeId === 'nn00925220')!.fields['ids'], ',uu80158431,us6000tzcn,nn00925220,');
 });
+
+test('comcat siblings: the heal folds an exact-id pair only when both events are inside the hot window', () => {
+  // Since round 15 the heal's passes run foldComcatTwins with `hotOnly`: an NCEDC event and ComCat's row of the same id
+  // (nc…) fold by identity there, but never with an event below the hot floor (the heal's scope; the ingest path keeps
+  // its own rule). Two separately minted events, 30 km apart (beyond every window), straddling the floor by 5 s.
+  const floor = NOW - HOT_WINDOW_DAYS * 86_400_000;
+  const report = (provider: string, id: string, eventTimeMs: number, lat: number, fields: Record<string, unknown>): RawObs => ({
+    provider, providerEventId: id, eventTimeMs, providerUpdatedMs: null, status: 'automatic', lat, lon: -121.5, depth: 5,
+    mag: 2.1, magType: 'md', place: null, knownAliasIds: [], fields,
+  });
+  const two = (ncedcMs: number, usgsMs: number): Map<string, EventNode> => {
+    const a = new Map<string, EventNode>();
+    new Resolver(a, prio, cfg, NOW, { hotFloorMs: 0 }).ingest(report('ncedc', '75990001', ncedcMs, 37.5, { EventID: '75990001' }), INGEST);
+    const b = new Map<string, EventNode>();
+    new Resolver(b, prio, cfg, NOW, { hotFloorMs: 0 }).ingest(report('usgs', 'nc75990001', usgsMs, 37.5 + 30 / 111.195, { ids: ',nc75990001,' }), INGEST);
+    return new Map([...a, ...b]);
+  };
+  // Both inside: one event, by identity.
+  const inside = two(floor + 60_000, floor + 65_000);
+  const folded = new Resolver(inside, prio, cfg, NOW).heal(INGEST).merges;
+  assert.equal(folded.length, 1);
+  assert.match(folded[0]!.reason, /^exact id/);
+  assert.equal(live(inside).length, 1);
+  // ComCat's row 5 s below the floor: the heal leaves both.
+  const straddling = two(floor + 5_000, floor - 5_000);
+  assert.equal(new Resolver(straddling, prio, cfg, NOW).heal(INGEST).merges.length, 0);
+  assert.equal(live(straddling).length, 2);
+});

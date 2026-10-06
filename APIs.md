@@ -406,6 +406,25 @@ each USP row 22–60 km from ComCat's solution of a quake that ComCat (32) or EM
 `us6000tzva`). A USP solution farther out keeps its own event: of the log's 189 USP rows that have a GEOFON row of the
 same suffix (below), 52 stay in another event than GEOFON's, 39 of them more than 50 km from that event.
 
+USP's magnitudes of large quakes run low. USP reports body-wave magnitudes (`mb`; `mB` or `Mw(mB)` for some large
+quakes), which saturate where ComCat reports moment magnitudes. Matched to the one ComCat quake within 60 s and 300 km,
+the 7,330 USP rows of the deep history's raw assets (2019-01…2023-07) sit within 0.5 of ComCat for 93–98 % of the quakes
+below M5.5 (median −0.12 to +0.05, both signs), but 0.5–1.0 below it for 26 % of M5.5–6.0, 29 % of M6.0–6.5, 25 % of
+M6.5–7.0 and 10 % from M7.0 (USP's `mb` alone: median −0.34, −0.52, −0.67 in the first three); more than 1.0 below for
+23 of the 1,577 from M5.5 and more than 0.5 above for 2. GEOFON, measured the same way, stays within 0.5 of ComCat for
+98–100 % of every band from M5.0. USP's live solutions (2026-07-05…10-06, 221 matched) show the same pattern less often.
+Since round 22, in USP's window, when the partner event's magnitude is at least 5.5 and above USP's, |ΔM| may reach 1.0
+(the large-event limit) instead of 0.5; nothing else in the window changes and no other agency gets it. Replaying the
+observation log folds 2 pairs and changes nothing else: Papua New Guinea M6.4 of 2026-07-13 (USP `Mw(mB)` 5.88, 25 km)
+and western China M5.7 of 2026-07-28 (USP 4.84, 8 km), each the one quake ComCat and EMSC list within 60 s and 300 km.
+The log's 3 other USP-only events that |ΔM| > 0.5 keeps from a partner within 20 s and 50 km (partners M4.7–5.1) stay
+apart: below M5.5 such a gap is scatter, not saturation. The allowance needs the merge pass, so the backfill and the
+deep-history build, which run without it, do not use it. Rebuilt with it, the 53 sealed deep months 2019-02…2023-06
+joined 217 groups, each one quake by ComCat, but with no merge pass to fold a USP event minted before its partner's
+reports, such an event kept other agencies' reports out of the partner event (62 groups, 151 rows, split off): 13
+quakes were shown once more. Without the allowance there, they rebuild byte-identical to the code before. Both days of
+the replayed folds are frozen, so the published feed changes only for new quakes.
+
 USP's event ids share GEOFON's suffix (`usp2026toln`, `gfz2026toln`), and that is no identity link: the four letters
 number a time slot of about 70 s (26⁴ a year) of the first origin each SeisComP system made. One quake's two ids
 usually share it, though not always (7 of the 47 USP rows in one event with a GEOFON row carry the neighbouring slot,

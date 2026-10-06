@@ -136,12 +136,45 @@ export const TMD_WINDOW_KM = 50;
 export const USP_PROVIDER = 'usp';
 export const USP_WINDOW_PARTNERS: ReadonlySet<string> = new Set(['usgs', 'emsc', 'geofon']);
 export const USP_WINDOW_KM = 50;
+/** USP's magnitudes of large quakes (round 22, R21-OWNER (3)). USP reports body-wave magnitudes (mb; mB or Mw(mB) for
+ *  some large quakes), which run low against ComCat's moment magnitudes from about M5.5. Measured 2026-10-06/07:
+ *  - Deep history (the raw assets of 2019-01..2023-07; 7,330 USP rows, each matched to the one ComCat quake of M >= 2.5
+ *    within 60 s and 300 km): USP minus ComCat at the median +0.05 / -0.01 / -0.12 for ComCat M4.0-4.5 / 4.5-5.0 /
+ *    5.0-5.5, then -0.30 / -0.28 / -0.14 / -0.04 for M5.5-6.0 / 6.0-6.5 / 6.5-7.0 / 7.0+ (USP's mb alone: -0.34 / -0.52 /
+ *    -0.67). USP 0.5-1.0 below ComCat: 2 % at M4.5-5.0, 6 % at M5.0-5.5, then 26 % / 29 % / 25 % / 10 %; more than 1.0 below:
+ *    23 of 1,577 from M5.5; more than 0.5 above: 2 of 1,577. GEOFON measured the same way stays within 0.5 of ComCat for
+ *    98-100 % of every band from M5.0. Live (the observation log 2026-07-05..10-06, 221 USP rows matched): the same
+ *    pattern, less often (5 % of M5.5-6.0 and 2 of 9 at M6.0-6.5 more than 0.5 below).
+ *  - So in USP's window (REGIONAL_WINDOWS), when the partner side's magnitude is at least USP_LOW_MAG_FROM and above
+ *    USP's, |ΔM| may reach USP_LOW_MAG_MAX_DELTA instead of MODERATE_EVENT_MAX_DELTA (from M5.5 the share of USP rows
+ *    within the limit goes from 73 % to 98.4 %). Every other guard stays (both M >= 4.0, ≤ 20 s, ≤ 50 km, a USP-only
+ *    event against a USGS, EMSC or GFZ event, neither cell dense, mutual best); no other provider gets it.
+ *  - Replaying the observation log (2026-07-05..10-06, 211,177 lines; a fresh Resolver per hour of ingest time over the
+ *    production load window, then the feed-side steps and the capped heal): 2 groups fold, nothing else changes (live
+ *    114,933 -> 114,931; rows in two live events unchanged): Papua New Guinea M6.4 of 2026-07-13 (USP Mw(mB) 5.88, 25.0 km
+ *    from the event) and western China M5.7 of 2026-07-28 (USP M 4.84, 8.1 km), each the one quake ComCat and EMSC list
+ *    within 60 s and 300 km of the USP row (us7000szzy, us6000tga6). The log's 3 other USP-only events kept apart by
+ *    |ΔM| > 0.5 (partners M4.7-5.1) stay apart: below M5.5 such a gap is scatter, not saturation.
+ *  - Only with the merge pass (Resolver.regional): the deep-history build and the backfill run without it, and there a
+ *    USP event minted before its partner's reports would be a mergeable neighbour nothing folds, whose mutual-best
+ *    rivalry keeps other agencies' reports out of the partner event. Rebuilt with the allowance, the 53 sealed deep
+ *    months 2019-02..2023-06 joined 217 groups (each one quake by ComCat, 1,423,950 -> 1,423,780 events) but split 62
+ *    groups (151 rows, 84 of them RéNaSS / RESIF) off other events, so 13 quakes were shown once more; without it in
+ *    those builds they rebuild byte-identical to main. */
+export const USP_LOW_MAG_FROM = LARGE_EVENT_MAG;
+export const USP_LOW_MAG_MAX_DELTA = LARGE_EVENT_MAX_DELTA;
+/** A regional window's magnitude allowance: against a partner side of at least `fromMag` whose magnitude is above the
+ *  provider's, |ΔM| may reach `maxDelta` instead of MODERATE_EVENT_MAX_DELTA. */
+export interface RegionalLowMag {
+  fromMag: number;
+  maxDelta: number;
+}
 /** The regional windows (Resolver.regionalWindow): a pair whose one side holds the provider's rows only and whose other
  *  side holds a row of one of its partners and none of the provider's gets the moderate-event window with its distance
- *  raised to `km`. TMD (round 14) and USP (round 21). */
-export const REGIONAL_WINDOWS: ReadonlyMap<string, { partners: ReadonlySet<string>; km: number }> = new Map([
+ *  raised to `km`. TMD (round 14) and USP (round 21); USP's also with `lowMag` (round 22), no other provider's. */
+export const REGIONAL_WINDOWS: ReadonlyMap<string, { partners: ReadonlySet<string>; km: number; lowMag?: RegionalLowMag }> = new Map([
   [TMD_PROVIDER, { partners: TMD_WINDOW_PARTNERS, km: TMD_WINDOW_KM }],
-  [USP_PROVIDER, { partners: USP_WINDOW_PARTNERS, km: USP_WINDOW_KM }],
+  [USP_PROVIDER, { partners: USP_WINDOW_PARTNERS, km: USP_WINDOW_KM, lowMag: { fromMag: USP_LOW_MAG_FROM, maxDelta: USP_LOW_MAG_MAX_DELTA } }],
 ]);
 /** A provider re-publishing ONE solution under a second native id (INGV 46714321 / 47246702,
  *  2026-09-25) is a re-id, not a distinct event: rows this close fold instead of minting. */

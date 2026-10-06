@@ -20,7 +20,11 @@
 //     compiled defaults once the bundle expires.
 // The two ages are published by gateways from round 13 on (X-4, CFG-6); a document without them skips the check, and
 // a null age (not read since the gateway deployed) is a warning.
-// It only warns (exit stays 0) when today's fanout.skipped_no_key or fanout.retry_dropped_budget is above 0.
+// It only warns (exit stays 0) when today's fanout.skipped_no_key or fanout.retry_dropped_budget is above 0, and when a
+// provider's separate deletions query (USGS `includedeleted=only`, round-16 gateways) has failed 3 times in a row
+// (`deletionsConsecutiveFailures` / `deletionsLastError`, published only while it fails). The provider stays ok
+// meanwhile (its live events still go out), but deleted events are not withdrawn and its watermark (the deletions
+// cursor) stands still; the gateway asks again from that cursor, at most 7 days back, so a shorter gap recovers.
 // Fields an older gateway does not publish (apns.mode/production/problems, fanout) are never a problem.
 // Optional usage half: when CF_ANALYTICS_TOKEN (Account Analytics: Read) is set, it also reads today's
 // (UTC) account-wide Workers requests and D1 rows written from the GraphQL Analytics API and fails at 80 %
@@ -35,7 +39,7 @@
 //   node scripts/alerts-watchdog.mjs --selftest             # forces a failing headroom limit (proves the red path)
 //   node scripts/alerts-watchdog.mjs --status-file doc.json # judge a saved document instead of fetching
 //   flags: --url <url> --max-age-sec <n> --provider-failures <n> --min-headroom-pct <n> --usage-fail-pct <n>
-//          --max-feed-manifest-age-sec <n> --max-config-bundle-age-sec <n>
+//          --max-feed-manifest-age-sec <n> --max-config-bundle-age-sec <n> --deletions-failures <n>
 //
 // Dependency-free (Node >= 22, global fetch). The pure helpers are exported for
 // tests/alerts-watchdog.test.ts, which never touches the network.
@@ -59,7 +63,15 @@ export const DEFAULT_THRESHOLDS = Object.freeze({
   maxFeedManifestAgeSec: 1_800,
   /** the signed config bundle older than this fails (10 days). */
   maxConfigBundleAgeSec: 864_000,
+  /** a provider's deletions query (USGS, GW-R15-1) failing this many times in a row warns (never fails): the same
+   *  streak that turns a provider down. The gateway backs the query off to every 60 s after 3 failures and every 300 s
+   *  after 10, so a health run every 15 min sees a streak of 3 or more only when it lasted minutes, not one slow poll. */
+  deletionsFailures: 3,
 });
+
+/** How far back the gateway's USGS deletions query reaches (alerts-gateway USGS_DELETIONS_MAX_WINDOW_MS = the
+ *  detector's 7-day withdrawal floor): a deletion older than this when the query next succeeds is never withdrawn. */
+export const DELETIONS_MAX_WINDOW_MS = 7 * 86_400_000;
 
 /** Workers Free daily caps (account-wide, reset 00:00 UTC). */
 export const FREE_TIER_DAILY = Object.freeze({ workersRequests: 100_000, d1RowsWritten: 100_000 });
@@ -112,6 +124,25 @@ export function failureReason(p) {
 }
 
 /**
+ * The deletions half of a provider entry (round-16 gateways, GW-R15-1): `deletionsConsecutiveFailures` and
+ * `deletionsLastError` are published only while the provider's separate deletions query fails, and `ok` stays true
+ * meanwhile. Returns null when the entry carries no positive streak (a healthy query, an older gateway, a provider
+ * without a deletions query, or a malformed value), else the streak and a readable reason.
+ */
+export function deletionsFailure(p) {
+  if (!isObject(p)) return null;
+  const n = p.deletionsConsecutiveFailures;
+  if (!isNum(n) || n <= 0) return null;
+  let why = '';
+  if (typeof p.deletionsLastError === 'string' && p.deletionsLastError !== '') {
+    const code = p.deletionsLastError.slice(0, 32);
+    const gloss = Object.hasOwn(PROVIDER_ERRORS, code) ? ` (${PROVIDER_ERRORS[code]})` : '';
+    why = `, last error ${code}${gloss}`;
+  }
+  return { failures: n, why };
+}
+
+/**
  * Judge a parsed status.json. Pure: `nowMs` is injected.
  * @returns {{ problems: string[], warnings: string[], notes: string[], summary: string }}
  *   problems fail the run; warnings become ::warning:: annotations; notes are log lines only.
@@ -154,7 +185,23 @@ export function evaluateStatus(doc, { nowMs, thresholds = DEFAULT_THRESHOLDS } =
       if (!isObject(p)) continue;
       const id = typeof p.id === 'string' ? p.id : '?';
       const fails = isNum(p.consecutiveFailures) ? p.consecutiveFailures : null;
-      tags.push(`${id}:${p.ok === false ? `FAIL(${fails ?? '?'})` : 'ok'}`);
+      const del = deletionsFailure(p);
+      tags.push(`${id}:${p.ok === false ? `FAIL(${fails ?? '?'})` : 'ok'}${del ? `/deletions-FAIL(${del.failures})` : ''}`);
+      // The deletions query (USGS): judged whatever `ok` says, since it never fails the provider. A warning only — a
+      // gap shorter than the gateway's 7-day deletions window recovers by itself on the next successful query.
+      if (del) {
+        let cursor = '';
+        if (isNum(p.watermarkMs) && p.watermarkMs > 0) {
+          const lagMs = Math.max(0, nowMs - p.watermarkMs);
+          const lag = lagMs >= 172_800_000 ? `${(lagMs / 86_400_000).toFixed(1)} days` : `${(lagMs / 3_600_000).toFixed(1)} h`;
+          cursor = lagMs > DELETIONS_MAX_WINDOW_MS
+            ? `; its cursor (watermarkMs) is ${lag} old, past the gateway's 7-day deletions window: a deletion from the start of the gap is no longer asked for, and that event stays live`
+            : `; its cursor (watermarkMs) is ${lag} old (the next successful query asks from there, at most 7 days back)`;
+        }
+        const text = `provider ${id}'s deletions query has failed ${del.failures} time${del.failures === 1 ? '' : 's'} in a row${del.why}: deleted events are not being withdrawn${cursor}`;
+        if (del.failures >= t.deletionsFailures) warnings.push(`${text} (warning at ${t.deletionsFailures})`);
+        else notes.push(`${text} (below the warning at ${t.deletionsFailures})`);
+      }
       if (p.ok !== false) continue;
       const http = isNum(p.httpStatus) ? `, last HTTP ${p.httpStatus}` : '';
       const why = failureReason(p);
@@ -452,6 +499,7 @@ const NUMERIC_FLAGS = {
   '--usage-fail-pct': 'usageFailPct',
   '--max-feed-manifest-age-sec': 'maxFeedManifestAgeSec',
   '--max-config-bundle-age-sec': 'maxConfigBundleAgeSec',
+  '--deletions-failures': 'deletionsFailures',
 };
 
 /** Parse argv + env into options; throws an Error with a readable message on a bad argument. */

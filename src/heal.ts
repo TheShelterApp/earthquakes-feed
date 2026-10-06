@@ -75,6 +75,8 @@ export interface FeedSideResult {
   heal: HealMarker | null;
   /** EMSC copies the re-home pass moved (Resolver.rehomeMisplacedCopies, FEED-2). */
   rehomed: number;
+  /** EMSC rows moved by the re-point guard's every-run pass (Resolver.rehomeStrandedRows). */
+  stranded: number;
   /** The regular heal of a run without an epoch heal (FEED-6), else null: its op:merge lines, the survivors whose
    *  revision moved, and whether it stopped at HEAL_MAX_FOLDS_PER_RUN. */
   regularHeal: { merged: number; survivors: number; capped: boolean } | null;
@@ -103,6 +105,10 @@ export function runFeedSideSteps(
   // its new event. A no-op once nothing is misplaced.
   const rehomed = resolver.rehomeMisplacedCopies(opts.ingestTime);
   for (const { raw, result } of rehomed) log.record(raw, result);
+  // EMSC rows left in an event after EMSC re-pointed their id to another quake (Resolver.rehomeStranded, round 14): the
+  // same lines as a re-homed copy. A no-op once nothing is stranded.
+  const stranded = resolver.rehomeStrandedRows(opts.ingestTime);
+  for (const { raw, result } of stranded) log.record(raw, result);
   let heal: HealMarker | null = null;
   if (opts.healDue) {
     const { merges, survivors } = resolver.heal(opts.ingestTime);
@@ -129,5 +135,5 @@ export function runFeedSideSteps(
     log.recordFolds(merges, survivors, 'heal');
     regularHeal = { merged: merges.length, survivors: survivors.length, capped };
   }
-  return { retracted: retractions.length, retractedByProvider, heal, rehomed: rehomed.length, regularHeal };
+  return { retracted: retractions.length, retractedByProvider, heal, rehomed: rehomed.length, stranded: stranded.length, regularHeal };
 }

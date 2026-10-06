@@ -98,4 +98,6 @@ test('Chiapas 2026-08-22: EMSC moves its event from SSN’s solution to NEIC’s
   assert.equal(events.length, 1);
   assert.equal(rowsOf(events[0]!), 'emsc:20260822_0000272 mexico:2026-08-22155344_14.419_-93.305 usgs:us6000tmuq');
   assert.deepEqual(r.rehomeMisplacedCopies('2026-08-22T23:00:00Z'), [], 'the every-run pass leaves a NEIC copy where it is');
+  // The re-point guard leaves it too: the copy is one quake with ComCat's row of its event.
+  assert.deepEqual(r.rehomeStrandedRows('2026-08-22T23:00:00Z'), [], 'and so does the re-point guard');
 });

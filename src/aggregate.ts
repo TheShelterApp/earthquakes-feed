@@ -12,7 +12,7 @@ import { activeProviders, configMap, loadRegistry, priorityMap } from './provide
 import { byIngestOrder, emptyTally, screen } from './quality.js';
 import { COMCAT_DELETE_REASON, revisionSweep } from './sweep.js';
 import { vanishedIds } from './absence.js';
-import { frozenProviders, loadActivity, saveActivity, silentProviders, tlsLeafStatus, updateActivity } from './activity.js';
+import { frozenProviders, loadActivity, saveActivity, silentProviders, soonestLeaf, tlsLeafStatus, updateActivity } from './activity.js';
 import { pinnedLeaf } from './custom.js';
 import { fetchRunInputs, loadSweepCursors, nextCursors, saveSweepCursors, sweepOriginFloorMs, sweepSpecs } from './sweep-cursor.js';
 import type { ProviderStatus, RawObs } from './types.js';
@@ -238,8 +238,9 @@ async function main(): Promise<void> {
   const paths = dataPaths(DATA_DIR);
   const loadedActivity = loadActivity(paths.providerActivity, paths.statusHistoryDir);
   if (loadedActivity.seeded) console.log(`aggregate: provider activity seeded from the status history (${Object.keys(loadedActivity.index).length} sources)`);
-  // Pinned sources (FEED-SEC-1): the leaf each host presented in this run, kept in the index so a failed handshake still
-  // shows when it expired; status.json carries it per source (`tls_leaf`) and in `tls_leaves`, health warns under 7 days.
+  // Pinned sources (FEED-SEC-1): the leaf each host presented in this run, kept in the index with the others it presented
+  // in the last week (one host, several leaves behind geo-DNS) so a failed handshake still shows when it expired;
+  // status.json carries the first to expire per source (`tls_leaf`) and in `tls_leaves`, health warns under 7 days.
   const leaves = Object.fromEntries(
     active.filter((p) => p.tlsIntermediates?.length).flatMap((p) => {
       const leaf = pinnedLeaf(new URL(p.base).hostname);
@@ -259,9 +260,9 @@ async function main(): Promise<void> {
   for (const id of Object.keys(frozen)) if (!degraded.includes(id)) degraded.push(id);
   const tlsLeaves: Record<string, ReturnType<typeof tlsLeafStatus>> = {};
   for (const p of active) {
-    const leaf = p.tlsIntermediates?.length ? activity[p.id]?.tlsLeaf : undefined;
+    const leaf = p.tlsIntermediates?.length ? soonestLeaf(activity[p.id]) : undefined;
     if (!leaf) continue;
-    tlsLeaves[p.id] = tlsLeafStatus(leaf, nowMs);
+    tlsLeaves[p.id] = tlsLeafStatus(leaf, nowMs, activity[p.id]?.tlsLeaves?.length ?? 1);
     if (providers[p.id]) providers[p.id] = { ...providers[p.id]!, tls_leaf: tlsLeaves[p.id] };
   }
   // The sweeps' outcomes and cursors: fail-open like the live fetch, and a sweep that did not

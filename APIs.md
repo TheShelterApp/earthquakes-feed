@@ -1227,21 +1227,28 @@ added (*Alaska (AEC)*).
 - Speed: neither format carries a creation or publication time, so no first-solution time can be measured from the
   catalogue, and no new event appeared while it was polled (below). The feed had the three real quakes 6.9 min (M4.8),
   51 min (M3.0) and 11.6 min (M3.85) after their origins, through ComCat and EMSC.
-- Terms: the data is CC BY 4.0 by the registry page, the open-data page (citing the network DOI) and Zenodo; the site's
-  terms forbid automated access (bots, scrapers) to its services without GeoShake's consent, and reproducing or
-  distributing its content without authorisation; `map.geoshake.org/robots.txt` disallows `/fdsnws/` and `/api/` for
-  every client (the same application answers `/fdsnws/` there; `api.geoshake.org/robots.txt` redirects to the map).
-  Rate limit 100 requests per 5 minutes per IP. GeoShake says it is not an official early-warning service.
+- Terms: the data is CC BY 4.0 by the registry page, the open-data page (citing the network DOI) and Zenodo, and the
+  event service is open to programs: the FDSN data centre entry says all data is served anonymously under CC BY 4.0
+  with no registration, API key or rate agreement, and the developer page offers the FDSN services without a key
+  (100 requests per 5 minutes per IP, ObsPy named). Against that, the site's general terms forbid automated access
+  (bots, scrapers) to its services without GeoShake's consent and reproducing or distributing its content without
+  authorisation, and `map.geoshake.org/robots.txt` disallows `/fdsnws/` and `/api/` for every crawler (the same
+  application answers `/fdsnws/` there; `api.geoshake.org/robots.txt` redirects to the map's home page, so that host
+  has no robots file of its own). Read together (review, 2026-10-06): the FDSN pages are the consent the general terms
+  ask for, so the licence would allow an adapter with attribution; the terms are not why GeoShake was declined.
+  GeoShake says it is not an official early-warning service.
 - Uptime: 40 polls 2 minutes apart, 2026-10-06 16:28–17:46 UTC: every one answered (30 with the four events, 10 with
   HTTP 204 for a 3-day window that holds none), in 1.5 s on average and 15.8 s at most; no new event in that time.
   Nothing older is known: the registry page was last updated 2026-09-06 and the monthly discovery first saw the node
-  on 2026-10-01.
+  on 2026-10-01. The review's re-probe (17:53 UTC, text and QuakeML of the whole catalogue) got the same four events in
+  0.65 s, and matched them against ComCat and EMSC itself (the same pairs, 1.6–8.3 s and 8.5–29 km; event 12 58 s and
+  185 km from `us6000ty0q`).
 
 Why not: no event the feed does not already have, no faster solution that can be shown, a magnitude field that is not a
-magnitude (it would put an M4.8 into the summaries as 3.7 and break the magnitude gates of the event matching), one
-of four events mislocated by 185 km, and terms that contradict the licence for automated access. Look again if the
-network starts publishing seismic magnitudes, depths and creation times, lists quakes no agency has, and its terms
-allow automated access.
+magnitude (it would put an M4.8 into the summaries as 3.7 and break the magnitude gates of the event matching), no
+depth, and one of four events mislocated by 185 km. Look again if the network starts publishing seismic magnitudes,
+depths and creation times and lists quakes no agency has; then read its terms again (above). `DECLINED` also holds
+`map.geoshake.org`, the same service under the map's host name.
 
 ## Recipes
 

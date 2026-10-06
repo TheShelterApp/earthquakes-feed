@@ -38,8 +38,10 @@ export const DECLINED: { host: string; dc: string; issue: number; why: string }[
     host: 'api.geoshake.org',
     dc: 'GeoShake Data Center',
     issue: 38,
-    why: 'a community MEMS network: 4 events in its whole catalogue (2026-09-18 → 10-03, Puerto Rico), each a quake the feed already had or a mislocated one; its "magnitude" is an intensity (MMI), not a magnitude, and its site terms forbid automated access without consent (round 20)',
+    why: 'a community MEMS network: 4 events in its whole catalogue (2026-09-18 → 10-03, Puerto Rico), each a quake the feed already had or a mislocated one; its "magnitude" is an intensity (MMI), not a magnitude, and it has no depth or creation time: no gain to measure (round 20)',
   },
+  // The same application serves the same event service on its map host (round 20 review).
+  { host: 'map.geoshake.org', dc: 'GeoShake Data Center (map host)', issue: 38, why: 'the event service of api.geoshake.org under another host name' },
 ];
 
 /** Labels of a host name that name a service, not its operator (`api.geoshake.org` → `geoshake`). */
@@ -81,6 +83,37 @@ const hostOf = (u: string): string => {
   }
 };
 
+/** One fdsnws-event service of the FDSN data centre registry (https://www.fdsn.org/ws/datacenters/1/query). */
+export interface RegistryDatacenter {
+  name?: string;
+  fullName?: string;
+  repositories?: { services?: { name?: string; url?: string }[] }[];
+}
+
+/** The event services to probe, by host: the registry's fdsnws-event services, then the curated leads, without the
+ *  hosts the feed already reads (`known`) and the ones a human declined (`declined`, DECLINED). Exported for the tests. */
+export function candidateServices(
+  datacenters: RegistryDatacenter[],
+  curated: { dc: string; url: string }[],
+  known: ReadonlySet<string>,
+  declined: ReadonlySet<string>,
+): Map<string, { dc: string; url: string }> {
+  const cand = new Map<string, { dc: string; url: string }>();
+  const consider = (host: string, c: { dc: string; url: string }): void => {
+    if (!known.has(host) && !declined.has(host) && !cand.has(host)) cand.set(host, c);
+  };
+  for (const dc of datacenters)
+    for (const rp of dc.repositories ?? [])
+      for (const s of rp.services ?? []) {
+        if (!/^fdsnws-event/.test(s.name ?? '') || !s.url) continue;
+        const url = s.url.replace(/\/+$/, '') + '/query';
+        const host = hostOf(url);
+        consider(host, { dc: dc.fullName || dc.name || host, url });
+      }
+  for (const c of curated) consider(hostOf(c.url), c);
+  return cand;
+}
+
 async function get(url: string): Promise<{ status: number; body: string } | null> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
@@ -107,32 +140,27 @@ async function main(): Promise<void> {
   const known = new Set(registry.providers.flatMap((p) => [p.base, ...(p.fallbackBase ? [p.fallbackBase] : [])]).map(hostOf));
   // A declined host is skipped like a known one, and named in the report.
   const declined = new Set(DECLINED.map((d) => d.host));
-  const cand = new Map<string, { dc: string; url: string }>();
 
-  // 1) Newly-registered FDSN event services (the rare, high-value case).
+  // 1) Newly-registered FDSN event services (the rare, high-value case), then 2) the curated leads (re-probe the
+  //    known-down endpoints).
   const reg = await get(FDSN_REGISTRY);
   let registryOk = false;
+  let dcs: RegistryDatacenter[] = [];
   if (reg && reg.status < 400) {
     try {
-      const dcs = (JSON.parse(reg.body) as { datacenters?: { name?: string; fullName?: string; repositories?: { services?: { name?: string; url?: string }[] }[] }[] }).datacenters ?? [];
-      for (const dc of dcs)
-        for (const rp of dc.repositories ?? [])
-          for (const s of rp.services ?? []) {
-            if (!/^fdsnws-event/.test(s.name ?? '') || !s.url) continue;
-            const url = s.url.replace(/\/+$/, '') + '/query';
-            const host = hostOf(url);
-            if (!known.has(host) && !declined.has(host) && !cand.has(host)) cand.set(host, { dc: dc.fullName || dc.name || host, url });
-          }
+      dcs = (JSON.parse(reg.body) as { datacenters?: RegistryDatacenter[] }).datacenters ?? [];
       registryOk = true;
     } catch {
       /* fall through to curated */
     }
   }
-
-  // 2) Curated leads (re-probe the known-down endpoints).
-  for (const c of CURATED) {
-    const h = hostOf(c.url);
-    if (!known.has(h) && !declined.has(h) && !cand.has(h)) cand.set(h, c);
+  let cand: Map<string, { dc: string; url: string }>;
+  try {
+    cand = candidateServices(dcs, CURATED, known, declined);
+  } catch {
+    // A registry answer of an unexpected shape: the curated leads only, as before.
+    registryOk = false;
+    cand = candidateServices([], CURATED, known, declined);
   }
 
   // 3) Probe each; keep endpoints returning events in a format the generic adapter can parse

@@ -197,6 +197,29 @@ under `properties.feed`:
 | `aliases[]` | every `provider:native_id` for this event (for realtime dedup) |
 | `provenance[]` | every reporting provider with its solution + `license`/`attribution`/`doi`, and `fields` = that provider's **complete original vocabulary** (nothing dropped). Present in day files + partitions; omitted from the compact rolling summaries |
 
+**What "stable" means for `feed_id`.** Once minted, an event's id never changes; a fold retires
+the loser (`superseded_by`) and its provider ids resolve to the survivor. Which id an event gets is
+fixed by its first report: the id is seeded by that report's 30 s time bucket and 0.02° place
+bucket, so if another agency's report of the quake reaches the feed first, the quake gets another
+id. Replaying the observation log in another arrival order measures this (FEED-DQ-2, 2026-10-06; two
+3-day slices, 2026-09-20…22 and 09-30…10-02, 6,432 and 8,137 lines, 3,906 and 4,894 live events in
+the logged order; each provider id's own lines kept in order):
+
+| arrival order | events grouped as logged | M ≥ 4.5 events grouped as logged | same `feed_id`, events with ≥ 2 providers | same `feed_id`, M ≥ 4.5 |
+|---|---|---|---|---|
+| each provider id 0–2 runs (0–10 min) late, then the feed's own order within a run | 99.73–99.90 % | 120–122 of 123, 85 of 85 | 94.7–96.6 % | 87–94 % |
+| any order (adversarial) | 98.98–99.37 % | 114–117 of 123, 77–80 of 85 | 83.2–87.2 % | 67–83 % |
+
+So a consumer must not derive anything from the id beyond identity, and must not expect a mirror
+built from the same reports in another order to carry the same ids; follow `superseded_by` and
+`aliases[]` instead. The grouping itself moves for a fraction of a percent of events: a fold needs
+each event to be the other's best match, and in a dense cell a join needs a shared id, so the
+outcome can depend on what is already there (2026-09-30, The Geysers: when NCEDC's 75441706 arrives
+before ComCat's nc75441706 and another NC quake's rows join its event first, ComCat's row of the
+same id cannot follow, because that event already holds another ComCat id). Making the id independent
+of arrival order would mean re-keying events after first sight, which would break every consumer
+that keys on it, so the feed keeps the pinned id.
+
 ## Freshness contract
 
 Scheduled runs are best-effort. A consumer should compute
@@ -609,6 +632,7 @@ agency's report:
 | `UNA` | `ovsicori` | 2026-10-01 |
 | `UNM` | `mexico` | 2026-10-01 |
 | `HV`, `PR`, `AK`, `TX`, `NN`, `UU`, `UW`, `OK`, `MB` | ComCat's row of that network (`hv…`, `pr…`, `ak…`, `tx…`, `nn…`, `uu…`, `uw…`, `ok…`, `mb…`) | 2026-10 (FEED-4) |
+| `NEIC` | ComCat's `us…` row (never moved, see below) | 2026-10 (round 14) |
 
 A code is on the list only where EMSC's copy is the agency's solution up to rounding: at least 90 %
 of the copies equal in time and place a version of the agency's solution the feed saw (or, for
@@ -623,15 +647,16 @@ those limits of the agency's row. Where KOERI gives both ML and Mw the feed's ro
 while EMSC copies the ML, so those copies do not count. Not on the list: BMKG (its public lists
 carry another solution), PHIVOLCS and JMA (their lists give the origin to the minute), GFZ,
 ReNaSS, ETHZ, NOA, IMO (too many copies differ from every version the feed saw), GSRAS (not
-KAGSR's solution), CN (the feed's NRCan rows carry no magnitude), the agencies with fewer than 50
-copies (IPMA, IGP, GA, CWA, IPGP's observatories, BGS, USP, KNMI, AEC), and NEIC (ComCat's `us`
-solutions). The US networks the feed reads only through ComCat count against ComCat's row whose own
+KAGSR's solution), CN (the feed's NRCan rows carry no magnitude) and the agencies with fewer than 50
+copies (IPMA, IGP, GA, CWA, IPGP's observatories, BGS, USP, KNMI, AEC). The US networks the feed reads only through ComCat count against ComCat's row whose own
 id carries the network's prefix (EMSC's `20261003_0000049`, `auth: "HV"`, is ComCat's `hv75048812`
 to EMSC's rounding); ComCat's row of another network for the same quake (`us…`) is another solution
 and does not count. Their copies equal the network's ComCat row in time and place in 99–100 % of the
 versions the feed saw and in magnitude in 96–100 % (OK and MB had 35 and 11 copies, every one of
 them the network's row); in the dense Kilauea cell the HV copies stood beside ComCat's event 10
-times in the 11 days to 2026-10-04.
+times in the 11 days to 2026-10-04. NEIC's copies count against ComCat's `us…` row in the same way
+(99.9 % of 2,107 versions equal in time and place, 93.0 % in magnitude too; in the dense cell of the
+August 2026 Flores sequence 29 M4.4–5.8 quakes stood as an EMSC event and a ComCat event each).
 
 This matters where many small quakes fall into one cell (the Granada basin, The Geysers, Sındırgı,
 the Milford Sound and Puntarenas swarms): there the feed joins two reports only on a shared id,
@@ -656,7 +681,9 @@ solution no live event holds yet stays where it is until that row is in; then th
 listing of the copy, or the pass every run makes over the 7-day hot window (which also moves the
 copies left in the wrong event before this rule), moves it. A copy alone in its event is not
 moved: the merge pass folds that event into the agency's. Status counts the moves as
-`copies_rehomed`.
+`copies_rehomed`. A NEIC copy is never moved: EMSC often takes an event's solution first from the
+regional agency (SSN, JMA, CENC) and then from NEIC, which is the same quake under two agencies'
+solutions; the row stays, its event moves to NEIC's solution and ComCat's event folds into it.
 
 ## Alaska (AEC)
 

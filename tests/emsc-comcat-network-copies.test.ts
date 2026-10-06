@@ -58,10 +58,10 @@ function kilaueaCell(at: RawObs): { map: Map<string, EventNode>; r: Resolver; ba
 test('config: EMSC copies of the US networks name ComCat’s network prefix; none is an agency the feed reads itself', () => {
   assert.deepEqual(
     [...EMSC_COMCAT_NETWORK_COPIES].sort(),
-    [['AK', 'ak'], ['HV', 'hv'], ['MB', 'mb'], ['NN', 'nn'], ['OK', 'ok'], ['PR', 'pr'], ['TX', 'tx'], ['UU', 'uu'], ['UW', 'uw']],
+    [['AK', 'ak'], ['HV', 'hv'], ['MB', 'mb'], ['NEIC', 'us'], ['NN', 'nn'], ['OK', 'ok'], ['PR', 'pr'], ['TX', 'tx'], ['UU', 'uu'], ['UW', 'uw']],
   );
   for (const code of EMSC_COMCAT_NETWORK_COPIES.keys()) assert.equal(EMSC_AUTHORED_COPIES.has(code), false, code);
-  assert.equal(EMSC_COMCAT_NETWORK_COPIES.has('NEIC'), false, 'NEIC copies of `us` rows are not part of FEED-4');
+  // NEIC's copies of ComCat's `us` rows joined in round 14 (tests/emsc-neic-copies.test.ts).
 });
 
 test('HV: in the dense Kilauea cell ComCat hv75048812 and EMSC’s HV copy are one event, in both orders', () => {

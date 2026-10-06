@@ -175,7 +175,7 @@ open, reachable source appears.
   workflow logs the repository's size and warns above 6 GB (5.48 GB on 2026-10-04, 5.64 GB on 2026-10-06, about 67 MB a
   day: GitHub keeps about one compressed copy of every large file a commit rewrites, see
   [APIs.md](APIs.md#repository-size); `scripts/repo-growth/` measures it). `event_map` is sharded by
-  event-day and pruned to a 45-day dedup horizon; identity older than that lives in the
+  event-day and UTC hour (`YYYY-MM-DD-HH.ndjson` since round 17) and pruned to a 45-day dedup horizon; identity older than that lives in the
   frozen day partitions. Every source with a time-range query reached the target
   (2023-07-06) in July 2026 except ISC, whose walk is paused; a backfilled row is the
   source's solution when it was fetched, while the log holds each report as first seen
@@ -322,7 +322,7 @@ copyrightable expression) and honor removal requests reactively — see
 
 Live end-to-end: 42 sources, stateful field-level dedup (superset model — every source
 field preserved), bitemporal log, 20 rolling feeds, per-day partitions + Pages day
-files, manifest, CI, and Cloudflare Pages serving. `event_map` is sharded by day and
+files, manifest, CI, and Cloudflare Pages serving. `event_map` is sharded by day and hour and
 pruned to a 45-day dedup horizon, with older identity preserved in the day partitions.
 
 Running in production: `updatedafter` revision + `includedeleted` tombstone sweeps (the

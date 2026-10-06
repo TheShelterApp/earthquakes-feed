@@ -623,6 +623,22 @@ Round 17 (LANE G) changes what the commits rewrite, never what consumers read, a
   month file. Replayed, the eight days grow 11 % less (56 MB a day on average): 20–26 % on the last days of September,
   when the month file was 23–24 MB (77 MB became 57 on 09-28/29), 1–14 % in early October. With the October file padded
   to 31 MB (as on about 10-24), 107 MB a day becomes 79.
+- The event_map (the dedup state aggregate keeps, read by nothing outside this repository's code) is written in shards
+  of one UTC hour of each event-day, `knowledge/index/event_map/YYYY-MM-DD-HH.ndjson` (`EVENT_MAP_SHARD_HOURS`,
+  src/config.ts; 24 writes one file a day again). A run's changes fall into 1–3 hours of a day, so a commit rewrites
+  shards of about 70 KB instead of 1.7 MB days: 777 MB a day of rewritten bytes become 65 (10-05/06). Every reader
+  takes the event-day from the name's first 10 characters, as the code before round 17 did, so a reverted deploy still
+  reads the hour shards. Replayed alone, the event_map's share of the days to 10-04, 10-05 and 10-06 falls from 13, 20
+  and 32 MB to 6, 7.5 and 10.
+
+Both together replay to 45 MB a day on average over the eight days instead of 63 (23–42 % less a day, 28 % in all); at
+GitHub's 67 MB a day that is about 48 MB. What remains is about three quarters day partitions, which consumers read
+(jsDelivr `@data` / `@<data_commit>`, the manifest's `partitions`) and keep their layout. They shrink only by being
+rewritten less often, which changes what the `data` branch shows between runs: a partition of a day 2 or more days old
+written at most every 3 hours (Pages, the live index and the summaries unchanged) replays the days to 10-04, 10-05 and
+10-06 to 19, 30 and 40 MB. That, and how large the repository may grow (GitHub's on-disk limit is 10 GB,
+[Repository limits](https://docs.github.com/en/repositories/creating-and-managing-repositories/repository-limits),
+read 2026-10-06), are owner decisions.
 
 ## Deep history (before 2023-07-06)
 

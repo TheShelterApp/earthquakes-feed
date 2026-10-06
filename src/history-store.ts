@@ -115,3 +115,41 @@ export class LocalStore implements HistoryStore {
     copyFileSync(src, dest);
   }
 }
+
+/**
+ * A dry run of a walk that already has assets in production (edition 2 of a month needs the published raw assets of
+ * the sources fetched before): reads the published Releases (read only) and writes only to the local directory.
+ * `list` is both, the local copy winning a name both hold; `download` takes the local copy when there is one, else the
+ * published asset; `ensureRelease` and `upload` touch the local directory only, and an upload under a name the
+ * Release already holds is refused (a dry run never shadows a published asset; the walk takes the next free name).
+ */
+export class DryRunStore implements HistoryStore {
+  constructor(
+    private readonly local: HistoryStore,
+    private readonly published: HistoryStore,
+  ) {}
+
+  get label(): string {
+    return `${this.local.label}, reading the published assets of ${this.published.label} (read only)`;
+  }
+
+  list(tag: string): AssetInfo[] {
+    const mine = this.local.list(tag);
+    const names = new Set(mine.map((a) => a.name));
+    return [...this.published.list(tag).filter((a) => !names.has(a.name)), ...mine].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  }
+
+  ensureRelease(tag: string): void {
+    this.local.ensureRelease(tag);
+  }
+
+  upload(tag: string, file: string): void {
+    if (this.published.list(tag).some((a) => a.name === basename(file))) throw new Error(`asset ${tag}/${basename(file)} is published; history never overwrites an asset`);
+    this.local.upload(tag, file);
+  }
+
+  download(tag: string, asset: string, dest: string): void {
+    if (this.local.list(tag).some((a) => a.name === asset)) this.local.download(tag, asset, dest);
+    else this.published.download(tag, asset, dest);
+  }
+}

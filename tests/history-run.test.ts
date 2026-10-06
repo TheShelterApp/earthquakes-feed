@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -8,7 +8,7 @@ import { type RawHeader, RAW_KIND, rawFileText } from '../src/history-build.js';
 import { type HistoryConfig, type HistoryEra, allPeriods, historyTag, rawAssetName } from '../src/history-config.js';
 import type { HttpAnswer } from '../src/history-fetch.js';
 import { emptyIndex } from '../src/history-index.js';
-import { LocalStore } from '../src/history-store.js';
+import { DryRunStore, LocalStore } from '../src/history-store.js';
 import { type Ctx, adoptOrphans, fetchUnits } from '../src/history.js';
 import { loadRegistry } from '../src/providers.js';
 
@@ -56,7 +56,7 @@ function ctxOf(over: Partial<Ctx> = {}): Ctx {
     assetCache: new Map(),
     rawCache: new Map(),
     now: () => NOW_ISO,
-    report: { fetched: [], sealed: [], adopted: [], failed: [], unused: [], blocked: [] },
+    report: { fetched: [], sealed: [], adopted: [], failed: [], unused: [], blocked: [], empty_after_rows: [] },
     ...over,
   };
 }
@@ -165,4 +165,50 @@ test('fetch: a month that answers is uploaded, read back and indexed, and its fa
   assert.equal(ctx.idx.attempts['usgs:2022-12'], undefined);
   assert.deepEqual(ctx.store.list(historyTag('2022-12')).map((a) => a.name), [r.asset]);
   assert.ok(h.calls.every((u) => u.includes('/count?')), 'an empty month costs its count requests only');
+});
+
+test('fetch: a dry run limited to some sources (HISTORY_ONLY_SOURCES) asks only those sources', async () => {
+  const era: HistoryEra = { ...ERA, sources: ['usgs', 'emsc', 'geofon'] };
+  const h = http(() => ({ status: 500, body: 'boom', latencyMs: 1, retryAfterMs: null }));
+  const ctx = ctxOf({ cfg: { ...CFG, eras: [era] }, fetchOptions: h.fetchOptions, onlySources: new Set(['geofon']) });
+  await fetchUnits(ctx, 10);
+  assert.ok(h.calls.length > 0);
+  assert.ok(h.calls.every((u) => u.startsWith('https://geofon.gfz.de/')), h.calls.join(' '));
+  assert.deepEqual(Object.keys(ctx.idx.attempts), ['geofon:2022-12']);
+});
+
+test('fetch: an empty month right before a month with rows is named in the report (catalogue start or a service answering empty)', { skip: !hasZstd && 'zstd not installed' }, async () => {
+  const era: HistoryEra = { ...ERA, sources: ['geofon'] };
+  const ctx = ctxOf({ cfg: { ...CFG, eras: [era] } });
+  // 2022-12 is already fetched with rows; 2022-11 answers 204.
+  ctx.idx.raw.push({
+    source: 'geofon', period: '2022-12', tag: 'history-2022', asset: 'raw-geofon-2022-12.ndjson.zst', url: 'x', sha256: 'x', bytes: 1, rows: 120,
+    provider_count: null, start: '2022-12-01T00:00:00.000Z', end: '2023-01-01T00:00:00.000Z', fetch_min_magnitude: null, fetched_at: NOW_ISO,
+  });
+  const h = http(() => ({ status: 204, body: '', latencyMs: 1, retryAfterMs: null }));
+  ctx.fetchOptions = h.fetchOptions;
+  await fetchUnits(ctx, 4);
+  assert.deepEqual(ctx.idx.raw.map((r) => [r.period, r.rows]), [['2022-12', 120], ['2022-11', 0]]);
+  assert.deepEqual(ctx.report.empty_after_rows, ['geofon:2022-11: no rows, 120 in 2022-12']);
+});
+
+test('dry-run store: reads published assets, writes only locally, never shadows a published name', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'history-dryrun-'));
+  const published = new LocalStore(join(dir, 'published'));
+  const local = new LocalStore(join(dir, 'local'));
+  const src = join(dir, 'raw-usgs-2022-12.ndjson.zst');
+  writeFileSync(src, 'published bytes');
+  published.upload('history-2022', src);
+  const store = new DryRunStore(local, published);
+  assert.deepEqual(store.list('history-2022').map((a) => a.name), ['raw-usgs-2022-12.ndjson.zst']);
+  const back = join(dir, 'back');
+  store.download('history-2022', 'raw-usgs-2022-12.ndjson.zst', back);
+  assert.equal(readFileSync(back, 'utf8'), 'published bytes');
+  assert.throws(() => store.upload('history-2022', src), /is published/);
+  const mine = join(dir, 'raw-emsc-2022-12.ndjson.zst');
+  writeFileSync(mine, 'local bytes');
+  store.ensureRelease('history-2022');
+  store.upload('history-2022', mine);
+  assert.deepEqual(store.list('history-2022').map((a) => a.name), ['raw-emsc-2022-12.ndjson.zst', 'raw-usgs-2022-12.ndjson.zst']);
+  assert.deepEqual(published.list('history-2022').map((a) => a.name), ['raw-usgs-2022-12.ndjson.zst'], 'nothing reached the published store');
 });

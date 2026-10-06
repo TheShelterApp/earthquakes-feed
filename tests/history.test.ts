@@ -19,7 +19,7 @@ import {
   nextRawGeneration,
   rawAssetName,
 } from '../src/history-config.js';
-import { type HttpAnswer, fetchRange, historyQueryUrl, parseRetryAfter } from '../src/history-fetch.js';
+import { COUNT_SERVICE_PROVIDERS, type HttpAnswer, fetchRange, historyQueryUrl, parseRetryAfter } from '../src/history-fetch.js';
 import { type HistoryIndex, emptyIndex, indexText, newerNeighbour, parseIndex, pendingUnits, periodsToSeal } from '../src/history-index.js';
 import { LocalStore } from '../src/history-store.js';
 import { verifyEdition } from '../src/history-verify.js';
@@ -241,6 +241,25 @@ test('history fetch: a Retry-After over the 2-minute cap ends the attempt at onc
   }
   assert.equal(f.calls.length, 1);
   assert.ok(!f.sleeps.some((ms) => ms >= 5_000));
+});
+
+test('history fetch: EMSC is counted too, in its own json format (its count answers 500 for geojson)', () => {
+  const c = decodeURIComponent(historyQueryUrl(emsc, S, E, { limit: 20000, minMagnitude: null, count: true }));
+  assert.equal(c, 'https://www.seismicportal.eu/fdsnws/event/1/count?format=json&starttime=2022-12-01T00:00:00&endtime=2023-01-01T00:00:00');
+  assert.ok(COUNT_SERVICE_PROVIDERS.has('emsc') && COUNT_SERVICE_PROVIDERS.has('usgs') && !COUNT_SERVICE_PROVIDERS.has('geofon'));
+});
+
+test('history fetch: an unreadable count answer fails the range (a source failure, asked again next run)', async () => {
+  const r = await fetchRange(emsc, S, E, {
+    limit: 20000,
+    minMagnitude: null,
+    spacingMs: 0,
+    timeoutMs: 1000,
+    fetcher: async () => ({ status: 200, body: '<html>maintenance</html>', latencyMs: 1, retryAfterMs: null }),
+    sleep: async () => {},
+  });
+  assert.equal(r.ok, false);
+  assert.match(!r.ok ? r.error : '', /count .* unreadable answer/);
 });
 
 test('history fetch: the count URL drops limit/orderby and the query keeps the provider params', () => {

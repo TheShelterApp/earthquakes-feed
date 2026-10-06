@@ -151,7 +151,7 @@ test('comcat siblings: the heal folds an exact-id pair only when both events are
   // (nc…) fold by identity there, but never with an event below the hot floor (the heal's scope; the ingest path keeps
   // its own rule). Two separately minted events, 30 km apart (beyond every window), straddling the floor by 5 s.
   const floor = NOW - HOT_WINDOW_DAYS * 86_400_000;
-  const report = (provider: string, id: string, eventTimeMs: number, lat: number, fields: Record<string, unknown>): RawObs => ({
+  const report = (provider: string, id: string, eventTimeMs: number, lat: number, fields: RawObs['fields']): RawObs => ({
     provider, providerEventId: id, eventTimeMs, providerUpdatedMs: null, status: 'automatic', lat, lon: -121.5, depth: 5,
     mag: 2.1, magType: 'md', place: null, knownAliasIds: [], fields,
   });

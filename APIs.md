@@ -579,7 +579,8 @@ adapters (`afad`, `kagsr`, `imo`, `csn`, …) have no history query yet and are 
 2000-01-01: 270 months, walked newest first after the pilot's edition 2, one edition per month. Some catalogues start
 later than 2000 (measured 2026-10-06 in the sampled months: NOA's `eida2` has no rows before 2011-03, GEOFON none in
 2000-01 and 2004-12, IPGP none before 2018 and a dozen a month in 2018–2019, USP a few a month before 2016); their
-earlier months are empty raw assets, and the first of them is named in the run's `empty_after_rows`. Projection from
+earlier months are empty raw assets; the first of them is kept once the source still answers rows of the newer month
+(*Pace* below) and is named in the run's `empty_after_rows`. Projection from
 the round-15 measurements (ComCat's and EMSC's monthly counts for all 270 months, INGV fetched for all 270, the other 14
 sources measured in 35 months and interpolated, about ±30 % for those):
 

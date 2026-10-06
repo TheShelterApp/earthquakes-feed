@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { CORRECTION_EPOCH, DATA_DIR, EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS, SWEEP_EPOCH, dataPaths } from './config.js';
-import { appendObservations, earliestEventMapDay, loadState, saveEventMap, saveMeta } from './bitemporal.js';
+import { HISTORY_FILE_WARN_BYTES, appendObservations, earliestEventMapDay, loadState, saveEventMap, saveMeta } from './bitemporal.js';
 import { onboardStep } from './onboard.js';
 import { correctedEpoch, correctionFloor, runCorrection } from './correction.js';
 import { Resolver } from './dedup.js';
@@ -314,7 +314,12 @@ async function main(): Promise<void> {
     sweeps,
   };
   saveEventMap(DATA_DIR, state.eventMap);
-  saveMeta(DATA_DIR, state.head, state.watermarks, status);
+  const history = saveMeta(DATA_DIR, state.head, state.watermarks, status);
+  if (history.historyBytes > HISTORY_FILE_WARN_BYTES) {
+    console.warn(
+      `::warning title=Status history size::${relative(DATA_DIR, history.historyFile)} is ${(history.historyBytes / 1e6).toFixed(1)} MB, over ${HISTORY_FILE_WARN_BYTES / 1e6} MB: every aggregate commit rewrites it and GitHub rejects a pushed file above 100 MiB (APIs.md Run logs)`,
+    );
+  }
   saveActivity(paths.providerActivity, activity);
   saveSweepCursors(DATA_DIR, nextCursors(cursors, sweepRuns));
 

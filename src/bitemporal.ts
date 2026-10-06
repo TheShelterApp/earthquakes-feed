@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { EXTRA_CANON_KEYS, NULLABLE_STD_KEYS, mergeCanonical } from './canonical.js';
 import { reviewStatusOfNode, reviewStatusOfRow } from './review-status.js';
@@ -149,8 +149,40 @@ export function readObservations(root: string, fromDay: string): Observation[] {
   return out.sort((a, b) => a.seq - b.seq);
 }
 
-/** head + watermarks + status + status/history (event_map is written separately). */
-export function saveMeta(root: string, head: Head, watermarks: Watermarks, status: unknown): void {
+/** The per-provider fields status.json carries for the current run only, left out of its status/history line. */
+export const HISTORY_OMITTED_PROVIDER_FIELDS = ['newest_origin', 'tls_leaf'] as const;
+
+/** A status/history month file past this size draws a warning (GitHub warns on a pushed file above 50 MiB and rejects
+ *  one above 100 MiB; every aggregate commit rewrites the current month's file). */
+export const HISTORY_FILE_WARN_BYTES = 45_000_000;
+
+/**
+ * The status/history line of a run (FEED-R15-1, round 16): status.json without `providers.<id>.newest_origin` and
+ * `providers.<id>.tls_leaf`. Both serve the current run only: the frozen check reads the newest origins of the run's
+ * own answers (a frozen source keeps its `newest_origin` in the top-level `frozen`), and `tls_leaf` repeats the
+ * top-level `tls_leaves`, which the line keeps. With them a line grew from ~4.4 KB to ~6.5 KB (a month file of
+ * ~54 MB at 12 runs an hour). Everything else passes through untouched; a status without `providers` is returned as is.
+ */
+export function historyStatus(status: unknown): unknown {
+  if (status == null || typeof status !== 'object' || Array.isArray(status)) return status;
+  const providers = (status as { providers?: unknown }).providers;
+  if (providers == null || typeof providers !== 'object' || Array.isArray(providers)) return status;
+  const slim: Record<string, unknown> = {};
+  for (const [id, entry] of Object.entries(providers as Record<string, unknown>)) {
+    if (entry == null || typeof entry !== 'object' || Array.isArray(entry)) {
+      slim[id] = entry;
+      continue;
+    }
+    const rest: Record<string, unknown> = { ...(entry as Record<string, unknown>) };
+    for (const k of HISTORY_OMITTED_PROVIDER_FIELDS) delete rest[k];
+    slim[id] = rest;
+  }
+  return { ...(status as Record<string, unknown>), providers: slim };
+}
+
+/** head + watermarks + status + status/history (event_map is written separately). status.json is the full status; the
+ *  history line is `historyStatus(status)`. Returns the history file and its size after the append. */
+export function saveMeta(root: string, head: Head, watermarks: Watermarks, status: unknown): { historyFile: string; historyBytes: number } {
   const p = dataPaths(root);
   ensureDir(p.head);
   writeFileSync(p.head, JSON.stringify(head, null, 2) + '\n');
@@ -159,7 +191,8 @@ export function saveMeta(root: string, head: Head, watermarks: Watermarks, statu
   const now = new Date(head.ingest_time || Date.now());
   const histFile = join(p.statusHistoryDir, `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}.ndjson`);
   ensureDir(histFile);
-  appendFileSync(histFile, JSON.stringify(status) + '\n');
+  appendFileSync(histFile, JSON.stringify(historyStatus(status)) + '\n');
+  return { historyFile: histFile, historyBytes: statSync(histFile).size };
 }
 
 // --- Feature <-> node (lossless round-trip, P1: enables identity-from-partitions) ---

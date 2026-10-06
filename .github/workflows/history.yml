@@ -9,12 +9,12 @@ name: history
 # Off unless providers/history.json says `"enabled": true` (then the walk runs hourly, a few source
 # months per run, one request at a time per host).
 # The heartbeat Worker dispatches this workflow hourly at :26 with no inputs (heartbeat/src/worker.js), because GitHub
-# delivers this repository's hourly crons a few times a day (the :29 cron below was not delivered once between
-# 2026-10-01 16:54 and 21:00 UTC); the cron stays as the fallback when the Worker is down. A dispatched run goes through
-# the same gate as a scheduled one: with `enabled` false it stops after the first step.
+# delivers this repository's hourly crons a few times a day (the :29 cron this file had was not delivered once between
+# 2026-10-01 16:54 and 21:00 UTC). It has no cron of its own since round 22: each delivery started a second run in the
+# hour beside the Worker's, in the group first-solutions' collect job shares (R16-FOLLOWUPS (7)). The fallback for a
+# Worker outage is walk-fallback.yml, which dispatches this workflow as the Worker does, and only once the Worker has
+# missed two ticks in a row. With `enabled` false a run stops after the first step.
 on:
-  schedule:
-    - cron: '29 * * * *'
   workflow_dispatch:
     inputs:
       max_units:

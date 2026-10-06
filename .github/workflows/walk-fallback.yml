@@ -1,0 +1,64 @@
+name: walk-fallback
+
+# The fallback of the two hourly walks, history.yml and first-solutions.yml (R16-FOLLOWUPS (7), round 22;
+# scripts/walk-fallback.mjs). The heartbeat Worker dispatches them (history at :26, first-solutions at :48 with
+# tick=1; heartbeat/src/worker.js) and they take turns in the concurrency group `earthquakes-feed-history`. They have
+# no cron of their own: GitHub delivered each walk's hourly cron about 4 times a day at whatever minute its scheduler
+# reached it, and each delivery started a second run in the hour while the Worker had dispatched the first, so a
+# first-solutions run held the group across history's turn (10 of 48 heartbeat history runs waited 2.2–31 minutes in
+# the 48 hours to 2026-10-06 20:20 UTC, and three runs were cancelled while they waited).
+#
+# Each cron below stands in for one walk. A run only reads the walk's newest workflow_dispatch run and dispatches the
+# walk, as the Worker does, when that run is more than two hours and five minutes old: the Worker has missed two ticks
+# in a row. It joins neither walk's group, so a run that finds nothing to do (nearly every run) never waits behind a
+# walk or cancels one. Manual check: gh workflow run walk-fallback.yml -f workflow=history.yml (dry run by default).
+on:
+  schedule:
+    - cron: '29 * * * *' # history.yml
+    - cron: '50 * * * *' # first-solutions.yml
+  workflow_dispatch:
+    inputs:
+      workflow:
+        description: 'The walk to check'
+        type: choice
+        options: [history.yml, first-solutions.yml]
+        required: true
+      dry_run:
+        description: 'Dry run: decide and print, dispatch nothing'
+        type: boolean
+        default: true
+
+concurrency:
+  group: earthquakes-feed-walk-fallback
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  fallback:
+    runs-on: ubuntu-24.04
+    # Two API calls and at most 3 read attempts (5 s and 10 s apart).
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # Read the walk's runs; dispatch it (a workflow_dispatch event from the GITHUB_TOKEN starts a run).
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .nvmrc
+            scripts/walk-fallback.mjs
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Dispatch the walk if the heartbeat Worker missed it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SCHEDULE: ${{ github.event.schedule }}
+          WORKFLOW: ${{ inputs.workflow }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+        run: node scripts/walk-fallback.mjs

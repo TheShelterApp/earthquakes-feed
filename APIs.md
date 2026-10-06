@@ -606,22 +606,23 @@ whatever changed in it.
 `scripts/repo-growth/replay.sh` measures that locally: it pushes real `data` commits one by one into a bare repository
 that keeps every pushed pack and runs `git repack -d --geometric=2` after every 12 pushes (about hourly), then
 attributes the growth by path (`attribute.sh`; `relayout.py` re-creates a range of commits from a shallow checkout,
-optionally in another layout). Three days of commits, 24 hours each, ending 10-04, 10-05 and 10-06 11:47 UTC: 45, 52
-and 88 MB (GitHub: 64 MB for the day to 10-05 12:07, 79 MB to 10-06 11:07). After an all-into-one repack the day to
-10-06 holds 50 MB of day partitions, 32 MB of event_map shards, 1 MB of status history, 1 MB of the observation log and
-1 MB of everything else (trees, commits, indexes, change log). The rate follows the number of distinct large files
-rewritten per hour, which grew from 2.8 partitions an hour on 10-03 to 4.8 on 10-05/06: more events landed in, or were
-revised in, days 2–9 days old (43 rewrites of such partitions on 10-03, 216 on 10-05/06: ComCat's late publications,
-ENSN and GA back with older events, late NRCan and GeoSphere events, revisions). Rounds 13–16 did not add commits
-(derive committed separately before round 14 too), and the files they added (`provider_activity.json`,
-`live_silent.json`, `correction.json`) or grew (`history.json`, about 3 commits a day) are under 0.1 MB a day; the
-live index and the detail hours of round 15 are Pages-only.
+optionally in another layout). Eight days of commits, 24 hours each, ending 09-29 … 10-06 at 11:47 UTC: 77, 46, 73, 80,
+47, 45, 52 and 88 MB, 63 MB a day on average (GitHub: 64 MB for the day to 10-05 12:07, 79 MB to 10-06 11:07). After an
+all-into-one repack the day to 10-06 holds 50 MB of day partitions, 32 MB of event_map shards, 1 MB of status history, 1
+MB of the observation log and 1 MB of everything else (trees, commits, indexes, change log). The rate follows the number
+of distinct large files rewritten per hour, which grew from 2.8 partitions an hour on 10-03 to 4.8 on 10-05/06: more
+events landed in, or were revised in, days 2–9 days old (43 rewrites of such partitions on 10-03, 216 on 10-05/06:
+ComCat's late publications, ENSN and GA back with older events, late NRCan and GeoSphere events, revisions). Rounds
+13–16 did not add commits (derive committed separately before round 14 too), and the files they added
+(`provider_activity.json`, `live_silent.json`, `correction.json`) or grew (`history.json`, about 3 commits a day) are
+under 0.1 MB a day; the live index and the detail hours of round 15 are Pages-only.
 
 Round 17 (LANE G) changes what the commits rewrite, never what consumers read, and rewrites no history:
 
 - The status history is written per day (*Run logs*): a commit rewrites a file of at most about 1.3 MB instead of the
-  month file. Replayed, the three days grow 6–14 % less (41.6, 48.8 and 76.0 MB); with the month file as large as it is
-  late in a month (31 MB), 107 MB a day becomes 79.
+  month file. Replayed, the eight days grow 11 % less (56 MB a day on average): 20–26 % on the last days of September,
+  when the month file was 23–24 MB (77 MB became 57 on 09-28/29), 1–14 % in early October. With the October file padded
+  to 31 MB (as on about 10-24), 107 MB a day becomes 79.
 
 ## Deep history (before 2023-07-06)
 

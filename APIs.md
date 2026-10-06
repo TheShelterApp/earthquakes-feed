@@ -1199,7 +1199,8 @@ AusPass ids of 2026-07-05 → 07-28 (while the feed read GA's RSS) are all among
 listed 5 more); the 12 ids both sources gave the feed (origins 2026-09-29/30) are 12 events holding both rows. The two
 solutions of one id can differ, one source holding an earlier one: of the 214 July pairs, GA's RSS solution and
 AusPass's today are 0.05 km apart at the median, 63 more than 1 km and 6 more than 10 km (up to 31.7 km, an M5.0 south
-of the Kermadec Islands). AusPass imports GA's solutions in batches days after the origin, and the feed asks it for the
+of the Kermadec Islands); GA's FIRST RSS solution of those ids was 2.3 km from AusPass's at the median, 30 more than
+10 km and up to 83.4 km (an M5.0 off Honshu, revised to AusPass's position by the RSS the next day; review). AusPass imports GA's solutions in batches days after the origin, and the feed asks it for the
 last 2 days, so few of its events reach the feed through it: 18 ids since 2026-07-05, against 689 AusPass events of
 2026-07-05 → 09-30. GA's RSS is the source that carries GA's catalogue in time (silent from 2026-07-30 until the parser
 fix of 2026-10-06, issue #59; of the 71 Australian events of 2026-07-05 → 09-30 with neither row, 65 reached the feed

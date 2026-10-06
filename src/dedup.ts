@@ -45,7 +45,7 @@ import { finalsIndex, isPreliminary, supersedingFinal } from './preliminary.js';
 import { isCoordinateless } from './quality.js';
 import type { EventNode, Extra, Op, ProvenanceRow, ProviderConfig, RawObs } from './types.js';
 import { deterministicFeedId } from './ulid.js';
-import { comcatIdOf, knownAliasIdsOf, nativeIdOfComcat, statusRank } from './util.js';
+import { catalogueOf, comcatIdOf, knownAliasIdsOf, mirrorKeys, nativeIdOfComcat, statusRank } from './util.js';
 
 const REVIEWED_DT_HARD_MS = 30_000;
 /** How far lateTwin looks for the event a late report duplicates: the widest identity window. */
@@ -232,10 +232,11 @@ export class Resolver {
     return raw.knownAliasIds.some((a) => node.aliases.includes(a)) || node.provenance.some((r) => Resolver.authoredCopy(raw, r) || Resolver.authoredCopy(r, raw));
   }
 
-  /** Node-to-node form of sharesIdentity: one node's own report names the other's id (USGS `ids`), or one node holds
-   *  an authored copy of a row of the other. */
+  /** Node-to-node form of sharesIdentity: one node's own report names the other's id (USGS `ids`), one node holds the
+   *  catalogue mirror's twin of a row of the other (config CATALOGUE_MIRRORS), or one node holds an authored copy of a
+   *  row of the other. */
   private static nodesShareIdentity(a: EventNode, b: EventNode): boolean {
-    const named = (n: EventNode): string[] => n.provenance.flatMap((r) => knownAliasIdsOf(r.provider, r.nativeId, r.fields));
+    const named = (n: EventNode): string[] => n.provenance.flatMap((r) => [...knownAliasIdsOf(r.provider, r.nativeId, r.fields), ...mirrorKeys(r.provider, r.nativeId)]);
     if (named(a).some((k) => b.aliases.includes(k)) || named(b).some((k) => a.aliases.includes(k))) return true;
     return a.provenance.some((ra) => b.provenance.some((rb) => Resolver.authoredCopy(ra, rb) || Resolver.authoredCopy(rb, ra)));
   }
@@ -321,12 +322,15 @@ export class Resolver {
    *  DIFFERENT native id means its pipeline considers these distinct events — never merge —
    *  unless the provider itself links the two ids (USGS `ids`, read from either side: the
    *  report's own list, or a node row that names the report) or the two rows are one solution
-   *  under two ids (sameSolution) or one quake re-located under a new id (revisedIdPair). */
+   *  under two ids (sameSolution) or one quake re-located under a new id (revisedIdPair). "The same provider" is the
+   *  same catalogue (config CATALOGUE_MIRRORS, round 17): a RESIF report is distinct from a node holding RéNaSS's row of
+   *  another id, as from one holding RESIF's. */
   private sameProviderDistinct(raw: RawObs, node: EventNode): boolean {
     const key = `${raw.provider}:${raw.providerEventId}`;
+    const catalogue = catalogueOf(raw.provider);
     return node.provenance.some(
       (r) =>
-        r.provider === raw.provider &&
+        catalogueOf(r.provider) === catalogue &&
         r.nativeId !== raw.providerEventId &&
         !raw.knownAliasIds.includes(`${r.provider}:${r.nativeId}`) &&
         !knownAliasIdsOf(r.provider, r.nativeId, r.fields).includes(key) &&
@@ -339,7 +343,8 @@ export class Resolver {
    *  different native ids blocks the fold, unless its own `ids` link them or the two rows
    *  are one re-published solution. Two ComCat rows are linked when any ComCat row of either node lists the other's id
    *  (round 15): every id a ComCat event lists is that one event, so Utah's uu80158431 and NEIC's us6000tzcn, both
-   *  listed by Nevada's nn00925220, are one quake although neither lists the other. */
+   *  listed by Nevada's nn00925220, are one quake although neither lists the other. A provider is its catalogue here too
+   *  (config CATALOGUE_MIRRORS): RESIF's row in one node and RéNaSS's row of another id in the other block the fold. */
   private static nodesDistinct(a: EventNode, b: EventNode): boolean {
     const comcatNamed = (n: EventNode): Set<string> => new Set(n.provenance.flatMap((r) => comcatIdsNamed(r.provider, r.nativeId, r.fields)));
     let namedA: Set<string> | null = null;
@@ -347,7 +352,7 @@ export class Resolver {
     for (const ra of a.provenance) {
       const linked = knownAliasIdsOf(ra.provider, ra.nativeId, ra.fields);
       for (const rb of b.provenance) {
-        if (rb.provider !== ra.provider || rb.nativeId === ra.nativeId) continue;
+        if (catalogueOf(rb.provider) !== catalogueOf(ra.provider) || rb.nativeId === ra.nativeId) continue;
         if (linked.includes(`${rb.provider}:${rb.nativeId}`)) continue;
         if (ra.provider === COMCAT_PROVIDER && ((namedA ??= comcatNamed(a)).has(rb.nativeId) || (namedB ??= comcatNamed(b)).has(ra.nativeId))) continue;
         if (knownAliasIdsOf(rb.provider, rb.nativeId, rb.fields).includes(`${ra.provider}:${ra.nativeId}`)) continue;
@@ -523,7 +528,8 @@ export class Resolver {
   }
 
   /** The id half of findExisting: the report's own alias, then the ids it names (USGS `ids`, the ComCat id of a
-   *  COMCAT_ID_PROVIDERS report), then, for a ComCat report, the COMCAT_ID_PROVIDERS rows of the ComCat ids it names
+   *  COMCAT_ID_PROVIDERS report) and its catalogue mirror's twin (`renass:<id>` for a RESIF report and back, config
+   *  CATALOGUE_MIRRORS), then, for a ComCat report, the COMCAT_ID_PROVIDERS rows of the ComCat ids it names
    *  (NCEDC 75438707 for nc75438707, PF-5d), then, for a COMCAT_ID_PROVIDERS report, the live node whose ComCat row
    *  lists its ComCat id. */
   private findById(raw: RawObs): string | null {
@@ -535,7 +541,7 @@ export class Resolver {
     };
     const hit = accept(this.alias.get(key));
     if (hit) return hit;
-    for (const alt of [...raw.knownAliasIds, ...this.comcatIdRowKeys(raw)]) {
+    for (const alt of [...raw.knownAliasIds, ...mirrorKeys(raw.provider, raw.providerEventId), ...this.comcatIdRowKeys(raw)]) {
       const h = accept(this.alias.get(alt));
       if (h) {
         this.alias.set(key, h);
@@ -693,6 +699,8 @@ export class Resolver {
       if (this.isDense(node.lat, node.lon)) continue;
       const providers = Resolver.providersOf(node);
       if (!Resolver.moderateProviders([raw.provider], providers)) continue;
+      // A catalogue mirror's row of another id (config CATALOGUE_MIRRORS) is that catalogue's other quake.
+      if (this.sameProviderDistinct(raw, node)) continue;
       const tmd = Resolver.tmdPair([raw.provider], providers);
       const d = haversineKm(raw.lat, raw.lon, node.lat, node.lon);
       if (this.rejectModerate(raw, node, d, tmd)) continue;

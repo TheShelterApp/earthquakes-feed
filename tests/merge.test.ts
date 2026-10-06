@@ -91,7 +91,10 @@ test('fixture: the Loyalty Islands M7.0 (21 log lines, 12 provider ids) is one l
   assert.equal(survivor.feedId, 'efd_01M3D76ES08HGFRSA05T71J8ZF');
   const loser = [...map.values()].find((n) => n.state === 'superseded')!;
   assert.equal(loser.feedId, 'efd_01M3D77C2GZTT65JP6GD75YXXD');
-  assert.ok(loser.provenance.every((r) => r.provider === 'renass'), 'the frozen copy is what the loser was');
+  // Round 17 (config CATALOGUE_MIRRORS): RESIF's report of RéNaSS's id joins the event of its twin by id, and with
+  // RESIF's revised solution that event folds at once (seq 179969, one line before RéNaSS's own revision did it): the
+  // frozen copy is RéNaSS's one id at its two sources.
+  assert.deepEqual(loser.provenance.map((r) => `${r.provider}:${r.nativeId}`).sort(), ['renass:fr2026urwokh', 'resif:fr2026urwokh'], 'the frozen copy is what the loser was');
   assert.ok(survivor.revision > loser.revision - 1, 'both revisions moved');
 });
 

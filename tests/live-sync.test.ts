@@ -7,11 +7,13 @@ import { test } from 'node:test';
 import { Resolver } from '../src/dedup.js';
 import {
   LIVE_DELTAS,
+  LIVE_FEATURES_FORMAT,
   deltaBoundViolations,
   deltaFromSeq,
   detectSilentChanges,
   liveWindowDays,
   nextSilentLog,
+  sha256Hex,
   writeLiveIndex,
   type LiveIndex,
 } from '../src/live-sync.js';
@@ -269,4 +271,22 @@ test('the silent log keeps the newest head per id and drops what no delta can ne
     { id: 'efd_c', head_before: 60, at: 3 },
   ]);
   assert.deepEqual(nextSilentLog(log, [], 60, 4, 55).map((e) => e.id), ['efd_a', 'efd_c']);
+});
+
+test('the index names the compact feature format; a change to that serialization comes with a LIVE_FEATURES_FORMAT bump', () => {
+  const s = world();
+  const p = publish(s, T0);
+  try {
+    assert.equal(p.index.features_format, LIVE_FEATURES_FORMAT);
+  } finally {
+    rmSync(p.dir, { recursive: true, force: true });
+  }
+  // A tripwire: the compact features of this fixed world, as the day files and deltas publish them. A change here moves
+  // no seq, so delta clients would keep the old serialization of every event they hold: bump LIVE_FEATURES_FORMAT
+  // (clients then re-read every day) and pin the new digest under it.
+  const pinned: Record<number, string> = {
+    1: '85fdce134bb4fdd0da839f93760bc658f00aa5a42317273dce42c982a9183310',
+  };
+  const feats = summaryFeats([...s.map.values()], T0).sort((a, b) => a.timeMs - b.timeMs);
+  assert.equal(sha256Hex(JSON.stringify(feats.map((f) => f.feature))), pinned[LIVE_FEATURES_FORMAT]);
 });

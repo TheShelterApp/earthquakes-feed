@@ -66,6 +66,13 @@ export const LIVE_DELTAS: ReadonlyArray<{ name: string; seconds: number }> = [
 ];
 export const LIVE_DIR = 'live';
 export const LIVE_INDEX_PATH = `v1/${LIVE_DIR}/index.json`;
+/**
+ * The serialization of the compact features the day files and deltas carry. Bump it with any change to what
+ * `nodeToFeature(..., { compact: true })` writes (a new field, another format of one): such a change moves no seq, so a
+ * delta never carries it to the events a client already holds, and a client that holds the window in another format
+ * re-reads every day instead (APIs.md, Live index). 1 = round 15.
+ */
+export const LIVE_FEATURES_FORMAT = 1;
 
 export interface LiveDayEntry {
   date: string;
@@ -100,6 +107,8 @@ export interface LiveIndex {
   /** Live events over the window's days. */
   count: number;
   window_days: number;
+  /** LIVE_FEATURES_FORMAT: a client holding the window in another one re-reads every day. */
+  features_format: number;
   days: LiveDayEntry[];
   deltas: LiveDeltaEntry[];
 }
@@ -324,6 +333,7 @@ export function writeLiveIndex(
     head_seq: headSeq,
     count: dayEntries.reduce((s, d) => s + d.count, 0),
     window_days: LIVE_WINDOW_DAYS,
+    features_format: LIVE_FEATURES_FORMAT,
     days: dayEntries,
     deltas: deltaEntries,
   };

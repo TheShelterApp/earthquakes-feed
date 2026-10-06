@@ -127,6 +127,10 @@ because `metadata.generated` does. The index lists:
   `feed.ingest_seq` is above `from_seq`: everything that changed — a new event, a revision, a fold, a withdrawal —
   since about `window_seconds` ago. `count` counts every feature, retired markers included.
 - `head_seq`: the knowledge clock all of them reflect (the same in every delta).
+- `features_format`: the serialization of the compact features (1 since 2026-10). It changes when the feed changes what
+  a compact feature holds (a new field, another format of one); such a change moves no seq, so no delta carries it to
+  the events you already hold: when it differs from the one you hold the window in, drop your cursor and fingerprints
+  and re-read every day (step 3).
 
 How to use it: keep the features of the days you fetched and the `head_seq` you got them at (your cursor).
 

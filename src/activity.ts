@@ -29,10 +29,28 @@ export interface ActivityRecord {
   lastNonEmptyAt: number | null;
   /** ms epoch from which the record counts (its first run, or the oldest status-history line it was seeded from). */
   sinceMs: number;
-  /** Pinned sources (tlsIntermediates): the leaf certificate last read from the host, kept so a run whose handshake
-   *  fails (an expired leaf) still shows when it expired. */
-  tlsLeaf?: { notAfterMs: number; issuer: string | null; subject: string | null; seenAt: number };
+  /** Round 14 #63 kept only the last leaf read; a record that still has it is moved into `tlsLeaves` by the next update. */
+  tlsLeaf?: KeptLeaf;
+  /** Pinned sources (tlsIntermediates): every leaf certificate the host presented in the last TLS_LEAF_MEMORY_MS, one per
+   *  issuer, kept so a run whose handshake fails (an expired leaf) still shows when it expired. One host can present
+   *  several: PHIVOLCS's name resolves either to its own server (a GlobalSign leaf) or to CloudFront (an Amazon leaf)
+   *  depending on the resolver, and consecutive runs on 2026-10-06 read 192.9, 44.1 and 192.9 days left. */
+  tlsLeaves?: KeptLeaf[];
 }
+
+/** A leaf certificate a pinned host presented, and when it was last read. */
+export interface KeptLeaf {
+  notAfterMs: number;
+  issuer: string | null;
+  subject: string | null;
+  seenAt: number;
+}
+
+/** How long a leaf no longer presented is still reported: a week, so a leaf served by only some of a host's addresses
+ *  stays in view between the runs that reach it, and an expired one that fails every handshake stays in view a week. */
+export const TLS_LEAF_MEMORY_MS = 7 * 86_400_000;
+
+const leafKey = (l: Pick<KeptLeaf, 'issuer' | 'subject'>): string => l.issuer ?? l.subject ?? '';
 export type ActivityIndex = Record<string, ActivityRecord>;
 
 export interface SilentEntry {
@@ -54,7 +72,8 @@ export function activityBudgetHours(p: Pick<ProviderConfig, 'liveActive' | 'acti
 const hasRows = (s: Pick<ProviderStatus, 'ok' | 'events_returned'>): boolean => s.ok && (s.events_returned ?? 0) > 0;
 
 /** This run's answers into the index: a source with rows is active now; a new source starts its clock now. A leaf
- *  certificate read in this run (pinned sources) replaces the one kept. */
+ *  certificate read in this run (pinned sources) replaces the kept one of the same issuer (a renewal under the same
+ *  intermediate), joins those of other issuers, and leaves unseen for TLS_LEAF_MEMORY_MS are dropped. */
 export function updateActivity(
   prev: ActivityIndex,
   statuses: Record<string, Pick<ProviderStatus, 'ok' | 'events_returned'>>,
@@ -66,11 +85,27 @@ export function updateActivity(
     const rec = next[id] ?? { lastNonEmptyAt: null, sinceMs: nowMs };
     next[id] = hasRows(s) ? { ...rec, lastNonEmptyAt: nowMs } : rec;
   }
+  for (const [id, rec] of Object.entries(next)) {
+    const leaf = leaves[id];
+    const kept = rec.tlsLeaves ?? (rec.tlsLeaf ? [rec.tlsLeaf] : []);
+    if (!leaf && !kept.length && !rec.tlsLeaf) continue;
+    const seen = leaf ? { ...leaf, seenAt: nowMs } : null;
+    const list = [...kept.filter((l) => !seen || leafKey(l) !== leafKey(seen)), ...(seen ? [seen] : [])]
+      .filter((l) => nowMs - l.seenAt <= TLS_LEAF_MEMORY_MS)
+      .sort((a, b) => a.notAfterMs - b.notAfterMs || leafKey(a).localeCompare(leafKey(b)));
+    const { tlsLeaf: _legacy, tlsLeaves: _kept, ...rest } = rec;
+    next[id] = list.length ? { ...rest, tlsLeaves: list } : rest;
+  }
   for (const [id, leaf] of Object.entries(leaves)) {
-    const rec = next[id] ?? { lastNonEmptyAt: null, sinceMs: nowMs };
-    next[id] = { ...rec, tlsLeaf: { ...leaf, seenAt: nowMs } };
+    if (!next[id]) next[id] = { lastNonEmptyAt: null, sinceMs: nowMs, tlsLeaves: [{ ...leaf, seenAt: nowMs }] };
   }
   return next;
+}
+
+/** The leaf to report for a source: the one that expires first among those it presented lately (undefined: none). */
+export function soonestLeaf(rec: ActivityRecord | undefined): KeptLeaf | undefined {
+  const list = rec?.tlsLeaves ?? (rec?.tlsLeaf ? [rec.tlsLeaf] : []);
+  return list.reduce<KeptLeaf | undefined>((a, l) => (!a || l.notAfterMs < a.notAfterMs ? l : a), undefined);
 }
 
 /** The sources past their budget, by id (only those the registry still asks). */
@@ -155,14 +190,16 @@ export function frozenProviders(answers: Record<string, Answer>, providers: Prov
   return out;
 }
 
-/** status.json's view of a kept leaf certificate: when it expires, how many days are left now, when it was read. */
-export function tlsLeafStatus(leaf: NonNullable<ActivityRecord['tlsLeaf']>, nowMs: number): TlsLeafStatus {
+/** status.json's view of a kept leaf certificate: when it expires, how many days are left now, when it was last read,
+ *  and how many leaves the host presented lately (`leaves`, absent for one). */
+export function tlsLeafStatus(leaf: KeptLeaf, nowMs: number, leaves = 1): TlsLeafStatus {
   return {
     not_after: isoFromMs(leaf.notAfterMs),
     days_left: Math.round(((leaf.notAfterMs - nowMs) / 86_400_000) * 10) / 10,
     issuer: leaf.issuer,
     subject: leaf.subject,
     seen_at: isoFromMs(leaf.seenAt),
+    ...(leaves > 1 ? { leaves } : {}),
   };
 }
 

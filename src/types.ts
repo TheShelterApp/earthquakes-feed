@@ -168,8 +168,11 @@ export interface TlsLeafStatus {
   days_left: number;
   issuer: string | null;
   subject: string | null;
-  /** When the leaf was read: this run, or an earlier run when this one could not complete the handshake. */
+  /** When the leaf was last read: this run, or an earlier one (this run reached another of the host's leaves, or could
+   *  not complete the handshake). */
   seen_at: string;
+  /** How many leaves the host presented in the last week, when more than one (the one shown expires first). */
+  leaves?: number;
 }
 
 export interface State {

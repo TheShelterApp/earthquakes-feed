@@ -14,7 +14,9 @@ import {
   saveActivity,
   seedActivity,
   silentProviders,
+  soonestLeaf,
   tlsLeafStatus,
+  TLS_LEAF_MEMORY_MS,
   updateActivity,
 } from '../src/activity.js';
 import { isNoData } from '../src/fdsn.js';
@@ -213,20 +215,57 @@ test('frozenProviders: rows whose newest origin stands past window + frozen budg
   assert.deepEqual(Object.keys(frozenProviders({ late: { ok: true, events_returned: 4, newestOriginMs: NOW - 229 * HOUR } }, [late], NOW)), ['late']);
 });
 
-test('updateActivity: a pinned leaf read in this run replaces the kept one; a run without one keeps it', () => {
-  const prev = { tmd: { lastNonEmptyAt: NOW - HOUR, sinceMs: 0, tlsLeaf: { notAfterMs: 1, issuer: 'old', subject: 'old', seenAt: 0 } } };
+test('updateActivity: a pinned leaf read in this run replaces the kept one of its issuer; a run without one keeps it', () => {
+  // The index #63 wrote (one `tlsLeaf`) is moved into `tlsLeaves`; the renewal under the same issuer replaces it.
+  const prev = { tmd: { lastNonEmptyAt: NOW - HOUR, sinceMs: 0, tlsLeaf: { notAfterMs: 1, issuer: 'GlobalSign GCC R6 AlphaSSL CA 2025', subject: 'old', seenAt: NOW - HOUR } } };
   const leaf = { notAfterMs: Date.parse('2026-10-09T01:59:47Z'), issuer: 'GlobalSign GCC R6 AlphaSSL CA 2025', subject: '*.tmd.go.th' };
   const next = updateActivity(prev, { tmd: { ok: true, events_returned: 20 } }, NOW, { tmd: leaf });
-  assert.deepEqual(next.tmd, { lastNonEmptyAt: NOW, sinceMs: 0, tlsLeaf: { ...leaf, seenAt: NOW } });
+  assert.deepEqual(next.tmd, { lastNonEmptyAt: NOW, sinceMs: 0, tlsLeaves: [{ ...leaf, seenAt: NOW }] });
   const kept = updateActivity(next, { tmd: { ok: false } }, NOW + HOUR);
-  assert.deepEqual(kept.tmd!.tlsLeaf, { ...leaf, seenAt: NOW });
-  assert.deepEqual(tlsLeafStatus(kept.tmd!.tlsLeaf!, Date.parse('2026-10-06T00:00:00Z')), {
+  assert.deepEqual(kept.tmd!.tlsLeaves, [{ ...leaf, seenAt: NOW }]);
+  assert.deepEqual(soonestLeaf(kept.tmd), { ...leaf, seenAt: NOW });
+  assert.deepEqual(tlsLeafStatus(soonestLeaf(kept.tmd)!, Date.parse('2026-10-06T00:00:00Z')), {
     not_after: '2026-10-09T01:59:47.000Z',
     days_left: 3.1,
     issuer: 'GlobalSign GCC R6 AlphaSSL CA 2025',
     subject: '*.tmd.go.th',
     seen_at: new Date(NOW).toISOString(),
   });
+  // A source with no leaf gains no field.
+  assert.deepEqual(updateActivity({}, { usgs: { ok: true, events_returned: 5 } }, NOW).usgs, { lastNonEmptyAt: NOW, sinceMs: NOW });
+});
+
+test('updateActivity: a host that presents two leaves by turns reports the one that expires first, every run', () => {
+  // PHIVOLCS on 2026-10-06: its name resolves to its own server (GlobalSign leaf, to 2026-11-19) or to CloudFront (Amazon
+  // leaf, to 2027-04-16) by resolver; three production runs read 192.9, 44.1 and 192.9 days. Reporting the last leaf read
+  // would open and close the health issue by turns once the first nears its end.
+  const own = { notAfterMs: Date.parse('2026-11-19T05:01:03Z'), issuer: 'GlobalSign RSA OV SSL CA 2018', subject: '*.phivolcs.dost.gov.ph' };
+  const edge = { notAfterMs: Date.parse('2027-04-16T23:59:59Z'), issuer: 'Amazon RSA 2048 M04', subject: 'phivolcs.dost.gov.ph' };
+  let idx = updateActivity({}, { phivolcs: { ok: true, events_returned: 9 } }, NOW, { phivolcs: edge });
+  const reported: string[] = [];
+  for (const [i, leaf] of [own, edge, edge, own, edge].entries()) {
+    idx = updateActivity(idx, { phivolcs: { ok: true, events_returned: 9 } }, NOW + (i + 1) * 5 * 60_000, { phivolcs: leaf });
+    reported.push(soonestLeaf(idx.phivolcs)!.issuer!);
+  }
+  assert.deepEqual(reported, Array(5).fill('GlobalSign RSA OV SSL CA 2018'));
+  assert.equal(idx.phivolcs!.tlsLeaves!.length, 2);
+  const at = NOW + 30 * 60_000;
+  assert.equal(tlsLeafStatus(soonestLeaf(idx.phivolcs)!, at, idx.phivolcs!.tlsLeaves!.length).leaves, 2);
+  // Renewed under the same intermediate: the new GlobalSign leaf replaces the old at once, and the Amazon leaf (now the
+  // first to expire) is reported.
+  const renewed = { ...own, notAfterMs: Date.parse('2027-11-19T05:01:03Z') };
+  idx = updateActivity(idx, { phivolcs: { ok: true, events_returned: 9 } }, at, { phivolcs: renewed });
+  assert.equal(soonestLeaf(idx.phivolcs)!.issuer, 'Amazon RSA 2048 M04');
+  // A leaf not presented for a week is dropped: here the host no longer resolves to CloudFront.
+  const later = at + TLS_LEAF_MEMORY_MS + 60_000;
+  idx = updateActivity(idx, { phivolcs: { ok: true, events_returned: 9 } }, later, { phivolcs: renewed });
+  assert.deepEqual(idx.phivolcs!.tlsLeaves, [{ ...renewed, seenAt: later }]);
+  // An expired leaf that fails every handshake stays in view for that week, then goes (the source is failing by then).
+  idx = updateActivity(idx, { phivolcs: { ok: false } }, later + TLS_LEAF_MEMORY_MS);
+  assert.equal(idx.phivolcs!.tlsLeaves!.length, 1);
+  idx = updateActivity(idx, { phivolcs: { ok: false } }, later + TLS_LEAF_MEMORY_MS + 1);
+  assert.equal(idx.phivolcs!.tlsLeaves, undefined);
+  assert.equal(soonestLeaf(idx.phivolcs), undefined);
 });
 
 test('status v2: a frozen source keeps ok, gains frozen, and is listed in frozenProviders; tls_leaves pass through', () => {

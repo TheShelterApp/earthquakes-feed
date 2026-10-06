@@ -12,18 +12,20 @@ name: first-solutions
 # each after 31 minutes of requests); a commit job that fails anyway loses nothing: the next run's collect job takes
 # its output over.
 #
-# Off until enabled: the scheduled runs go ahead only when the repository variable FIRST_SOLUTIONS_SCHEDULE is `on`
-# (gh variable set FIRST_SOLUTIONS_SCHEDULE --body on -R TheShelterApp/earthquakes-feed); a manual dispatch always runs.
-# The heartbeat Worker dispatches this workflow hourly at :48 with `tick=1` (heartbeat/src/worker.js), because GitHub
-# delivers this repository's hourly crons about 4 times a day (backfill, derive and health each got 4 scheduled runs
-# between 2026-09-30 16:40 and 2026-10-01 16:40 UTC); the cron below is the fallback when the Worker is down.
+# Off until enabled: the hourly runs (dispatched with `tick=1`) go ahead only when the repository variable
+# FIRST_SOLUTIONS_SCHEDULE is `on` (gh variable set FIRST_SOLUTIONS_SCHEDULE --body on -R TheShelterApp/earthquakes-feed);
+# a manual dispatch always runs. The heartbeat Worker dispatches this workflow hourly at :48 with `tick=1`
+# (heartbeat/src/worker.js), because GitHub delivers this repository's hourly crons about 4 times a day (backfill, derive
+# and health each got 4 scheduled runs between 2026-09-30 16:40 and 2026-10-01 16:40 UTC). It has no cron of its own
+# since round 22: each delivery of the :50 cron this file had started a second run in the hour, whose collect job then
+# held the history group from about :20 to :52, across the deep-history walk's :26 turn (R16-FOLLOWUPS (7)). The fallback
+# for a Worker outage is walk-fallback.yml, which dispatches this workflow as the Worker does (`tick=1`), and only once
+# the Worker has missed two ticks in a row.
 on:
-  schedule:
-    - cron: '50 * * * *'
   workflow_dispatch:
     inputs:
       tick:
-        description: 'Set to 1 by the heartbeat Worker: then the run goes ahead only when FIRST_SOLUTIONS_SCHEDULE is on'
+        description: 'Set to 1 by the heartbeat Worker (and walk-fallback.yml): then the run goes ahead only when FIRST_SOLUTIONS_SCHEDULE is on'
         required: false
       days:
         description: 'One-off slice: days (2026-06-15 or 2026-06-15..2026-06-20); blank = the walk'

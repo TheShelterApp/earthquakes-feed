@@ -767,8 +767,21 @@ keeps anything: it asks the source again for a two-hour window around the newer 
 run's `report.json` `empty_after_rows` and as a warning); no row, or an error, fails the month like any other failure,
 so nothing empty is sealed while the service is down and the month is asked again next run.
 The heartbeat Worker dispatches the workflow at `:26` (GitHub delivers this repository's hourly crons only a few times
-a day; the workflow's own `:29` cron is the fallback), and a run does nothing unless `providers/history.json` has
-`enabled: true`.
+a day), and a run does nothing unless `providers/history.json` has `enabled: true`. The walk and first-solutions'
+`collect` job (dispatched at `:48`) take turns in one concurrency group, so they never ask a host at the same time: a
+history run held it 5.4–17.8 minutes (20 era-A runs, 2026-10-06), a first-solutions collect job 31.2–33.2 minutes (53
+runs), and the Worker's runs start 25–44 s after their minute, so each turn ends about 4 minutes before the other's
+begins. Neither workflow has a cron of its own (round 22, R16-FOLLOWUPS (7)): GitHub delivered each one's hourly cron 8
+times in the 48 hours to 10-06 20:20 UTC, at whatever minute it reached it, and every delivery was a second run in the
+hour. A cron-started first-solutions run queued behind the Worker's and then held the group from about `:20` to `:52`,
+across history's turn: 10 of the 48 Worker-started history runs waited 2.2–31 minutes (9 behind a cron-started or
+delayed first-solutions run, 1 behind a cron-started history run), and GitHub, which keeps one pending run or job per
+group, cancelled 3 cron-started runs while they waited. Replayed without those deliveries, the same 48 hours have no
+wait and no cancellation in the group. The fallback for a Worker outage is `walk-fallback.yml`
+(`scripts/walk-fallback.mjs`): on its `:29` and `:50` crons it reads the walk's newest `workflow_dispatch` run and
+dispatches the walk as the Worker does only when that run is more than 2 h 5 min old (two missed ticks; the Worker
+missed 1 of 48 first-solutions ticks in those 48 hours, 10-06 19:48, and a single miss costs one hour of the walk). It
+holds a group of its own, so a delivery that finds nothing to do never waits behind a walk or cancels one.
 
 **Dry runs.** `gh workflow run history.yml -f dry_run=true` (or `HISTORY_DRY_RUN=1 HISTORY_FORCE=1` locally, with
 `DATA_DIR` a copy of the `data` branch's `knowledge/index`) creates no Release, uploads nothing and commits nothing: the
@@ -891,7 +904,9 @@ longer changes. Once caught up, each run takes the newly frozen day first.
 
 **Pace.** Hourly, when the repository variable `FIRST_SOLUTIONS_SCHEDULE` is `on`: the heartbeat Worker dispatches the
 workflow at `:48` with `tick=1` (a run so dispatched goes ahead only while the variable is `on`; a manual dispatch always
-does), and the workflow's own `:50` cron is the fallback. The Worker is needed: GitHub delivered this repository's hourly
+does); `walk-fallback.yml` dispatches it the same way only after the Worker has missed two ticks in a row (the
+workflow's own `:50` cron, removed in round 22, started a second run in the hour across the deep-history walk's `:26`
+turn; see *Deep history*). The Worker is needed: GitHub delivered this repository's hourly
 crons about 4 times a day (backfill, derive and health each got 4 scheduled runs between 2026-09-30 16:40 and
 2026-10-01 16:40 UTC), which would stretch every estimate below about sixfold. The `collect` job holds no
 writer lock (it shares the deep-history walk's group, so the two never ask a host at the same time): up to 30 minutes of

@@ -108,10 +108,17 @@ test('push-data: PUSH_ATTEMPTS bounds the pushes, and the last rejection is not 
   // A hook that rejects every push: each attempt is a rejection, then a fetch and a rebase with nothing to do.
   writeFileSync(join(s.dir, 'origin.git', 'hooks', 'pre-receive'), '#!/bin/sh\necho rejected-by-hook\nexit 1\n', { mode: 0o755 });
   commit(s, s.a, 'status.json', '{"seq":2}\n', 'aggregate: seq=2');
-  const r = push(s, s.a, { PUSH_ATTEMPTS: '3' });
+  // GIT_TRACE names every git command the script runs: a fetch follows each rejected push but the last one.
+  const trace = join(s.dir, 'git-trace.log');
+  const r = push(s, s.a, { PUSH_ATTEMPTS: '3', GIT_TRACE: trace });
   assert.equal(r.status, 1);
   assert.equal((r.stderr.match(/rejected-by-hook/g) ?? []).length, 3, r.stderr);
   assert.match(r.stdout, /::error::push to data failed after 3 attempts/);
+  const commands = readFileSync(trace, 'utf8').split('\n').filter((l) => /trace: built-in: git (push|fetch)\b/.test(l));
+  assert.deepEqual(
+    commands.map((l) => /built-in: git (push|fetch)/.exec(l)![1]),
+    ['push', 'fetch', 'push', 'fetch', 'push'],
+  );
 });
 
 /**

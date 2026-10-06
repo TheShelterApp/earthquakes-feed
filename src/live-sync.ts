@@ -24,7 +24,8 @@ import { isoFromMs } from './util.js';
  *   (`feed.ingest_seq`) is above the delta's `from_seq`: everything that changed (a new event, a revision, a fold, a
  *   withdrawal) since about that long ago. A client that holds the window as of `head_seq` = c applies the smallest
  *   delta with `from_seq <= c` (upsert by `id`, remove the non-live ones) and then holds it as of the delta's
- *   `head_seq`.
+ *   `head_seq`; it does so for every new index (`generated`), even when `head_seq` did not move (see the silent
+ *   changes below).
  * - `v1/live/index.json`, the small catalog of both (`head_seq`, the days with `sha256`, the deltas with `from_seq`),
  *   rewritten every run; `manifest.json` points at it (`live`).
  *
@@ -48,7 +49,8 @@ import { isoFromMs } from './util.js';
  * Measured over origin/data's derive commits of 2026-10-04..06 (brotli level 4, the compression Pages serves is
  * about 6 % larger): the week summary 846 KB per changed poll; the per-day files 205 KB per 5-minute run (1.8 of the
  * 8 days change per run on average), 530 KB after an hour away, 786 KB after 8 h; the deltas 4.0 KB (15 min), 11.1 KB
- * (1 h), 54.7 KB (6 h) and 173.8 KB (24 h).
+ * (1 h), 54.7 KB (6 h) and 173.8 KB (24 h). A client replayed over those 566 runs (polling every 15 min, 1 h or 8 h)
+ * held exactly each polled run's day files.
  */
 
 const DOMAIN = 'https://earthquakes-feed.theshelter.app';

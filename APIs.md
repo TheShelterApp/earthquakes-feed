@@ -130,10 +130,11 @@ because `metadata.generated` does. The index lists:
 
 How to use it: keep the features of the days you fetched and the `head_seq` you got them at (your cursor).
 
-1. Fetch the index (it is about 2 KB).
+1. Fetch the index (about 4 KB, 1 KB compressed). If its `generated` is the one you hold, you are current.
 2. If you have a cursor and some delta has `from_seq <= cursor`, fetch the smallest such delta, upsert its features by
    `id`, drop the ones whose `feed.state` is not `live` (as from `all_week`), and set the cursor to the delta's
-   `head_seq`. That is exactly the window as of the index's `head_seq`.
+   `head_seq`. That is exactly the window as of the index's `head_seq`. Do this for every new `generated`, even when
+   `head_seq` did not move: a run can change an event without a new seq (below), and its delta carries it.
 3. Otherwise (no cursor, or more than a day behind) compare each day's `sha256` with the copy you hold, fetch only the
    days that differ, replace those days' features with the file's, drop days that left the window, and set the cursor
    to the index's `head_seq`. If a day file you fetched does not hash to the index's `sha256` (a deploy landed between
@@ -148,9 +149,10 @@ event can still change the event's compact feature through the fill-only fields 
 event for a day in `knowledge/index/live_silent.json` with the previous run's head (`head_before`); every delta whose
 `from_seq` is at most `head_before` carries it. Events that leave the window and retired markers that stop being
 published after 48 h are not changes: the first is your time filter, the second repeats a removal you already applied.
-Replayed over the real derive commits of 2026-10-04..06, a client polling every run, every hour or every 8 hours holds
-exactly the day files of each run it polls (without the silent log, 20 events of 11.5 hours kept an older `author` or
-`updated`).
+Replayed over the 566 real derive commits of 2026-10-04 03:04 → 10-06 02:57 UTC (246 such changes detected), a client
+polling every 15 minutes, every hour or every 8 hours held exactly the day files of each run it polled, moving after its
+first sync about 5 KB per 15-minute poll, 14 KB per hourly poll and 171 KB per 8-hour poll (brotli 4) against ~846 KB
+for the week summary. Without the silent log, 20 events of 11.5 hours kept an older `author` or `updated`.
 
 Measured over the derive commits of 2026-10-04..06 (brotli level 4; what Pages serves is about 6 % larger): the week
 summary 846 KB per changed poll; the day files 205 KB per 5-minute run (on average 1.8 of the 8 days change per run:

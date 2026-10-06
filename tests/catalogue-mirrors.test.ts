@@ -5,7 +5,7 @@ import { CATALOGUE_MIRRORS, SWARM_CELL_ABSOLUTE } from '../src/config.js';
 import { Resolver } from '../src/dedup.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import type { EventNode, RawObs } from '../src/types.js';
-import { catalogueOf, knownAliasIdsOf, mirrorKeys, mirrorsOf } from '../src/util.js';
+import { catalogueIdOf, catalogueOf, knownAliasIdsOf, mirrorKeys, mirrorsOf, sameCatalogueEvent } from '../src/util.js';
 
 // Round 17 (config CATALOGUE_MIRRORS): RESIF's FDSN event service serves RéNaSS's catalogue under the same event ids, so
 // `resif:<id>` and `renass:<id>` are one report. Production 2026-07-05 → 10-06: 420 ids of the two stood in two live
@@ -57,7 +57,10 @@ const rowsOf = (n: EventNode): string => n.provenance.map((p) => `${p.provider}:
 const eventsHolding = (map: Map<string, EventNode>, id: string): string[] => live(map).filter((n) => n.provenance.some((p) => p.nativeId === id)).map(rowsOf);
 
 test('mirrors: RESIF is RéNaSS\'s catalogue; the twin key is derived, never stored with the report', () => {
-  assert.deepEqual([...CATALOGUE_MIRRORS], [['resif', 'renass']]);
+  assert.deepEqual([...CATALOGUE_MIRRORS], [
+    ['resif', 'renass'],
+    ['auspass', 'ga'],
+  ]);
   assert.equal(catalogueOf('resif'), 'renass');
   assert.equal(catalogueOf('renass'), 'renass');
   assert.equal(catalogueOf('ipgp'), 'ipgp');
@@ -161,4 +164,121 @@ test('mirrors: the merge pass folds an event holding one source\'s row into the 
   assert.deepEqual(eventsHolding(map, 'fr2026tvuwsm'), ['renass:fr2026tvuwsm resif:fr2026tvuwsm']);
   // Nothing else in the dense cell folds: the background events share no id.
   assert.equal(live(map).length, SWARM_CELL_ABSOLUTE + 5 + 1);
+});
+
+// Round 20: AusPass (auspass.edu.au) serves Geoscience Australia's catalogue under GA's ids with the prefix `smi:local/`
+// (AusPass `smi:local/ga2026tgusvy` is GA `ga2026tgusvy`; all 6,811 AusPass events of 2024-01 → 2026-09 carry `Author`
+// "GA (via ANU)"). The two rows of one id are one report, and an id is compared in GA's own form.
+
+/** GA's RSS row (rounded coordinates, whole-km depth) and AusPass's FDSN text row of one GA id, as the adapters give them. */
+const gaRow = (id: string, over: Partial<RawObs> = {}): RawObs =>
+  raw('ga', id, { magType: null, fields: { title: `Magnitude ${over.mag ?? 1.1}, Near Tennant Creek, NT` }, ...over });
+const auspassRow = (gaId: string, over: Partial<RawObs> = {}): RawObs =>
+  raw('auspass', `smi:local/${gaId}`, { fields: { EventID: `smi:local/${gaId}`, Author: 'GA (via ANU)', Contributor: 'Geoscience Australia', ContributorID: `smi:local/${gaId}` }, ...over });
+/** ga2026okrkzr, 2026-07-22 near Tennant Creek: GA's RSS solution and AusPass's (GA's later one) 8.2 km and 0.19 s apart. */
+const TENNANT_GA = { lat: -19.7, lon: 133.989, depth: 7.76, mag: 2.4 };
+const TENNANT_AUSPASS = { lat: -19.76763, lon: 133.95781, depth: 11.1985, mag: 2.5, magType: 'MLa075', eventTimeMs: T + 190 };
+
+/** A resolver whose Tennant Creek cell holds SWARM_CELL_ABSOLUTE + 5 GA events of the last days (dense). */
+function tennantResolver(map = new Map<string, EventNode>()): { r: Resolver; map: Map<string, EventNode> } {
+  const r = new Resolver(map, prio, cfg, NOW);
+  for (let i = 0; i < SWARM_CELL_ABSOLUTE + 5; i++) {
+    r.ingest(gaRow(`ga2026okfill${String.fromCharCode(97 + (i % 26))}${String.fromCharCode(97 + Math.floor(i / 26))}`, { eventTimeMs: T - (i + 1) * 900_000, lat: TENNANT_GA.lat + ((i % 5) - 2) * 0.002, lon: TENNANT_GA.lon, mag: 1.2 }), INGEST);
+  }
+  return { r, map };
+}
+
+test('mirrors: AusPass is GA\'s catalogue under `smi:local/` ids; the twin key is derived both ways, never stored', () => {
+  assert.equal(catalogueOf('auspass'), 'ga');
+  assert.equal(catalogueOf('ga'), 'ga');
+  assert.deepEqual(mirrorsOf('auspass'), ['ga']);
+  assert.deepEqual(mirrorsOf('ga'), ['auspass']);
+  assert.deepEqual(mirrorKeys('auspass', 'smi:local/ga2026tgusvy'), ['ga:ga2026tgusvy']);
+  assert.deepEqual(mirrorKeys('ga', 'ga2026tgusvy'), ['auspass:smi:local/ga2026tgusvy']);
+  assert.deepEqual(mirrorKeys('ga', ''), []);
+  assert.equal(catalogueIdOf('auspass', 'smi:local/ga2026tgusvy'), 'ga2026tgusvy');
+  assert.equal(catalogueIdOf('auspass', 'ga2026tgusvy'), 'ga2026tgusvy', 'an id without the prefix is taken as it is');
+  assert.equal(catalogueIdOf('auspass', 'smi:local/'), 'smi:local/');
+  assert.equal(catalogueIdOf('ga', 'smi:local/ga2026tgusvy'), 'smi:local/ga2026tgusvy', 'only the mirror\'s ids carry the prefix');
+  assert.equal(catalogueIdOf('resif', 'fr2026abc'), 'fr2026abc');
+  assert.ok(sameCatalogueEvent('auspass', 'smi:local/ga2026tgusvy', 'ga', 'ga2026tgusvy'));
+  assert.ok(sameCatalogueEvent('resif', 'fr2026abc', 'renass', 'fr2026abc'));
+  assert.ok(!sameCatalogueEvent('auspass', 'smi:local/ga2026tgusvy', 'ga', 'ga2026thnhnl'));
+  assert.ok(!sameCatalogueEvent('auspass', 'smi:local/ga2026tgusvy', 'geonet', 'ga2026tgusvy'));
+  // knownAliasIds go into the deep-history raw assets (AusPass is a deep-history source): unchanged.
+  assert.deepEqual(knownAliasIdsOf('auspass', 'smi:local/ga2026tgusvy', { EventID: 'smi:local/ga2026tgusvy' }), []);
+  assert.deepEqual(knownAliasIdsOf('ga', 'ga2026tgusvy', {}), []);
+});
+
+test('mirrors: in a dense cell AusPass\'s and GA\'s rows of one GA id are one event, whichever comes first', () => {
+  for (const first of ['ga', 'auspass'] as const) {
+    const { r, map } = tennantResolver();
+    const a = first === 'ga' ? gaRow('ga2026okrkzr', TENNANT_GA) : auspassRow('ga2026okrkzr', TENNANT_AUSPASS);
+    const b = first === 'ga' ? auspassRow('ga2026okrkzr', TENNANT_AUSPASS) : gaRow('ga2026okrkzr', TENNANT_GA);
+    const one = r.ingest(a, INGEST).node.feedId;
+    assert.equal(r.ingest(b, INGEST).node.feedId, one, `${first} first`);
+    assert.deepEqual(live(map).filter((n) => n.provenance.some((p) => catalogueIdOf(p.provider, p.nativeId) === 'ga2026okrkzr')).map(rowsOf), ['auspass:smi:local/ga2026okrkzr ga:ga2026okrkzr'], `${first} first`);
+  }
+  // Another agency's report of the quake under its own id still needs a shared id there (the swarm guard).
+  const { r, map } = tennantResolver();
+  r.ingest(auspassRow('ga2026okrkzr', TENNANT_AUSPASS), INGEST);
+  r.ingest(raw('usgs', 'us7000qwer', { ...TENNANT_GA, magType: 'mb', fields: { ids: ',us7000qwer,' } }), INGEST);
+  assert.deepEqual(eventsHolding(map, 'smi:local/ga2026okrkzr'), ['auspass:smi:local/ga2026okrkzr']);
+});
+
+test('mirrors: the merge pass folds an event holding AusPass\'s row into the event of GA\'s row of the same id', () => {
+  // Two runs that never saw each other's node (the state a dense cell left before this rule). AusPass carries the
+  // solution GA's RSS rounds (9 of the 12 pairs in production are 0.02–0.07 km apart). In a dense cell the merge pass
+  // folds only inside the dense windows (3 km) and on a shared id; a pair farther apart is joined at first sight by id.
+  const { r: r1, map } = tennantResolver();
+  r1.ingest(gaRow('ga2026okrkzr', TENNANT_GA), INGEST);
+  const other = new Map<string, EventNode>();
+  new Resolver(other, prio, cfg, NOW).ingest(auspassRow('ga2026okrkzr', { ...TENNANT_AUSPASS, lat: -19.70012, lon: 133.98931, depth: 7.7643 }), INGEST);
+  const twin = [...other.values()][0]!;
+  twin.feedId = 'efd_01KT0Q9Q303W5XCGVG29Y4MPB7';
+  map.set(twin.feedId, twin);
+  assert.equal(live(map).filter((n) => n.provenance.some((p) => catalogueIdOf(p.provider, p.nativeId) === 'ga2026okrkzr')).length, 2, 'split before');
+  const { merges } = new Resolver(map, prio, cfg, NOW).heal(INGEST);
+  assert.equal(merges.length, 1);
+  assert.deepEqual(eventsHolding(map, 'ga2026okrkzr'), ['auspass:smi:local/ga2026okrkzr ga:ga2026okrkzr']);
+  assert.equal(live(map).length, SWARM_CELL_ABSOLUTE + 5 + 1);
+});
+
+test('mirrors: AusPass\'s row of one GA id is not put beside GA\'s row of ANOTHER id (ga2025oxwcrk / oxwdke)', () => {
+  // GA lists two quakes 0.2 s and 9.4 km apart (M5.19, M5.29). AusPass's row of the second is inside the base windows of
+  // GA's first; GA's two ids are two quakes to the feed (the same-provider rule), and AusPass's row is GA's second.
+  const { r, map } = resolver(false);
+  const banda = { lat: -6.5, lon: 129.9, depth: 100, magType: 'mb' };
+  r.ingest(gaRow('ga2025oxwcrk', { ...banda, mag: 5.19 }), INGEST);
+  r.ingest(auspassRow('ga2025oxwdke', { ...banda, lat: -6.5 + 9.4 / 111.2, mag: 5.29, eventTimeMs: T + 200 }), INGEST);
+  assert.deepEqual(eventsHolding(map, 'ga2025oxwcrk'), ['ga:ga2025oxwcrk']);
+  assert.deepEqual(eventsHolding(map, 'smi:local/ga2025oxwdke'), ['auspass:smi:local/ga2025oxwdke']);
+  const [x, y] = live(map);
+  assert.equal(r.whyNotMerged(x!, y!), 'same provider under distinct native ids');
+  // GA's row of the second id joins AusPass's.
+  r.ingest(gaRow('ga2025oxwdke', { ...banda, lat: -6.5 + 9.4 / 111.2, mag: 5.29, eventTimeMs: T + 200 }), INGEST);
+  assert.deepEqual(eventsHolding(map, 'ga2025oxwdke'), ['auspass:smi:local/ga2025oxwdke ga:ga2025oxwdke']);
+});
+
+test('mirrors: AusPass\'s and GA\'s rows of one id 8.2 km apart are no "other id" to the same-provider rules', () => {
+  // Outside a dense cell the merge pass folds the two events (inside the 10 km window); comparing the ids as written
+  // (`smi:local/ga2026okrkzr` against `ga2026okrkzr`) would call them one catalogue's two quakes, and the solutions are
+  // too far apart for the one-solution exception (sameSolution: 2 s, 2 km).
+  const map = new Map<string, EventNode>();
+  new Resolver(map, prio, cfg, NOW).ingest(gaRow('ga2026okrkzr', TENNANT_GA), INGEST);
+  const other = new Map<string, EventNode>();
+  new Resolver(other, prio, cfg, NOW).ingest(auspassRow('ga2026okrkzr', TENNANT_AUSPASS), INGEST);
+  const twin = [...other.values()][0]!;
+  twin.feedId = 'efd_01KT0Q9Q303W5XCGVG29Y4MPB8';
+  map.set(twin.feedId, twin);
+  const r = new Resolver(map, prio, cfg, NOW);
+  const [a, b] = live(map);
+  assert.equal(r.whyNotMerged(a!, b!), null);
+  // The first-sight form, which findById makes unreachable for these two (the twin's key is found first): GA's report
+  // is no other quake of an event holding AusPass's row of its id, and is one beside AusPass's row of another id.
+  const firstSight = r as unknown as { sameProviderDistinct(raw: RawObs, node: EventNode): boolean };
+  assert.equal(firstSight.sameProviderDistinct(gaRow('ga2026okrkzr', TENNANT_GA), twin), false);
+  assert.equal(firstSight.sameProviderDistinct(gaRow('ga2026okrkzs', TENNANT_GA), twin), true);
+  assert.equal(r.heal(INGEST).merges.length, 1);
+  assert.deepEqual(eventsHolding(map, 'ga2026okrkzr'), ['auspass:smi:local/ga2026okrkzr ga:ga2026okrkzr']);
 });

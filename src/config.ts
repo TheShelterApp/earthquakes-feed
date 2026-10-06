@@ -289,8 +289,20 @@ export const EMSC_AUTHORED_COPIES: ReadonlyMap<string, string> = new Map([
  *  one solution published twice (tx2026nbcmeq / tx2026nbcmvr, 22 ms and 1 km apart, both M2.3), which sameSolution
  *  already treats as one. In the event map's live events of 2026-09-24..10-04 the copies stood beside their ComCat row
  *  as a separate event 10 times for HV and twice for TX (all in dense cells), and joined it everywhere else.
- *  Not added: NEIC (`us`, 2,076 versions: 99.9 / 93.0 %, one separate event in those 11 days), AV, SE, NM (fewer than
- *  30 versions each). */
+ *  Not added: AV, SE, NM (fewer than 30 versions each).
+ *
+ *  NEIC (`us`, round 14): the National Earthquake Information Center's solution is ComCat's `us…` row, and EMSC copies it
+ *  like a network's (2026-08-19, EMSC 20260819_0000150, auth NEIC, is 00:11:39.549Z, -8.264 / 121.4067, 35 km, mb 4.8,
+ *  as ComCat us6000tls7; in the dense cell of the Flores sequence the two stood as two events). Checked 2026-10-06 over the
+ *  observation log (2026-07-05..10-06, 204,335 lines): 2,107 EMSC versions with the code stand beside a ComCat `us` row
+ *  (within 60 s and 50 km); 2,105 (99.9 %) equal a version of that row in time (≤ 1 s) and place (≤ 1 km), 1,959
+ *  (93.0 %) in magnitude too (the rest carry a magnitude ComCat has replaced: they stay unlinked, as before). No version
+ *  is within sameSolution of two distinct `us` ids. No other source carries NEIC as an author. Replaying the log (a fresh
+ *  Resolver every 6 h with the production hot window and the regular heal) against the rules before: 29 groups fold,
+ *  every one an EMSC copy and ComCat's row of one quake (≤ 22.9 km, ≤ 7.2 s; all in the Flores swarm of
+ *  2026-08-16..22); live events 112,499 → 112,469; 2 Flores groups regroup in the dense cell (GFZ's and BMKG's rows had
+ *  reached EMSC's event through a cell boundary; per connected group of ids 31 fewer events, 1 more); rows in two live
+ *  events 0. NEIC copies are not re-homed (EMSC_COPIES_KEPT_IN_PLACE). */
 export const EMSC_COMCAT_NETWORK_COPIES: ReadonlyMap<string, string> = new Map([
   ['AK', 'ak'],
   ['HV', 'hv'],
@@ -301,7 +313,16 @@ export const EMSC_COMCAT_NETWORK_COPIES: ReadonlyMap<string, string> = new Map([
   ['TX', 'tx'],
   ['UU', 'uu'],
   ['UW', 'uw'],
+  ['NEIC', 'us'],
 ]);
+/** Copy codes whose copies count as the original's identity (authoredCopy: the dense-cell join, the merge pass) but are
+ *  never moved to the event holding the row they copy (Resolver.rehomeCopy, FEED-2). EMSC often takes an event's
+ *  solution first from the regional agency and then from NEIC: the same quake, under two agencies' solutions. Moving
+ *  the row then left the regional agency's row behind as an event of its own whenever the two solutions lie beyond
+ *  each other's windows (round 14 replay: SSN's M4.3 of 2026-08-22 off Chiapas 33 km from ComCat's, JMA's M4.2 of
+ *  2026-08-20 with its minute-rounded time, CENC's M3.9 of 2026-08-01 in Qinghai: each one event without the move, two
+ *  with it). Left in place, the row moves its event to NEIC's solution and the merge pass folds ComCat's event in. */
+export const EMSC_COPIES_KEPT_IN_PLACE: ReadonlySet<string> = new Set(['NEIC']);
 /** Rolling-file sources whose ids are watched for disappearing (PF-5b, log only): a row younger than
  *  ABSENCE_WATCH_DAYS that the feed holds and a complete file no longer lists is counted in status `absent`. AEC's
  *  file spans ~14 days, so a younger id that vanishes was most likely deleted upstream; whether to retract on absence

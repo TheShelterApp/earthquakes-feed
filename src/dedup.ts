@@ -5,6 +5,7 @@ import {
   COMCAT_PROVIDER,
   EMSC_AUTHORED_COPIES,
   EMSC_COMCAT_NETWORK_COPIES,
+  EMSC_COPIES_KEPT_IN_PLACE,
   EMSC_PROVIDER,
   GRID_CELL_DEG,
   HOT_WINDOW_DAYS,
@@ -1044,10 +1045,12 @@ export class Resolver {
     return out;
   }
 
-  /** The EMSC `auth` code of a report when it names an agency or a ComCat network whose copies count (authoredCopy). */
+  /** The EMSC `auth` code of a report when it names an agency or a ComCat network whose copies count (authoredCopy) and
+   *  move to the row they copy (rehomeCopy; not EMSC_COPIES_KEPT_IN_PLACE). */
   private static copyCode(raw: SourcedSolution): string | null {
     const auth = raw.fields['auth'];
-    return typeof auth === 'string' && (EMSC_AUTHORED_COPIES.has(auth) || EMSC_COMCAT_NETWORK_COPIES.has(auth)) ? auth : null;
+    if (typeof auth !== 'string' || EMSC_COPIES_KEPT_IN_PLACE.has(auth)) return null;
+    return EMSC_AUTHORED_COPIES.has(auth) || EMSC_COMCAT_NETWORK_COPIES.has(auth) ? auth : null;
   }
 
   /** The live event other than `from` holding a row `copy` is an authored copy of (the nearest row, then the smaller

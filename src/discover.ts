@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { REGISTRY_PATH } from './config.js';
 import type { ProviderConfig } from './types.js';
 
@@ -28,6 +29,49 @@ const CURATED: { dc: string; url: string }[] = [
   { dc: 'ICGC (Catalonia)', url: 'https://ws.icgc.cat/fdsnws/event/1/query' },
   { dc: 'Raspberry Shake', url: 'https://fdsnws.raspberryshakedata.com/fdsnws/event/1/query' },
 ];
+
+/** Event services a human reviewed and decided not to add (APIs.md, *Sources looked at and not added*): never probed and
+ *  never listed as a candidate again, so a monthly run does not reopen the decision; the report names them in one
+ *  line. Remove an entry to have the host probed again. */
+export const DECLINED: { host: string; dc: string; issue: number; why: string }[] = [
+  {
+    host: 'api.geoshake.org',
+    dc: 'GeoShake Data Center',
+    issue: 38,
+    why: 'a community MEMS network: 4 events in its whole catalogue (2026-09-18 → 10-03, Puerto Rico), each a quake the feed already had or a mislocated one; its "magnitude" is an intensity (MMI), not a magnitude, and its site terms forbid automated access without consent (round 20)',
+  },
+];
+
+/** Labels of a host name that name a service, not its operator (`api.geoshake.org` → `geoshake`). */
+const GENERIC_HOST_LABELS = new Set(['api', 'www', 'ws', 'service', 'services', 'webservices', 'fdsnws', 'data']);
+
+/** The registry id a candidate's entry suggests: the host's first label that is not a generic service label. */
+export function candidateId(host: string): string {
+  const labels = host.toLowerCase().split('.');
+  const label = labels.slice(0, -1).find((l) => !GENERIC_HOST_LABELS.has(l)) ?? labels[0] ?? '';
+  return label.replace(/[^a-z0-9]/g, '') || 'src';
+}
+
+/** The registry entry the report suggests for a candidate. The probe reads no licence: `license` is "unknown" until a
+ *  human reads the source's terms (the entry is never added automatically). */
+export function suggestedEntry(c: { dc: string; url: string; fmt: 'text' | 'geojson' }): Record<string, unknown> {
+  return {
+    id: candidateId(hostOf(c.url)),
+    name: c.dc,
+    priority: 25,
+    active: false,
+    adapter: 'fdsn',
+    parse: c.fmt,
+    queryFormat: c.fmt === 'geojson' ? 'geojson' : 'text',
+    base: c.url,
+    supportsTimeRange: true,
+    refreshSeconds: 600,
+    license: 'unknown',
+    attribution: c.dc,
+    doi: null,
+    contact: '',
+  };
+}
 
 const hostOf = (u: string): string => {
   try {
@@ -61,6 +105,8 @@ async function main(): Promise<void> {
   const registry = JSON.parse(readFileSync(REGISTRY_PATH, 'utf8')) as { providers: ProviderConfig[] };
   // A source's fallback host (NOA's registered node, PF-5j-NOA) is known too: when it answers again it is not a new source.
   const known = new Set(registry.providers.flatMap((p) => [p.base, ...(p.fallbackBase ? [p.fallbackBase] : [])]).map(hostOf));
+  // A declined host is skipped like a known one, and named in the report.
+  const declined = new Set(DECLINED.map((d) => d.host));
   const cand = new Map<string, { dc: string; url: string }>();
 
   // 1) Newly-registered FDSN event services (the rare, high-value case).
@@ -75,7 +121,7 @@ async function main(): Promise<void> {
             if (!/^fdsnws-event/.test(s.name ?? '') || !s.url) continue;
             const url = s.url.replace(/\/+$/, '') + '/query';
             const host = hostOf(url);
-            if (!known.has(host) && !cand.has(host)) cand.set(host, { dc: dc.fullName || dc.name || host, url });
+            if (!known.has(host) && !declined.has(host) && !cand.has(host)) cand.set(host, { dc: dc.fullName || dc.name || host, url });
           }
       registryOk = true;
     } catch {
@@ -86,7 +132,7 @@ async function main(): Promise<void> {
   // 2) Curated leads (re-probe the known-down endpoints).
   for (const c of CURATED) {
     const h = hostOf(c.url);
-    if (!known.has(h) && !cand.has(h)) cand.set(h, c);
+    if (!known.has(h) && !declined.has(h) && !cand.has(h)) cand.set(h, c);
   }
 
   // 3) Probe each; keep endpoints returning events in a format the generic adapter can parse
@@ -121,22 +167,17 @@ async function main(): Promise<void> {
   const L: string[] = [];
   L.push(`Scanned the [FDSN datacenter registry](${FDSN_REGISTRY})${registryOk ? '' : ' _(fetch failed — curated leads only)_'} + ${CURATED.length} curated leads against \`providers/registry.json\` (${known.size} known hosts, ${cand.size} probed).`);
   L.push('');
+  L.push(`Reviewed and not added, not probed (\`DECLINED\` in src/discover.ts): ${DECLINED.map((d) => `${d.dc} (${d.host}, #${d.issue})`).join(', ')}.`);
+  L.push('');
   if (!live.length) {
     L.push('**No new working FDSN event endpoints found** — all registered datacenters are already covered and the curated leads are still down.');
   } else {
-    L.push(`**${live.length} candidate source(s) returned events.** Review each (format / timezone / license / reliability), then add to \`providers/registry.json\` and flip \`active:true\`:`);
+    L.push(`**${live.length} candidate source(s) returned events.** Review each (format / timezone / license / terms / reliability / whether its events are its own solutions or copies), then add to \`providers/registry.json\` and flip \`active:true\`, or add it to \`DECLINED\` with the issue that holds the evidence. The suggested entry's \`license\` is \`unknown\`: the probe reads none.`);
     L.push('');
     for (const c of live) {
-      const id = hostOf(c.url).split('.')[0]!.replace(/[^a-z0-9]/g, '') || 'src';
       L.push(`### ${c.dc} — probe returned ${c.n} event(s) as \`${c.fmt}\``);
       L.push('```json');
-      L.push(
-        JSON.stringify(
-          { id, name: c.dc, priority: 25, active: false, adapter: 'fdsn', parse: c.fmt, queryFormat: c.fmt === 'geojson' ? 'geojson' : 'text', base: c.url, supportsTimeRange: true, refreshSeconds: 600, license: 'CC-BY-4.0', attribution: c.dc, doi: null, contact: '' },
-          null,
-          2,
-        ),
-      );
+      L.push(JSON.stringify(suggestedEntry(c), null, 2));
       L.push('```');
       L.push('');
     }
@@ -148,8 +189,10 @@ async function main(): Promise<void> {
   console.log(`candidates=${live.length}`);
 }
 
-main().catch((e) => {
-  console.error('discover failed:', e);
-  console.log('candidates=0');
-  process.exit(0);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((e) => {
+    console.error('discover failed:', e);
+    console.log('candidates=0');
+    process.exit(0);
+  });
+}

@@ -60,19 +60,19 @@ jobs:
       group: earthquakes-feed-history
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # Read only: the day partitions (the work list), the cursor, archives.json and backfill.json.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: data
           path: .data
           fetch-depth: 1
           persist-credentials: false
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       - name: Collect
@@ -86,7 +86,7 @@ jobs:
           # gh: archived months (release download), the chunk uploads and the previous run's artifact.
           GH_TOKEN: ${{ github.token }}
         run: npx --no-install tsx src/first-solutions-collect.ts
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: first-solutions-out
           path: |
@@ -107,16 +107,16 @@ jobs:
     steps:
       # The main checkout holds only scripts/push-data.sh, the push loop every writer shares. First: checkout empties a
       # directory that is not yet a repository, so it must not run after the artifact download.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           sparse-checkout: scripts/push-data.sh
           sparse-checkout-cone-mode: false
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: first-solutions-out
           path: fs-out
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: data
           path: .data

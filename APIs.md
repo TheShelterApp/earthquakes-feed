@@ -279,6 +279,19 @@ list only one id of 14 (all inside these limits) and both of 10; 3 of those 10 a
 lists twice (EMSC shows one event for each, and no agency a second quake) and fold too; the other
 7 stay apart. The older row stays in the event's provenance.
 
+ComCat's own ids are another exception. ComCat publishes a quake under several ids when several networks locate it
+and later associates them into one event, whose `ids` then list every id (`,uu80158431,us6000tzcn,nn00925220,`). A
+report naming such an id joined the event at first sight already, but an id the feed had published as an event of its
+own before the association stayed one when its solution lay beyond the time-and-place windows. Since 2026-10-06 two live
+events of the 7-day hot window are one when a ComCat row of one lists, in its `ids`, the id of ComCat's own row in the
+other, whatever the distance (Nevada, 2026-10-03: Utah's automatic `uu80158431` 148 km and 23 s from Nevada's reviewed
+`nn00925220`); a provider that holds the two under distinct ids of its own still keeps them apart. The merge after a
+ComCat revision and the every-run pass over the hot window make the fold (an `op:merge` line with the reason "exact id:
+ComCat … lists …"). In the observation log of 2026-07-05…10-06 this happened 4 times, every one an event ComCat lists as
+one today (the Kumamoto M6.8 of 2026-07-28 and PTWC's `pt26209004`, 44.5 s later in ComCat's copy; two Alaska quakes,
+15.6 and 79.3 km between AEC's and NEIC's solutions; the Nevada one). Older days keep both events: drop a live
+`usgs`-only feature whose id another live feature's `usgs` row lists in `fields.ids`.
+
 ## Retired events
 
 An event can leave the live set in two ways: an upstream delete (`state: "tombstoned"`,

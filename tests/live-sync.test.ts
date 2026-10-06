@@ -286,6 +286,7 @@ test('the index names the compact feature format; a change to that serialization
   // (clients then re-read every day) and pin the new digest under it.
   const pinned: Record<number, string> = {
     1: '85fdce134bb4fdd0da839f93760bc658f00aa5a42317273dce42c982a9183310',
+    2: 'e654b155feafd310925c57a6d6d0027d7fd769714db2462a245491ea9e071cd7',
   };
   const feats = summaryFeats([...s.map.values()], T0).sort((a, b) => a.timeMs - b.timeMs);
   assert.equal(sha256Hex(JSON.stringify(feats.map((f) => f.feature))), pinned[LIVE_FEATURES_FORMAT]);

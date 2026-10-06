@@ -57,7 +57,7 @@ export function detailHourJson(hour: string, nodes: EventNode[]): string {
       schema_version: SCHEMA_VERSION,
       attribution: NOTICE,
     },
-    features: sorted.map((n) => nodeToFeature(n)),
+    features: sorted.map((n) => nodeToFeature(n, { reviewStatus: true })),
   });
 }
 

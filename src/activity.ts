@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { statusHistoryFiles } from './bitemporal.js';
 import { liveLookbackMs } from './providers.js';
 import type { ProviderConfig, ProviderStatus, TlsLeafStatus } from './types.js';
 import { isoFromMs } from './util.js';
@@ -204,16 +204,15 @@ export function tlsLeafStatus(leaf: KeptLeaf, nowMs: number, leaves = 1): TlsLea
 }
 
 /**
- * The first index, from the status history (status/history/YYYY-MM.ndjson, one line per aggregate run): without it a
- * source that went silent before this module existed would look fresh for another budget. Lines are read in file
- * order; a line that does not parse is skipped.
+ * The first index, from the status history (status/history/YYYY-MM-DD.ndjson, or the month files YYYY-MM.ndjson written
+ * until round 17; one line per aggregate run): without it a source that went silent before this module existed would
+ * look fresh for another budget. Lines are read in the order they were written (`statusHistoryFiles`); a line that does
+ * not parse is skipped.
  */
 export function seedActivity(statusHistoryDir: string): ActivityIndex {
   const index: ActivityIndex = {};
-  if (!existsSync(statusHistoryDir)) return index;
-  const files = readdirSync(statusHistoryDir).filter((f) => /^\d{4}-\d{2}\.ndjson$/.test(f)).sort();
-  for (const f of files) {
-    for (const line of readFileSync(join(statusHistoryDir, f), 'utf8').split('\n')) {
+  for (const f of statusHistoryFiles(statusHistoryDir)) {
+    for (const line of readFileSync(f.path, 'utf8').split('\n')) {
       if (!line.trim()) continue;
       let row: { generated?: unknown; providers?: Record<string, ProviderStatus> };
       try {

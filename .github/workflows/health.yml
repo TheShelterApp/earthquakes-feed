@@ -258,8 +258,9 @@ jobs:
           fi
       - name: Repository size (logged; a warning past the threshold, never a red run)
         # LIVE-2: the data branch's history only grows (nothing is ever rewritten) and GitHub asks to keep repositories
-        # small; finished months of status/history and changes/ leave the tree (archive.yml), so the growth is the
-        # observation log, the day partitions and the current month's logs. GitHub reports `size` in KB.
+        # small; finished months of status/history and changes/ leave the tree (archive.yml). The growth is the large
+        # files every commit rewrites (day partitions, event_map shards): GitHub keeps about one compressed copy of each
+        # per repack, about 67 MB a day in October 2026 (APIs.md Repository size). GitHub reports `size` in KB.
         if: always()
         continue-on-error: true
         env:

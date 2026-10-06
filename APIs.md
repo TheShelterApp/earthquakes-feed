@@ -553,29 +553,79 @@ a deliberate one-off, like a heal, not an automatic step.
 
 ## Run logs
 
-Two logs record the runs themselves, beside the observation log: `status/history/YYYY-MM.ndjson` (every aggregate
-run's `status.json`, one line per run) and `changes/YYYY-MM-DD.ndjson` (derive's change log of
-each day; the current day's file is also served as `/v1/changes/<day>.ndjson`). Until 2026-10-04 both stayed on the
-`data` branch forever. Since then (LIVE-2) the current month stays in the tree and, from the second day of the next
-month, the `archive` workflow moves each finished month's files into the Release `logs-YYYY-MM`, one immutable gzip
-asset per file (`status-history-YYYY-MM.ndjson.gz`, `changes-YYYY-MM-DD.ndjson.gz`; gunzip gives the file byte for
-byte). `knowledge/index/log_archives.json` lists every one: `file` (its old path), `tag`, `asset`, `url`, `bytes` and
-`sha256` of the asset, `content_bytes` and `content_sha256` of the file, `lines`, `archived_at`. A tree file goes only
-after its uploaded asset was downloaded back and both hashes matched; an asset is never replaced (an asset of the
-same name left by a run that died before its commit is taken only if its content is identical, otherwise the file
-stays and the run turns red). History is not rewritten: the files stay in the `data` branch's past commits.
+Two logs record the runs themselves, beside the observation log: the status history (every aggregate run's
+`status.json`, one line per run) and `changes/YYYY-MM-DD.ndjson` (derive's change log of each day; the current day's
+file is also served as `/v1/changes/<day>.ndjson`). The status history is written to `status/history/YYYY-MM-DD.ndjson`,
+one file per UTC day of the run's ingest time, since round 17 (2026-10-06); until then it was one file per month,
+`status/history/YYYY-MM.ndjson`, and `status/history/2026-10.ndjson` keeps October's lines from before the switch. Read
+a month's lines in write order: the month file first (where there is one), then the day files by date
+(`statusHistoryFiles` in src/bitemporal.ts). Until 2026-10-04 both logs stayed on the `data` branch forever. Since then
+(LIVE-2) the current month stays in the tree and, from the second day of the next month, the `archive` workflow moves
+each finished month's files into the Release `logs-YYYY-MM`, one immutable gzip asset per change-log day
+(`changes-YYYY-MM-DD.ndjson.gz`) and one per status-history month (`status-history-YYYY-MM.ndjson.gz`: the month's
+files concatenated in write order, the same bytes a single month file would have had); gunzip gives the content byte
+for byte. `knowledge/index/log_archives.json` lists every one: `file` (the path of the file it replaces; for the status
+history the month's path `status/history/YYYY-MM.ndjson`, also when the month was written as day files), `files` (only
+when the asset was rolled from day files: the tree files, in order), `tag`, `asset`, `url`, `bytes` and `sha256` of the
+asset, `content_bytes` and `content_sha256` of the content, `lines`, `archived_at`. A tree file goes only after its
+uploaded asset was downloaded back and both hashes matched (all of a month's files, or none); an asset is never
+replaced (an asset of the same name left by a run that died before its commit is taken only if its content is
+identical, otherwise the files stay and the run turns red). History is not rewritten: the files stay in the `data`
+branch's past commits.
 
 A status history line is `status.json` without `providers.<id>.newest_origin` and `providers.<id>.tls_leaf` (round 16,
 FEED-R15-1): both serve the current run only, a frozen source keeps its newest origin in the line's `frozen`, and the
 line keeps `tls_leaves`. From 2026-10-06 01:57Z to the round-16 merge the lines carried both (about 6.5 KB a line);
-since then a line is about 4.5 KB, so a month file is about 40 MB at 12 runs an hour (31 days; it was about 25 MB in
-August and September, when a line was about 3.8–4.2 KB). Every aggregate commit rewrites the current month's file, and
-GitHub warns on a pushed file above 50 MiB and rejects one above 100 MiB: the aggregate run prints a warning once the
-file passes 45 MB (`HISTORY_FILE_WARN_BYTES`, src/bitemporal.ts), the signal to slim the line again before the month
-ends. The `health` watchdog checks the same from outside every 15 minutes (round 17): it reads the `data` branch's tree
-from the API, logs the files under `status/history/` (count, total, largest, whatever their layout) and opens the
+since then a line is about 4.5 KB: a day file is about 1.3 MB at 12 runs an hour, a month about 40 MB (31 days; it was
+about 25 MB in August and September, when a line was about 3.8–4.2 KB). Every aggregate commit rewrites the current
+day's file. Until round 17 it rewrote the whole month file, up to about 40 MB at a month's end, against GitHub's
+warning for a pushed file above 50 MiB and its rejection above 100 MiB, and each such rewrite left about one
+compressed copy of the file in the repository's storage per GitHub repack (*Repository size*, below). The aggregate run
+prints a warning once the day file passes 5 MB (`HISTORY_FILE_WARN_BYTES`, src/bitemporal.ts): the line has grown about
+fourfold. The `health` watchdog checks the same from outside every 15 minutes (round 17): it reads the `data` branch's
+tree from the API, logs the files under `status/history/` (count, total, largest, whatever their layout) and opens the
 `[health] data file size` issue while a status-history day file (`YYYY-MM-DD.ndjson`) is over 5 MB or any other file
 on the branch over 45 MB (closed when none is; never a red run).
+
+## Repository size
+
+GitHub counts the repository's git objects (Release assets are not counted): 5,498,152 KB on 2026-10-04 11:52 UTC,
+5,631,151 KB on 2026-10-06 11:07 UTC (the `health` workflow logs it), about 67 MB a day; the 24 hours to 10-05 12:07
+grew 64 MB, those to 10-06 00:07 87 MB, those to 10-06 11:07 79 MB. Nearly all of it is the `data` branch: about 576
+commits a day (an aggregate commit and a derive commit per run), each rewriting a few large files whole. The derive
+commit rewrites about 2.3 day partitions (`events/YYYY/MM/DD.ndjson`, about 2.4 MB each), the aggregate commit about
+2.3 event_map day shards (about 1.7 MB each) and, until round 17, the status history's month file (up to about 40 MB
+at a month's end).
+
+Git itself stores such a rewrite as a small delta: a full repack (`git repack -adf`, default window and depth) of the
+`data` branch's commits of 2026-09-27 … 10-06 takes about 8 MB a day. GitHub stores a busy repository differently. Each
+push becomes a pack, and maintenance rolls the newest packs together from time to time, reusing the deltas the packs
+hold. In such a roll-up the oldest version of every rewritten file has its delta base in an older pack, outside the
+new one, and the newer versions in the roll-up are deltas on it, so it cannot become a delta of them: it is stored
+whole or as a delta against another file of similar name and size, usually another day's partition (25–55 % of its
+compressed size). The cost is about one compressed copy of every distinct large file rewritten between two roll-ups,
+whatever changed in it.
+
+`scripts/repo-growth/replay.sh` measures that locally: it pushes real `data` commits one by one into a bare repository
+that keeps every pushed pack and runs `git repack -d --geometric=2` after every 12 pushes (about hourly), then
+attributes the growth by path (`attribute.sh`; `relayout.py` re-creates a range of commits from a shallow checkout,
+optionally in another layout). Eight days of commits, 24 hours each, ending 09-29 … 10-06 at 11:47 UTC: 77, 46, 73, 80,
+47, 45, 52 and 88 MB, 63 MB a day on average (GitHub: 64 MB for the day to 10-05 12:07, 79 MB to 10-06 11:07). After an
+all-into-one repack the day to 10-06 holds 50 MB of day partitions, 32 MB of event_map shards, 1 MB of status history, 1
+MB of the observation log and 1 MB of everything else (trees, commits, indexes, change log). The rate follows the number
+of distinct large files rewritten per hour, which grew from 2.8 partitions an hour on 10-03 to 4.8 on 10-05/06: more
+events landed in, or were revised in, days 2–9 days old (43 rewrites of such partitions on 10-03, 216 on 10-05/06:
+ComCat's late publications, ENSN and GA back with older events, late NRCan and GeoSphere events, revisions). Rounds
+13–16 did not add commits (derive committed separately before round 14 too), and the files they added
+(`provider_activity.json`, `live_silent.json`, `correction.json`) or grew (`history.json`, about 3 commits a day) are
+under 0.1 MB a day; the live index and the detail hours of round 15 are Pages-only.
+
+Round 17 (LANE G) changes what the commits rewrite, never what consumers read, and rewrites no history:
+
+- The status history is written per day (*Run logs*): a commit rewrites a file of at most about 1.3 MB instead of the
+  month file. Replayed, the eight days grow 11 % less (56 MB a day on average): 20–26 % on the last days of September,
+  when the month file was 23–24 MB (77 MB became 57 on 09-28/29), 1–14 % in early October. With the October file padded
+  to 31 MB (as on about 10-24), 107 MB a day becomes 79.
 
 ## Deep history (before 2023-07-06)
 

@@ -181,3 +181,92 @@ test('the per-run cap stops after maxFiles uploads; the rest rolls next run', ()
   assert.equal(archiveLogFiles(root, idx, NOW, io, join(root, '..', `${basename(root)}-c1`), { maxFiles: 3, log: () => {} }).archived.length, 3);
   assert.equal(archiveLogFiles(root, idx, NOW, io, join(root, '..', `${basename(root)}-c2`), { maxFiles: 3, log: () => {} }).archived.length, 1);
 });
+
+// Round 17 (LANE G): the status history is written per day. A finished month's files (October 2026: the month file
+// written before the switch plus the day files after it; later months: day files only) roll into the same one asset
+// per month, whose content is their concatenation in write order — the month file the earlier layout would have
+// written. Every part leaves the tree only after the asset verified.
+function dayRoot(): { root: string; oct: Buffer; nov: Buffer } {
+  const root = mkdtempSync(join(tmpdir(), 'log-archive-days-'));
+  const h = join(root, 'status', 'history');
+  mkdirSync(h, { recursive: true });
+  mkdirSync(join(root, 'changes'), { recursive: true });
+  mkdirSync(join(root, 'knowledge', 'index'), { recursive: true });
+  const line = (t: string): string => `{"generated":"${t}","n":1}\n`;
+  writeFileSync(join(h, '2026-10.ndjson'), line('2026-10-01T00:00:00Z') + line('2026-10-06T11:50:00Z'));
+  writeFileSync(join(h, '2026-10-06.ndjson'), line('2026-10-06T11:55:00Z') + line('2026-10-06T23:55:00Z'));
+  writeFileSync(join(h, '2026-10-31.ndjson'), line('2026-10-31T23:59:00Z'));
+  writeFileSync(join(h, '2026-11-01.ndjson'), line('2026-11-01T00:00:00Z'));
+  writeFileSync(join(h, '2026-11-30.ndjson'), line('2026-11-30T23:55:00Z'));
+  writeFileSync(join(h, '2026-12-01.ndjson'), line('2026-12-01T00:00:00Z'));
+  const oct = Buffer.from(line('2026-10-01T00:00:00Z') + line('2026-10-06T11:50:00Z') + line('2026-10-06T11:55:00Z') + line('2026-10-06T23:55:00Z') + line('2026-10-31T23:59:00Z'));
+  const nov = Buffer.from(line('2026-11-01T00:00:00Z') + line('2026-11-30T23:55:00Z'));
+  return { root, oct, nov };
+}
+const DEC2 = Date.parse('2026-12-02T06:00:00Z');
+
+test('day files: a finished month is one log, its parts in write order, named and indexed by the month', () => {
+  const { root } = dayRoot();
+  const files = logFilesToArchive(root, DEC2);
+  assert.deepEqual(files.map((f) => [f.kind, f.file, f.period, (f.parts ?? []).map((x) => basename(x))]), [
+    ['status_history', 'status/history/2026-10.ndjson', '2026-10', ['2026-10.ndjson', '2026-10-06.ndjson', '2026-10-31.ndjson']],
+    ['status_history', 'status/history/2026-11.ndjson', '2026-11', ['2026-11-01.ndjson', '2026-11-30.ndjson']],
+  ]);
+  assert.equal(assetName(files[0]!), 'status-history-2026-10.ndjson.gz');
+  // Before the grace is over the month stays whole in the tree.
+  assert.deepEqual(logFilesToArchive(root, Date.parse('2026-12-01T12:00:00Z')).map((f) => f.period), ['2026-10']);
+});
+
+test('day files: the month asset is the concatenation, verified, indexed with its parts; every part leaves the tree', () => {
+  const { root, oct, nov } = dayRoot();
+  const { io, store } = stubReleases();
+  const idx = loadLogArchives(root);
+  const lines: string[] = [];
+  const res = archiveLogFiles(root, idx, DEC2, io, join(root, '..', `${basename(root)}-st`), { log: (l) => lines.push(l) });
+  assert.deepEqual(res.blocked, []);
+  assert.equal(res.archived.length, 2);
+  assert.deepEqual(gunzipSync(store.get('logs-2026-10')!.get('status-history-2026-10.ndjson.gz')!), oct);
+  assert.deepEqual(gunzipSync(store.get('logs-2026-11')!.get('status-history-2026-11.ndjson.gz')!), nov);
+  const e = idx.entries.find((x) => x.file === 'status/history/2026-10.ndjson')!;
+  assert.deepEqual(e.files, ['status/history/2026-10.ndjson', 'status/history/2026-10-06.ndjson', 'status/history/2026-10-31.ndjson']);
+  assert.equal(e.lines, 5);
+  assert.equal(e.content_bytes, oct.length);
+  for (const f of ['2026-10.ndjson', '2026-10-06.ndjson', '2026-10-31.ndjson', '2026-11-01.ndjson', '2026-11-30.ndjson'])
+    assert.equal(existsSync(join(root, 'status', 'history', f)), false, f);
+  assert.ok(existsSync(join(root, 'status', 'history', '2026-12-01.ndjson')), 'the current month stays');
+  assert.match(lines.join('\n'), /status\/history\/2026-10\.ndjson \(from 3 files\) -> logs-2026-10\/status-history-2026-10\.ndjson\.gz/);
+  // A month written as one month file keeps the entry it always had (no `files`).
+  const old = dataRoot();
+  const idx2 = loadLogArchives(old);
+  archiveLogFiles(old, idx2, NOW, stubReleases().io, join(old, '..', `${basename(old)}-st`), { log: () => {} });
+  assert.equal('files' in idx2.entries.find((x) => x.file === 'status/history/2026-09.ndjson')!, false);
+});
+
+test('day files: a part that fails to verify keeps every part of the month in the tree', () => {
+  const { root } = dayRoot();
+  const { io } = stubReleases((_tag, name, b) => (name === 'status-history-2026-10.ndjson.gz' ? Buffer.from('garbage') : b));
+  const res = archiveLogFiles(root, loadLogArchives(root), DEC2, io, join(root, '..', `${basename(root)}-st`), { log: () => {} });
+  assert.equal(res.blocked.length, 1);
+  for (const f of ['2026-10.ndjson', '2026-10-06.ndjson', '2026-10-31.ndjson']) assert.ok(existsSync(join(root, 'status', 'history', f)), f);
+  assert.ok(!existsSync(join(root, 'status', 'history', '2026-11-01.ndjson')));
+});
+
+test('day files: leftovers of an archived month are removed only when they are exactly its content', () => {
+  const { root } = dayRoot();
+  const { io } = stubReleases();
+  const idx = loadLogArchives(root);
+  const h = join(root, 'status', 'history');
+  const saved = Object.fromEntries(['2026-11-01.ndjson', '2026-11-30.ndjson'].map((f) => [f, readFileSync(join(h, f))]));
+  archiveLogFiles(root, idx, DEC2, io, join(root, '..', `${basename(root)}-a`), { log: () => {} });
+  // The removal commit was lost: both parts are back. Identical → removed as leftovers.
+  for (const [f, b] of Object.entries(saved)) writeFileSync(join(h, f), b);
+  let res = archiveLogFiles(root, idx, DEC2, io, join(root, '..', `${basename(root)}-b`), { log: () => {} });
+  assert.deepEqual(res.leftoversRemoved, ['status/history/2026-11.ndjson']);
+  assert.ok(!existsSync(join(h, '2026-11-01.ndjson')) && !existsSync(join(h, '2026-11-30.ndjson')));
+  // Only one part is back (or a stray day file appears): not the archived content → blocked, left in the tree.
+  writeFileSync(join(h, '2026-11-30.ndjson'), saved['2026-11-30.ndjson']!);
+  res = archiveLogFiles(root, idx, DEC2, io, join(root, '..', `${basename(root)}-c`), { log: () => {} });
+  assert.equal(res.blocked.length, 1);
+  assert.match(res.blocked[0]!, /status\/history\/2026-11\.ndjson: differs from its archived copy/);
+  assert.ok(existsSync(join(h, '2026-11-30.ndjson')));
+});

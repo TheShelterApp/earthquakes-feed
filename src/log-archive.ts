@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
 import { gunzipSync, gzipSync } from 'node:zlib';
+import { statusHistoryFiles } from './bitemporal.js';
 import { REPO, dataPaths } from './config.js';
 import { gh, ghRetry, ghRetryNet, sleepMs } from './gh.js';
 
@@ -20,6 +21,13 @@ import { gh, ghRetry, ghRetryNet, sleepMs } from './gh.js';
  * asset of that name already in the release (a run that uploaded and died before its commit) is adopted only when its
  * content is byte-identical to the tree file, else the month is blocked and the file stays. History is never
  * rewritten; only the current month (and the first day of the next, LOG_ARCHIVE_GRACE_MS) stays in the tree.
+ *
+ * Since round 17 (LANE G) the status history is written per day (`status/history/YYYY-MM-DD.ndjson`): rewriting the
+ * whole month file on every aggregate commit was one of the repository's growth drivers. A finished month's day files
+ * (and the month file of October 2026, which holds the lines before the switch) are rolled into the same one asset per
+ * month as before, `status-history-YYYY-MM.ndjson.gz`, whose content is their concatenation in write order: byte for
+ * byte the month file the earlier layout would have written. Its index entry keeps the month's path as `file` and lists
+ * the tree files in `files`.
  */
 export const LOG_ARCHIVE_GRACE_MS = 86_400_000;
 export const LOG_ARCHIVE_MAX_FILES = Number(process.env.LOG_ARCHIVE_MAX_FILES ?? 60);
@@ -28,12 +36,16 @@ export type LogKind = 'status_history' | 'changes';
 
 export interface LogFile {
   kind: LogKind;
-  /** Absolute path in the tree. */
+  /** Absolute path in the tree (the first part when the log is rolled from several files). */
   path: string;
-  /** Path relative to the data root (what the index records). */
+  /** Path relative to the data root (what the index records): for the status history, the month's file
+   *  `status/history/YYYY-MM.ndjson`, also when the month was written as day files. */
   file: string;
   /** YYYY-MM the file belongs to. */
   period: string;
+  /** The status history's tree files of the month in write order (absolute), when they are not exactly `path`:
+   *  the asset is their concatenation and every one leaves the tree. */
+  parts?: string[];
 }
 
 export interface LogArchiveEntry {
@@ -49,6 +61,8 @@ export interface LogArchiveEntry {
   content_sha256: string;
   lines: number;
   archived_at: string;
+  /** The tree files the asset was rolled from, in order (since round 17, when they are day files). */
+  files?: string[];
 }
 
 export interface LogArchiveIndex {
@@ -77,7 +91,7 @@ export function isFinishedMonth(period: string, nowMs: number): boolean {
   return nowMs >= nextMonthStart + LOG_ARCHIVE_GRACE_MS;
 }
 
-/** `status-history-YYYY-MM.ndjson.gz` / `changes-YYYY-MM-DD.ndjson.gz`, from the tree file's own name. */
+/** `status-history-YYYY-MM.ndjson.gz` / `changes-YYYY-MM-DD.ndjson.gz`, from the log's file name (for the status history the month's path). */
 export const assetName = (f: Pick<LogFile, 'kind' | 'file'>): string =>
   `${f.kind === 'status_history' ? 'status-history' : 'changes'}-${basename(f.file, '.ndjson')}.ndjson.gz`;
 export const logTag = (period: string): string => `logs-${period}`;
@@ -86,11 +100,15 @@ export const logTag = (period: string): string => `logs-${period}`;
 export function logFilesToArchive(root: string, nowMs: number): LogFile[] {
   const p = dataPaths(root);
   const out: LogFile[] = [];
-  if (existsSync(p.statusHistoryDir)) {
-    for (const f of readdirSync(p.statusHistoryDir)) {
-      const m = /^(\d{4}-\d{2})\.ndjson$/.exec(f);
-      if (m && isFinishedMonth(m[1]!, nowMs)) out.push({ kind: 'status_history', path: join(p.statusHistoryDir, f), file: relative(root, join(p.statusHistoryDir, f)), period: m[1]! });
-    }
+  // The status history: one log per finished month, rolled from its month file and/or day files in write order.
+  const months = new Map<string, string[]>();
+  for (const f of statusHistoryFiles(p.statusHistoryDir)) {
+    if (isFinishedMonth(f.month, nowMs)) (months.get(f.month) ?? months.set(f.month, []).get(f.month)!).push(f.path);
+  }
+  for (const [period, parts] of months) {
+    const file = relative(root, join(p.statusHistoryDir, `${period}.ndjson`));
+    const single = parts.length === 1 && relative(root, parts[0]!) === file;
+    out.push({ kind: 'status_history', path: parts[0]!, file, period, ...(single ? {} : { parts }) });
   }
   if (existsSync(p.changesDir)) {
     for (const f of readdirSync(p.changesDir)) {
@@ -140,13 +158,17 @@ export function archiveLogFiles(
   const archivedAt = new Date(nowMs).toISOString();
   let n = 0;
   for (const f of logFilesToArchive(root, nowMs)) {
-    const content = readFileSync(f.path);
+    const parts = f.parts ?? [f.path];
+    const content = parts.length === 1 ? readFileSync(parts[0]!) : Buffer.concat(parts.map((x) => readFileSync(x)));
+    const removeParts = (): void => {
+      for (const x of parts) rmSync(x);
+    };
     const contentSha = sha256(content);
     const known = index.entries.find((e) => e.file === f.file);
     if (known) {
       // Archived by an earlier run whose tree removal did not land: remove it now if it is the same bytes.
       if (known.content_sha256 === contentSha) {
-        if (!opts.dryRun) rmSync(f.path);
+        if (!opts.dryRun) removeParts();
         res.leftoversRemoved.push(f.file);
       } else {
         res.blocked.push(`${f.file}: differs from its archived copy ${known.tag}/${known.asset} (content sha ${known.content_sha256.slice(0, 12)} vs ${contentSha.slice(0, 12)}); left in the tree`);
@@ -176,9 +198,11 @@ export function archiveLogFiles(
       content_sha256: contentSha,
       lines: countLines(content),
       archived_at: archivedAt,
+      ...(f.parts ? { files: f.parts.map((x) => relative(root, x)) } : {}),
     };
+    const from = f.parts ? ` (from ${f.parts.length} files)` : '';
     if (opts.dryRun) {
-      log(`log-archive: ${f.file} -> ${tag}/${asset} (${(content.length / 1e6).toFixed(2)} MB -> ${(gz.length / 1e6).toFixed(2)} MB, ${entry.lines} lines) [dry-run]`);
+      log(`log-archive: ${f.file}${from} -> ${tag}/${asset} (${(content.length / 1e6).toFixed(2)} MB -> ${(gz.length / 1e6).toFixed(2)} MB, ${entry.lines} lines) [dry-run]`);
       continue;
     }
     io.ensureRelease(tag, `Run logs for ${f.period}: the aggregate status history and the daily change logs, moved out of the data branch's tree when the month ended (immutable; index: knowledge/index/log_archives.json on the data branch).`);
@@ -232,11 +256,11 @@ export function archiveLogFiles(
         continue;
       }
     }
-    // Verified: index it, then remove the tree copy.
+    // Verified: index it, then remove the tree copy (every part of it).
     index.entries.push(entry);
-    rmSync(f.path);
+    removeParts();
     res.archived.push(entry);
-    log(`log-archive: ${f.file} -> ${tag}/${asset} (${(content.length / 1e6).toFixed(2)} MB -> ${(entry.bytes / 1e6).toFixed(2)} MB, ${entry.lines} lines)${present ? ' [adopted]' : ''}`);
+    log(`log-archive: ${f.file}${from} -> ${tag}/${asset} (${(content.length / 1e6).toFixed(2)} MB -> ${(entry.bytes / 1e6).toFixed(2)} MB, ${entry.lines} lines)${present ? ' [adopted]' : ''}`);
   }
   return res;
 }

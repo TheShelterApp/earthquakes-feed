@@ -169,10 +169,12 @@ open, reachable source appears.
   lock. `scripts/writer-group-sim.ts` replays a week of runs under GitHub's queue rules.
 - **History & growth:** `backfill` walks each source backward (paced, idempotent, ~3-yr
   target), and `archive` rolls cold months (>120 d) to GitHub Releases (un-metered) and
-  prunes the tree — so the `data` branch stays bounded. The run logs (`status/history`,
-  `changes/`) keep only the current month in the tree; finished months become immutable
+  prunes the tree — so the `data` branch stays bounded. The run logs (`status/history`, one
+  file per day since round 17, and `changes/`) keep only the current month in the tree; finished months become immutable
   gzip assets of the `logs-YYYY-MM` releases ([APIs.md](APIs.md#run-logs)). The `health`
-  workflow logs the repository's size and warns above 6 GB (5.48 GB on 2026-10-04). `event_map` is sharded by
+  workflow logs the repository's size and warns above 6 GB (5.48 GB on 2026-10-04, 5.64 GB on 2026-10-06, about 67 MB a
+  day: GitHub keeps about one compressed copy of every large file a commit rewrites, see
+  [APIs.md](APIs.md#repository-size); `scripts/repo-growth/` measures it). `event_map` is sharded by
   event-day and pruned to a 45-day dedup horizon; identity older than that lives in the
   frozen day partitions. Every source with a time-range query reached the target
   (2023-07-06) in July 2026 except ISC, whose walk is paused; a backfilled row is the

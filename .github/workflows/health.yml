@@ -275,6 +275,91 @@ jobs:
           if [ "$KB" -gt "$REPO_SIZE_WARN_KB" ]; then
             echo "::warning title=Repository size::the repository is ${GB} GB, over the ${REPO_SIZE_WARN_KB} KB threshold: check what grows (gh api repos/${{ github.repository }} --jq .size; the data branch tree by top-level directory)"
           fi
+      - name: Data file sizes (the run log and every file on data; logged, a warning and an issue past the limit, never a red run)
+        # R16-FOLLOWUPS (3): every aggregate commit rewrites the current run-log file under status/history, and GitHub warns on
+        # a pushed file above 50 MiB and rejects one above 100 MiB, which would stop the feed publishing. The aggregate run's
+        # own warning (src/bitemporal.ts HISTORY_FILE_WARN_BYTES) is an annotation among ~288 green runs a day; this one is
+        # in the watchdog and files an issue (emailed). It reads the data branch's tree from the API (one call, no
+        # checkout) and judges every blob, so it fits either layout of status/history: a day file (YYYY-MM-DD.ndjson, round
+        # 17 lane G: about 1.3 MB a day) warns past 5 MB, the aggregate's limit for a day file; any other file, a month file
+        # (YYYY-MM.ndjson, the layout until then) included, past 45 MB. The files under the directory are summed and the
+        # largest named, and a large file anywhere else on data warns the same way.
+        id: sizes
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # 45 MB, the month file's HISTORY_FILE_WARN_BYTES until round 17: under GitHub's 50 MiB push warning.
+          DATA_FILE_WARN_BYTES: '45000000'
+          # 5 MB, a status/history day file's HISTORY_FILE_WARN_BYTES (round 17 lane G): about four times a day's lines.
+          HISTORY_DAY_FILE_WARN_BYTES: '5000000'
+        run: |
+          gh api "repos/${{ github.repository }}/git/trees/data?recursive=1" > data-tree.json \
+            || { echo "data tree: unknown (the API call failed)"; exit 0; }
+          node -e '
+            const fs = require("fs");
+            const limit = Number(process.env.DATA_FILE_WARN_BYTES) || 45000000;
+            const dayLimit = Number(process.env.HISTORY_DAY_FILE_WARN_BYTES) || 5000000;
+            const mb = (b) => (b / 1e6).toFixed(1);
+            const isDayFile = (p) => /^status\/history\/\d{4}-\d{2}-\d{2}\.ndjson$/.test(p);
+            const limitOf = (p) => (isDayFile(p) ? dayLimit : limit);
+            let t = null;
+            try { t = JSON.parse(fs.readFileSync("data-tree.json", "utf8")); } catch {}
+            if (!t || !Array.isArray(t.tree)) { console.log("data tree: unknown (no tree in the answer)"); process.exit(0); }
+            const blobs = t.tree.filter((e) => e && e.type === "blob" && typeof e.path === "string" && typeof e.size === "number");
+            // The status history, whatever its file layout (one file a month today): the current file is rewritten by every
+            // aggregate commit, so it is the one that grows toward the limit.
+            const history = blobs.filter((e) => e.path.startsWith("status/history/"));
+            const largest = history.reduce((m, e) => (m && m.size >= e.size ? m : e), null);
+            const total = history.reduce((n, e) => n + e.size, 0);
+            const days = history.filter((e) => isDayFile(e.path)).length;
+            console.log(`status history: ${history.length} file(s) (${days} day file(s)), ${mb(total)} MB, largest ${largest ? `${largest.path} ${mb(largest.size)} MB` : "none"} (warning above ${mb(dayLimit)} MB a day file, ${mb(limit)} MB any other file)`);
+            const dirs = {};
+            for (const e of blobs) { const top = e.path.includes("/") ? e.path.slice(0, e.path.indexOf("/")) : "(root)"; dirs[top] = (dirs[top] || 0) + e.size; }
+            const all = blobs.reduce((n, e) => n + e.size, 0);
+            console.log(`data tree: ${blobs.length} files, ${mb(all)} MB (${Object.entries(dirs).sort((a, b) => b[1] - a[1]).map(([d, n]) => `${d} ${mb(n)} MB`).join(", ")})${t.truncated ? ", listing TRUNCATED" : ""}`);
+            const over = blobs.filter((e) => e.size > limitOf(e.path)).sort((a, b) => b.size - a.size || (a.path < b.path ? -1 : 1));
+            const text = over.map((e) => `${e.path}: ${mb(e.size)} MB, over ${mb(limitOf(e.path))} MB (${e.path.startsWith("status/history/") ? "the run log, rewritten by every aggregate commit" : "a file on the data branch"})`);
+            for (const x of text) console.log(`::warning title=Data file size::${x}: every rewrite of a large file grows the repository, and GitHub rejects a pushed file above 100 MiB, which stops the feed publishing (APIs.md Run logs)`);
+            // A truncated listing (over 100,000 entries or 7 MB) may miss a file: said, never guessed.
+            if (t.truncated) console.log("::warning title=Data file size::the data tree listing was truncated, so some files were not judged");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `tree_read=1\nsize_set=${over.map((e) => e.path).join(",")}\nsize=${text.join("; ")}\n`);
+          '
+      - name: Data file size issue (opened when a file on data passes its limit, closed when none; never fails the run)
+        if: always() && steps.sizes.outputs.tree_read == '1'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIZE: ${{ steps.sizes.outputs.size }}
+          SIZE_SET: ${{ steps.sizes.outputs.size_set }}
+        run: |
+          TITLE="[health] data file size"
+          NUM=$(gh issue list --repo "${{ github.repository }}" --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          RUN="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ -n "$SIZE_SET" ]; then
+            BODY="Automated watchdog: these files on the data branch are over their limit (5 MB for a status/history day file, 45 MB for any other file). Every rewrite of a large file grows the repository; GitHub warns on a pushed file above 50 MiB and rejects one above 100 MiB, and a rejected push stops the feed publishing. For the run log under status/history, slim its line (APIs.md *Run logs*).
+
+          $(printf '%s\n' "$SIZE" | tr ';' '\n' | sed 's/^ */- /')
+
+          size-set: ${SIZE_SET}
+          Run: ${RUN} ($(date -u +%FT%TZ))"
+            if [ -z "$NUM" ]; then
+              gh issue create --repo "${{ github.repository }}" --title "$TITLE" --body "$BODY" --label bug
+            else
+              # Comment only when the set of files changed: the sizes grow every run.
+              LAST=$(gh issue view "$NUM" --repo "${{ github.repository }}" --json body,comments --jq '[.body, (.comments[].body)] | map(select(test("size-set: "))) | last // ""' | sed -n 's/^ *size-set: //p' | tail -1)
+              if [ "$LAST" != "$SIZE_SET" ]; then
+                gh issue comment "$NUM" --repo "${{ github.repository }}" --body "$BODY"
+              else
+                echo "issue #$NUM already lists ${SIZE_SET}"
+              fi
+            fi
+          elif [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --repo "${{ github.repository }}" --body "No file on the data branch is over its limit as of $(date -u +%FT%TZ) (run ${RUN}).
+
+          size-set: "
+            gh issue close "$NUM" --repo "${{ github.repository }}"
+          fi
 
   alerts:
     # The alert-pipeline watchdog. A separate job on purpose: it runs in parallel with the feed

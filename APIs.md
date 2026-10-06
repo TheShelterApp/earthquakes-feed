@@ -582,7 +582,10 @@ day's file. Until round 17 it rewrote the whole month file, up to about 40 MB at
 warning for a pushed file above 50 MiB and its rejection above 100 MiB, and each such rewrite left about one
 compressed copy of the file in the repository's storage per GitHub repack (*Repository size*, below). The aggregate run
 prints a warning once the day file passes 5 MB (`HISTORY_FILE_WARN_BYTES`, src/bitemporal.ts): the line has grown about
-fourfold.
+fourfold. The `health` watchdog checks the same from outside every 15 minutes (round 17): it reads the `data` branch's
+tree from the API, logs the files under `status/history/` (count, total, largest, whatever their layout) and opens the
+`[health] data file size` issue while a status-history day file (`YYYY-MM-DD.ndjson`) is over 5 MB or any other file
+on the branch over 45 MB (closed when none is; never a red run).
 
 ## Repository size
 

@@ -7,6 +7,8 @@ import {
   annotation,
   buildUsageRequest,
   DEFAULT_THRESHOLDS,
+  DELETIONS_MAX_WINDOW_MS,
+  deletionsFailure,
   evaluateStatus,
   evaluateUsage,
   failureReason,
@@ -579,4 +581,96 @@ test('freshness: the limits can be set on the command line', () => {
   const o = parseArgs(['--max-feed-manifest-age-sec', '900', '--max-config-bundle-age-sec', '3600']);
   assert.equal(o.thresholds.maxFeedManifestAgeSec, 900);
   assert.equal(o.thresholds.maxConfigBundleAgeSec, 3600);
+});
+
+// --- the USGS deletions query (GW-R15-1, round-16 gateways): a warning, never a failure ---
+
+/** What a round-16 gateway publishes while USGS's `includedeleted=only` query fails: the provider stays ok, the two
+ *  deletions fields appear, and the watermark (the deletions cursor) stops moving. */
+function deletionsFailing(failures: unknown, lastError: unknown = 'timeout', watermarkAgoMs = 2 * 3_600_000): Record<string, any> {
+  const doc = structuredClone(HEALTHY);
+  Object.assign(doc.detector.providers[0], { ok: true, consecutiveFailures: 0, watermarkMs: NOW - watermarkAgoMs, deletionsConsecutiveFailures: failures, deletionsLastError: lastError });
+  return doc;
+}
+
+test('deletions: a streak of 3 warns with the reason and the cursor age; the run stays healthy', () => {
+  assert.equal(DEFAULT_THRESHOLDS.deletionsFailures, 3);
+  const v = evaluateStatus(deletionsFailing(3), { nowMs: NOW });
+  assert.deepEqual(v.problems, []);
+  assert.deepEqual(v.warnings, [
+    "provider usgs's deletions query has failed 3 times in a row, last error timeout (slower than the gateway's fetch timeout): deleted events are not being withdrawn; its cursor (watermarkMs) is 2.0 h old (the next successful query asks from there, at most 7 days back) (warning at 3)",
+  ]);
+  assert.deepEqual(v.notes, []);
+  assert.match(v.summary, /providers=usgs:ok\/deletions-FAIL\(3\),feed:ok,emsc:ok,gfz:ok/);
+});
+
+test('deletions: below the threshold it is a log note; at 0 or absent nothing is said', () => {
+  const v = evaluateStatus(deletionsFailing(2, 'http'), { nowMs: NOW });
+  assert.deepEqual(v.warnings, []);
+  assert.deepEqual(v.notes, [
+    "provider usgs's deletions query has failed 2 times in a row, last error http (an HTTP error status): deleted events are not being withdrawn; its cursor (watermarkMs) is 2.0 h old (the next successful query asks from there, at most 7 days back) (below the warning at 3)",
+  ]);
+  const one = evaluateStatus(deletionsFailing(1, null), { nowMs: NOW });
+  assert.match(one.notes[0]!, /^provider usgs's deletions query has failed 1 time in a row: deleted events/);
+  // The healthy capture (and every gateway before round 16) carries neither field.
+  const healthy = evaluateStatus(HEALTHY, { nowMs: NOW });
+  assert.deepEqual([healthy.warnings, healthy.notes], [[], []]);
+  assert.match(healthy.summary, /providers=usgs:ok,feed:ok,emsc:ok,gfz:ok/);
+  assert.equal(deletionsFailure(HEALTHY.detector.providers[0]), null);
+});
+
+test('deletions: missing, malformed or unknown values never break the check', () => {
+  for (const bad of [0, -2, null, '12', Number.NaN, Number.POSITIVE_INFINITY, { n: 5 }, true]) {
+    const v = evaluateStatus(deletionsFailing(bad), { nowMs: NOW });
+    assert.deepEqual([v.problems, v.warnings, v.notes], [[], [], []], String(bad));
+    assert.doesNotMatch(v.summary, /deletions/, String(bad));
+  }
+  assert.equal(deletionsFailure(null), null);
+  assert.equal(deletionsFailure('usgs'), null);
+  // An unknown or odd lastError: shown as is (cut to 32 characters) or left out; a missing or odd watermark drops the age.
+  assert.deepEqual(deletionsFailure({ deletionsConsecutiveFailures: 4, deletionsLastError: 'tls' }), { failures: 4, why: ', last error tls' });
+  assert.deepEqual(deletionsFailure({ deletionsConsecutiveFailures: 4, deletionsLastError: 'y'.repeat(80) }), { failures: 4, why: `, last error ${'y'.repeat(32)}` });
+  assert.deepEqual(deletionsFailure({ deletionsConsecutiveFailures: 4, deletionsLastError: { code: 1 } }), { failures: 4, why: '' });
+  const doc = deletionsFailing(4, 'network');
+  delete doc.detector.providers[0].watermarkMs;
+  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).warnings, [
+    "provider usgs's deletions query has failed 4 times in a row, last error network (a network failure before the timeout): deleted events are not being withdrawn (warning at 3)",
+  ]);
+});
+
+test('deletions: a cursor older than the gateway\'s 7-day window says deletions from the gap are lost (still a warning)', () => {
+  assert.equal(DELETIONS_MAX_WINDOW_MS, 7 * 86_400_000);
+  const inside = evaluateStatus(deletionsFailing(2_016, 'timeout', 6.5 * 86_400_000), { nowMs: NOW });
+  assert.match(inside.warnings[0]!, /cursor \(watermarkMs\) is 6\.5 days old \(the next successful query asks from there, at most 7 days back\)/);
+  const past = evaluateStatus(deletionsFailing(2_100, 'timeout', 7.25 * 86_400_000), { nowMs: NOW });
+  assert.deepEqual(past.problems, []);
+  assert.match(past.warnings[0]!, /cursor \(watermarkMs\) is 7\.3 days old, past the gateway's 7-day deletions window: a deletion from the start of the gap is no longer asked for/);
+});
+
+test('deletions: judged whatever ok says; a provider that is also down fails for its live query only', () => {
+  const doc = deletionsFailing(12);
+  Object.assign(doc.detector.providers[0], { ok: false, httpStatus: 0, consecutiveFailures: 12, lastError: 'timeout', consecutiveTimeouts: 12 });
+  const v = evaluateStatus(doc, { nowMs: NOW });
+  assert.equal(v.problems.length, 1);
+  assert.match(v.problems[0]!, /^provider usgs is down: ok:false with 12 consecutive failures/);
+  assert.equal(v.warnings.length, 1);
+  assert.match(v.warnings[0]!, /deletions query has failed 12 times in a row/);
+  assert.match(v.summary, /usgs:FAIL\(12\)\/deletions-FAIL\(12\)/);
+});
+
+test('deletions: the threshold can be set on the command line', () => {
+  const o = parseArgs(['--deletions-failures', '10']);
+  assert.equal(o.thresholds.deletionsFailures, 10);
+  const v = evaluateStatus(deletionsFailing(9), { nowMs: NOW, thresholds: o.thresholds });
+  assert.deepEqual(v.warnings, []);
+  assert.match(v.notes[0]!, /below the warning at 10/);
+  assert.throws(() => parseArgs(['--deletions-failures', '-1']), /non-negative number/);
+});
+
+test('main: a failing deletions query is a warning annotation and keeps exit 0', async () => {
+  const r = await run({ routes: { [STATUS_URL]: [jsonResponse(deletionsFailing(5, 'timeout'))] } });
+  assert.equal(r.code, 0);
+  assert.doesNotMatch(r.out, /::error/);
+  assert.match(r.out, /::warning title=Alert pipeline::provider usgs's deletions query has failed 5 times in a row/);
+  assert.match(r.out, /alert pipeline healthy/);
 });

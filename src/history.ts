@@ -285,7 +285,10 @@ function editionEntryOf(tag: string, asset: string, sha256: string, bytes: numbe
   };
 }
 
-export async function fetchUnits(ctx: Ctx, maxUnits: number): Promise<void> {
+/** Fetch up to `maxUnits` pending source months. `onMonthComplete` runs when a fetch completes a month (every source of
+ *  its era fetched): the walk seals it there and then, so editions follow the fetches within the run instead of waiting
+ *  for a run whose fetching ends before its time budget does. */
+export async function fetchUnits(ctx: Ctx, maxUnits: number, onMonthComplete?: (p: Period) => void): Promise<void> {
   const paces = new Map<string, { lastEndMs: number }>();
   const failedSources = new Set<string>();
   let done = 0;
@@ -380,6 +383,7 @@ export async function fetchUnits(ctx: Ctx, maxUnits: number): Promise<void> {
     }
     ctx.report.fetched.push(`${tag}/${asset}: ${res.rows.length} rows${count}, ${res.windows.length} window(s), ${res.requests} request(s), ${(bytes / 1e6).toFixed(2)} MB`);
     console.log(`history: ${key} -> ${tag}/${asset} (${res.rows.length} rows${count}, ${res.requests} requests)`);
+    if (onMonthComplete && era.sources.every((s) => rawOf(ctx.idx, s, u.period.key))) onMonthComplete(u.period);
   }
 }
 
@@ -403,7 +407,9 @@ function editionContext(ctx: Ctx, e: EditionEntry, day: string): ContextInput {
   return { label: `${e.tag}/${e.asset}#${day.slice(8, 10)}.ndjson`, day, nodes, sha256: e.sha256 };
 }
 
-function sealPeriods(ctx: Ctx): void {
+/** Build, verify and upload the next edition of every month that is complete and stale, newest first (a month waits
+ *  until its newer neighbour is frozen). Exported for tests/history-run.test.ts. */
+export function sealPeriods(ctx: Ctx): void {
   for (const p of periodsToSeal(ctx.cfg, ctx.idx)) {
     if (Date.now() > ctx.deadline) break;
     const nb = newerNeighbour(ctx.cfg, ctx.idx, p);
@@ -495,7 +501,10 @@ async function main(): Promise<void> {
   try {
     adoptOrphans(ctx);
     // An empty value (a blank workflow_dispatch input) means the config's number, never 0.
-    await fetchUnits(ctx, process.env.HISTORY_MAX_UNITS ? Number(process.env.HISTORY_MAX_UNITS) : cfg.maxUnitsPerRun);
+    // Months left complete but unsealed by an earlier run first, then each month as its last source arrives: a run
+    // whose fetching uses the whole time budget (era A's walk) still seals what it completed.
+    sealPeriods(ctx);
+    await fetchUnits(ctx, process.env.HISTORY_MAX_UNITS ? Number(process.env.HISTORY_MAX_UNITS) : cfg.maxUnitsPerRun, () => sealPeriods(ctx));
     sealPeriods(ctx);
   } catch (e) {
     fatal = e;

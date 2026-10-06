@@ -9,7 +9,7 @@ import { type HistoryConfig, type HistoryEra, allPeriods, historyTag, rawAssetNa
 import type { HttpAnswer } from '../src/history-fetch.js';
 import { emptyIndex } from '../src/history-index.js';
 import { DryRunStore, LocalStore } from '../src/history-store.js';
-import { type Ctx, adoptOrphans, fetchUnits } from '../src/history.js';
+import { type Ctx, adoptOrphans, fetchUnits, sealPeriods } from '../src/history.js';
 import { loadRegistry } from '../src/providers.js';
 
 // FEED-TEST-1: the deep-history walk's run decisions (src/history.ts): taking over assets a run uploaded but never
@@ -211,4 +211,21 @@ test('dry-run store: reads published assets, writes only locally, never shadows 
   store.upload('history-2022', mine);
   assert.deepEqual(store.list('history-2022').map((a) => a.name), ['raw-emsc-2022-12.ndjson.zst', 'raw-usgs-2022-12.ndjson.zst']);
   assert.deepEqual(published.list('history-2022').map((a) => a.name), ['raw-usgs-2022-12.ndjson.zst'], 'nothing reached the published store');
+});
+
+test('fetch + seal: a month is sealed as soon as its last source arrives, newest first, each on its newer neighbour', { skip: !hasZstd && 'zstd not installed' }, async () => {
+  const h = http((url) => (url.includes('/count?') ? { status: 200, body: '{"count":0}', latencyMs: 1, retryAfterMs: null } : { status: 204, body: '', latencyMs: 1, retryAfterMs: null }));
+  const ctx = ctxOf({ fetchOptions: h.fetchOptions });
+  const sealedAfter: number[] = [];
+  await fetchUnits(ctx, 4, () => {
+    sealPeriods(ctx);
+    sealedAfter.push(ctx.idx.raw.length);
+  });
+  assert.deepEqual(sealedAfter, [1, 2], 'one seal per completed month, right after its fetch');
+  // In the order they were sealed: the newest month first, the older one on its frozen first day.
+  assert.deepEqual(ctx.idx.editions.map((e) => [e.period, e.edition, e.context]), [
+    ['2022-12', 1, null],
+    ['2022-11', 1, 'history-2022/events-2022-12.e1.tar.zst#01.ndjson'],
+  ]);
+  assert.deepEqual(ctx.report.sealed.length, 2);
 });

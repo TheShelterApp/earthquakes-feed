@@ -1,16 +1,25 @@
 name: aggregate
 
-# Phase 1: fetch every source, dedup, append to the observation log, commit to `data`.
-# Public repo => Actions is free & unlimited. Cron is offset off :00; GitHub delivers
-# scheduled runs best-effort (often sparser than 5 min) — freshness contract is 30 min.
+# Phase 1: fetch every source, dedup, append to the observation log, commit to `data`; then phase 2 in the same job
+# (.github/actions/derive-publish): rebuild the derived views from that commit and publish them.
+# Public repo => Actions is free & unlimited. GitHub delivers scheduled runs best-effort (often sparser than 5 min) —
+# freshness contract is 30 min.
 #
 # FALLBACK ONLY, every 15 min. The external Cloudflare-Worker heartbeat already dispatches
 # this workflow every 5 min, so a 5-min cron on top of it put ~2 arrivals per 5 min into the
-# serialized `earthquakes-feed-writer` group while each run takes 1-3 min. Any slowdown then
-# cascades: with `cancel-in-progress: false` each new arrival supersedes the pending one, so
-# nothing completes at all (2026-07-27 23:50-00:13 — every cycle cancelled, manifest 26 min
-# stale; same shape as the 48 cancelled aggregates on 2026-07-09). This cron now only covers
+# serialized `earthquakes-feed-writer` group while each run takes 1-3 min. This cron now only covers
 # the heartbeat being down, which the 30-min contract tolerates.
+#
+# The writer lock (FEED-OPS-4, round 14). Every workflow that commits to `data` beyond its own side index (aggregate,
+# backfill, archive, derive.yml by hand) shares the group `earthquakes-feed-writer` with `queue: max`: runs wait in
+# arrival order (GitHub keeps up to 100 pending; changelog 2026-05-07). With the default queue a group keeps ONE
+# pending run and a newer arrival cancels it: in the week 2026-09-29 → 10-06 that cancelled 29 aggregate, 41 derive,
+# 8 backfill and 10 first-solutions commit runs, the last ones after 31 minutes of requests each
+# (scripts/writer-group-sim.ts replays that week through GitHub's rules: 80 of the 91 runs GitHub cancelled, 3 more).
+# derive used to be a workflow of its own, triggered by every completed aggregate run: a second arrival every 5
+# minutes and a second checkout of the 539 MB data tree (75 of derive's 109 s). It now runs at the end of this job, on
+# the checkout the aggregate step committed from: 2 minutes of the group per cycle instead of 3.4. The side-index
+# commit jobs (history, first-solutions, remediate) write only their own files and push without the lock.
 on:
   schedule:
     - cron: '9,24,39,54 * * * *'
@@ -19,6 +28,7 @@ on:
 concurrency:
   group: earthquakes-feed-writer
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: write
@@ -28,22 +38,25 @@ jobs:
     # Pinned, not ubuntu-latest: ubuntu-latest moves to Ubuntu 26.04 from 2026-10-19
     # (actions/runner-images#14748). Move to ubuntu-26.04 deliberately, after a green test run.
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    # The aggregate part had 5 minutes and derive 12 as jobs of their own (three Pages deploy attempts + backoff cannot
+    # fit in 6 min; a failing deploy alone runs ~3 min before erroring out). The Aggregate step keeps its own bound.
+    timeout-minutes: 16
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: data
           path: .data
           fetch-depth: 1
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       - name: Aggregate
+        timeout-minutes: 4
         env:
           DATA_DIR: .data
           # Every fetch resolves its host through getaddrinfo, which runs on libuv's thread pool
@@ -66,3 +79,17 @@ jobs:
           # Fail-loud push loop: a swallowed rebase conflict here silently loses data (H3). Three attempts, rebasing
           # onto a concurrent writer's commit; a conflict aborts the rebase and fails (tests/push-data.test.ts).
           bash "$GITHUB_WORKSPACE/scripts/push-data.sh"
+      # Phase 2. Only after a pushed (or unchanged) aggregate: a failed step above skips it, so derive never builds on
+      # a failed aggregate (M6).
+      - name: Derive and publish
+        uses: ./.github/actions/derive-publish
+        with:
+          cf-api-token: ${{ secrets.CF_API_TOKEN }}
+          cf-account-id: ${{ secrets.CF_ACCOUNT_ID }}
+          feed-signing-key: ${{ secrets.FEED_SIGNING_KEY }}
+          feed-signing-kid: ${{ vars.FEED_SIGNING_KID }}
+          r2-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          r2-s3-endpoint: ${{ vars.R2_S3_ENDPOINT }}
+          r2-bucket: ${{ vars.R2_BUCKET }}
+          r2-public-base: ${{ vars.R2_PUBLIC_BASE }}

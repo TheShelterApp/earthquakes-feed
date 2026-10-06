@@ -538,8 +538,10 @@ does), and the workflow's own `:50` cron is the fallback. The Worker is needed: 
 crons about 4 times a day (backfill, derive and health each got 4 scheduled runs between 2026-09-30 16:40 and
 2026-10-01 16:40 UTC), which would stretch every estimate below about sixfold. The `collect` job holds no
 writer lock (it shares the deep-history walk's group, so the two never ask a host at the same time): up to 30 minutes of
-requests, chunks uploaded, then the `commit` job writes the two small files in seconds under the writer lock (a sparse checkout of `knowledge/first_solutions/`; it refuses to write if they changed since the
-collect job read them). A lane takes no day of a seventh event month in one run (each month is one chunk upload, so the
+requests, chunks uploaded, then the `commit` job writes the two small files in seconds (a sparse checkout of `knowledge/first_solutions/`; it refuses to write if they changed since the
+collect job read them, and refuses to stage any other file). Since round 14 (FEED-OPS-4) it holds no writer lock either:
+no other writer touches those files, so its push rebases onto whatever another writer pushed first
+(`scripts/push-data.sh`). A lane takes no day of a seventh event month in one run (each month is one chunk upload, so the
 uploads stay a few minutes inside the job's 45-minute timeout; a day source would otherwise reach dozens of months a
 run). At one request a second a run does up to about 1,750 requests per lane (ComCat answered 441
 requests of 2026-06-15 in 450 s), so ComCat's 454,000 reports take about 11 days of hourly runs (and about 4 more for
@@ -554,8 +556,9 @@ answered 204 for 2026-08-25, whose one report it no longer lists); with no such 
 node that is down), the day is asked again in the next two runs before it is recorded as missing; any other refusal
 stops the lane; a source failing 24 runs in a row warns, from 72 the run turns
 red about once a day. A run whose upload fails keeps that source's cursor where it was. A run whose commit job never
-lands (GitHub keeps one pending job per concurrency group, so a commit waiting for the writer lock is cancelled when
-another writer queues behind it; run 36909538501 lost its commit that way on 2026-10-01) is taken over by the next run:
+lands (until round 14 GitHub cancelled a commit job waiting for the writer lock whenever another writer queued behind
+it, 10 of 126 runs in the week to 2026-10-06, run 36909538501 first; now only a failed push or job is left) is taken
+over by the next run:
 the collect job reads the newest `first-solutions-out` artifact, and when that output was uploaded, was built on
 exactly the cursor and chunk list `data` still holds, and every chunk it added is in its Release with the listed size,
 the run starts from it, so its commit lands both runs' work and nothing is asked twice.

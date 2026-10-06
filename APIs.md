@@ -402,7 +402,7 @@ magnitudes are close to the other agencies', its places scatter: against ComCat'
 moderate-event window with its distance raised to 50 km at every magnitude ≥ 4.0, as for TMD (same 20 s, |ΔM| ≤ 0.5,
 best-match and dense-cell rules). Replaying the observation log of 2026-07-05…10-06 folds 33 such pairs (none split),
 each USP row 22–60 km from ComCat's solution of a quake that ComCat (32) or EMSC (1) lists alone within 60 s and 300 km;
-28 of them are South American, such as the M4.5 of 2026-10-06 in southern Bolivia (USP 29 km and 1.2 s from ComCat's
+27 of them are in South America, such as the M4.5 of 2026-10-06 in southern Bolivia (USP 29 km and 1.2 s from ComCat's
 `us6000tzva`). A USP solution farther out keeps its own event: of the log's 189 USP rows that have a GEOFON row of the
 same suffix (below), 52 stay in another event than GEOFON's, 39 of them more than 50 km from that event.
 

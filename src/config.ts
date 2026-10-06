@@ -127,7 +127,9 @@ export const TMD_WINDOW_KM = 50;
  *    ComCat's solution, ≤ 50 km from the other event, and ComCat (32) or EMSC (1) lists that event's quake and no other
  *    within 60 s and 300 km of the USP row. Live M ≥ 4.5 events of the last 10 days with a sibling 78/271 → 75/270; rows
  *    in two live events 0; same-suffix pairs in two events 75 → 52 (39 beyond 50 km, 4 by magnitude, 2 in a dense cell
- *    or the large-event window, 6 with USP's row beside another agency's, 1 two quakes). 28 of the 33 are South American.
+ *    or the large-event window, 6 with USP's row beside another agency's, 1 two quakes). 27 of the 33 are in South
+ *    America; the other 6 lie on the Mid-Atlantic Ridge (2), near the South Sandwich Islands (2), Saint Helena and off
+ *    Chiapas.
  *  - 50 km is LARGE_EVENT_MAX_KM, the alerts gateway's fold window, as for TMD. Wider was replayed too and checked the
  *    same way, without a wrong fold: 75 km folds 54 groups, 100 km 64, 150 km 76, but each regroups 2–3 events of the
  *    2026-07/08 Chiapas offshore sequence (USP's row leaves SSN's for the partner event, SSN's row then stands alone). */

@@ -29,6 +29,13 @@ curl -s https://earthquakes-feed.theshelter.app/v1/all_day.geojson
 # live window — a partition's pages_url in manifest.json tells you it exists):
 curl -s https://earthquakes-feed.theshelter.app/v1/events/2026-07-04.geojson
 
+# The week kept current without re-downloading it: per-day files with sha256 fingerprints plus
+# head_seq deltas (APIs.md, Live index):
+curl -s https://earthquakes-feed.theshelter.app/v1/live/index.json
+
+# One event's full detail: the live events of its UTC hour, full-fat (APIs.md, Event detail):
+curl -s https://earthquakes-feed.theshelter.app/v1/detail/2026-10-05T09.geojson
+
 # Any historical day as NDJSON, straight from the data branch (full history):
 curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2026/07/04.ndjson
 ```
@@ -205,7 +212,7 @@ npm run typecheck
 
 # Run the pipeline against a scratch dir (hits live public APIs, read-only):
 DATA_DIR=.data npm run aggregate                 # fetch → dedup → append log
-DATA_DIR=.data PUBLIC_DIR=public npm run derive  # summaries + day files + partitions + manifest
+DATA_DIR=.data PUBLIC_DIR=public npm run derive  # summaries + day files + partitions + live index + detail hours + manifest
 DATA_DIR=.data PUBLIC_DIR=public npm run validate
 ```
 
@@ -249,7 +256,7 @@ as a fallback). It runs three independent jobs; any one failing turns the run re
   | Condition in `status.json` | Meaning |
   |---|---|
   | `generatedAtMs` older than 300 s | the detector stopped ticking or publishing (it publishes every 60 s) |
-  | a `detector.providers[]` entry with `ok: false` and `consecutiveFailures >= 3` | an alert source is down (a single failed poll is only logged) |
+  | a `detector.providers[]` entry with `ok: false` and `consecutiveFailures >= 3` | an alert source is down (a single failed poll is only logged); the message names why when the gateway says so: `lastError` (`timeout`, `http`, `network`, `invalid`) and `consecutiveTimeouts` |
   | `policy.fallback == true` | the restrictive compiled alerts policy runs instead of the signed one |
   | `degraded.active == true` | the free-tier degradation ladder is shedding alert tiers |
   | `budget.headroomPct < 20` (when present) | the gateway is close to a Workers Free daily cap |
@@ -261,7 +268,8 @@ as a fallback). It runs three independent jobs; any one failing turns the run re
 
   It only **warns** (the run stays green) when today's `fanout.skipped_no_key` or
   `fanout.retry_dropped_budget` is above 0. Fields an older gateway does not publish
-  (`apns.mode`, `apns.production`, `apns.problems`, `fanout`, the two ages) are never treated as a problem;
+  (`apns.mode`, `apns.production`, `apns.problems`, `fanout`, the two ages, a provider's `lastError` /
+  `consecutiveTimeouts`) are never treated as a problem;
   a null age (not read since the gateway deployed) is a warning.
 
   The fetch is retried twice (2 s, then 5 s backoff) before it gives up. A document it cannot

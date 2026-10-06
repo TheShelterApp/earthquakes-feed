@@ -14,11 +14,14 @@ export interface Feat {
   sig: number | null;
   /** false = a retired marker (superseded or tombstoned) published non-live (publishesRetired), not counted. */
   live: boolean;
+  /** The node's knowledge clock (`feed.ingest_seq`) and last ingest (ms): the live index's deltas select by them. */
+  seq: number;
+  ingestMs: number;
 }
 
 const DOMAIN = 'https://earthquakes-feed.theshelter.app';
 /** Reject future-timestamped events (adapter timezone bugs) beyond this leeway. */
-const FUTURE_LEEWAY_MS = 10 * 60_000;
+export const FUTURE_LEEWAY_MS = 10 * 60_000;
 
 /** Magnitude rungs the size guard climbs; a file only ever escalates above its own name. */
 const MAG_LADDER = [1.0, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0];
@@ -27,7 +30,7 @@ const SIZE_CEILING = MAX_PUBLISHED_BYTES * 0.9;
 /** Growth is visible here, ~months before it becomes a failed run. */
 const SIZE_WARN = MAX_PUBLISHED_BYTES * 0.75;
 
-const NOTICE =
+export const NOTICE =
   'Aggregated by earthquakes-feed (https://earthquakes-feed.theshelter.app). Per-source attribution and each provider\'s full solution are in properties.feed.provenance[] of the day files (/v1/events/) and NDJSON partitions; summaries are compact. Sources include USGS/ANSS (public domain), EMSC/CSEM and FDSN networks (CC-BY-4.0).';
 
 function collectionJson(name: string, feats: Feat[], nowMs: number, headIngestTime: string, minMag?: number | null, truncated = false): string {
@@ -64,7 +67,15 @@ export function summaryFeats(nodes: Iterable<EventNode>, nowMs: number): Feat[] 
   for (const n of nodes) {
     if (!(n.state === 'live' || publishesRetired(n, nowMs)) || n.eventTimeMs > nowMs + FUTURE_LEEWAY_MS) continue;
     const feature = nodeToFeature(n, { compact: true }) as { properties: { mag: number | null; sig: number | null } };
-    out.push({ feature, timeMs: n.eventTimeMs, mag: feature.properties.mag, sig: feature.properties.sig, live: n.state === 'live' });
+    out.push({
+      feature,
+      timeMs: n.eventTimeMs,
+      mag: feature.properties.mag,
+      sig: feature.properties.sig,
+      live: n.state === 'live',
+      seq: n.lastSeq,
+      ingestMs: Date.parse(n.lastIngestTime),
+    });
   }
   return out;
 }

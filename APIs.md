@@ -11,7 +11,7 @@ archival, redaction).
 
 | Surface | Base | Use | Cache |
 |---|---|---|---|
-| Cloudflare Pages | `https://earthquakes-feed.theshelter.app/v1/` | live feed, recent day files, manifest | summaries + manifest `max-age=30` + SWR; day files `max-age=300` (today, yesterday) / `3600` (older) |
+| Cloudflare Pages | `https://earthquakes-feed.theshelter.app/v1/` | live feed, recent day files, manifest, live index, per-hour detail | summaries + manifest + live index and deltas `max-age=30` + SWR; day files `max-age=300` (today, yesterday) / `3600` (older); live index day files `max-age=0, must-revalidate`; detail hours `max-age=300` |
 | jsDelivr (branch) | `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/` | full-history partitions | ~12 h |
 | jsDelivr (`@sha`) | `…@<data_commit>/` | immutable frozen partitions | 1 year, immutable |
 | GitHub Releases | `archive-YYYY-MM` assets | very old months (bulk) | immutable, no CORS |
@@ -35,6 +35,8 @@ The catalog. Fields:
 | `summaries` | map of `{name: {path, url, count}}` for the 20 rolling feeds (`count` = live events in that file) |
 | `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}` |
 | `archives[]` | rolled-up cold months: `{period, tag, asset, url, bytes, sha256, count, days[]}` |
+| `live` | the live index: `{path, url, head_seq, window_days}` (see *Live index* below; since 2026-10) |
+| `event_detail` | the per-hour detail files: `{path_template, url_template, first_hour, last_hour}` (see *Event detail* below; since 2026-10) |
 
 `partitions[]` overrides `archives[]` for any day present in both.
 
@@ -107,6 +109,85 @@ Ready-to-render `FeatureCollection` for one UTC day: the live events **full-fat*
 event-map window (~45 days) — a partition's `pages_url` is present in `manifest.json`
 **iff** its day file is actually deployed; for any other day use the partition `url`
 (NDJSON, same full-fat Features, one per line).
+
+### `GET /v1/live/index.json` — live index (incremental refresh of the week)
+
+The content of `all_week.geojson` in a form a client can keep up to date without downloading the whole week again
+(PRB-2, 2026-10). `all_week` is one ~7.4 MB file (~870 KB brotli) whose bytes change on every 5-minute run, if only
+because `metadata.generated` does. The index lists:
+
+- `days[]`: `{date, path, url, count, bytes, sha256}` for each UTC day of the window — today and the 7 days before it
+  (`window_days`), and tomorrow while an event within the 10-minute future leeway sits past midnight. Each
+  `/v1/live/days/YYYY-MM-DD.geojson` is a compact `FeatureCollection` with exactly the features `all_week` carries for
+  that day (live events, plus the events retired in the last 48 h flagged non-live, see *Retired events*), for the
+  whole day and without a magnitude floor. It holds no run clock (`metadata.generated` is the newest `ingest_time`
+  among its features), so its bytes, and its `sha256`, change only when its events do. `count` counts live events.
+- `deltas[]`: `{name, window_seconds, path, url, from_seq, head_seq, count, bytes, sha256}` for `15m`, `1h`, `6h` and
+  `24h`. `/v1/live/delta-<name>.geojson` holds the same compact features of **every** window event whose
+  `feed.ingest_seq` is above `from_seq`: everything that changed — a new event, a revision, a fold, a withdrawal —
+  since about `window_seconds` ago. `count` counts every feature, retired markers included.
+- `head_seq`: the knowledge clock all of them reflect (the same in every delta).
+- `features_format`: the serialization of the compact features (1 since 2026-10). It changes when the feed changes what
+  a compact feature holds (a new field, another format of one); such a change moves no seq, so no delta carries it to
+  the events you already hold: when it differs from the one you hold the window in, drop your cursor and fingerprints
+  and re-read every day (step 3).
+
+How to use it: keep the features of the days you fetched and the `head_seq` you got them at (your cursor).
+
+1. Fetch the index (about 4 KB, 1 KB compressed). If its `generated` is the one you hold, you are current.
+2. If you have a cursor and some delta has `from_seq <= cursor`, fetch the smallest such delta, check that it hashes to
+   the index's `sha256` (a deploy between the two requests serves another run's delta, which may start after your
+   cursor: go to step 3 instead), upsert **all** its features by `id` (a silent change, below, keeps its older
+   `ingest_seq`, at or below `from_seq`), drop the ones whose `feed.state` is not `live` (as from `all_week`), and set
+   the cursor to the delta's `head_seq`. That is exactly the window as of the index's `head_seq`. Do this for every new
+   `generated`, even when `head_seq` did not move: a run can change an event without a new seq (below), and its delta
+   carries it.
+3. Otherwise (no cursor, or more than a day behind) compare each day's `sha256` with the copy you hold, fetch only the
+   days that differ, replace those days' features with the file's, drop days that left the window, and set the cursor
+   to the index's `head_seq`. If a day file you fetched does not hash to the index's `sha256` (a deploy landed between
+   the two requests), keep it but do not take the cursor: the next refresh compares again.
+4. Filter by your own time window (`time >= now − 7 days`, as `all_week` does): whole days reach a little further back.
+
+Why a delta is exact: `from_seq` for a window W is the largest `ingest_seq` among the events last changed at least W
+ago; sequence numbers grow with ingest time, so everything changed later is above it, and the delta is by definition
+every window event above it. One kind of change moves no seq: a revision of a provider row that does not represent its
+event can still change the event's compact feature through the fill-only fields (`updated`, `author`, `magAuthor`,
+`tsunami`, ...). derive compares each window event's line with the one the previous run committed and keeps such an
+event for a day in `knowledge/index/live_silent.json` with the previous run's head (`head_before`); every delta whose
+`from_seq` is at most `head_before` carries it. Events that leave the window and retired markers that stop being
+published after 48 h are not changes: the first is your time filter, the second repeats a removal you already applied.
+Replayed over the 566 real derive commits of 2026-10-04 03:04 → 10-06 02:57 UTC (246 such changes detected), a client
+polling every 15 minutes, every hour or every 8 hours held exactly the day files of each run it polled, moving after its
+first sync about 5 KB per 15-minute poll, 14 KB per hourly poll and 171 KB per 8-hour poll (brotli 4) against ~846 KB
+for the week summary. Without the silent log, 20 events of 11.5 hours kept an older `author` or `updated`.
+
+Measured over the derive commits of 2026-10-04..06 (brotli level 4; what Pages serves is about 6 % larger): the week
+summary 846 KB per changed poll; the day files 205 KB per 5-minute run (on average 1.8 of the 8 days change per run:
+today in 96.5 % of runs, yesterday 41 %, older days 2–19 % each), 530 KB after an hour away, 786 KB after 8 h; the
+deltas 4.0 KB (15 min), 11.1 KB (1 h), 54.7 KB (6 h), 173.8 KB (24 h). So a client that polls every few minutes moves
+the index and a 15-minute delta (~5 KB) instead of the week (~870 KB), one back after a night moves the 24-hour delta,
+and one away for longer moves the changed days. `all_week` and the other summaries stay as they are. Schema:
+`schema/live-index.schema.json`.
+
+### `GET /v1/detail/YYYY-MM-DDTHH.geojson` — event detail (one UTC hour)
+
+A `FeatureCollection` of the **live** events whose origin falls in one UTC hour, full-fat like the day files (every
+provider's solution in `feed.provenance[]`; EVT-5, 2026-10). An app that opens one event reads its hour (~95 KB,
+~11 KB brotli on average; the largest hour on 2026-10-06 was 296 KB) instead of its day file (~2.3 MB, ~270 KB brotli).
+Build the URL by putting the hour key into `manifest.event_detail.url_template`; every hour from `first_hour` to
+`last_hour` (the days of the Pages day files, through the current hour) has a file, empty or not, so a missing hour
+outside that range means "use the day files". Look for the event by `id`, then by `feed.aliases[]`; when it is not
+there (a revision moved its origin time across the hour), read the neighbouring hours. Agencies' solutions of one
+quake lie within 60 s of each other: within 60 s of the hour's edge, the neighbouring hour may hold one. Retired
+events are not in these files (the day files keep their 48-hour markers). The bytes hold no run clock
+(`metadata.generated` is the newest `ingest_time` among the features, or the hour's start), so an hour's file changes
+only when its events do and a deploy uploads only the hours that changed.
+
+Why hours: on 2026-10-06 the 46 published days held about 54k live events; a file per event would be 54k files, past
+Cloudflare Pages' 20,000 files per site on the free plan (developers.cloudflare.com/pages/platform/limits, read
+2026-10-06); hours are 1,104 files (the deploy goes from 69 to about 1,170 files and from 145 to 258 MB, derive from
+2.5 to 3.1 s). A feed id → byte range index into the day files would need no new files, but Pages serves the day
+files compressed, and a range of a compressed body is not a range of the JSON.
 
 ### Historical day partitions (full history)
 
@@ -241,7 +322,10 @@ windows shrink with the magnitude difference. Those are the feed's own identity 
 (`src/dedup.ts`): agencies' preliminary epicentres of one M6–7 quake scatter by tens of
 km, and a provider re-publishing one solution under a second id (≤ 2 s, ≤ 2 km,
 |ΔM| ≤ 0.1) is the same event, not a new one. Exactly 0.1 counts, for every pair of magnitudes (since 2026-10-01;
-before, floating point made 2.3 vs 2.2 count and 1.5 vs 1.4 not). When the feed folds two existing ids it
+before, floating point made 2.3 vs 2.2 count and 1.5 vs 1.4 not). Every other magnitude limit below counts exactly
+the same way since 2026-10-06 (the 1.0 of the large-event window, the 0.8 between two reviewed solutions, the 1.5 and
+the 1.0 of AEC's location join and withheld reports; before, 5.4 vs 4.6 was more than 0.8 and 8.3 vs 7.3 more than
+1.0). When the feed folds two existing ids it
 folds a pair only when each is the other's best match (distance and time, relative to the
 pair's window), so a report is never welded to a neighbour while its own twin stays apart.
 
@@ -366,8 +450,20 @@ revised (`lastUpdateDate`, 28 of 9,071 logged AFAD reports by 2026-10-01); no so
 and the solution itself. `scripts/first-observations.ts` prints that for an event, named by its feed id or by any
 `provider:native_id`, with superseded ids followed to their survivor. A source that revises within minutes
 (EMSC often does) may have had a version the feed never saw. Reports the feed held back have no line until they join
-an event (`twin_withheld` AEC reports, `late_withheld` ComCat reports), and a later revision of a row that represents
-nothing and moves nothing can update the event without a line; neither changes which line is first.
+an event (`twin_withheld` AEC reports, `late_withheld` ComCat reports); that does not change which line is first.
+
+A revision of a row that represents nothing in its event (another source's solution leads it, and the revision moves
+nothing) changes the row in `feed.provenance` but not the event: its `revision` and `ingest_seq` stay, so the
+change-log has no line for it. Since round 15 (2026-10-06) the log has one: an `op:observe` line with a `reason`
+starting "row revised:" that carries the row as stored, at the event's unchanged `revision` (so two lines can carry one
+feed id at one revision; `ingest_seq` stays the seq of the line that made the revision). Status counts them as
+`rows_revised` (about one a run). Before that such a revision was stored without a line, so a replay of the log kept the
+older version: 1,068 of the 11,647 live rows of the hot window on 2026-10-06 (GEOFON's row of the Loyalty Islands M5.3
+of 2026-09-29 is M5.3 in the event, M5.71 in its last line). A one-time correction (`knowledge/index/correction.json`,
+epoch 3) logged each live row of the 10 days not yet frozen whose stored version its newest line did not carry: one
+`op:observe` line each with a `reason` starting "correction epoch 3:", the event unchanged. Older days keep the gap. The
+log replays to the stored rows since then; it never did, and still does not, for rows that backfill or a new source's
+onboarding wrote (they have no line).
 
 **Filled by backfill.** History before that, and the history of a source added later, comes from `backfill`: one
 window per source and run (hourly), walking each source that has a time-range query backwards into the day
@@ -894,6 +990,16 @@ at ingest, and frozen days are never rewritten.
 // Current week, one CORS-open fetch:
 const fc = await (await fetch('https://earthquakes-feed.theshelter.app/v1/all_week.geojson')).json();
 const stale = (Date.now() - fc.metadata.generated) / 1000 > 1800;
+
+// Keep the week current: the live index (see Live index) instead of all_week on every change
+const m0 = await (await fetch('https://earthquakes-feed.theshelter.app/v1/manifest.json')).json();
+const idx = await (await fetch(m0.live.url)).json();
+const delta = cursor != null ? idx.deltas.find(d => d.from_seq <= cursor) : null; // smallest first
+// delta (its body hashing to delta.sha256) ? upsert all its features by id : refetch the days whose sha256 changed; cursor = idx.head_seq
+
+// One event's full detail: its UTC hour
+const hour = new Date(eventTimeMs).toISOString().slice(0, 13);
+const detail = await (await fetch(m0.event_detail.url_template.replace('{hour}', hour))).json();
 
 // Time-slider: fetch a specific recent day
 const day = await (await fetch(`https://earthquakes-feed.theshelter.app/v1/events/${isoDate}.geojson`)).json();

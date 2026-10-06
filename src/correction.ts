@@ -1,12 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { eventDayKey } from './bitemporal.js';
+import { eventDayKey, readObservations } from './bitemporal.js';
 import { CORRECTION_EPOCH, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS, dataPaths } from './config.js';
 import { parseAfad } from './custom.js';
-import { Resolver } from './dedup.js';
+import { Resolver, rowAsReport } from './dedup.js';
 import { rereadFdsnTextRow } from './fdsn.js';
 import type { LogBuffer } from './oplog.js';
-import type { EventNode, ProviderConfig, RawObs } from './types.js';
+import type { EventNode, Observation, ProviderConfig, ProvenanceRow, RawObs } from './types.js';
 
 /** knowledge/index/correction.json — which one-time correction the data branch has had (config CORRECTION_EPOCH).
  *  Written by aggregate in the same commit as the correction's log lines, like heal.json: a run whose push fails
@@ -28,6 +28,18 @@ export interface CorrectionMarker {
   comcat_id: { merged: number; survivors: number } | null;
   /** Epoch 2 (PF-5h); null when an earlier run made it. Absent from markers written before epoch 2. */
   nrcan?: NrcanCorrection | null;
+  /** Epoch 3 (round 15, PF-5h (2)); null when an earlier run made it. Absent from markers written before epoch 3. */
+  rows?: RowsCorrection | null;
+}
+
+export interface RowsCorrection {
+  /** Live rows of the events at or after from_day. */
+  checked: number;
+  /** Rows whose stored version the newest line carrying their id did not carry: one op:observe line each
+   *  (ROWS_LOGGED_REASON). */
+  logged: number;
+  /** Rows no line of the log read carries at all (backfill and onboarding write none): not logged. */
+  no_line: number;
 }
 
 export interface NrcanCorrection {
@@ -72,6 +84,13 @@ export const AFAD_MOVED_OUT_REASON =
 export const NRCAN_PROVIDER = 'nrcan';
 export const NRCAN_FILLED_REASON =
   "correction epoch 2: re-read with the fixed FDSN text parser, which finds columns by their header name; the old one read NRCan's magnitude, magnitude type and place at the standard columns 10, 9 and 12, which NRCan's 8-column rows do not have (PF-5h)";
+/** The `reason` on the epoch-3 lines (unloggedRows). */
+export const ROWS_LOGGED_REASON =
+  'correction epoch 3: this row as stored; until round 15 a revision of a row that represented nothing in its event replaced the stored row without a log line, so the log did not carry this version (PF-5h)';
+/** How many ingest days before the correction floor unloggedRows reads: a row's lines come at or after its origin (the
+ *  live path takes nothing more than 10 minutes in the future), and an EMSC id that moved to another quake moved within
+ *  minutes. A row whose line lies further back is logged again, which costs a line and changes nothing. */
+export const ROWS_LOG_MARGIN_DAYS = 2;
 /** The label of the op:correction lines of the fold passes (LogBuffer.recordFolds). */
 export const CORRECTION_FOLD_LABEL = `correction epoch ${CORRECTION_EPOCH}`;
 
@@ -135,6 +154,55 @@ export function nrcanCorrections(eventMap: Map<string, EventNode>, floorMs: numb
   return out.sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.providerEventId < b.providerEventId ? -1 : a.providerEventId > b.providerEventId ? 1 : 0));
 }
 
+/** A JSON value with its object keys sorted, so two field vocabularies compare by content. */
+const canonical = (v: unknown): unknown =>
+  Array.isArray(v) ? v.map(canonical) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonical((v as Record<string, unknown>)[k])])) : v;
+
+/** Whether the log line `o` carries `row` as stored: its solution, its update time and its fields. */
+export function lineCarriesRow(o: Observation, row: ProvenanceRow): boolean {
+  return (
+    o.event_time === new Date(row.eventTimeMs).toISOString() &&
+    o.lat === row.lat &&
+    o.lon === row.lon &&
+    (o.depth ?? null) === row.depth &&
+    (o.mag ?? null) === row.mag &&
+    (o.magType ?? null) === row.magType &&
+    (o.status ?? null) === row.status &&
+    (o.place ?? null) === row.place &&
+    (o.provider_updated ? Date.parse(o.provider_updated) : null) === row.providerUpdatedMs &&
+    JSON.stringify(canonical(o.fields ?? {})) === JSON.stringify(canonical(row.fields ?? {}))
+  );
+}
+
+/** Epoch 3 (round 15, PF-5h (2)): every live row of an event at or after `floorMs` whose stored version the newest
+ *  op:observe / op:tombstone line carrying its id in `lines` (the log, any order) does not carry (lineCarriesRow). Until
+ *  round 15 a revision of a row that represented nothing in its event replaced the stored row without a line
+ *  (IngestResult.rowOnly), so a replay of the log kept the older version (on 2026-10-06, 1,465 of the 16,822 live rows of
+ *  the 10 days not yet frozen). A row no line carries at all came from backfill or a new source's onboarding, which
+ *  write no lines by design: counted (`noLine`), not logged. Deterministic order (event time, feed id, provider, id),
+ *  so the lines replay. */
+export function unloggedRows(eventMap: Map<string, EventNode>, floorMs: number, lines: readonly Observation[]): { rows: { raw: RawObs; node: EventNode }[]; noLine: number } {
+  const newest = new Map<string, Observation>();
+  for (const o of [...lines].sort((a, b) => a.seq - b.seq)) if (o.op === 'observe' || o.op === 'tombstone') newest.set(`${o.provider}:${o.provider_event_id}`, o);
+  const out: { raw: RawObs; node: EventNode; key: string }[] = [];
+  let noLine = 0;
+  for (const node of eventMap.values()) {
+    if (node.state !== 'live' || node.eventTimeMs < floorMs) continue;
+    for (const row of node.provenance) {
+      const key = `${row.provider}:${row.nativeId}`;
+      const o = newest.get(key);
+      if (!o) {
+        noLine++;
+        continue;
+      }
+      if (o.op === 'observe' && lineCarriesRow(o, row)) continue;
+      out.push({ raw: rowAsReport(row), node, key });
+    }
+  }
+  out.sort((a, b) => a.node.eventTimeMs - b.node.eventTimeMs || (a.node.feedId < b.node.feedId ? -1 : a.node.feedId > b.node.feedId ? 1 : 0) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  return { rows: out.map(({ raw, node }) => ({ raw, node })), noLine };
+}
+
 /** aggregate's one-time correction (config CORRECTION_EPOCH), run before the run's own reports over the days the
  *  manifest does not call frozen. It works on `eventMap` through a Resolver of its own whose window starts at that
  *  floor, so its folds reach every such day (the run's Resolver, built afterwards, keeps the usual 7-day window); a
@@ -159,8 +227,14 @@ export function nrcanCorrections(eventMap: Map<string, EventNode>, floorMs: numb
  *  line with NRCAN_FILLED_REASON. Then Resolver.foldAround folds the events they touched under the current rules (a
  *  magnitude only narrows the identity windows, except that two solutions of M5.5 or more get the widened one).
  *
+ *  Stored rows the log does not carry (epoch 3, round 15, PF-5h (2)): each live row whose stored version the newest line
+ *  of its id does not carry (unloggedRows) gets an op:observe line with ROWS_LOGGED_REASON at its event's unchanged revision
+ *  (LogBuffer.recordRow), so a replay of the log reproduces the stored rows; nothing else changes (the event map, the
+ *  partitions, the change-log), and nothing folds.
+ *
  *  Each step belongs to the epoch that added it, and a run makes only the steps of epochs after `fromEpoch` (the data
- *  branch's marker, correctedEpoch): the branch corrected to epoch 1 on 2026-09-30 gets the NRCan step alone. */
+ *  branch's marker, correctedEpoch): the branch corrected to epoch 1 on 2026-09-30 gets the NRCan step alone, the
+ *  branch at epoch 2 the rows step alone. */
 export function runCorrection(
   root: string,
   eventMap: Map<string, EventNode>,
@@ -224,6 +298,17 @@ export function runCorrection(
     nrcan.survivors = folds.survivors.length;
   }
 
+  let rows: RowsCorrection | null = null;
+  if (fromEpoch < 3) {
+    const fromLogDay = eventDayKey(floorMs - ROWS_LOG_MARGIN_DAYS * 86_400_000);
+    // The data branch's lines and the ones this run's earlier steps wrote.
+    const missing = unloggedRows(eventMap, floorMs, [...readObservations(root, fromLogDay), ...log.lines]);
+    let checked = 0;
+    for (const node of eventMap.values()) if (node.state === 'live' && node.eventTimeMs >= floorMs) checked += node.provenance.length;
+    for (const { raw, node } of missing.rows) log.recordRow(raw, { node, changed: false, revision: node.revision, merges: [] }, ROWS_LOGGED_REASON);
+    rows = { checked, logged: missing.rows.length, no_line: missing.noLine };
+  }
+
   const wrote = log.seq >= firstSeq;
   const marker: CorrectionMarker = {
     epoch: CORRECTION_EPOCH,
@@ -235,6 +320,7 @@ export function runCorrection(
     afad,
     comcat_id: comcatId,
     nrcan,
+    rows,
   };
   writeCorrectionMarker(root, marker);
   return marker;

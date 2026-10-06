@@ -56,6 +56,10 @@ const HEAL_MAX_PASSES = 4;
  *  every pair the base and large-event windows accept (score < 2) ranks ahead of it: the tier only adds folds. */
 const MODERATE_SCORE_OFFSET = 2;
 const clamp = (n: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, n));
+/** |a − b| > limit for two magnitudes, with REID_MAG_TOLERANCE of floating-point slack: a difference of exactly the
+ *  limit in published steps passes whatever its float error (5.4 − 4.6 = 0.8000000000000007, 8.3 − 7.3 =
+ *  1.0000000000000009, 2.2 − 0.7 = 1.5000000000000002). Every magnitude limit of the identity rules reads it (PF-5h (4)). */
+const magsApart = (a: number, b: number, limit: number): boolean => Math.abs(a - b) > limit + REID_MAG_TOLERANCE;
 /** How the op:tombstone line of a re-homed EMSC copy (Resolver.rehomeCopy, FEED-2) starts its reason. */
 export const REHOMED_REASON_PREFIX = 're-homed:';
 
@@ -69,7 +73,7 @@ function comcatIdsNamed(provider: string, nativeId: string, fields: Record<strin
 
 /** A stored provenance row as the report it was: what an op:tombstone line records for a withdrawn row, and what a
  *  replay feeds back to tombstoneProvider. */
-function rowAsReport(row: ProvenanceRow): RawObs {
+export function rowAsReport(row: ProvenanceRow): RawObs {
   return {
     provider: row.provider,
     providerEventId: row.nativeId,
@@ -139,6 +143,11 @@ export interface IngestResult {
    *  event, or what it folded into), `old` the withdrawn row as a report, `reason` the op:tombstone line's reason.
    *  LogBuffer.record writes that line (and its op:merge lines) before this report's own line. */
   rehomed?: { from: IngestResult; old: RawObs; reason: string };
+  /** Set, with `changed` false, when the report revised a row that represents nothing in its event: the stored row is
+   *  now the report's solution while the event's representative and revision stay. LogBuffer.recordRow writes its line
+   *  (an op:observe line with ROW_REVISED_REASON at the event's revision), so a replay of the log reproduces the row;
+   *  before round 15 such a revision was stored without a line (PF-5h (2)). */
+  rowOnly?: boolean;
 }
 
 /** What reviseOrMintInHotWindow did with one sweep row of a late-publishing catalog. */
@@ -434,7 +443,7 @@ export class Resolver {
 
   private magGuardBlocks(a: Solution, b: Solution): boolean {
     if (statusRank(a.status) >= 3 && statusRank(b.status) >= 3) {
-      if (a.mag != null && b.mag != null && Math.abs(a.mag - b.mag) > MAG_MERGE_MAX_DELTA) return true;
+      if (a.mag != null && b.mag != null && magsApart(a.mag, b.mag, MAG_MERGE_MAX_DELTA)) return true;
       if (Math.abs(a.eventTimeMs - b.eventTimeMs) > REVIEWED_DT_HARD_MS) return true;
     }
     return false;
@@ -447,7 +456,7 @@ export class Resolver {
     const dt = Math.abs(a.eventTimeMs - b.eventTimeMs);
     if (dt > ms) return `dt ${(dt / 1000).toFixed(1)} s > ${(ms / 1000).toFixed(1)} s`;
     if (d > km) return `d ${d.toFixed(1)} km > ${km.toFixed(1)} km${widened ? ' (widened)' : ''}`;
-    if (widened && Math.abs(a.mag! - b.mag!) > LARGE_EVENT_MAX_DELTA) {
+    if (widened && magsApart(a.mag!, b.mag!, LARGE_EVENT_MAX_DELTA)) {
       return `dM ${Math.abs(a.mag! - b.mag!).toFixed(2)} > ${LARGE_EVENT_MAX_DELTA} on the widened window`;
     }
     if (this.magGuardBlocks(a, b)) return 'reviewed-vs-reviewed mag/time guard';
@@ -467,7 +476,7 @@ export class Resolver {
    *  a great quake can run far below the final one. */
   private static lifecycleLocationBlocks(aRows: readonly SourcedSolution[], a: Solution, bRows: readonly SourcedSolution[], b: Solution): boolean {
     const far = (r: Solution, s: Solution): boolean =>
-      Math.abs(r.eventTimeMs - s.eventTimeMs) > LOCATION_JOIN_DT_MS || (r.mag != null && s.mag != null && Math.abs(r.mag - s.mag) > LOCATION_JOIN_MAX_DM);
+      Math.abs(r.eventTimeMs - s.eventTimeMs) > LOCATION_JOIN_DT_MS || (r.mag != null && s.mag != null && magsApart(r.mag, s.mag, LOCATION_JOIN_MAX_DM));
     const confirmed = (r: SourcedSolution, rows: readonly SourcedSolution[]): boolean => {
       const id = comcatIdOf(r.provider, nativeIdOf(r));
       return id != null && rows.some((o) => comcatIdsNamed(o.provider, nativeIdOf(o), o.fields).includes(id));
@@ -976,7 +985,7 @@ export class Resolver {
         const km = haversineKm(raw.lat, raw.lon, node.lat, node.lon);
         if (km > LATE_TWIN_KM) continue;
         if (node.provenance.some((r) => r.provider === raw.provider)) continue;
-        if (raw.mag != null && node.mag != null && Math.abs(raw.mag - node.mag) > LARGE_EVENT_MAX_DELTA) continue;
+        if (raw.mag != null && node.mag != null && magsApart(raw.mag, node.mag, LARGE_EVENT_MAX_DELTA)) continue;
         if (!best || km < best.km || (km === best.km && node.feedId < best.near.feedId)) best = { near: node, km, dtMs };
       }
     }
@@ -1035,6 +1044,7 @@ export class Resolver {
     const needsComcatAlias = comcatKey != null && !node.aliases.includes(comcatKey);
     const idx = node.provenance.findIndex((r) => r.provider === raw.provider && r.nativeId === raw.providerEventId);
     let structural = false;
+    let rowRevised = false;
     if (idx < 0) {
       node.provenance.push(this.makeRow(raw));
       structural = true;
@@ -1054,6 +1064,7 @@ export class Resolver {
       }
     } else {
       node.provenance[idx] = this.makeRow(raw);
+      rowRevised = true;
     }
     if (!hadAlias && !node.aliases.includes(key)) node.aliases.push(key);
     if (comcatKey && needsComcatAlias) {
@@ -1084,7 +1095,8 @@ export class Resolver {
       const survivor = this.mergeAround(this.foldComcatTwins(node, ingestTime, merges), ingestTime, merges);
       return { node: survivor, changed: true, revision: survivor.revision, merges };
     }
-    return { node, changed: false, revision: node.revision, merges: [] };
+    // A revision of a row that represents nothing: the event is unchanged, the row is not (rowOnly).
+    return { node, changed: false, revision: node.revision, merges: [], ...(rowRevised ? { rowOnly: true } : {}) };
   }
 
   /** FEED-2: EMSC's copy of an agency's solution (authoredCopy) that copies no other row of its event, while another

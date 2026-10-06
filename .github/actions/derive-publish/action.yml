@@ -1,0 +1,155 @@
+name: derive and publish
+description: >-
+  Phase 2 on the data checkout in .data: rebuild the derived views (rolling summaries, per-day partitions and Pages day
+  files, manifest) as a pure function of the log, validate them, commit them to `data`, pin and sign the manifest, then
+  publish to R2 and Cloudflare Pages. Since FEED-OPS-4 (round 14) these are the last steps of every aggregate run (same
+  job, same checkout, same hold on the writer lock); derive.yml runs them alone when dispatched by hand.
+
+# Summaries go to Cloudflare Pages ONLY (never committed — design §4.5); the data branch gets plain-NDJSON partitions +
+# the root manifest. Direct Upload deploys do NOT count against the 500-builds/month Pages cap. Each secret reaches only
+# the step that needs it.
+inputs:
+  cf-api-token:
+    description: secrets.CF_API_TOKEN (Pages deploy)
+    required: true
+  cf-account-id:
+    description: secrets.CF_ACCOUNT_ID
+    required: true
+  feed-signing-key:
+    description: secrets.FEED_SIGNING_KEY (blank = v2 manifest skipped with a warning)
+    required: false
+    default: ''
+  feed-signing-kid:
+    description: vars.FEED_SIGNING_KID
+    required: false
+    default: ''
+  r2-access-key-id:
+    description: secrets.R2_ACCESS_KEY_ID (blank = R2 skipped with a warning)
+    required: false
+    default: ''
+  r2-secret-access-key:
+    description: secrets.R2_SECRET_ACCESS_KEY
+    required: false
+    default: ''
+  r2-s3-endpoint:
+    description: vars.R2_S3_ENDPOINT
+    required: false
+    default: ''
+  r2-bucket:
+    description: vars.R2_BUCKET
+    required: false
+    default: ''
+  r2-public-base:
+    description: vars.R2_PUBLIC_BASE
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Check CF secrets present
+      shell: bash
+      env:
+        CF_API_TOKEN: ${{ inputs.cf-api-token }}
+      run: |
+        if [ -z "$CF_API_TOKEN" ]; then
+          echo '::error::CF_API_TOKEN secret is missing — live feed would go stale silently'
+          exit 1
+        fi
+    - name: Start from the data commit
+      # In an aggregate run the checkout already holds the pushed aggregate commit. Anything the aggregate step wrote
+      # but did not commit is dropped here, so derive sees exactly what a fresh checkout of `data` would hold (as it
+      # did when derive was a workflow of its own) and `git add -A` below stages only derive's own output.
+      shell: bash
+      working-directory: .data
+      run: |
+        left=$(git status --porcelain)
+        if [ -n "$left" ]; then
+          echo "::warning::uncommitted files in the data checkout before derive, dropped: $(printf '%s\n' "$left" | sed -n '1,20p' | tr '\n' ' ')"
+          git checkout -- .
+          git clean -fdq
+        fi
+    - name: Derive views
+      shell: bash
+      env:
+        DATA_DIR: .data
+        PUBLIC_DIR: public
+      run: npx --no-install tsx src/derive.ts
+    - name: Validate output (schema + seq + size gates)
+      shell: bash
+      env:
+        DATA_DIR: .data
+        PUBLIC_DIR: public
+      run: npx --no-install tsx src/validate.ts
+    - name: Commit & push derived views
+      shell: bash
+      working-directory: .data
+      env:
+        # The writer lock keeps other data writers out, but the side-index commit jobs (history, first-solutions,
+        # remediate) push without it: a rejected push fetches, rebases onto their commit and retries.
+        PUSH_ATTEMPTS: '3'
+        PUSH_BACKOFF_S: '5'
+      run: |
+        git config user.name  "earthquakes-feed-bot"
+        git config user.email "bot@users.noreply.github.com"
+        # -A, not `events manifest.json`: derive also rewrites knowledge/index/partitions.json
+        # (saveInventory) and deletes pruned knowledge/index/event_map shards, both tracked.
+        # Staging only events+manifest froze the inventory 30 partitions behind the manifest,
+        # never landed a single shard prune, and left the tree dirty on every run — which then
+        # turned any push retry into `cannot rebase: You have unstaged changes` (run 30301900011).
+        git add -A
+        if git commit -q -m "derive: views @ $(date -u +%FT%TZ)"; then
+          # Fail-loud push loop (H3; tests/push-data.test.ts).
+          bash "$GITHUB_WORKSPACE/scripts/push-data.sh"
+        else
+          echo 'no data-branch changes'
+        fi
+    - name: Pin manifest to the data commit (@sha immutable URLs)
+      shell: bash
+      run: |
+        SHA=$(git -C .data rev-parse HEAD)
+        node -e "const f='public/v1/manifest.json',fs=require('fs');const m=JSON.parse(fs.readFileSync(f));m.data_commit='$SHA';fs.writeFileSync(f,JSON.stringify(m,null,2));console.log('data_commit='+'$SHA'.slice(0,8))"
+    - name: Sign v2 manifest (Ed25519 envelope pinned to the data commit)
+      # Skips with a warning until FEED_SIGNING_KEY exists — v1 keeps publishing either way.
+      # The tiles pointer is fetched so the manifest can vouch for the offline bundle; if the
+      # fetch fails the manifest says tiles: null rather than failing the run.
+      shell: bash
+      env:
+        DATA_DIR: .data
+        PUBLIC_DIR: public
+        FEED_SIGNING_KEY: ${{ inputs.feed-signing-key }}
+        FEED_SIGNING_KID: ${{ inputs.feed-signing-kid }}
+        TILES_POINTER: .tiles-pointer.json
+        R2_PUBLIC_BASE: ${{ inputs.r2-public-base }}
+      run: |
+        curl -fsSL --max-time 20 https://raw.githubusercontent.com/TheShelterApp/region-tiles/main/regions-db.json -o .tiles-pointer.json || echo '::warning::regions-db.json fetch failed — tiles: null'
+        DATA_COMMIT=$(git -C .data rev-parse HEAD) npx --no-install tsx src/sign-manifest.ts
+    - name: Publish artifacts to R2 (data origin, S3 API)
+      # Idempotent (skip-by-sha); self-skips with a warning until the R2 keys exist. The R2
+      # origin is additive — never a gate on the Pages publish below.
+      shell: bash
+      env:
+        DATA_DIR: .data
+        PUBLIC_DIR: public
+        R2_ACCESS_KEY_ID: ${{ inputs.r2-access-key-id }}
+        R2_SECRET_ACCESS_KEY: ${{ inputs.r2-secret-access-key }}
+        R2_S3_ENDPOINT: ${{ inputs.r2-s3-endpoint }}
+        R2_BUCKET: ${{ inputs.r2-bucket }}
+      run: npx --no-install tsx src/publish-r2.ts
+    - name: Publish live feed to Cloudflare Pages (Direct Upload)
+      shell: bash
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ inputs.cf-api-token }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ inputs.cf-account-id }}
+      run: |
+        # Three deploys failed in 15 days, all control-plane-side and all after the upload
+        # succeeded (2026-07-12 'malformed response from the API'; runs 29588370032 /
+        # 30256024198 'Failed to publish your Function ... Unknown internal error'). Retrying
+        # is idempotent — assets are content-addressed and Direct Upload never touches the
+        # 500-builds/month Pages cap. Still exits red on a sustained outage so health.yml fires.
+        for i in 1 2 3; do
+          npx --no-install wrangler pages deploy public --project-name=earthquakes-feed --branch=main --commit-dirty=true && exit 0
+          [ "$i" = "3" ] || sleep 20
+        done
+        echo '::error::Cloudflare Pages deploy failed after 3 attempts'
+        exit 1

@@ -225,13 +225,13 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           sparse-checkout: scripts
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version-file: .nvmrc
       - name: Check alert pipeline (status.json + optional free-tier usage)
         env:
           # Optional (owner): a read-only Cloudflare token with Account Analytics: Read. Unset -> the
@@ -255,13 +255,13 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           sparse-checkout: scripts
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version-file: .nvmrc
       # Exit 0 healthy, 1 a host is down or unhealthy, 3 misconfigured; the ::error:: annotations say which.
       - name: Check api.theshelter.app and config.theshelter.app
         run: node scripts/platform-watchdog.mjs

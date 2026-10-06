@@ -4,7 +4,8 @@ name: remediate
 # one-day window still filled the source's page cap was kept partial and listed in knowledge/index/backfill.json
 # `saturatedDays`. Each such day is asked again in sub-day windows and published as an ADDITIVE, immutable day
 # edition in the Release `remediation-YYYY` (beside the raw answer); the archived day, its archive asset and the
-# manifest are never touched. The data branch gains only knowledge/index/remediation.json, written by the `commit` job.
+# manifest are never touched. The data branch gains only knowledge/index/remediation.json, written by the `commit` job,
+# which holds no writer lock (FEED-OPS-4, round 14): no other writer touches the file, so its push rebases onto theirs.
 # Manual only: a run does at most `max_days` days, one request at a time per source host.
 on:
   workflow_dispatch:
@@ -38,10 +39,10 @@ jobs:
     outputs:
       changed: ${{ steps.run.outputs.changed }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: data
           path: .data
@@ -53,9 +54,9 @@ jobs:
             knowledge/index/head.json
             knowledge/index/remediation.json
           sparse-checkout-cone-mode: false
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       - name: Remediate saturated days
@@ -70,13 +71,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: npx --no-install tsx src/remediate.ts
       - if: steps.run.outputs.changed == 'true' && !inputs.dry_run
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: remediation-index
           path: remediation-out/remediation.json
           retention-days: 3
       - if: inputs.dry_run
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: remediation-dry-run
           path: remediation-out/
@@ -90,13 +91,17 @@ jobs:
     if: ${{ !cancelled() && needs.collect.outputs.changed == 'true' && !inputs.dry_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    concurrency:
-      group: earthquakes-feed-writer
-      cancel-in-progress: false
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      # The main checkout holds only scripts/push-data.sh, the push loop every writer shares. First: checkout empties a
+      # directory that is not yet a repository, so it must not run after the artifact download.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/push-data.sh
+          sparse-checkout-cone-mode: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: data
           path: .data
@@ -104,7 +109,7 @@ jobs:
           sparse-checkout: |
             knowledge/index/remediation.json
           sparse-checkout-cone-mode: false
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: remediation-index
           path: remediation-out
@@ -121,11 +126,6 @@ jobs:
           if [ -z "$staged" ]; then echo 'no changes'; exit 0; fi
           if [ "$staged" != "knowledge/index/remediation.json" ]; then echo "::error::refusing to commit anything but knowledge/index/remediation.json: $staged"; exit 1; fi
           git commit -m "remediate: index @ $(date -u +%FT%TZ)"
-          for _ in 1 2 3; do
-            git push origin HEAD:data && exit 0
-            git fetch origin data
-            # `|| true`: with no rebase started --abort exits 128 and bash -e would kill the step
-            # before the annotation is emitted, losing the reason the push died.
-            git rebase origin/data || { git rebase --abort || true; echo '::error::rebase conflict'; exit 1; }
-          done
-          echo '::error::push failed after 3 attempts'; exit 1
+          # No writer lock (FEED-OPS-4): only this workflow writes these files, so a push that loses the race to another
+          # writer fetches, rebases this one commit onto it (no conflict possible) and tries again (scripts/push-data.sh).
+          PUSH_ATTEMPTS=6 PUSH_BACKOFF_S=3 bash "$GITHUB_WORKSPACE/scripts/push-data.sh"

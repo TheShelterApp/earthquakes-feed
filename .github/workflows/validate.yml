@@ -9,19 +9,73 @@ on:
 permissions:
   contents: read
 
+# One CI run per ref at a time, in arrival order. `queue: max` here also proves on every pull request that GitHub accepts
+# the key the writer workflows depend on (FEED-OPS-4; actionlint 1.7.12 does not know it yet).
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   ci:
     # Pinned, not ubuntu-latest: ubuntu-latest moves to Ubuntu 26.04 from 2026-10-19
     # (actions/runner-images#14748). Move to ubuntu-26.04 deliberately, after a green test run.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       - name: Typecheck
         run: npm run typecheck
       - name: Unit tests
         run: npm test
+
+  # The artifact hand-off the writers depend on (history, remediate and first-solutions upload in `collect` and download
+  # in `commit`), exercised on every pull request with the pinned upload-artifact / download-artifact: one file and a
+  # multi-file artifact, read back by name in another job with the content checked (X-10, round 14).
+  artifacts-upload:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Make the artifacts
+        run: |
+          mkdir -p one many
+          printf '{"probe":"%s"}\n' "$GITHUB_RUN_ID" > one/index.json
+          printf 'a\n' > many/cursor.json
+          printf 'b\n' > many/chunks.ndjson
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: probe-one
+          path: one/index.json
+          retention-days: 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: probe-many
+          path: |
+            many/cursor.json
+            many/chunks.ndjson
+          if-no-files-found: error
+          retention-days: 1
+  artifacts-download:
+    needs: artifacts-upload
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: probe-one
+          path: got-one
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: probe-many
+          path: got-many
+      - name: Check what came back
+        run: |
+          set -euo pipefail
+          find got-one got-many -type f | sort
+          test "$(cat got-one/index.json)" = "{\"probe\":\"$GITHUB_RUN_ID\"}"
+          test "$(cat got-many/cursor.json)" = a
+          test "$(cat got-many/chunks.ndjson)" = b

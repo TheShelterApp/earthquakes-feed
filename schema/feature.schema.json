@@ -267,6 +267,13 @@
             "null"
           ]
         },
+        "review_status": {
+          "enum": [
+            "automatic",
+            "reviewed"
+          ],
+          "description": "The representative solution's review status where its source says it (APIs.md, Review status); absent otherwise. On the rolling summaries, the live index and the detail hours (2026-10), not on the day files and partitions."
+        },
         "feed": {
           "type": "object",
           "required": [
@@ -336,6 +343,13 @@
                   "native_id"
                 ],
                 "properties": {
+                  "review_status": {
+                    "enum": [
+                      "automatic",
+                      "reviewed"
+                    ],
+                    "description": "This row's review status where its source says it (APIs.md, Review status); on the detail hours (2026-10)."
+                  },
                   "fields": {
                     "type": "object",
                     "description": "This provider's COMPLETE original field vocabulary — every field it reported, verbatim."

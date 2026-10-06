@@ -66,7 +66,8 @@ export function summaryFeats(nodes: Iterable<EventNode>, nowMs: number): Feat[] 
   const out: Feat[] = [];
   for (const n of nodes) {
     if (!(n.state === 'live' || publishesRetired(n, nowMs)) || n.eventTimeMs > nowMs + FUTURE_LEEWAY_MS) continue;
-    const feature = nodeToFeature(n, { compact: true }) as { properties: { mag: number | null; sig: number | null } };
+    // review_status since round 15 (review-status.ts): additive; the summaries are rebuilt every run.
+    const feature = nodeToFeature(n, { compact: true, reviewStatus: true }) as { properties: { mag: number | null; sig: number | null } };
     out.push({
       feature,
       timeMs: n.eventTimeMs,

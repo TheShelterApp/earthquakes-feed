@@ -257,8 +257,11 @@ other providers, core geometry/magnitude is never mixed. A top-level **`source`*
 `properties.net`, the chosen network) sits beside `id`/`geometry`/`properties` for
 clients that key a source enum off one required field. `geometry.coordinates` is
 `[lon, lat]` or `[lon, lat, depthKm]` — the depth slot is **omitted (never null)** when
-unknown, so a strictly typed `[Double]`/`[number]` decoder never trips. Feed data is
-under `properties.feed`:
+unknown, so a strictly typed `[Double]`/`[number]` decoder never trips. **`review_status`**
+(`"automatic"` | `"reviewed"`, absent when the source does not say) tells whether the event's solution is its source's
+automatic one or one a seismologist reviewed — the same on each `provenance[]` row for that row (see *Review status*;
+on the rolling summaries, the live index and the detail hours since 2026-10; the day files and partitions keep their
+bytes). Feed data is under `properties.feed`:
 
 | `feed.*` | Meaning |
 |---|---|
@@ -293,6 +296,40 @@ before ComCat's nc75441706 and another NC quake's rows join its event first, Com
 same id cannot follow, because that event already holds another ComCat id). Making the id independent
 of arrival order would mean re-keying events after first sight, which would break every consumer
 that keys on it, so the feed keeps the pinned id.
+
+## Review status
+
+`properties.review_status` and `provenance[].review_status` (2026-10) normalize what each source says about its
+solution to `"automatic"` or `"reviewed"`; absent means the source does not say it in what the feed reads. The event's
+value is its representative row's (the solution its top-level fields come from). It is computed from the stored row at
+publish time, so every row the hot window holds has it, and nothing is fetched or logged for it. The top-level `status`
+stays the source's own word (ComCat's `automatic` / `reviewed` / `deleted`, NCS's `Reviewed`, …).
+
+| Source | Where it comes from |
+|---|---|
+| ComCat (`usgs`) | `status` (`automatic` / `reviewed`) |
+| AEC | version 2 or an analyst magnitude = reviewed (see *Alaska (AEC)*) |
+| IMO | `evaluation_mode` (`manual` = reviewed) |
+| KOERI | a `REVISE` solution = reviewed, `Quick` = automatic |
+| OVSICORI, IG-EPN | "revisado" = reviewed |
+| GeoSphere Austria | `is_verified` |
+| CWA | reviewed reports only |
+| NCS (India) | `Reviewed` |
+| SSN (Mexico) | a preliminary solution = automatic (see *Mexico (SSN)*) |
+| RéNaSS, RESIF, NOA, IPGP, ETHZ | the origin's author in the FDSN text answer (`Author`): an automatic SeisComP locator (`scautoloc…@`, `l1autoloc@`, ETHZ's `…_auloc@`, `…_aloc@`, `…_reloc@`, `…_scloc@`, `scrtdd@`) or the `PhaseNet` picker = automatic, a person's login = reviewed |
+
+The author rule was checked against each service's own QuakeML `evaluationMode` for the same events on 2026-10-06
+(starttime 2026-09-26, up to 300 events each): RéNaSS 300 of 300 agree (29 automatic), NOA 300 of 300 (1 automatic),
+IPGP 119 of 119 (8 automatic), ETHZ 80 of 80 (all manual: its public service lists reviewed solutions; its automatic
+locators' names come from the all-origins answer of 2025-03-10) — `tests/fixtures/fdsn-author-modes-2026-10-06.json`.
+
+Not said by what the feed reads: EMSC (its FDSN JSON has no mode), GEOFON and KNMI (no author in the text answer), INGV
+(`SURVEY-INGV` on automatic and reviewed solutions alike), GeoNet, NCEDC and SCEDC (network codes; their events reach the
+feed through ComCat, which says it), NRCan, and the remaining custom sources. EMSC's and GEOFON's QuakeML do carry
+`evaluationMode` (EMSC, 2026-10-06: 329 automatic and 462 manual of its 791 events of two days): reading it would be a
+second query per run (EMSC's `updatedafter` QuakeML for the last 10 minutes was 8.8 KB; the whole two-day window is 1.58 MB
+against 430 KB of JSON). On the week of 2026-10-06 the field covers 3,822 of 7,360 live events (the top-level `status`
+said automatic or reviewed for 3,192); EMSC represents 1,354 of the rest.
 
 ## Freshness contract
 

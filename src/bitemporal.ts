@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { EXTRA_CANON_KEYS, NULLABLE_STD_KEYS, mergeCanonical } from './canonical.js';
+import { reviewStatusOfNode, reviewStatusOfRow } from './review-status.js';
 import { GRID_CELL_DEG, SCHEMA_VERSION, dataPaths } from './config.js';
 import { gridKey } from './geo.js';
 import type { EventNode, Extra, Head, Observation, ProvenanceRow, State, Watermarks } from './types.js';
@@ -154,7 +155,10 @@ const maxUpdated = (node: EventNode): number | null => {
  *  38 sources cannot fit a single servable file full-fat (Pages hard limit 25 MiB).
  *  Nothing is lost: day partitions and /v1/events day files stay full-fat, and the
  *  summary keeps `aliases` + `chosen_provider` for realtime dedup. */
-export function nodeToFeature(node: EventNode, opts?: { compact?: boolean }): unknown {
+/** `reviewStatus`: add the normalized `review_status` (review-status.ts) to the event's properties and to each
+ *  provenance row, when the source says it. Opt-in, for the surfaces derive rebuilds every run (summaries, the live
+ *  index, the detail hours): the day partitions and Pages day files keep their bytes, so a frozen day never changes. */
+export function nodeToFeature(node: EventNode, opts?: { compact?: boolean; reviewStatus?: boolean }): unknown {
   const updated = maxUpdated(node);
   // 2-element [lon, lat] when depth is unknown — never emit a null Z, so strictly
   // typed consumers (iOS `coordinates: [Double]`) can decode every Feature.
@@ -186,6 +190,10 @@ export function nodeToFeature(node: EventNode, opts?: { compact?: boolean }): un
   for (const k of NULLABLE_STD_KEYS) properties[k] = canon[k] ?? null;
   // Cross-source attribution + geo-admin — surfaced only when a source actually provided them.
   for (const k of EXTRA_CANON_KEYS) if (canon[k] != null) properties[k] = canon[k];
+  if (opts?.reviewStatus) {
+    const rs = reviewStatusOfNode(node);
+    if (rs) properties['review_status'] = rs;
+  }
 
   properties['feed'] = {
     schema_version: SCHEMA_VERSION,
@@ -220,6 +228,7 @@ export function nodeToFeature(node: EventNode, opts?: { compact?: boolean }): un
       license: r.license,
       attribution: r.attribution,
       doi: r.doi,
+      ...(opts?.reviewStatus && reviewStatusOfRow(r) ? { review_status: reviewStatusOfRow(r) } : {}),
       ...(Object.keys(r.fields).length ? { fields: r.fields } : {}),
     })) }),
   };

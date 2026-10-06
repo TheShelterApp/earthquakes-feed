@@ -248,7 +248,7 @@ as a fallback). It runs three independent jobs; any one failing turns the run re
   | Condition in `status.json` | Meaning |
   |---|---|
   | `generatedAtMs` older than 300 s | the detector stopped ticking or publishing (it publishes every 60 s) |
-  | a `detector.providers[]` entry with `ok: false` and `consecutiveFailures >= 3` | an alert source is down (a single failed poll is only logged) |
+  | a `detector.providers[]` entry with `ok: false` and `consecutiveFailures >= 3` | an alert source is down (a single failed poll is only logged); the message names why when the gateway says so: `lastError` (`timeout`, `http`, `network`, `invalid`) and `consecutiveTimeouts` |
   | `policy.fallback == true` | the restrictive compiled alerts policy runs instead of the signed one |
   | `degraded.active == true` | the free-tier degradation ladder is shedding alert tiers |
   | `budget.headroomPct < 20` (when present) | the gateway is close to a Workers Free daily cap |
@@ -260,7 +260,8 @@ as a fallback). It runs three independent jobs; any one failing turns the run re
 
   It only **warns** (the run stays green) when today's `fanout.skipped_no_key` or
   `fanout.retry_dropped_budget` is above 0. Fields an older gateway does not publish
-  (`apns.mode`, `apns.production`, `apns.problems`, `fanout`, the two ages) are never treated as a problem;
+  (`apns.mode`, `apns.production`, `apns.problems`, `fanout`, the two ages, a provider's `lastError` /
+  `consecutiveTimeouts`) are never treated as a problem;
   a null age (not read since the gateway deployed) is a warning.
 
   The fetch is retried twice (2 s, then 5 s backoff) before it gives up. A document it cannot

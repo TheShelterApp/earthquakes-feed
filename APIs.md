@@ -142,6 +142,18 @@ lists (see *Alaska (AEC)*; logged, never retracted). `absent.mexico` does the sa
 last 15 items: only ids younger than the oldest item it still lists are counted. `preliminary_superseded` and
 `preliminary_skipped` count SSN preliminary solutions withdrawn or not ingested (see *Mexico (SSN)*).
 
+**Frozen sources (round 14).** A source whose file is still served but no longer regenerated keeps answering `ok` with
+rows, so it is never silent. Each run records the newest origin every answer lists (`providers.<id>.newest_origin`);
+a source whose answer has rows but whose newest origin is older than its query window (2 days, or `lookbackDays`) plus
+its frozen budget is **frozen**: listed in `frozen` (by id: `newest_origin`, `newest_origin_age_hours`, `window_hours`,
+`budget_hours`, `rows`) and counted in `degraded`. The frozen budget is three activity budgets (36 h for an active agency,
+so 84 h in all), `frozenBudgetHours` for a source that lists its last N events and legitimately stands still for days
+(216 h: BGS, IG-EPN, CWA; their longest quiet spells 2026-07-05 → 10-06 were 180, 168 and 157 h, the longest among the
+other sources without a time window CENC's 59.6 h). An answer limited to a time window can never be frozen. The v2
+status adds `providers.<id>.frozen` and `frozenProviders`; the health workflow lists frozen sources in the silent
+providers issue (`frozen:<id>` in its set line). Pinned sources (FEED-SEC-1) also carry `providers.<id>.tls_leaf` and
+`tls_leaves` (the leaf certificate's `not_after`, `days_left`, `issuer`, `subject`, `seen_at`; providers/tls/README.md).
+
 **Failing and silent sources.** A provider whose fetch failed has `ok: false` and is in `degraded`. An FDSN answer of
 HTTP 204 is an empty success; HTTP 404 is an empty success only for a source whose query asks `nodata=404` (none does
 today) and an error otherwise, because it means the query path is gone (before 2026-10-04 every 404 counted as empty).

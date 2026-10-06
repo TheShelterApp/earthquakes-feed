@@ -13,6 +13,8 @@ export interface AggregateStatus {
   degraded?: string[];
   /** FEED-3: the sources past their activity budget (src/activity.ts), by id; absent before 2026-10-04. */
   silent?: Record<string, unknown>;
+  /** FEED-3, round 14: the sources whose newest listed origin stands still past window + budget, by id; absent before. */
+  frozen?: Record<string, unknown>;
   providers: Record<string, RawProvider>;
   [key: string]: unknown;
 }
@@ -48,6 +50,7 @@ export interface StatusV2Options {
 export function enrichStatusV2(raw: AggregateStatus, opts: StatusV2Options): Record<string, unknown> {
   const degradedProviders = raw.degraded ?? Object.entries(raw.providers).filter(([, p]) => !p.ok).map(([id]) => id);
   const silent = raw.silent ?? {};
+  const frozen = raw.frozen ?? {};
   const providers: Record<string, unknown> = {};
   for (const [id, p] of Object.entries(raw.providers)) {
     const lastSuccess = opts.health[id];
@@ -59,6 +62,8 @@ export function enrichStatusV2(raw: AggregateStatus, opts: StatusV2Options): Rec
       // FEED-3: `ok` says the fetch worked; `silent` says it has brought no rows for longer than the source's budget.
       ...(opts.lastNonEmpty ? { lastNonEmptyAt: opts.lastNonEmpty[id] ?? null } : {}),
       silent: id in silent,
+      // Round 14: rows, but the newest origin they list stands still past the source's window plus budget.
+      frozen: id in frozen,
       lagSeconds: lastSuccess != null ? Math.max(0, Math.round((opts.generatedMs - lastSuccess) / 1000)) : null,
       error: p.ok ? null : { kind: classifyError(p), message: p.error ?? 'provider failed', since: lastSuccess ?? opts.generatedMs },
     };
@@ -72,6 +77,7 @@ export function enrichStatusV2(raw: AggregateStatus, opts: StatusV2Options): Rec
     staleAfterSeconds: opts.staleAfterSeconds,
     degradedProviders,
     silentProviders: Object.keys(silent),
+    frozenProviders: Object.keys(frozen),
     providers,
   };
 }

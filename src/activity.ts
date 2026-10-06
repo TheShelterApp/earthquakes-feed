@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { ProviderConfig, ProviderStatus } from './types.js';
+import { liveLookbackMs } from './providers.js';
+import type { ProviderConfig, ProviderStatus, TlsLeafStatus } from './types.js';
 import { isoFromMs } from './util.js';
 
 /**
@@ -28,6 +29,9 @@ export interface ActivityRecord {
   lastNonEmptyAt: number | null;
   /** ms epoch from which the record counts (its first run, or the oldest status-history line it was seeded from). */
   sinceMs: number;
+  /** Pinned sources (tlsIntermediates): the leaf certificate last read from the host, kept so a run whose handshake
+   *  fails (an expired leaf) still shows when it expired. */
+  tlsLeaf?: { notAfterMs: number; issuer: string | null; subject: string | null; seenAt: number };
 }
 export type ActivityIndex = Record<string, ActivityRecord>;
 
@@ -49,12 +53,22 @@ export function activityBudgetHours(p: Pick<ProviderConfig, 'liveActive' | 'acti
 
 const hasRows = (s: Pick<ProviderStatus, 'ok' | 'events_returned'>): boolean => s.ok && (s.events_returned ?? 0) > 0;
 
-/** This run's answers into the index: a source with rows is active now; a new source starts its clock now. */
-export function updateActivity(prev: ActivityIndex, statuses: Record<string, Pick<ProviderStatus, 'ok' | 'events_returned'>>, nowMs: number): ActivityIndex {
+/** This run's answers into the index: a source with rows is active now; a new source starts its clock now. A leaf
+ *  certificate read in this run (pinned sources) replaces the one kept. */
+export function updateActivity(
+  prev: ActivityIndex,
+  statuses: Record<string, Pick<ProviderStatus, 'ok' | 'events_returned'>>,
+  nowMs: number,
+  leaves: Record<string, { notAfterMs: number; issuer: string | null; subject: string | null }> = {},
+): ActivityIndex {
   const next: ActivityIndex = { ...prev };
   for (const [id, s] of Object.entries(statuses)) {
     const rec = next[id] ?? { lastNonEmptyAt: null, sinceMs: nowMs };
     next[id] = hasRows(s) ? { ...rec, lastNonEmptyAt: nowMs } : rec;
+  }
+  for (const [id, leaf] of Object.entries(leaves)) {
+    const rec = next[id] ?? { lastNonEmptyAt: null, sinceMs: nowMs };
+    next[id] = { ...rec, tlsLeaf: { ...leaf, seenAt: nowMs } };
   }
   return next;
 }
@@ -77,6 +91,79 @@ export function silentProviders(index: ActivityIndex, providers: ProviderConfig[
     };
   }
   return out;
+}
+
+/**
+ * Frozen sources (FEED-3's blind spot, round 14). A source whose file stops being regenerated but is still served answers
+ * `ok` with rows for ever, so it is never silent: the rows are just old. A last-N list (ENSN's RSS, BGS, CWA, IG-EPN) or a
+ * rolling file (CENC's year) would keep its rows that way; none has done it yet. A source is FROZEN when its answer has
+ * rows but the newest origin it lists is older than its query window (2 days, or `lookbackDays`) plus its frozen budget:
+ * `frozenBudgetHours`, else three times its activity budget (36 h for an active agency). A source that honours the time
+ * window and stops publishing goes silent after the window plus its activity budget; one whose file stands still goes
+ * frozen after the window plus the frozen budget. A time-windowed FDSN answer can never be frozen (its newest origin is
+ * inside the window); a failed fetch is failing, not frozen.
+ * Calibrated on the observation log 2026-07-05 → 10-06 (newest origin per source, hourly): the longest quiet spells of
+ * the sources that list without a time window, outside fetch outages, were CENC 59.6 h, GeoSphere 54.1 h, BMKG 51.8 h,
+ * IGP 46.2 h, JMA 41.2 h (all others under 31 h): the window of 48 h plus 12 h would have flagged CENC's, so the
+ * default is 48 + 36 = 84 h. The last-N lists of BGS (180 h), IG-EPN (168 h) and CWA (157 h) get 216 h (264 h in all).
+ */
+export interface FrozenEntry {
+  newest_origin: string;
+  newest_origin_age_hours: number;
+  window_hours: number;
+  budget_hours: number;
+  rows: number;
+}
+
+/** The frozen budget is this many activity budgets unless the registry sets `frozenBudgetHours`. */
+export const FROZEN_BUDGET_FACTOR = 3;
+
+/** A source's frozen budget in hours, or null when it has none (never reported frozen). */
+export function frozenBudgetHours(p: Pick<ProviderConfig, 'liveActive' | 'activityBudgetHours' | 'frozenBudgetHours'>): number | null {
+  if (p.liveActive === false) return null;
+  if (p.frozenBudgetHours === null) return null;
+  if (typeof p.frozenBudgetHours === 'number' && p.frozenBudgetHours > 0) return p.frozenBudgetHours;
+  const activity = activityBudgetHours(p);
+  return activity == null ? null : activity * FROZEN_BUDGET_FACTOR;
+}
+
+export interface Answer {
+  ok: boolean;
+  events_returned?: number;
+  /** ms epoch of the newest origin among the answer's rows (future rows excluded), null with none. */
+  newestOriginMs: number | null;
+}
+
+/** The sources whose rows stand still past their window plus budget, by id (only those the registry still asks). */
+export function frozenProviders(answers: Record<string, Answer>, providers: ProviderConfig[], nowMs: number): Record<string, FrozenEntry> {
+  const out: Record<string, FrozenEntry> = {};
+  for (const p of providers) {
+    const a = answers[p.id];
+    const budget = frozenBudgetHours(p);
+    if (budget == null || !a || !hasRows(a) || a.newestOriginMs == null) continue;
+    const windowHours = liveLookbackMs(p) / HOUR_MS;
+    const ageHours = (nowMs - a.newestOriginMs) / HOUR_MS;
+    if (ageHours <= windowHours + budget) continue;
+    out[p.id] = {
+      newest_origin: isoFromMs(a.newestOriginMs),
+      newest_origin_age_hours: Math.round(ageHours * 10) / 10,
+      window_hours: Math.round(windowHours * 10) / 10,
+      budget_hours: budget,
+      rows: a.events_returned ?? 0,
+    };
+  }
+  return out;
+}
+
+/** status.json's view of a kept leaf certificate: when it expires, how many days are left now, when it was read. */
+export function tlsLeafStatus(leaf: NonNullable<ActivityRecord['tlsLeaf']>, nowMs: number): TlsLeafStatus {
+  return {
+    not_after: isoFromMs(leaf.notAfterMs),
+    days_left: Math.round(((leaf.notAfterMs - nowMs) / 86_400_000) * 10) / 10,
+    issuer: leaf.issuer,
+    subject: leaf.subject,
+    seen_at: isoFromMs(leaf.seenAt),
+  };
 }
 
 /**

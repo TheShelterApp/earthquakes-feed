@@ -225,7 +225,8 @@ last 15 items: only ids younger than the oldest item it still lists are counted.
 `preliminary_skipped` count SSN preliminary solutions withdrawn or not ingested (see *Mexico (SSN)*).
 
 **Frozen sources (round 14).** A source whose file is still served but no longer regenerated keeps answering `ok` with
-rows, so it is never silent. Each run records the newest origin every answer lists (`providers.<id>.newest_origin`);
+rows, so it is never silent. Each run records the newest origin every answer lists (`providers.<id>.newest_origin` in
+`status.json`; not in the status history line, see *Run logs*);
 a source whose answer has rows but whose newest origin is older than its query window (2 days, or `lookbackDays`) plus
 its frozen budget is **frozen**: listed in `frozen` (by id: `newest_origin`, `newest_origin_age_hours`, `window_hours`,
 `budget_hours`, `rows`) and counted in `degraded`. The frozen budget is three activity budgets (36 h for an active agency,
@@ -553,7 +554,7 @@ a deliberate one-off, like a heal, not an automatic step.
 ## Run logs
 
 Two logs record the runs themselves, beside the observation log: `status/history/YYYY-MM.ndjson` (every aggregate
-run's `status.json`, one line per run, about 25 MB a month) and `changes/YYYY-MM-DD.ndjson` (derive's change log of
+run's `status.json`, one line per run) and `changes/YYYY-MM-DD.ndjson` (derive's change log of
 each day; the current day's file is also served as `/v1/changes/<day>.ndjson`). Until 2026-10-04 both stayed on the
 `data` branch forever. Since then (LIVE-2) the current month stays in the tree and, from the second day of the next
 month, the `archive` workflow moves each finished month's files into the Release `logs-YYYY-MM`, one immutable gzip
@@ -563,6 +564,15 @@ byte). `knowledge/index/log_archives.json` lists every one: `file` (its old path
 after its uploaded asset was downloaded back and both hashes matched; an asset is never replaced (an asset of the
 same name left by a run that died before its commit is taken only if its content is identical, otherwise the file
 stays and the run turns red). History is not rewritten: the files stay in the `data` branch's past commits.
+
+A status history line is `status.json` without `providers.<id>.newest_origin` and `providers.<id>.tls_leaf` (round 16,
+FEED-R15-1): both serve the current run only, a frozen source keeps its newest origin in the line's `frozen`, and the
+line keeps `tls_leaves`. From 2026-10-06 01:57Z to the round-16 merge the lines carried both (about 6.5 KB a line);
+since then a line is about 4.5 KB, so a month file is about 40 MB at 12 runs an hour (31 days; it was about 25 MB in
+August and September, when a line was about 3.8–4.2 KB). Every aggregate commit rewrites the current month's file, and
+GitHub warns on a pushed file above 50 MiB and rejects one above 100 MiB: the aggregate run prints a warning once the
+file passes 45 MB (`HISTORY_FILE_WARN_BYTES`, src/bitemporal.ts), the signal to slim the line again before the month
+ends.
 
 ## Deep history (before 2023-07-06)
 

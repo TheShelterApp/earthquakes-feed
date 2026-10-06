@@ -7,7 +7,8 @@ import { gh, ghRetry, ghRetryNet, sleepMs } from './gh.js';
 
 /**
  * LIVE-2: the run logs leave the data branch's tree once their month is over (2026-10-04, owner answer 7 of the
- * engineering assessment). `status/history/YYYY-MM.ndjson` (one line per aggregate run, ~25 MB a month) and
+ * engineering assessment). `status/history/YYYY-MM.ndjson` (one line per aggregate run: ~25 MB a month in August and
+ * September 2026, ~40 MB for a 31-day month since round 16's slimmer line, APIs.md Run logs) and
  * `changes/YYYY-MM-DD.ndjson` (derive's change log, one file a day) were kept forever, so the tree every run checks out
  * grew by ~40 MB a month and every aggregate commit rewrote a month file of up to 25 MB. Nothing reads a finished
  * month (the Pages / R2 change log is the current day's file; status history is a record).

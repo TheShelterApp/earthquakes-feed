@@ -178,7 +178,17 @@ test('a NEIC copy, which FEED-2 keeps in place, still moves when it is stranded 
   };
   const revised = r.ingest(neic, '2026-10-03T16:31:59.000Z');
   assert.equal(revised.rehomed, undefined, 'the revision itself moves nothing');
-  for (const o of lines.filter((l) => l.seq > 201403)) r.ingest(observationToRaw(o), o.ingest_time);
+  // Since round 15 ComCat's revision of nn00925220, whose `ids` list uu80158431, folds Utah's event by identity
+  // (tests/comcat-siblings.test.ts), and the guard has nothing left to move. To keep the guard's case, this run sees
+  // the revision without uu80158431 in its `ids`, as if ComCat had not associated Utah's id.
+  for (const o of lines.filter((l) => l.seq > 201403)) {
+    const raw = observationToRaw(o);
+    if (o.seq === 207005) {
+      raw.fields = { ...raw.fields, ids: ',us6000tzcn,nn00925220,' };
+      raw.knownAliasIds = raw.knownAliasIds.filter((k) => k !== 'usgs:uu80158431');
+    }
+    r.ingest(raw, o.ingest_time);
+  }
   assert.deepEqual(groups(map), ['emsc:20261003_0000160 usgs:uu80158431', 'usgs:nn00925220 usgs:us6000tzcn']);
   const scratch = mkdtempSync(join(tmpdir(), 'stranded-'));
   try {

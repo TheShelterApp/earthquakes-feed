@@ -24,6 +24,7 @@ import {
   MODERATE_EVENT_KM_PER_MAG,
   MODERATE_EVENT_MAG,
   MODERATE_EVENT_MAX_DELTA,
+  MODERATE_EVENT_FULL_KM_MAG,
   MODERATE_EVENT_MAX_DT_MS,
   NEW_ID_PER_REVISION_PROVIDERS,
   REID_DT_MS,
@@ -336,13 +337,19 @@ export class Resolver {
 
   /** Node-to-node form of sameProviderDistinct: a provider present in both nodes under
    *  different native ids blocks the fold, unless its own `ids` link them or the two rows
-   *  are one re-published solution. */
+   *  are one re-published solution. Two ComCat rows are linked when any ComCat row of either node lists the other's id
+   *  (round 15): every id a ComCat event lists is that one event, so Utah's uu80158431 and NEIC's us6000tzcn, both
+   *  listed by Nevada's nn00925220, are one quake although neither lists the other. */
   private static nodesDistinct(a: EventNode, b: EventNode): boolean {
+    const comcatNamed = (n: EventNode): Set<string> => new Set(n.provenance.flatMap((r) => comcatIdsNamed(r.provider, r.nativeId, r.fields)));
+    let namedA: Set<string> | null = null;
+    let namedB: Set<string> | null = null;
     for (const ra of a.provenance) {
       const linked = knownAliasIdsOf(ra.provider, ra.nativeId, ra.fields);
       for (const rb of b.provenance) {
         if (rb.provider !== ra.provider || rb.nativeId === ra.nativeId) continue;
         if (linked.includes(`${rb.provider}:${rb.nativeId}`)) continue;
+        if (ra.provider === COMCAT_PROVIDER && ((namedA ??= comcatNamed(a)).has(rb.nativeId) || (namedB ??= comcatNamed(b)).has(ra.nativeId))) continue;
         if (knownAliasIdsOf(rb.provider, rb.nativeId, rb.fields).includes(`${ra.provider}:${ra.nativeId}`)) continue;
         if (Resolver.sameSolution(ra, rb) || Resolver.revisedIdPair(ra, rb)) continue;
         return true;
@@ -387,12 +394,13 @@ export class Resolver {
   }
 
   /** The moderate-event window of a pair (FEED-1), or null when its magnitudes keep it out of the tier. `tmd`: the pair
-   *  gets TMD's distance (config TMD_WINDOW_KM, tmdPair). */
+   *  gets TMD's distance (config TMD_WINDOW_KM, tmdPair). From MODERATE_EVENT_FULL_KM_MAG on the distance is
+   *  LARGE_EVENT_MAX_KM, not shrunk by ΔM (round 15). */
   private static moderateWindow(a: Solution, b: Solution, tmd = false): { km: number; ms: number } | null {
     if (a.mag == null || b.mag == null || a.mag < MODERATE_EVENT_MAG || b.mag < MODERATE_EVENT_MAG) return null;
     const dM = Math.abs(a.mag - b.mag);
     if (dM > MODERATE_EVENT_MAX_DELTA + REID_MAG_TOLERANCE) return null;
-    const km = Resolver.moderateEventKm(Math.min(a.mag, b.mag)) * clamp(1 - 0.3 * dM, 0.3, 1);
+    const km = Math.min(a.mag, b.mag) >= MODERATE_EVENT_FULL_KM_MAG ? LARGE_EVENT_MAX_KM : Resolver.moderateEventKm(Math.min(a.mag, b.mag)) * clamp(1 - 0.3 * dM, 0.3, 1);
     return { km: tmd ? Math.max(km, TMD_WINDOW_KM) : km, ms: MODERATE_EVENT_MAX_DT_MS };
   }
 
@@ -1284,8 +1292,9 @@ export class Resolver {
     return best;
   }
 
-  /** A ComCat report whose ids name a COMCAT_ID_PROVIDERS report held by another live node foldComcatTwins may join
-   *  to `node` (merge pass on only). */
+  /** A ComCat report whose ids name a COMCAT_ID_PROVIDERS report held by another live node, or (round 15) ComCat's own
+   *  row of another id of its event held by another live event (comcatSibling), that foldComcatTwins may join to
+   *  `node` (merge pass on only). */
   private namesComcatTwin(raw: RawObs, node: EventNode): boolean {
     if (!this.mergePass) return false;
     for (const id of comcatIdsNamed(raw.provider, raw.providerEventId, raw.fields)) {
@@ -1296,8 +1305,28 @@ export class Resolver {
         if (!other || other === node || other.state !== 'live') continue;
         if (other.provenance.some((r) => r.provider === p && r.nativeId === native) && !Resolver.nodesDistinct(node, other)) return true;
       }
+      if (raw.provider === COMCAT_PROVIDER && id !== raw.providerEventId) {
+        const other = this.comcatSibling(node, id);
+        // Judged with the report in place of its stored row: its `ids` are what changed.
+        const after = { ...node, provenance: node.provenance.map((r) => (r.provider === raw.provider && r.nativeId === raw.providerEventId ? this.makeRow(raw) : r)) };
+        if (other && !Resolver.nodesDistinct(after, other)) return true;
+      }
     }
     return false;
+  }
+
+  /** Round 15: the live event other than `node` holding ComCat's own row of `id`, another id of a ComCat event a ComCat
+   *  row of `node` lists in its `ids`, when both events are inside the hot window; else undefined. ComCat publishes one
+   *  quake under several ids when several networks located it, and associates them into one event later: the event's
+   *  `ids` then list every id (nn00925220 lists uu80158431 and us6000tzcn), while the feed may already hold an id as an
+   *  event of its own, minted before the association (Utah's automatic uu80158431, 148 km and 22.9 s from Nevada's
+   *  reviewed nn00925220, 2026-10-03). ComCat's `ids` are authoritative for ComCat's own rows. */
+  private comcatSibling(node: EventNode, id: string): EventNode | undefined {
+    if (node.eventTimeMs < this.hotFloor) return undefined;
+    const fid = this.alias.get(`${COMCAT_PROVIDER}:${id}`);
+    const other = fid ? this.resolveLive(fid) : undefined;
+    if (!other || other === node || other.state !== 'live' || other.eventTimeMs < this.hotFloor) return undefined;
+    return other.provenance.some((r) => r.provider === COMCAT_PROVIDER && r.nativeId === id) ? other : undefined;
   }
 
   /** Keep the ComCat index (once built) in step with a ComCat report that landed in `node`. */
@@ -1312,12 +1341,15 @@ export class Resolver {
    *  neither the proximity windows nor the dense-cell rule apply: an automatic AEC solution can sit tens of km from the
    *  solution ComCat prefers. It heals the one split first sight cannot prevent: ComCat listing the AEC id in a node's
    *  `ids` only after the AEC report had minted its own node (and, once, the NCEDC / SCEDC events minted beside
-   *  ComCat's copy before PF-5d: foldExactIdTwins). Bounded like mergeAround; off when merge=false. */
-  private foldComcatTwins(node: EventNode, ingestTime: string, merges: MergeRecord[]): EventNode {
+   *  ComCat's copy before PF-5d: foldExactIdTwins). Since round 15 also a live event holding ComCat's own row of
+   *  another id of the same ComCat event (comcatSibling: a ComCat row of one lists the other's ComCat id in `ids`), both
+   *  inside the hot window. `hotOnly` (the heal): every fold needs both events inside the hot window. Bounded like
+   *  mergeAround; off when merge=false. */
+  private foldComcatTwins(node: EventNode, ingestTime: string, merges: MergeRecord[], hotOnly = false): EventNode {
     if (!this.mergePass) return node;
     let cur = node;
     for (let round = 0; round < MERGE_MAX_ROUNDS && cur.state === 'live'; round++) {
-      const twin = this.comcatTwin(cur);
+      const twin = this.comcatTwin(cur, hotOnly);
       if (!twin) break;
       cur = this.mergeNodes(cur, twin.node, twin.reason, ingestTime, merges);
     }
@@ -1325,11 +1357,13 @@ export class Resolver {
   }
 
   /** The first live node linked to `node` by an exact ComCat id (foldComcatTwins), with its op:merge reason. */
-  private comcatTwin(node: EventNode): { node: EventNode; reason: string } | null {
+  private comcatTwin(node: EventNode, hotOnly = false): { node: EventNode; reason: string } | null {
+    if (hotOnly && node.eventTimeMs < this.hotFloor) return null;
     const seen = new Set<string>([node.feedId]);
     const consider = (fid: string | undefined, id: string): { node: EventNode; reason: string } | null => {
       const other = fid ? this.resolveLive(fid) : undefined;
       if (!other || other.state !== 'live' || seen.has(other.feedId)) return null;
+      if (hotOnly && other.eventTimeMs < this.hotFloor) return null;
       seen.add(other.feedId);
       const link = Resolver.comcatLink(node, other, id) ?? Resolver.comcatLink(other, node, id);
       if (!link || Resolver.nodesDistinct(node, other)) return null;
@@ -1346,6 +1380,12 @@ export class Resolver {
           const native = nativeIdOfComcat(p, id);
           const hit = native ? consider(this.alias.get(`${p}:${native}`), id) : null;
           if (hit) return hit;
+        }
+        if (r.provider === COMCAT_PROVIDER && id !== r.nativeId) {
+          const other = this.comcatSibling(node, id);
+          if (other && !Resolver.nodesDistinct(node, other)) {
+            return { node: other, reason: `exact id: ComCat ${r.nativeId} lists ${id}, ComCat's own row of the other event` };
+          }
         }
       }
     }
@@ -1682,7 +1722,7 @@ export class Resolver {
           capped = true;
           break;
         }
-        if (node.state === 'live') this.mergeAround(node, ingestTime, merges);
+        if (node.state === 'live') this.mergeAround(this.foldComcatTwins(node, ingestTime, merges, true), ingestTime, merges);
       }
       if (merges.length === before) break;
     }

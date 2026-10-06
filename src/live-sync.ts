@@ -66,6 +66,13 @@ export const LIVE_DELTAS: ReadonlyArray<{ name: string; seconds: number }> = [
 ];
 export const LIVE_DIR = 'live';
 export const LIVE_INDEX_PATH = `v1/${LIVE_DIR}/index.json`;
+/**
+ * The serialization of the compact features the day files and deltas carry. Bump it with any change to what
+ * `nodeToFeature(..., { compact: true })` writes (a new field, another format of one): such a change moves no seq, so a
+ * delta never carries it to the events a client already holds, and a client that holds the window in another format
+ * re-reads every day instead (APIs.md, Live index). 1 = round 15.
+ */
+export const LIVE_FEATURES_FORMAT = 1;
 
 export interface LiveDayEntry {
   date: string;
@@ -100,6 +107,8 @@ export interface LiveIndex {
   /** Live events over the window's days. */
   count: number;
   window_days: number;
+  /** LIVE_FEATURES_FORMAT: a client holding the window in another one re-reads every day. */
+  features_format: number;
   days: LiveDayEntry[];
   deltas: LiveDeltaEntry[];
 }
@@ -158,6 +167,27 @@ export function nextSilentLog(prior: SilentChange[], detected: string[], prevHea
   for (const e of prior) if (e.head_before >= oldestFromSeq) byId.set(e.id, e);
   for (const id of detected) byId.set(id, { id, head_before: prevHead, at: nowMs });
   return [...byId.values()].sort((a, b) => a.head_before - b.head_before || (a.id < b.id ? -1 : 1));
+}
+
+/**
+ * The features of a delta that break its bound: a feature at or below `from_seq` belongs in the delta only as a silent
+ * change the log names with `head_before >= from_seq` (writeLiveIndex adds exactly those). Returns their ids; empty
+ * when the delta is sound. validate.ts runs it on every published delta.
+ */
+export function deltaBoundViolations(
+  features: ReadonlyArray<{ id?: unknown; properties?: { feed?: { ingest_seq?: unknown } } }>,
+  fromSeq: number,
+  silent: ReadonlyArray<SilentChange>,
+): string[] {
+  const allowed = new Set(silent.filter((e) => e.head_before >= fromSeq).map((e) => e.id));
+  const out: string[] = [];
+  for (const f of features) {
+    const seq = f.properties?.feed?.ingest_seq;
+    if (typeof seq === 'number' && seq > fromSeq) continue;
+    const id = typeof f.id === 'string' ? f.id : '';
+    if (!allowed.has(id)) out.push(id || '(no id)');
+  }
+  return out;
 }
 
 export function readSilentLog(root: string): SilentChange[] {
@@ -303,6 +333,7 @@ export function writeLiveIndex(
     head_seq: headSeq,
     count: dayEntries.reduce((s, d) => s + d.count, 0),
     window_days: LIVE_WINDOW_DAYS,
+    features_format: LIVE_FEATURES_FORMAT,
     days: dayEntries,
     deltas: deltaEntries,
   };

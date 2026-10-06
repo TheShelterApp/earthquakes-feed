@@ -7,10 +7,13 @@ import { test } from 'node:test';
 import { Resolver } from '../src/dedup.js';
 import {
   LIVE_DELTAS,
+  LIVE_FEATURES_FORMAT,
+  deltaBoundViolations,
   deltaFromSeq,
   detectSilentChanges,
   liveWindowDays,
   nextSilentLog,
+  sha256Hex,
   writeLiveIndex,
   type LiveIndex,
 } from '../src/live-sync.js';
@@ -239,6 +242,17 @@ test('a revision of a row that represents nothing changes the feature without a 
     const carried = parse(out.files[delta.path]!).features.find((f) => f.id === today.feedId);
     assert.ok(carried, 'the covering delta carries the silently changed feature');
     assert.match(JSON.stringify(carried), /GFZ-rev/);
+    // It keeps its older seq, at or below the delta's from_seq: validate accepts it because the silent log names it
+    // (round 15 review: without the log check validate failed the run and blocked derive while the entry lived).
+    assert.ok(carried.properties.feed.ingest_seq <= delta.from_seq, 'setup: the silent feature sits at or below from_seq');
+    const deltaFeatures = parse(out.files[delta.path]!).features;
+    assert.deepEqual(deltaBoundViolations(deltaFeatures, delta.from_seq, silent), []);
+    assert.deepEqual(deltaBoundViolations(deltaFeatures, delta.from_seq, []), [today.feedId]);
+    assert.deepEqual(
+      deltaBoundViolations(deltaFeatures, delta.from_seq, [{ id: today.feedId, head_before: delta.from_seq - 1, at: nowMs }]),
+      [today.feedId],
+      'an entry older than the bound does not excuse it',
+    );
     // Without the silent log the same delta would have missed it: the client would keep the old author.
     const bare = writeLiveIndex(summaryFeats(nodes, nowMs), nodes, { publicV1: join(root, 'pub2', 'v1'), nowMs, headSeq: s.seq });
     const bareDelta = bare.index.deltas.find((d) => d.from_seq <= cursor)!;
@@ -257,4 +271,22 @@ test('the silent log keeps the newest head per id and drops what no delta can ne
     { id: 'efd_c', head_before: 60, at: 3 },
   ]);
   assert.deepEqual(nextSilentLog(log, [], 60, 4, 55).map((e) => e.id), ['efd_a', 'efd_c']);
+});
+
+test('the index names the compact feature format; a change to that serialization comes with a LIVE_FEATURES_FORMAT bump', () => {
+  const s = world();
+  const p = publish(s, T0);
+  try {
+    assert.equal(p.index.features_format, LIVE_FEATURES_FORMAT);
+  } finally {
+    rmSync(p.dir, { recursive: true, force: true });
+  }
+  // A tripwire: the compact features of this fixed world, as the day files and deltas publish them. A change here moves
+  // no seq, so delta clients would keep the old serialization of every event they hold: bump LIVE_FEATURES_FORMAT
+  // (clients then re-read every day) and pin the new digest under it.
+  const pinned: Record<number, string> = {
+    1: '85fdce134bb4fdd0da839f93760bc658f00aa5a42317273dce42c982a9183310',
+  };
+  const feats = summaryFeats([...s.map.values()], T0).sort((a, b) => a.timeMs - b.timeMs);
+  assert.equal(sha256Hex(JSON.stringify(feats.map((f) => f.feature))), pinned[LIVE_FEATURES_FORMAT]);
 });

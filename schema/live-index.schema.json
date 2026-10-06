@@ -4,7 +4,7 @@
   "title": "Live index (v1/live/index.json)",
   "description": "The week window as per-day compact files with sha256 fingerprints, plus deltas of every window event above a head_seq bound. APIs.md, Live index.",
   "type": "object",
-  "required": ["schema_version", "generated", "generated_iso", "head_seq", "count", "window_days", "days", "deltas"],
+  "required": ["schema_version", "generated", "generated_iso", "head_seq", "count", "window_days", "features_format", "days", "deltas"],
   "properties": {
     "schema_version": { "type": "integer" },
     "api": { "const": "1" },
@@ -13,6 +13,7 @@
     "head_seq": { "type": "integer", "description": "the knowledge clock every day file and delta of this run reflects" },
     "count": { "type": "integer", "description": "live events over the days" },
     "window_days": { "type": "integer" },
+    "features_format": { "type": "integer", "minimum": 1, "description": "the compact feature serialization of the day files and deltas; a client holding the window in another one re-reads every day (a format change moves no seq, so no delta carries it)" },
     "days": {
       "type": "array",
       "minItems": 1,

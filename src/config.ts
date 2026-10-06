@@ -278,7 +278,7 @@ export const EMSC_PROVIDER = 'emsc';
  *  - this rule moves 3 rows in the replay (EMSC copies of JMA's 20260728201106 and of INPRES's 20260814203051 and
  *    20260820173334, 38–90 s from the other quake left in their event, which the agency itself lists under its own id;
  *    per connected group of ids 0 more events, rows in two live events 0) and, on the event map's hot window, 5 more on the next run (2026-10-02 to 10-05: an EMSC id re-pointed 16–32 s
- *    and up to 300 km to a quake NOA, KAGSR, ComCat, AFAD/KOERI or BMKG holds), then none.
+ *    and 11–329 km to a quake NOA, KAGSR, ComCat, AFAD/KOERI or BMKG holds), then none.
  *  Not covered: the Oregon residual of round 13 (2026-09-07, EMSC's M5.3 re-pointed to its M3.9 foreshock), where the
  *  foreshock's own event did not exist yet at the revision, so EMSC's row took the event with it and GFZ's row of the
  *  mainshock is the one left behind. */

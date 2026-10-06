@@ -629,8 +629,8 @@ one quake with. The same `op:tombstone` / `op:observe` lines record it, with a r
 never moves at once, only the next listing of the unchanged row or the every-run pass over the
 hot window, so a merge the revision causes comes first: when EMSC switches from JMA's
 minute-rounded copy to NEIC's solution of the same quake, ComCat's event folds in and nothing
-moves. On 2026-10-06 the pass would move 5 rows of the hot window, each an EMSC id 16–32 s and up
-to 300 km from the quake its event shows. The observation log of 2026-07-05…10-06 replays to 3
+moves. On 2026-10-06 the pass would move 5 rows of the hot window, each an EMSC id 16–32 s and
+11–329 km from the quake its event shows. The observation log of 2026-07-05…10-06 replays to 3
 such moves (38–90 s).
 
 ## Alaska (AEC)

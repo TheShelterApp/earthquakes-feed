@@ -175,9 +175,11 @@ export const HEAL_MAX_FOLDS_PER_RUN = 100;
  *  3 h early are read again with the fixed parser and re-timed (PF-5e), and NCEDC / SCEDC events standing beside
  *  ComCat's row of the same id are folded into it (PF-5d). Epoch 2 (PF-5h): NRCan rows stored without the magnitude,
  *  magnitude type and place their own fields carry (the FDSN text parser read NRCan's 8 columns at the standard
- *  positions) are read again with the fixed parser and filled. Bump it only to run a new correction on purpose, with
- *  that correction's code. */
-export const CORRECTION_EPOCH = 2;
+ *  positions) are read again with the fixed parser and filled. Epoch 3 (round 15, PF-5h (2)): the stored rows whose
+ *  version no log line carries (a revision of a row that represented nothing was stored without a line until then) get
+ *  a line each, so a replay of the log reproduces the stored rows; nothing else changes. Bump it only to run a new
+ *  correction on purpose, with that correction's code. */
+export const CORRECTION_EPOCH = 3;
 /** Only events within this many days are kept in the in-memory dedup index. */
 export const HOT_WINDOW_DAYS = 7;
 /** aggregate loads only this many days of event_map shards (fast hot path). */

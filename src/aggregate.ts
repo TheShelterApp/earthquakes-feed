@@ -127,7 +127,8 @@ async function main(): Promise<void> {
     if (raw.providerUpdatedMs != null) {
       state.watermarks[raw.provider] = Math.max(state.watermarks[raw.provider] ?? 0, raw.providerUpdatedMs);
     }
-    if (r.changed) log.record(raw, r);
+    // A change, or a revision of a row that represents nothing (its own line since round 15, status `rows_revised`).
+    log.recordIngest(raw, r);
     if (r.withheld) {
       twinWithheld.push(
         `${raw.provider}:${raw.providerEventId} M${raw.mag ?? '?'} ${raw.status ?? ''} beside ${r.node.feedId} [${[...new Set(r.node.provenance.map((p) => p.provider))].sort().join(',')}] ${r.withheld.km.toFixed(1)} km ${(r.withheld.dtMs / 1000).toFixed(1)} s`,
@@ -300,6 +301,7 @@ async function main(): Promise<void> {
     merged: log.merged,
     copies_rehomed: resolver.rehomedCopies.length,
     rows_rehomed: resolver.rehomedStranded.length,
+    rows_revised: log.rowsRevised,
     ...(feedSide.regularHeal ? { heal_merged: feedSide.regularHeal.merged, ...(feedSide.regularHeal.capped ? { heal_capped: true } : {}) } : {}),
     ...(heal ? { heal } : {}),
     ...(correction ? { correction } : {}),

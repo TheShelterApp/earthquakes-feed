@@ -369,8 +369,20 @@ revised (`lastUpdateDate`, 28 of 9,071 logged AFAD reports by 2026-10-01); no so
 and the solution itself. `scripts/first-observations.ts` prints that for an event, named by its feed id or by any
 `provider:native_id`, with superseded ids followed to their survivor. A source that revises within minutes
 (EMSC often does) may have had a version the feed never saw. Reports the feed held back have no line until they join
-an event (`twin_withheld` AEC reports, `late_withheld` ComCat reports), and a later revision of a row that represents
-nothing and moves nothing can update the event without a line; neither changes which line is first.
+an event (`twin_withheld` AEC reports, `late_withheld` ComCat reports); that does not change which line is first.
+
+A revision of a row that represents nothing in its event (another source's solution leads it, and the revision moves
+nothing) changes the row in `feed.provenance` but not the event: its `revision` and `ingest_seq` stay, so the
+change-log has no line for it. Since round 15 (2026-10-06) the log has one: an `op:observe` line with a `reason`
+starting "row revised:" that carries the row as stored, at the event's unchanged `revision` (so two lines can carry one
+feed id at one revision; `ingest_seq` stays the seq of the line that made the revision). Status counts them as
+`rows_revised` (about one a run). Before that such a revision was stored without a line, so a replay of the log kept the
+older version: 1,068 of the 11,647 live rows of the hot window on 2026-10-06 (GEOFON's row of the Loyalty Islands M5.3
+of 2026-09-29 is M5.3 in the event, M5.71 in its last line). A one-time correction (`knowledge/index/correction.json`,
+epoch 3) logged each live row of the 10 days not yet frozen whose stored version its newest line did not carry: one
+`op:observe` line each with a `reason` starting "correction epoch 3:", the event unchanged. Older days keep the gap. The
+log replays to the stored rows since then; it never did, and still does not, for rows that backfill or a new source's
+onboarding wrote (they have no line).
 
 **Filled by backfill.** History before that, and the history of a source added later, comes from `backfill`: one
 window per source and run (hourly), walking each source that has a time-range query backwards into the day

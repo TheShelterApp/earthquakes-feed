@@ -1075,6 +1075,32 @@ source's event and 331 new events (the largest M2.8), each in the day partition 
 with an origin more than 7 days before that run stay missing (from 2026-09-24 11:47 UTC on): older rows are dropped
 at ingest, and frozen days are never rewritten.
 
+## France (RéNaSS, RESIF)
+
+The `renass` source reads RéNaSS (BCSF-RéNaSS, Strasbourg: `api.franceseisme.fr`) and the `resif` source reads
+RESIF's FDSN event service (`ws.resif.fr`), which serves the same catalogue under the same event ids (`fr2026…`; the
+`Contributor` column names who located each event: RENASS, OMP, OSUNA, BRGM, the overseas observatories OVSM, OVSG,
+OVPF and REVOSIMA (Mayotte), IPGP, and EOST's world solutions `EOSTtele`, "(Monde)" in the place). Measured on
+2026-10-06: the 26 months both deep-history
+walks fetched (2021-06 → 2023-07) hold 34,345 rows each, the same ids, every row identical apart from `provider`;
+since 2026-07-05 the live log holds 3,826 ids from both, 7 from RESIF alone (all in the feed's first run) and 6 from
+RéNaSS alone (2 of them RéNaSS's second id of a quake it lists twice); RéNaSS had an id first 513 times, RESIF 96
+times, both in the same run 3,217 times. Every event of the two therefore carries two provenance rows with one
+solution, each with its own source's attribution; count them once when you count independent agencies.
+
+Since round 17 (`CATALOGUE_MIRRORS`, src/config.ts) the feed treats the two rows of one id as one report: a report
+joins the event its twin is in, however far the solutions have drifted (one source a revision behind) and however
+dense the cell, and a report of one source next to the other source's row of another id is that catalogue's other
+quake, as for a single source. Before, where 50 or more events fall into one cell within the hot window (Montagne
+Pelée, Mayotte, the Mont Blanc massif, aftershock zones) the feed joins two reports only on a shared id, so the two
+rows of one id were published as two events: in the day partitions of 2026-06-01…10-06, 420 ids (403 of them in
+June, written by the feed's first run on 2026-07-05). Those days are frozen and keep both events: drop a live
+`resif`-only feature whose `resif:<id>` has a twin `renass:<id>` in another live feature's `feed.aliases`, or the
+other way round. The deep-history editions sealed before the change keep theirs too (2022-01 e1: 186 ids; 2022-06
+e1: 0; 2023-01 e2: 18); a month sealed after it is built with the rule (rebuilt offline, 2022-01 gives 26,061 events
+instead of 26,245, every row of another source in the same event as before). A later edition of a sealed month would
+pick it up; nothing builds one automatically.
+
 ## Recipes
 
 ```js

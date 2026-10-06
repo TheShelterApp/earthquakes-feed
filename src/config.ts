@@ -234,6 +234,26 @@ export const COMCAT_ID_PREFIX: ReadonlyMap<string, string> = new Map([
   ['scedc', 'ci'],
 ]);
 export const COMCAT_ID_PROVIDERS: ReadonlySet<string> = new Set(COMCAT_ID_PREFIX.keys());
+/** Catalogue mirrors (round 17): a source whose service serves another source's catalogue under the same event ids,
+ *  mapped to that catalogue's own source. RESIF's FDSN event service (ws.resif.fr) serves RéNaSS's catalogue
+ *  (api.franceseisme.fr, `Contributor` RENASS, OVSG, OVSM, …): measured 2026-10-06, the 26 deep-history months both
+ *  walked (2021-06 → 2023-07) hold 34,345 rows each, the same ids, every row identical but for the provider; the live
+ *  log since 2026-07-05 holds 3,826 shared ids (RESIF 7 more, all from the feed's first run; RéNaSS 6 more, 2 of them
+ *  its second id of a quake it lists twice) and the event partitions 4,840 events with both rows, each pair identical.
+ *  One id at the two sources is one report, so the Resolver treats the twin's key (`renass:<id>` for `resif:<id>` and
+ *  back, util.ts mirrorKeys) as a shared id: a report joins the event its twin is in whatever the distance and however
+ *  dense the cell (findById), the merge pass may fold two events holding the twins (nodesShareIdentity),
+ *  and the same-provider rule (sameProviderDistinct, nodesDistinct: another id of the same provider is another quake)
+ *  reads the catalogue (util.ts catalogueOf) instead of the source, at first sight and in the moderate-event window
+ *  alike. The moderate window's disjoint providers and the survivor's provider count still read the source (a pair
+ *  holding the twins on its two sides may fold there; the survivor of a fold, and so its feed id, is chosen as before).
+ *  Before, the swarm guard
+ *  (a dense cell joins only on a shared id) kept the two rows of one id apart: in a cell of 50 or more live events
+ *  (Montagne Pelée, Mayotte, the Mont Blanc massif, an aftershock zone) each became an event of its own; and a RESIF
+ *  row that joined an event holding RéNaSS's other id of a quake left RéNaSS's row of its own id in a second event.
+ *  Both rows stay in the event (each source's own attribution and licence), and the twin is derived, never stored
+ *  (knownAliasIds go into the deep-history raw assets): nothing about the published or stored shape changes. */
+export const CATALOGUE_MIRRORS: ReadonlyMap<string, string> = new Map([['resif', 'renass']]);
 /** The COMCAT_ID_PROVIDERS whose event list follows ComCat's lifecycle and is mostly automatic solutions (AEC,
  *  PF-5b). The node that holds such a report carries the alias `usgs:<its id>`; an unmatched report beside another
  *  agency's event is withheld (Resolver.lateTwin); a ComCat delete of the id withdraws their row as well, and a row

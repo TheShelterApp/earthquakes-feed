@@ -1,4 +1,4 @@
-import { COMCAT_ID_PREFIX, COMCAT_PROVIDER } from './config.js';
+import { CATALOGUE_MIRRORS, COMCAT_ID_PREFIX, COMCAT_PROVIDER } from './config.js';
 
 export const round6 = (n: number): number => Math.round(n * 1e6) / 1e6;
 
@@ -105,12 +105,34 @@ export function nativeIdOfComcat(provider: string, comcatId: string): string | n
   return comcatId.slice(prefix.length);
 }
 
+/** The catalogue a source's ids belong to (config CATALOGUE_MIRRORS): the mirrored source for a mirror (`renass` for
+ *  `resif`), the source itself otherwise. */
+export function catalogueOf(provider: string): string {
+  return CATALOGUE_MIRRORS.get(provider) ?? provider;
+}
+
+/** The other sources serving `provider`'s catalogue under the same ids (`renass` for `resif` and `resif` for
+ *  `renass`); empty for a source without a mirror. */
+export function mirrorsOf(provider: string): string[] {
+  const own = catalogueOf(provider);
+  const out = own === provider ? [] : [own];
+  for (const [mirror, of] of CATALOGUE_MIRRORS) if (of === own && mirror !== provider) out.push(mirror);
+  return out;
+}
+
+/** The alias keys of the same report at the other sources of its catalogue (`renass:<id>` for `resif` and `<id>`). */
+export function mirrorKeys(provider: string, nativeId: string): string[] {
+  return nativeId ? mirrorsOf(provider).map((p) => `${p}:${nativeId}`) : [];
+}
+
 /** Same-provider alias ids carried in a report's own vocabulary: USGS lists every contributing
  *  catalog id in `ids` (",us7000abc,ci12345,"). Registering them as `provider:id` aliases
  *  survives USGS preferred-id churn and gives the dense-cell guard real id-level linkage
  *  (design §8.3/§8.4). The same parse serves the adapters and the node-to-node merge pass.
  *  A COMCAT_ID_PROVIDERS report also names the ComCat row of its own id (comcatIdOf: `usgs:aka2026…` for AEC,
- *  PF-5b; `usgs:nc75438707` for NCEDC 75438707 and `usgs:ci41341119` for SCEDC 41341119, PF-5d). */
+ *  PF-5b; `usgs:nc75438707` for NCEDC 75438707 and `usgs:ci41341119` for SCEDC 41341119, PF-5d). A catalogue mirror's
+ *  twin (config CATALOGUE_MIRRORS) is not named here: these ids are stored with every raw row (deep-history raw assets),
+ *  so the Resolver derives the twin from the provider and the id instead (mirrorKeys). */
 export function knownAliasIdsOf(provider: string, providerEventId: string, fields: Record<string, unknown> | null | undefined): string[] {
   const out: string[] = [];
   const comcatId = comcatIdOf(provider, providerEventId);

@@ -160,6 +160,21 @@ test('not in a dense cell', () => {
   };
   assert.equal(pair(34, {}, 'usgs', false, dense), 2, 'the partner in a dense cell');
   assert.equal(pair(34, {}, 'usgs', false), 1, 'the same pair outside it joins');
+  // The heal path too (review, round 21): a USP event minted beside the partner's event folds on the merge pass
+  // outside a dense cell, and stays apart when the partner's cell is dense (Resolver.moderatePair).
+  const heal = (withDense: boolean): number => {
+    const map = new Map<string, EventNode>();
+    const r = new Resolver(map, prio, cfg, NOW);
+    if (withDense) dense(r);
+    r.ingest(obs('usgs', 'us6000tzva'), '2026-10-06T12:00:00Z');
+    const usp = new Map<string, EventNode>();
+    new Resolver(usp, prio, cfg, NOW).ingest(obs(USP_PROVIDER, 'usp2026toln', { lat: north(LAT, 34), mag: 4.3, eventTimeMs: T0 + 1_200 }), '2026-10-06T12:00:00Z');
+    for (const [k, n] of usp) map.set(k, n);
+    const merges = new Resolver(map, prio, cfg, NOW).heal('2026-10-06T12:10:00Z').merges;
+    return merges.filter((m) => m.loser.provenance.some((p) => p.provider === USP_PROVIDER) || m.survivor.provenance.some((p) => p.provider === USP_PROVIDER)).length;
+  };
+  assert.equal(heal(false), 1, 'the heal folds the pair outside a dense cell');
+  assert.equal(heal(true), 0, 'the heal leaves the pair apart in a dense cell');
 });
 
 test('the merge pass folds a USP event into the partner event and says so (mutual best)', () => {

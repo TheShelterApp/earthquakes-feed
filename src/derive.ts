@@ -17,6 +17,8 @@ import { enrichStatusV2, updateProviderHealth, type AggregateStatus, type Provid
 import { appendChanges } from './changes.js';
 import { FRESHNESS_EXPECTED_INTERVAL_SECONDS, FRESHNESS_STALE_AFTER_SECONDS } from './freshness.js';
 import { pagesHeaders } from './pages-headers.js';
+import { detectSilentChanges, liveWindowDays, nextSilentLog, readSilentLog, writeLiveIndex, writeSilentLog } from './live-sync.js';
+import { writeDetailHours } from './event-detail.js';
 
 function main(): void {
   const nowMs = Date.now();
@@ -29,6 +31,13 @@ function main(): void {
   const feats = summaryFeats(allNodes, nowMs);
   const liveCount = feats.filter((f) => f.live).length;
   const summ = summaries(feats, nowMs, publicV1, state.head.ingest_time);
+
+  // PRB-2: window events whose line changed without a new seq since the previous run (live-sync.ts), read from the
+  // partitions the previous run committed, before they are rewritten below.
+  const prevManifest = join(DATA_DIR, 'manifest.json');
+  const prevHead = existsSync(prevManifest) ? ((JSON.parse(readFileSync(prevManifest, 'utf8')) as { head_seq?: number }).head_seq ?? null) : null;
+  const silentNow = prevHead == null ? [] : detectSilentChanges(DATA_DIR, allNodes, liveWindowDays(nowMs), prevHead);
+  const silentPrior = readSilentLog(DATA_DIR);
 
   // Partitions: every state, one file per event-day, only for the days we loaded.
   const byDay = new Map<string, EventNode[]>();
@@ -43,6 +52,15 @@ function main(): void {
   saveInventory(DATA_DIR, inv);
   // Days whose Pages day file exists in THIS deploy snapshot (drives truthful pages_url).
   const pagesDays = new Set(byDay.keys());
+
+  // PRB-2: the live index (per-day files with fingerprints + seq deltas of the week window), beside the summaries.
+  const silentWith = nextSilentLog(silentPrior, silentNow, prevHead ?? 0, nowMs, 0);
+  const live = writeLiveIndex(feats, allNodes, { publicV1, nowMs, headSeq: state.head.seq, silent: silentWith });
+  // Keep only what a delta can still need (head_before at or above the 24-hour delta's from_seq).
+  const oldestFrom = Math.min(...live.index.deltas.map((d) => d.from_seq));
+  writeSilentLog(DATA_DIR, nextSilentLog(silentWith, [], prevHead ?? 0, nowMs, oldestFrom));
+  // EVT-5: per-hour full-fat files for the event detail, over the same days as the Pages day files.
+  const detail = writeDetailHours(allNodes, pagesDays, { publicV1, nowMs });
 
   const manifest = JSON.stringify(
     {
@@ -60,6 +78,9 @@ function main(): void {
       summaries: summ,
       partitions: manifestPartitions(inv, nowMs, pagesDays),
       archives: loadArchives(),
+      // Additive (round 15): the live index (APIs.md, Live index) and the per-hour detail files (APIs.md, Event detail).
+      live: live.pointer,
+      ...(detail ? { event_detail: detail.pointer } : {}),
     },
     null,
     2,
@@ -119,6 +140,12 @@ function main(): void {
   console.log(
     `derive: live=${liveCount} summaries=${Object.keys(summ).length} partitions=${byDay.size} rewritten=${rewritten}` +
       (pruned.length ? ` pruned_shards=${pruned.length}` : ''),
+  );
+  console.log(
+    `derive: live index head=${live.index.head_seq} days=${live.index.days.length} (${live.index.days.reduce((s, d) => s + d.bytes, 0)} B)` +
+      ` deltas=${live.index.deltas.map((d) => `${d.name}:${d.count}/${d.bytes}B@${d.from_seq}`).join(',')}` +
+      ` silent=${silentNow.length} (kept ${silentWith.length})` +
+      (detail ? `; detail hours=${detail.files} (${detail.bytes} B, largest ${detail.maxBytes} B)` : ''),
   );
 }
 

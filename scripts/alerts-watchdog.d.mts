@@ -24,6 +24,10 @@ export interface StatusVerdict {
   summary: string;
 }
 export function evaluateStatus(doc: unknown, opts: { nowMs: number; thresholds?: Partial<Thresholds> }): StatusVerdict;
+/** The gateway's provider `lastError` codes and what they mean (round 14). */
+export const PROVIDER_ERRORS: Readonly<Record<'timeout' | 'http' | 'network' | 'invalid', string>>;
+/** ", last error …, N timeouts in a row" for a failing provider entry; '' when it carries neither field. */
+export function failureReason(provider: unknown): string;
 
 export type FetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
 export type FetchResult =

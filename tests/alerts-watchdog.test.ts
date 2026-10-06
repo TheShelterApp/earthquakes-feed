@@ -9,6 +9,7 @@ import {
   DEFAULT_THRESHOLDS,
   evaluateStatus,
   evaluateUsage,
+  failureReason,
   fetchJson,
   GRAPHQL_URL,
   main,
@@ -90,6 +91,51 @@ test('provider streak boundary: 2 failures pass, 3 fail', () => {
   assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).problems, []);
   doc.detector.providers[1].consecutiveFailures = 3;
   assert.match(evaluateStatus(doc, { nowMs: NOW }).problems[0]!, /provider feed is down/);
+});
+
+test('a failing provider without lastError / consecutiveTimeouts (an older gateway) keeps the message it had', () => {
+  const v = evaluateStatus(statusFixture('provider-down'), { nowMs: NOW });
+  assert.equal(v.problems[0], 'provider usgs is down: ok:false with 4 consecutive failures (limit 3), last HTTP 503');
+  assert.equal(v.notes[0], 'provider emsc is ok:false with 1 consecutive failures (below the limit of 3), last HTTP 502');
+});
+
+test('round-14 gateway: the failure message names lastError and consecutiveTimeouts (the 2026-10-04 USGS timeouts)', () => {
+  const doc = structuredClone(HEALTHY);
+  // What the gateway publishes while USGS answers slower than its 4 s fetch timeout: HTTP 0, latency ≈ the timeout.
+  Object.assign(doc.detector.providers[0], { ok: false, httpStatus: 0, latencyMs: 4000, consecutiveFailures: 387, lastError: 'timeout', consecutiveTimeouts: 387 });
+  const v = evaluateStatus(doc, { nowMs: NOW });
+  assert.equal(v.problems.length, 1);
+  assert.equal(
+    v.problems[0],
+    "provider usgs is down: ok:false with 387 consecutive failures (limit 3), last HTTP 0, last error timeout (slower than the gateway's fetch timeout), 387 timeouts in a row",
+  );
+  assert.match(v.summary, /usgs:FAIL\(387\)/); // the summary tag is unchanged
+});
+
+test('round-14 gateway: an HTTP, network or invalid failure is named; zero timeouts add nothing; a note carries it too', () => {
+  const doc = structuredClone(HEALTHY);
+  Object.assign(doc.detector.providers[2], { ok: false, httpStatus: 503, consecutiveFailures: 5, lastError: 'http', consecutiveTimeouts: 0 });
+  Object.assign(doc.detector.providers[3], { ok: false, httpStatus: 200, consecutiveFailures: 1, lastError: 'invalid', consecutiveTimeouts: 0 });
+  const v = evaluateStatus(doc, { nowMs: NOW });
+  assert.deepEqual(v.problems, ['provider emsc is down: ok:false with 5 consecutive failures (limit 3), last HTTP 503, last error http (an HTTP error status)']);
+  assert.deepEqual(v.notes, ['provider gfz is ok:false with 1 consecutive failures (below the limit of 3), last HTTP 200, last error invalid (a body that does not parse or verify)']);
+  // A streak that ended in a network error after two timeouts.
+  assert.equal(failureReason({ lastError: 'network', consecutiveTimeouts: 0 }), ', last error network (a network failure before the timeout)');
+  assert.equal(failureReason({ lastError: 'timeout', consecutiveTimeouts: 1 }), ", last error timeout (slower than the gateway's fetch timeout), 1 timeout in a row");
+});
+
+test('lastError / consecutiveTimeouts: missing, malformed or unknown values never break the check', () => {
+  assert.equal(failureReason({}), '');
+  assert.equal(failureReason(null), '');
+  assert.equal(failureReason({ lastError: '', consecutiveTimeouts: -1 }), '');
+  assert.equal(failureReason({ lastError: 42, consecutiveTimeouts: '3' }), '');
+  assert.equal(failureReason({ consecutiveTimeouts: Number.NaN }), '');
+  // An unknown code (a newer gateway) is shown as is, cut to 32 characters; only the timeout count is added.
+  assert.equal(failureReason({ lastError: 'tls', consecutiveTimeouts: 2 }), ', last error tls, 2 timeouts in a row');
+  assert.equal(failureReason({ lastError: 'x'.repeat(100) }), `, last error ${'x'.repeat(32)}`);
+  const doc = structuredClone(HEALTHY);
+  Object.assign(doc.detector.providers[0], { ok: false, consecutiveFailures: 3, lastError: { nested: true }, consecutiveTimeouts: null });
+  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).problems, ['provider usgs is down: ok:false with 3 consecutive failures (limit 3), last HTTP 200']);
 });
 
 test('policy-fallback fixture: policy.fallback == true fails with the reason', () => {

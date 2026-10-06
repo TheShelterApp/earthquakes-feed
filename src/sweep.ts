@@ -29,7 +29,8 @@ export interface LateWithheld {
 }
 
 export interface SweepResult {
-  /** Known events the sweep changed (one op:observe line each). */
+  /** Known events the sweep changed (one op:observe line each; a revision of a row that represents nothing gets its
+   *  line too, LogBuffer.recordIngest, and is not counted here). */
   revisions: number;
   /** Events the sweep minted (status `late_minted`), in ingest order. */
   lateMinted: LateMint[];
@@ -87,10 +88,7 @@ export function revisionSweep(
     }
     if (!lateMintProviders.has(raw.provider)) {
       const r = resolver.reviseExisting(raw, ingestTime);
-      if (r?.changed) {
-        log.record(raw, r);
-        revisions++;
-      }
+      if (r && log.recordIngest(raw, r) && r.changed) revisions++;
       continue;
     }
     const out = resolver.reviseOrMintInHotWindow(raw, ingestTime);
@@ -109,12 +107,11 @@ export function revisionSweep(
       continue;
     }
     const r = out.result;
-    if (!r.changed) continue;
     if (out.kind === 'revised') {
-      log.record(raw, r);
-      revisions++;
+      if (log.recordIngest(raw, r) && r.changed) revisions++;
       continue;
     }
+    if (!r.changed) continue;
     const lagDays = lagDaysOf(raw, ingestTime);
     log.record(raw, r, 'observe', lateMintReason(lagDays));
     lateMinted.push({

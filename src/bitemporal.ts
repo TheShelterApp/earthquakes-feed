@@ -126,6 +126,28 @@ export function appendObservations(root: string, obs: Observation[]): void {
   }
 }
 
+/** The observation-log lines of the ingest days from `fromDay` (YYYY-MM-DD) on that the data branch holds (older ingest
+ *  months move to the `archive-YYYY-MM` Releases), in seq order. */
+export function readObservations(root: string, fromDay: string): Observation[] {
+  const dir = dataPaths(root).observationsDir;
+  const out: Observation[] = [];
+  const list = (d: string): string[] => (existsSync(d) ? readdirSync(d).sort() : []);
+  for (const y of list(dir)) {
+    if (!y.startsWith('ingest=')) continue;
+    const yyyy = y.slice('ingest='.length);
+    for (const mm of list(join(dir, y))) {
+      for (const dd of list(join(dir, y, mm))) {
+        if (`${yyyy}-${mm}-${dd}` < fromDay) continue;
+        for (const f of list(join(dir, y, mm, dd))) {
+          if (!f.endsWith('.ndjson')) continue;
+          for (const line of readFileSync(join(dir, y, mm, dd, f), 'utf8').split('\n')) if (line.trim()) out.push(JSON.parse(line) as Observation);
+        }
+      }
+    }
+  }
+  return out.sort((a, b) => a.seq - b.seq);
+}
+
 /** head + watermarks + status + status/history (event_map is written separately). */
 export function saveMeta(root: string, head: Head, watermarks: Watermarks, status: unknown): void {
   const p = dataPaths(root);

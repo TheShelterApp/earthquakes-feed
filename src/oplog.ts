@@ -85,12 +85,20 @@ export function correctionLine(node: EventNode, seq: number, ingestTime: string,
   };
 }
 
+/** The `reason` on the op:observe line of a revision of a row that represents nothing in its event (LogBuffer.recordRow,
+ *  IngestResult.rowOnly). */
+export const ROW_REVISED_REASON =
+  'row revised: this row represents nothing in its event, so the event, its revision and its ingest_seq are unchanged; the line carries the stored row';
+
 /** The lines one aggregate run appends, with the seq clock they advance. Every change gets its
- *  own seq and the node it changed records it (`lastSeq`, and `firstSeenSeq` on a mint). */
+ *  own seq and the node it changed records it (`lastSeq`, and `firstSeenSeq` on a mint). A row line (recordRow) gets a
+ *  seq but changes no node. */
 export class LogBuffer {
   readonly lines: Observation[] = [];
   /** op:merge lines written (normal folds, re-points and the heal). */
   merged = 0;
+  /** Row-only revisions logged (recordIngest): status `rows_revised`. */
+  rowsRevised = 0;
 
   constructor(
     public seq: number,
@@ -118,6 +126,31 @@ export class LogBuffer {
     const line = observeLine(raw, r, this.seq, this.ingestTime, op);
     if (reason) line.reason = reason;
     this.lines.push(line);
+  }
+
+  /** A revision of a row that represents nothing in its event (IngestResult.rowOnly), or a stored row the log did not
+   *  carry (correction epoch 3): an op:observe line with `reason` that carries the row as stored, at the event's
+   *  unchanged revision. The event's `lastSeq` (its published `ingest_seq`) stays the seq of the line that made its
+   *  revision, so the partitions and the change-log see no change, as before; a replay of the log reproduces the row. */
+  recordRow(raw: RawObs, r: IngestResult, reason: string = ROW_REVISED_REASON): void {
+    this.seq += 1;
+    const line = observeLine(raw, r, this.seq, this.ingestTime);
+    line.reason = reason;
+    this.lines.push(line);
+  }
+
+  /** One ingest's line(s): the change (record), a row-only revision (recordRow), or nothing. True when it wrote. */
+  recordIngest(raw: RawObs, r: IngestResult, op: Op = 'observe', reason?: string): boolean {
+    if (r.changed) {
+      this.record(raw, r, op, reason);
+      return true;
+    }
+    if (r.rowOnly) {
+      this.recordRow(raw, r);
+      this.rowsRevised++;
+      return true;
+    }
+    return false;
   }
 
   /** The heal (Resolver.heal): one op:merge line per fold, in fold order, then one

@@ -91,7 +91,10 @@ export const TMD_WINDOW_KM = 50;
 export const REID_DT_MS = 2_000;
 export const REID_KM = 2;
 export const REID_MAG_DELTA = 0.1;
-/** Floating-point slack on the REID_MAG_DELTA test (Resolver.sameSolution: |ΔM| ≤ REID_MAG_DELTA + REID_MAG_TOLERANCE).
+/** Floating-point slack on the REID_MAG_DELTA test (Resolver.sameSolution: |ΔM| ≤ REID_MAG_DELTA + REID_MAG_TOLERANCE),
+ *  and since round 15 (PF-5h (4)) on every other magnitude limit of the identity rules too: MODERATE_EVENT_MAX_DELTA,
+ *  the REVISED_ID_WINDOWS `maxDeltaMag`, LARGE_EVENT_MAX_DELTA (the widened window and Resolver.lateTwin),
+ *  MAG_MERGE_MAX_DELTA (the reviewed-vs-reviewed guard) and LOCATION_JOIN_MAX_DM (Resolver.magsApart).
  *  Magnitudes are published in 0.1 or 0.01 steps but held as binary floats, so a difference of exactly 0.1 lands on
  *  either side of 0.1: 1.5 − 1.4 = 0.10000000000000009 failed the bare `≤ 0.1` while 2.3 − 2.2 = 0.09999999999999964
  *  passed (PF-5g). 1e-9 is far above the rounding error of a difference of two magnitudes (about 1e-15) and far below
@@ -172,9 +175,11 @@ export const HEAL_MAX_FOLDS_PER_RUN = 100;
  *  3 h early are read again with the fixed parser and re-timed (PF-5e), and NCEDC / SCEDC events standing beside
  *  ComCat's row of the same id are folded into it (PF-5d). Epoch 2 (PF-5h): NRCan rows stored without the magnitude,
  *  magnitude type and place their own fields carry (the FDSN text parser read NRCan's 8 columns at the standard
- *  positions) are read again with the fixed parser and filled. Bump it only to run a new correction on purpose, with
- *  that correction's code. */
-export const CORRECTION_EPOCH = 2;
+ *  positions) are read again with the fixed parser and filled. Epoch 3 (round 15, PF-5h (2)): the stored rows whose
+ *  version no log line carries (a revision of a row that represented nothing was stored without a line until then) get
+ *  a line each, so a replay of the log reproduces the stored rows; nothing else changes. Bump it only to run a new
+ *  correction on purpose, with that correction's code. */
+export const CORRECTION_EPOCH = 3;
 /** Only events within this many days are kept in the in-memory dedup index. */
 export const HOT_WINDOW_DAYS = 7;
 /** aggregate loads only this many days of event_map shards (fast hot path). */

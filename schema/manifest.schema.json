@@ -51,6 +51,28 @@
         }
       }
     },
-    "archives": { "type": "array", "items": { "type": "object" } }
+    "archives": { "type": "array", "items": { "type": "object" } },
+    "live": {
+      "type": "object",
+      "description": "The live index (APIs.md, Live index): the week window as per-day files with sha256 fingerprints plus head_seq deltas, for an incremental refresh. Additive (2026-10).",
+      "required": ["path", "url", "head_seq", "window_days"],
+      "properties": {
+        "path": { "type": "string" },
+        "url": { "type": "string" },
+        "head_seq": { "type": "integer" },
+        "window_days": { "type": "integer" }
+      }
+    },
+    "event_detail": {
+      "type": "object",
+      "description": "Per-hour full-fat detail files (APIs.md, Event detail): put a UTC hour key YYYY-MM-DDTHH into url_template; every hour from first_hour to last_hour has a file. Additive (2026-10).",
+      "required": ["path_template", "url_template", "first_hour", "last_hour"],
+      "properties": {
+        "path_template": { "type": "string" },
+        "url_template": { "type": "string" },
+        "first_hour": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}$" },
+        "last_hour": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}$" }
+      }
+    }
   }
 }

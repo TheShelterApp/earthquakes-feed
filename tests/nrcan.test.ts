@@ -261,7 +261,10 @@ test('correction epoch 2: a branch at epoch 1 gets the NRCan step alone; rows ar
   const { log, marker, root } = correct(map, 1);
   assert.equal(correctedEpoch(root), CORRECTION_EPOCH);
   rmSync(root, { recursive: true, force: true });
-  assert.equal(CORRECTION_EPOCH, 2);
+  // Since round 15 the branch also gets epoch 3's rows step: this run's lines carry the 7 filled rows, and the test root
+  // holds no line of the other 8, so it logs nothing.
+  assert.equal(CORRECTION_EPOCH, 3);
+  assert.deepEqual(marker.rows, { checked: 15, logged: 0, no_line: 8 });
   assert.equal(marker.from_epoch, 1);
   assert.equal(marker.afad, null);
   assert.equal(marker.comcat_id, null);

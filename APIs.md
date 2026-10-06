@@ -154,7 +154,9 @@ is never empty that long), `activityBudgetHours` in `providers/registry.json` fo
 USP) and none for KNMI and LMU (regions that go weeks without an event) or a source the live path does not ask (ISC).
 The published v2 status adds `providers.<id>.silent`, `providers.<id>.lastNonEmptyAt` (ms) and `silentProviders`.
 On 2026-10-04 three sources were silent the moment this went live: ENSN Egypt (no rows since 2026-07-29), Geoscience
-Australia (since 07-30) and TMD (since 08-18).
+Australia (since 07-30) and TMD (since 08-18). None had stopped publishing: ENSN moved to a new site whose old JSON URL
+lists only stations (the feed now reads its RSS, `/en/events/feed.rss`), GA rewrote its RSS descriptions so no item
+parsed (both read since round 14, issue #59), and TMD's rows had lost their ids (named by origin second since round 13).
 
 ## The Feature
 

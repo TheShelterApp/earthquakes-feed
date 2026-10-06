@@ -479,24 +479,52 @@ const igp: CustomAdapter = async (cfg, nowMs, window) => {
   return out.filter((o) => o.providerEventId);
 };
 
-// --- Egypt: ENSN/NRIAG (JSON; `time` is UNIX epoch seconds) ---
-const egypt: CustomAdapter = async (cfg) => {
-  const j = JSON.parse(await getText(cfg.base, { timeoutMs: 12_000, retries: 2 })) as { data?: { earthquakes?: Record<string, unknown>[] } };
+// --- Egypt: ENSN/NRIAG (RSS of a Nanometrics Athena site; times UTC) ---
+// Until 2026-07-29 12:06 UTC the registry read https://ensn.nriag.sci.eg/earthquakes.json (`data.earthquakes`, ids like
+// 53884). The site then moved to Athena: that URL still answers 200, with only `data.page.stations` and an empty
+// `eventCriterias`, so the source looked healthy with no rows for 67 days (issue #59). The site's own feed is
+// /en/events/feed.rss: the last 30 events (about a week), one <item> per event, the event's Athena id in <link>
+// (/en/events/1355/summary) and its values in a table inside <description> (checked 2026-10-06).
+export function parseEnsnRss(xml: string, providerId: string): RawObs[] {
   const out: RawObs[] = [];
-  for (const e of j.data?.earthquakes ?? []) {
-    const lat = num(e['latitude']);
-    const lon = num(e['longitude']);
-    const ts = num(e['time']);
-    if (lat == null || lon == null || ts == null) continue;
+  for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
+    const it = m[1]!;
+    const link = (/<link>([^<]+)<\/link>/.exec(it)?.[1] ?? '').trim();
+    const id = /\/events\/(\d+)\b/.exec(link)?.[1] ?? '';
+    const desc = /<description>([\s\S]*?)<\/description>/.exec(it)?.[1] ?? '';
+    const html = desc.replace(/^\s*<!\[CDATA\[/, '').replace(/\]\]>\s*$/, '');
+    const cell = (label: string): string | null => {
+      const v = new RegExp(`<th>\\s*${label}:\\s*</th>\\s*<td>([\\s\\S]*?)</td>`).exec(html)?.[1];
+      return v == null ? null : htmlDecode(v.replace(/&nbsp;/g, ' ').replace(/<[^>]+>/g, '')).trim() || null;
+    };
+    const title = htmlDecode((/<title>([^<]*)<\/title>/.exec(it)?.[1] ?? '').trim());
+    // The table's cells; the title ("2026-10-05 21:35:29.470; 27.7223°N, 34.5987°E; 2.16 Ml; …") when one is missing.
+    const parts = title.split(';').map((x) => x.trim());
+    const time = (cell('Time') ?? parts[0] ?? '').replace(/\s*UTC$/i, '');
+    const pos = cell('Position') ?? parts[1] ?? '';
+    const ll = /([\d.]+)\s*°?\s*([NS])\s*,\s*([\d.]+)\s*°?\s*([EW])/i.exec(pos);
+    const t = parseUtcMs(time);
+    if (!id || !ll || t == null) continue;
+    const lat = Number(ll[1]) * (ll[2]!.toUpperCase() === 'S' ? -1 : 1);
+    const lon = Number(ll[3]) * (ll[4]!.toUpperCase() === 'W' ? -1 : 1);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const magText = cell('Magnitude') ?? parts[2] ?? '';
+    const mag = /^(-?[\d.]+)\s*([A-Za-z][\w]*)?/.exec(magText);
+    const name = /<a [^>]*href="[^"]*\/origins\/(\d+)\/event"[^>]*>([^<]+)<\/a>/.exec(html);
+    const place = cell('Place');
+    const major = cell('Major Place');
     out.push({
-      provider: cfg.id, providerEventId: String(e['id'] ?? e['name'] ?? ''), eventTimeMs: Math.round(ts * 1000),
-      providerUpdatedMs: null, status: e['isManual'] === true ? 'reviewed' : 'automatic', lat, lon, depth: num(e['depth']),
-      mag: num(e['magnitudeValue']), magType: (e['magnitudeType'] as string) || null,
-      place: (e['nearestMajorPlace'] as string) || (e['nearestPlace'] as string) || null, knownAliasIds: [], fields: flattenScalars(e),
+      provider: providerId, providerEventId: id, eventTimeMs: t, providerUpdatedMs: null, status: null, lat, lon,
+      depth: num(/^(-?[\d.]+)/.exec(cell('Depth') ?? '')?.[1]), mag: num(mag?.[1]), magType: mag?.[2] ?? null,
+      // As before the move: the "km from a major place" line first (the old JSON's nearestMajorPlace), else the place.
+      place: major ?? place, knownAliasIds: [],
+      fields: { link, title, event: name?.[2]?.trim() ?? null, origin_id: name?.[1] ?? null, time, position: pos, place, major_place: major, depth: cell('Depth'), magnitude: magText || null },
     });
   }
-  return out.filter((o) => o.providerEventId);
-};
+  return out;
+}
+
+const egypt: CustomAdapter = async (cfg) => parseEnsnRss(await getText(cfg.base, { timeoutMs: 12_000, retries: 2 }), cfg.id);
 
 // --- United Kingdom: BGS (RSS; pubDate is RFC822 in GMT/UTC) ---
 const bgs: CustomAdapter = async (cfg) => {
@@ -662,8 +690,12 @@ const inpres: CustomAdapter = async (cfg) => {
 };
 
 // --- Australia: Geoscience Australia (RSS; times UTC; georss:point = "lat lon") ---
-const ga: CustomAdapter = async (cfg) => {
-  const xml = await getText(cfg.base, { timeoutMs: 12_000, retries: 2 });
+// Until 2026-07-30 the item's <description> was the origin time alone and <summary> held "Depth 17.6km, …"; since then
+// <description> is a sentence: `A magnitude 5.0 Mw earthquake has occurred in "South of Fiji Islands" at a depth of
+// 507 km at 05/10/2026 08:22:58 (UTC) at 2026-10-05T20:22:58.269Z(UTC)` (the first time is on a 12-hour clock without
+// AM/PM: only the ISO time is read) and the title carries the magnitude type ("Magnitude 5.0 Mw, …"). Both shapes parse;
+// with the old parser every new item lost its time, so the source returned no rows from 07-30 (issue #59).
+export function parseGaRss(xml: string, providerId: string): RawObs[] {
   const out: RawObs[] = [];
   for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
     const it = m[1]!;
@@ -671,21 +703,26 @@ const ga: CustomAdapter = async (cfg) => {
     const pt = (/<georss:point>([^<]+)</.exec(it)?.[1] ?? '').trim().split(/\s+/);
     const lat = num(pt[0]);
     const lon = num(pt[1]);
-    const desc = (/<description>([^<]+)</.exec(it)?.[1] ?? '').replace(/\(UTC\)/i, '').trim();
-    const t = parseUtcMs(desc);
+    const desc = htmlDecode((/<description>([^<]+)</.exec(it)?.[1] ?? '').trim());
+    const iso = /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/.exec(desc)?.[1];
+    const t = parseUtcMs(iso ?? desc.replace(/\(UTC\)/i, '').trim());
     if (!id || lat == null || lon == null || t == null) continue;
     const title = htmlDecode(/<title>([^<]+)</.exec(it)?.[1] ?? '');
     const summary = htmlDecode(/<summary>([\s\S]*?)<\/summary>/.exec(it)?.[1] ?? '').trim();
+    const head = /^Magnitude\s*([\d.]+)\s*([A-Za-z][\w]*)?\s*,\s*/i.exec(title);
+    const quoted = /occurred in "([^"]+)"/.exec(desc)?.[1];
     out.push({
-      provider: cfg.id, providerEventId: id, eventTimeMs: t, providerUpdatedMs: null, status: null,
-      lat, lon, depth: num(/Depth\s*([\d.]+)\s*km/i.exec(summary)?.[1]),
-      mag: num(/Magnitude\s*([\d.]+)/i.exec(title)?.[1]), magType: null,
-      place: title.replace(/^Magnitude\s*[\d.]+,\s*/i, '').trim() || null, knownAliasIds: [],
-      fields: { title, description: desc, summary },
+      provider: providerId, providerEventId: id, eventTimeMs: t, providerUpdatedMs: null, status: null,
+      lat, lon, depth: num(/depth of\s*([\d.]+)\s*km/i.exec(desc)?.[1] ?? /Depth\s*([\d.]+)\s*km/i.exec(summary)?.[1]),
+      mag: num(head?.[1] ?? /Magnitude\s*([\d.]+)/i.exec(title)?.[1]), magType: head?.[2] ?? null,
+      place: (head ? title.slice(head[0].length) : title).trim() || quoted || null, knownAliasIds: [],
+      fields: { title, description: desc, ...(summary ? { summary } : {}) },
     });
   }
-  return out.filter((o) => o.providerEventId);
-};
+  return out;
+}
+
+const ga: CustomAdapter = async (cfg) => parseGaRss(await getText(cfg.base, { timeoutMs: 12_000, retries: 2 }), cfg.id);
 
 // --- Costa Rica: OVSICORI-UNA (Leaflet L.marker JS; "Fecha y Hora Local" is UTC-6, no DST) ---
 const ovsicori: CustomAdapter = async (cfg) => {

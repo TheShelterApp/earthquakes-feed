@@ -521,14 +521,15 @@
       "active": true,
       "adapter": "custom",
       "parse": "custom",
-      "queryFormat": "json",
-      "base": "https://ensn.nriag.sci.eg/earthquakes.json",
+      "queryFormat": "rss",
+      "base": "https://ensn.nriag.sci.eg/en/events/feed.rss",
       "supportsTimeRange": false,
       "refreshSeconds": 300,
       "license": "ENSN-NRIAG",
       "attribution": "Egyptian National Seismic Network (ENSN), NRIAG",
       "doi": null,
-      "contact": "https://ensn.nriag.sci.eg"
+      "contact": "https://ensn.nriag.sci.eg",
+      "notes": "The site's RSS of its last 30 events (Nanometrics Athena; src/custom.ts parseEnsnRss). Until 2026-07-29 the feed read https://ensn.nriag.sci.eg/earthquakes.json, which since then lists only stations (issue #59). Row ids are the Athena event ids (/en/events/<id>/summary), a new series beside the old JSON ids (53884 on 2026-07-29)."
     },
     {
       "id": "bgs",
@@ -615,7 +616,8 @@
       "license": "CC-BY-4.0",
       "attribution": "© Commonwealth of Australia (Geoscience Australia)",
       "doi": null,
-      "contact": "https://earthquakes.ga.gov.au"
+      "contact": "https://earthquakes.ga.gov.au",
+      "notes": "RSS of the last 7 days (src/custom.ts parseGaRss). Since 2026-07-30 the item description is a sentence with the ISO origin time at its end and the title carries the magnitude type; the parser reads both shapes (issue #59)."
     },
     {
       "id": "ovsicori",

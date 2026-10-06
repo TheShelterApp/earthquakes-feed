@@ -69,7 +69,7 @@ function comcatIdsNamed(provider: string, nativeId: string, fields: Record<strin
 
 /** A stored provenance row as the report it was: what an op:tombstone line records for a withdrawn row, and what a
  *  replay feeds back to tombstoneProvider. */
-function rowAsReport(row: ProvenanceRow): RawObs {
+export function rowAsReport(row: ProvenanceRow): RawObs {
   return {
     provider: row.provider,
     providerEventId: row.nativeId,
@@ -139,6 +139,11 @@ export interface IngestResult {
    *  event, or what it folded into), `old` the withdrawn row as a report, `reason` the op:tombstone line's reason.
    *  LogBuffer.record writes that line (and its op:merge lines) before this report's own line. */
   rehomed?: { from: IngestResult; old: RawObs; reason: string };
+  /** Set, with `changed` false, when the report revised a row that represents nothing in its event: the stored row is
+   *  now the report's solution while the event's representative and revision stay. LogBuffer.recordRow writes its line
+   *  (an op:observe line with ROW_REVISED_REASON at the event's revision), so a replay of the log reproduces the row;
+   *  before round 15 such a revision was stored without a line (PF-5h (2)). */
+  rowOnly?: boolean;
 }
 
 /** What reviseOrMintInHotWindow did with one sweep row of a late-publishing catalog. */
@@ -1035,6 +1040,7 @@ export class Resolver {
     const needsComcatAlias = comcatKey != null && !node.aliases.includes(comcatKey);
     const idx = node.provenance.findIndex((r) => r.provider === raw.provider && r.nativeId === raw.providerEventId);
     let structural = false;
+    let rowRevised = false;
     if (idx < 0) {
       node.provenance.push(this.makeRow(raw));
       structural = true;
@@ -1054,6 +1060,7 @@ export class Resolver {
       }
     } else {
       node.provenance[idx] = this.makeRow(raw);
+      rowRevised = true;
     }
     if (!hadAlias && !node.aliases.includes(key)) node.aliases.push(key);
     if (comcatKey && needsComcatAlias) {
@@ -1084,7 +1091,8 @@ export class Resolver {
       const survivor = this.mergeAround(this.foldComcatTwins(node, ingestTime, merges), ingestTime, merges);
       return { node: survivor, changed: true, revision: survivor.revision, merges };
     }
-    return { node, changed: false, revision: node.revision, merges: [] };
+    // A revision of a row that represents nothing: the event is unchanged, the row is not (rowOnly).
+    return { node, changed: false, revision: node.revision, merges: [], ...(rowRevised ? { rowOnly: true } : {}) };
   }
 
   /** FEED-2: EMSC's copy of an agency's solution (authoredCopy) that copies no other row of its event, while another

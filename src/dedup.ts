@@ -31,6 +31,9 @@ import {
   SPATIAL_KM,
   SWARM_CELL_ABSOLUTE,
   TEMPORAL_MS,
+  TMD_PROVIDER,
+  TMD_WINDOW_KM,
+  TMD_WINDOW_PARTNERS,
 } from './config.js';
 import { qualityCount } from './canonical.js';
 import { gatherCellKeys, gridKey, haversineKm } from './geo.js';
@@ -324,7 +327,7 @@ export class Resolver {
   /** The widest spatial window `s` can get against any neighbour — the candidate gather radius. */
   private static maxWindowKm(s: Solution): number {
     if (s.mag == null) return SPATIAL_KM;
-    const moderate = s.mag >= MODERATE_EVENT_MAG ? Resolver.moderateEventKm(s.mag) : 0;
+    const moderate = s.mag >= MODERATE_EVENT_MAG ? Math.max(Resolver.moderateEventKm(s.mag), TMD_WINDOW_KM) : 0;
     return Math.max(s.mag < LARGE_EVENT_MAG ? SPATIAL_KM : Resolver.largeEventKm(s.mag), moderate);
   }
 
@@ -333,12 +336,31 @@ export class Resolver {
     return clamp(MODERATE_EVENT_BASE_KM + MODERATE_EVENT_KM_PER_MAG * (minMag - MODERATE_EVENT_MAG), MODERATE_EVENT_BASE_KM, LARGE_EVENT_MAX_KM);
   }
 
-  /** The moderate-event window of a pair (FEED-1), or null when its magnitudes keep it out of the tier. */
-  private static moderateWindow(a: Solution, b: Solution): { km: number; ms: number } | null {
+  /** The moderate-event window of a pair (FEED-1), or null when its magnitudes keep it out of the tier. `tmd`: the pair
+   *  gets TMD's distance (config TMD_WINDOW_KM, tmdPair). */
+  private static moderateWindow(a: Solution, b: Solution, tmd = false): { km: number; ms: number } | null {
     if (a.mag == null || b.mag == null || a.mag < MODERATE_EVENT_MAG || b.mag < MODERATE_EVENT_MAG) return null;
     const dM = Math.abs(a.mag - b.mag);
     if (dM > MODERATE_EVENT_MAX_DELTA + REID_MAG_TOLERANCE) return null;
-    return { km: Resolver.moderateEventKm(Math.min(a.mag, b.mag)) * clamp(1 - 0.3 * dM, 0.3, 1), ms: MODERATE_EVENT_MAX_DT_MS };
+    const km = Resolver.moderateEventKm(Math.min(a.mag, b.mag)) * clamp(1 - 0.3 * dM, 0.3, 1);
+    return { km: tmd ? Math.max(km, TMD_WINDOW_KM) : km, ms: MODERATE_EVENT_MAX_DT_MS };
+  }
+
+  /** Whether two sides (their providers) get TMD's window (config TMD_WINDOW_KM): one side holds TMD's rows only, the
+   *  other a USGS, EMSC or GFZ row and no TMD row. */
+  private static tmdPair(a: readonly string[], b: readonly string[]): boolean {
+    const tmdOnly = (s: readonly string[]): boolean => s.length > 0 && s.every((p) => p === TMD_PROVIDER);
+    const partner = (s: readonly string[]): boolean => !s.includes(TMD_PROVIDER) && s.some((p) => TMD_WINDOW_PARTNERS.has(p));
+    return (tmdOnly(a) && partner(b)) || (tmdOnly(b) && partner(a));
+  }
+
+  private static providersOf(n: EventNode): string[] {
+    return [...new Set(n.provenance.map((r) => r.provider))];
+  }
+
+  /** tmdPair of two nodes. */
+  private static tmdNodes(a: EventNode, b: EventNode): boolean {
+    return Resolver.tmdPair(Resolver.providersOf(a), Resolver.providersOf(b));
   }
 
   /** Whether two sides (their providers) may use the moderate-event window: no provider on both, none excluded. */
@@ -348,8 +370,8 @@ export class Resolver {
   }
 
   /** null when the pair is one event through the moderate-event window, else why not. */
-  private rejectModerate(a: Solution, b: Solution, d: number): string | null {
-    const w = Resolver.moderateWindow(a, b);
+  private rejectModerate(a: Solution, b: Solution, d: number, tmd = false): string | null {
+    const w = Resolver.moderateWindow(a, b, tmd);
     if (!w) return 'moderate: magnitudes';
     const dt = Math.abs(a.eventTimeMs - b.eventTimeMs);
     if (dt > w.ms) return `moderate: dt ${(dt / 1000).toFixed(1)} s > ${(w.ms / 1000).toFixed(1)} s`;
@@ -361,7 +383,7 @@ export class Resolver {
   /** Whether the moderate-event window may judge the two nodes: neither cell dense, providers allowed. */
   private moderatePair(a: EventNode, b: EventNode): boolean {
     if (this.isDense(a.lat, a.lon) || this.isDense(b.lat, b.lon)) return false;
-    return Resolver.moderateProviders([...new Set(a.provenance.map((r) => r.provider))], [...new Set(b.provenance.map((r) => r.provider))]);
+    return Resolver.moderateProviders(Resolver.providersOf(a), Resolver.providersOf(b));
   }
 
   /** The widened spatial base for a pair whose smaller magnitude is `minMag` (≥ LARGE_EVENT_MAG). */
@@ -568,11 +590,13 @@ export class Resolver {
       const node = this.eventMap.get(fid);
       if (!node || node.state !== 'live') continue;
       if (this.isDense(node.lat, node.lon)) continue;
-      if (!Resolver.moderateProviders([raw.provider], [...new Set(node.provenance.map((r) => r.provider))])) continue;
+      const providers = Resolver.providersOf(node);
+      if (!Resolver.moderateProviders([raw.provider], providers)) continue;
+      const tmd = Resolver.tmdPair([raw.provider], providers);
       const d = haversineKm(raw.lat, raw.lon, node.lat, node.lon);
-      if (this.rejectModerate(raw, node, d)) continue;
+      if (this.rejectModerate(raw, node, d, tmd)) continue;
       if (Resolver.lifecycleLocationBlocks([raw], raw, node.provenance, node)) continue;
-      const w = Resolver.moderateWindow(raw, node)!;
+      const w = Resolver.moderateWindow(raw, node, tmd)!;
       const score = d / w.km + Math.abs(raw.eventTimeMs - node.eventTimeMs) / w.ms;
       if (score < bestScore || (score === bestScore && best && node.feedId < best.feedId)) {
         best = node;
@@ -1302,7 +1326,7 @@ export class Resolver {
     const gate = this.reject(a, b, d, dense);
     if (gate) {
       if (!this.moderatePair(a, b)) return gate;
-      const moderate = this.rejectModerate(a, b, d);
+      const moderate = this.rejectModerate(a, b, d, Resolver.tmdNodes(a, b));
       if (moderate) return `${gate}; ${moderate}`;
     }
     if (Resolver.lifecycleLocationBlocks(a.provenance, a, b.provenance, b)) {
@@ -1323,7 +1347,7 @@ export class Resolver {
   private score(a: EventNode, b: EventNode): number {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
     const dense = this.pairDense(a, b);
-    const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b) : null;
+    const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b, Resolver.tmdNodes(a, b)) : null;
     const { km, ms } = moderate ?? this.windows(a, b, dense);
     return (moderate ? MODERATE_SCORE_OFFSET : 0) + d / km + Math.abs(a.eventTimeMs - b.eventTimeMs) / ms;
   }
@@ -1363,11 +1387,13 @@ export class Resolver {
   private foldReason(a: EventNode, b: EventNode): string {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
     const dense = this.pairDense(a, b);
-    const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b) : null;
+    const tmd = Resolver.tmdNodes(a, b);
+    const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b, tmd) : null;
     const { km, ms } = moderate ?? this.windows(a, b, dense);
     const dt = Math.abs(a.eventTimeMs - b.eventTimeMs) / 1000;
     const dM = a.mag != null && b.mag != null ? Math.abs(a.mag - b.mag).toFixed(2) : 'n/a';
-    return `proximity: d=${d.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} ${moderate ? 'moderate window' : 'window'}=${km.toFixed(1)} km/${(ms / 1000).toFixed(0)} s`;
+    const label = moderate ? (tmd ? 'TMD window' : 'moderate window') : 'window';
+    return `proximity: d=${d.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} ${label}=${km.toFixed(1)} km/${(ms / 1000).toFixed(0)} s`;
   }
 
   /** After a live node changed, match it against its live neighbours with the first-sight

@@ -233,6 +233,15 @@ observation log under the new rule leaves about a third with one. A client recon
 realtime source may use the same window; the feed keeps apart what KAGSR's high magnitudes,
 minute-rounded PHIVOLCS and JMA times beyond 20 s, and one provider's two ids keep apart.
 
+TMD (Thailand) locates the region's moderate quakes 20–50 km from where USGS, EMSC and GFZ put
+them (Myanmar, Yunnan, Vietnam, northern Sumatra), with origin times a few seconds and magnitudes
+a few tenths apart. Since 2026-10 an event that holds TMD's rows only and an event holding a
+USGS, EMSC or GFZ row get the moderate-event window with its distance raised to 50 km at every
+magnitude ≥ 4.0 (same 20 s, |ΔM| ≤ 0.5, best-match and dense-cell rules). Replaying the
+observation log of 2026-07-05…10-06 folds 7 such pairs (18–46 km, 1–5 s), among them TMD's M4.7
+of 2026-09-30 in Vietnam, 34 km from ComCat's M4.4; TMD beside another agency (NCS, CENC, BMKG)
+keeps the usual windows.
+
 ## Retired events
 
 An event can leave the live set in two ways: an upstream delete (`state: "tombstoned"`,

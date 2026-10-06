@@ -12,7 +12,7 @@ import type { ProviderConfig } from './types.js';
  * the next free name):
  * - raw: `raw-<source>-<YYYY-MM>.ndjson.zst` in the Release `history-<YYYY>`: one source's answer for one month,
  *   normalised by the source's parser (RawObs), after a header line that records the queries, the row counts and,
- *   where the source has a count service (ComCat), the source's own count;
+ *   where the source has a count service (ComCat, EMSC), the source's own count;
  * - events: `events-<YYYY-MM>.e<N>.tar.zst` in the same Release, the month's day files (`DD.ndjson`, the feature
  *   format of the day partitions and of `archive-YYYY-MM`) plus `_edition.json`, built offline from every raw asset of
  *   the month by the backfill's own Resolver (src/history-build.ts). Edition N+1 is built when a source joins an era;

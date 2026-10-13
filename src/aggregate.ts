@@ -12,8 +12,8 @@ import { activeProviders, configMap, loadRegistry, priorityMap } from './provide
 import { byIngestOrder, emptyTally, screen } from './quality.js';
 import { COMCAT_DELETE_REASON, revisionSweep } from './sweep.js';
 import { vanishedIds } from './absence.js';
-import { frozenProviders, loadActivity, saveActivity, silentProviders, soonestLeaf, tlsLeafStatus, updateActivity } from './activity.js';
-import { pinnedLeaf } from './custom.js';
+import { frozenProviders, loadActivity, saveActivity, silentProviders, soonestLeaf, tlsErrorStatus, tlsLeafStatus, updateActivity } from './activity.js';
+import { isPinnedCertError, pinnedLeaf } from './custom.js';
 import { fetchRunInputs, loadSweepCursors, nextCursors, saveSweepCursors, sweepOriginFloorMs, sweepSpecs } from './sweep-cursor.js';
 import type { ProviderStatus, RawObs } from './types.js';
 import { isoFromMs } from './util.js';
@@ -250,7 +250,14 @@ async function main(): Promise<void> {
       return leaf ? [[p.id, leaf] as const] : [];
     }),
   );
-  const activity = updateActivity(loadedActivity.index, Object.fromEntries(outcomes.map((o) => [o.provider, o.status])), nowMs, leaves);
+  // A pinned fetch that failed on a certificate (its chain, or the leaf itself): kept in the index for a few hours past
+  // the last such run and published as `tls_errors`, so the health issue stays open while the source is cut off by it
+  // (TMD, 2026-10-09 → 10-13), not only while its last leaf is under 7 days.
+  const pinnedIds = new Set(active.filter((p) => p.tlsIntermediates?.length).map((p) => p.id));
+  const certErrors = Object.fromEntries(
+    outcomes.filter((o) => pinnedIds.has(o.provider) && !o.status.ok && isPinnedCertError(o.status.error)).map((o) => [o.provider, o.status.error!] as const),
+  );
+  const activity = updateActivity(loadedActivity.index, Object.fromEntries(outcomes.map((o) => [o.provider, o.status])), nowMs, leaves, certErrors);
   const silent = silentProviders(activity, active, nowMs);
   for (const id of Object.keys(silent)) if (!degraded.includes(id)) degraded.push(id);
   // FEED-3, round 14: a source that answers with rows whose newest origin stands still past its window plus budget is
@@ -267,6 +274,11 @@ async function main(): Promise<void> {
     if (!leaf) continue;
     tlsLeaves[p.id] = tlsLeafStatus(leaf, nowMs, activity[p.id]?.tlsLeaves?.length ?? 1);
     if (providers[p.id]) providers[p.id] = { ...providers[p.id]!, tls_leaf: tlsLeaves[p.id] };
+  }
+  const tlsErrors: Record<string, ReturnType<typeof tlsErrorStatus>> = {};
+  for (const p of active) {
+    const kept = p.tlsIntermediates?.length ? activity[p.id]?.tlsError : undefined;
+    if (kept) tlsErrors[p.id] = tlsErrorStatus(kept);
   }
   // The sweeps' outcomes and cursors: fail-open like the live fetch, and a sweep that did not
   // complete keeps its cursor, so the next run asks for the same window again. `epoch` is the
@@ -310,6 +322,7 @@ async function main(): Promise<void> {
     silent,
     frozen,
     tls_leaves: tlsLeaves,
+    tls_errors: tlsErrors,
     providers,
     sweeps,
   };
@@ -353,6 +366,7 @@ async function main(): Promise<void> {
       (Object.keys(silent).length ? ` silent=[${Object.entries(silent).map(([id, e]) => `${id}:${Math.round(e.silent_hours)}h`).join(',')}]` : '') +
       (Object.keys(frozen).length ? ` frozen=[${Object.entries(frozen).map(([id, e]) => `${id}:${Math.round(e.newest_origin_age_hours)}h`).join(',')}]` : '') +
       (Object.keys(tlsLeaves).length ? ` tls_leaf_days=[${Object.entries(tlsLeaves).map(([id, l]) => `${id}:${l.days_left}`).join(',')}]` : '') +
+      (Object.keys(tlsErrors).length ? ` tls_errors=[${Object.keys(tlsErrors).join(',')}]` : '') +
       (sweep.stale ? ` sweep_stale_skipped=${sweep.stale}` : '') +
       ` sweeps_failed=[${sweepsFailed.join(',')}]` +
       (sweepsCatchUp.length ? ` sweeps_catch_up=[${sweepsCatchUp.join(',')}]` : ''),

@@ -22,10 +22,13 @@ jobs:
     # Pinned, not ubuntu-latest: ubuntu-latest moves to Ubuntu 26.04 from 2026-10-19
     # (actions/runner-images#14748). Move to ubuntu-26.04 deliberately, after a green test run.
     runs-on: ubuntu-24.04
-    # 12, not 6: three Pages deploy attempts + backoff cannot fit in 6 min (a failing
-    # deploy alone runs ~3 min before erroring out).
+    # 12, not 6: a failing Pages deploy alone runs ~3 min before erroring out. The deploy reads this budget
+    # (job-timeout-minutes below, kept equal by tests/pages-deploy.test.ts) and retries only while 7 min are left.
     timeout-minutes: 12
     steps:
+      # First, so the Pages deploy (.github/actions/derive-publish) counts the job's budget from about its start.
+      - name: Note the job's start
+        run: echo "FEED_JOB_STARTED_S=$(date -u +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -44,6 +47,8 @@ jobs:
         with:
           cf-api-token: ${{ secrets.CF_API_TOKEN }}
           cf-account-id: ${{ secrets.CF_ACCOUNT_ID }}
+          job-started-at: ${{ env.FEED_JOB_STARTED_S }}
+          job-timeout-minutes: 12
           feed-signing-key: ${{ secrets.FEED_SIGNING_KEY }}
           feed-signing-kid: ${{ vars.FEED_SIGNING_KID }}
           r2-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}

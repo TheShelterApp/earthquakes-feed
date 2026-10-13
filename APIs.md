@@ -236,7 +236,9 @@ other sources without a time window CENC's 59.6 h). An answer limited to a time 
 status adds `providers.<id>.frozen` and `frozenProviders`; the health workflow lists frozen sources in the silent
 providers issue (`frozen:<id>` in its set line). Pinned sources (FEED-SEC-1) also carry `providers.<id>.tls_leaf` and
 `tls_leaves` (of the leaves the host presented in the last week, the first to expire: `not_after`, `days_left`, `issuer`,
-`subject`, `seen_at`, `leaves` when more than one; providers/tls/README.md).
+`subject`, `seen_at`, `leaves` when more than one; an expired leaf goes once the host presents a valid one), and since
+2026-10-13 `tls_errors` (by id: `error`, `since`, `last_at`; a pinned source whose fetch failed on a certificate in the
+last 6 hours, which keeps the "[health] pinned certificate expiring" issue open; providers/tls/README.md).
 
 **Failing and silent sources.** A provider whose fetch failed has `ok: false` and is in `degraded`. An FDSN answer of
 HTTP 204 is an empty success; HTTP 404 is an empty success only for a source whose query asks `nodata=404` (none does

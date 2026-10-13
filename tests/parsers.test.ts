@@ -214,3 +214,18 @@ test('tmd: rows without an eventID (TMD since 2026-08-18) are named by their UTC
   assert.equal(out[0]!.mag, 4.7);
   assert.equal(out[0]!.fields['otime'], '2026-10-04 05:54:57', 'the original fields are kept as TMD sent them');
 });
+
+test('tmd: the file at /feed/map-events.json (2026-10-13) has numeric ids again; otime is UTC, timeth Thai time', () => {
+  // Two rows as eq.tmd.go.th/feed/map-events.json served them on 2026-10-13 (the Thai text of timeth and region replaced
+  // by ASCII here): 13:13:57 UTC is 20:13 in Thailand (UTC+7).
+  const raw = {
+    events: [
+      { eventID: '17218', otime: '2026-10-13 13:13:57', timeth: '13 Oct 2569 20:13', lat: 18.212, lon: 96.864, depth: 10, mag: 2.8, region: 'Myanmar', path: 'EQ17218' },
+      { eventID: '17216', otime: '2026-10-13 12:42:42', timeth: '13 Oct 2569 19:42', lat: 14.763, lon: 107.767, depth: 10, mag: 4.5, region: 'Vietnam', path: 'EQ17216' },
+    ],
+  };
+  const out = parseTmd(raw, 'tmd');
+  assert.deepEqual(out.map((o) => o.providerEventId), ['17218', '17216']);
+  assert.equal(out[0]!.eventTimeMs, Date.parse('2026-10-13T13:13:57Z'));
+  assert.deepEqual([out[1]!.lat, out[1]!.lon, out[1]!.depth, out[1]!.mag], [14.763, 107.767, 10, 4.5]);
+});

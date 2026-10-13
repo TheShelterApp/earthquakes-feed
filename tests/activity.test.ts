@@ -15,7 +15,9 @@ import {
   seedActivity,
   silentProviders,
   soonestLeaf,
+  tlsErrorStatus,
   tlsLeafStatus,
+  TLS_ERROR_MEMORY_MS,
   TLS_LEAF_MEMORY_MS,
   updateActivity,
 } from '../src/activity.js';
@@ -268,6 +270,62 @@ test('updateActivity: a host that presents two leaves by turns reports the one t
   assert.equal(soonestLeaf(idx.phivolcs), undefined);
 });
 
+test('updateActivity: once the host presents a valid leaf, a kept leaf that has expired goes (TMD, 2026-10-13)', () => {
+  // TMD's index on 2026-10-13: the R6 leaf, last read 2026-10-09 01:56:48 UTC, three minutes before it expired; every
+  // handshake failed from then on. Before this, the first run that read the R46 leaf still reported the R6 one (the
+  // first to expire, -4.7 days) until it left the week's memory on 10-16.
+  const r6 = { notAfterMs: Date.parse('2026-10-09T01:59:47Z'), issuer: 'GlobalSign GCC R6 AlphaSSL CA 2025', subject: '*.tmd.go.th', seenAt: Date.parse('2026-10-09T01:56:48.498Z') };
+  const r46 = { notAfterMs: Date.parse('2027-04-12T02:17:13Z'), issuer: 'GlobalSign GCC R46 AlphaSSL CA 2025', subject: '*.tmd.go.th' };
+  const at = Date.parse('2026-10-13T19:00:00Z');
+  const prev = { tmd: { lastNonEmptyAt: r6.seenAt, sinceMs: 0, tlsLeaves: [r6] } };
+  // A failed handshake reads no leaf: the expired one stays in view, as before.
+  assert.deepEqual(updateActivity(prev, { tmd: { ok: false } }, at).tmd!.tlsLeaves, [r6]);
+  const next = updateActivity(prev, { tmd: { ok: true, events_returned: 20 } }, at, { tmd: r46 });
+  assert.deepEqual(next.tmd!.tlsLeaves, [{ ...r46, seenAt: at }]);
+  assert.deepEqual(tlsLeafStatus(soonestLeaf(next.tmd)!, at, next.tmd!.tlsLeaves!.length), {
+    not_after: '2027-04-12T02:17:13.000Z',
+    days_left: 180.3,
+    issuer: 'GlobalSign GCC R46 AlphaSSL CA 2025',
+    subject: '*.tmd.go.th',
+    seen_at: '2026-10-13T19:00:00.000Z',
+  });
+  // A leaf of another issuer that is still valid stays (PHIVOLCS's two servers), however the run reads the other one.
+  const own = { notAfterMs: Date.parse('2026-11-19T05:01:03Z'), issuer: 'GlobalSign RSA OV SSL CA 2018', subject: '*.phivolcs.dost.gov.ph', seenAt: at - HOUR };
+  const edge = { notAfterMs: Date.parse('2027-04-16T23:59:59Z'), issuer: 'Amazon RSA 2048 M04', subject: 'phivolcs.dost.gov.ph' };
+  const both = updateActivity({ phivolcs: { lastNonEmptyAt: at - HOUR, sinceMs: 0, tlsLeaves: [own] } }, { phivolcs: { ok: true, events_returned: 9 } }, at, { phivolcs: edge });
+  assert.equal(both.phivolcs!.tlsLeaves!.length, 2);
+  // Past its end the own server's leaf goes at the first run that reads the edge's; that server's runs now fail on the
+  // expired certificate, which `tlsError` keeps in view (next test).
+  const after = Date.parse('2026-11-19T06:00:00Z');
+  const gone = updateActivity(both, { phivolcs: { ok: true, events_returned: 9 } }, after, { phivolcs: edge });
+  assert.deepEqual(gone.phivolcs!.tlsLeaves, [{ ...edge, seenAt: after }]);
+});
+
+test('updateActivity: a pinned fetch\'s certificate failure is kept from the streak\'s first run until 6 h pass without one', () => {
+  const t0 = Date.parse('2026-10-09T02:01:00Z');
+  const msg = 'unable to verify the first certificate (the pinned intermediate no longer completes this host\'s chain: pin the one its leaf names, providers/tls/README.md)';
+  let idx = updateActivity({ tmd: { lastNonEmptyAt: t0 - 5 * 60_000, sinceMs: 0 } }, { tmd: { ok: false } }, t0, {}, { tmd: msg });
+  assert.deepEqual(idx.tmd!.tlsError, { message: msg, sinceMs: t0, lastMs: t0 });
+  // Every failing run moves `lastMs`; the streak keeps its first run.
+  idx = updateActivity(idx, { tmd: { ok: false } }, t0 + 4 * 86_400_000, {}, { tmd: msg });
+  assert.deepEqual(tlsErrorStatus(idx.tmd!.tlsError!), { error: msg, since: '2026-10-09T02:01:00.000Z', last_at: '2026-10-13T02:01:00.000Z' });
+  // A host that fails by turns (geo-DNS) keeps it: runs without the failure do not clear it within 6 h.
+  const fixedAt = t0 + 4 * 86_400_000 + 5 * 60_000;
+  idx = updateActivity(idx, { tmd: { ok: true, events_returned: 20 } }, fixedAt);
+  assert.equal(idx.tmd!.tlsError!.sinceMs, t0);
+  idx = updateActivity(idx, { tmd: { ok: true, events_returned: 20 } }, t0 + 4 * 86_400_000 + TLS_ERROR_MEMORY_MS);
+  assert.ok(idx.tmd!.tlsError, 'still kept at exactly 6 h');
+  idx = updateActivity(idx, { tmd: { ok: true, events_returned: 20 } }, t0 + 4 * 86_400_000 + TLS_ERROR_MEMORY_MS + 1);
+  assert.equal(idx.tmd!.tlsError, undefined);
+  assert.equal('tlsError' in idx.tmd!, false);
+  // A later failure starts a new streak; a source with no failure gains no field; a failure of a source new to the index
+  // starts its record.
+  const again = updateActivity(idx, { tmd: { ok: false } }, t0 + 10 * 86_400_000, {}, { tmd: 'certificate has expired' });
+  assert.deepEqual(again.tmd!.tlsError, { message: 'certificate has expired', sinceMs: t0 + 10 * 86_400_000, lastMs: t0 + 10 * 86_400_000 });
+  assert.equal('tlsError' in updateActivity({}, { usgs: { ok: false } }, t0).usgs!, false);
+  assert.deepEqual(updateActivity({}, {}, t0, {}, { phivolcs: msg }).phivolcs, { lastNonEmptyAt: null, sinceMs: t0, tlsError: { message: msg, sinceMs: t0, lastMs: t0 } });
+});
+
 test('status v2: a frozen source keeps ok, gains frozen, and is listed in frozenProviders; tls_leaves pass through', () => {
   const raw = {
     generated: '2026-10-06T00:00:00.000Z',
@@ -285,4 +343,8 @@ test('status v2: a frozen source keeps ok, gains frozen, and is listed in frozen
   assert.equal(v2['providers'].bgs.newest_origin, '2026-09-25T00:00:00.000Z');
   assert.equal(v2['providers'].usgs.frozen, false);
   assert.deepEqual(v2['tls_leaves'], raw.tls_leaves);
+  // tls_errors (2026-10-13) passes through the same way.
+  const tlsErrors = { tmd: { error: 'unable to verify the first certificate (…providers/tls/README.md)', since: '2026-10-09T02:01:00.000Z', last_at: '2026-10-13T18:00:00.000Z' } };
+  const v2e = enrichStatusV2({ ...raw, tls_errors: tlsErrors }, { generatedMs: Date.parse(raw.generated), expectedIntervalSeconds: 300, staleAfterSeconds: 1800, health: {} }) as Record<string, any>;
+  assert.deepEqual(v2e['tls_errors'], tlsErrors);
 });

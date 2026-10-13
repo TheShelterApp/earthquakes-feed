@@ -511,3 +511,50 @@ test('stall: the thresholds — 24 unexplained runs, or 72 runs of any kind; the
   assert.equal(recordRun(s, { progress: true, workLeft: true, explained: false }, t(136)), false);
   assert.equal(s.stall, null, 'progress ends the streak');
 });
+
+// Review of round 24 (#99): the two time-budget cases that make a no-progress run explained (counted toward the 72-run
+// alarm, not the 24-run one) had no test, and either marker could be dropped with every test green.
+test('stall: a month whose fetch the time budget cuts short, and a seal the budget leaves to the next run, are explained', { skip: !hasZstd && 'zstd not installed' }, async () => {
+  const store = new LocalStore(join(mkdtempSync(join(tmpdir(), 'history-budget-')), 'releases'));
+  // ComCat answers the month's count, and the run's time is up before the query itself goes out: the month is asked
+  // from its start again next run (a month never fetched whole within maxSecondsPerRun).
+  let late = false;
+  const calls: string[] = [];
+  const cut = {
+    calls,
+    fetchOptions: {
+      fetcher: async (url: string): Promise<HttpAnswer> => {
+        calls.push(url);
+        late = true;
+        return { status: 200, body: '{"count":3}', latencyMs: 1, retryAfterMs: null };
+      },
+      sleep: async () => {},
+      now: () => (late ? Date.now() + 3_600_000 : Date.now()),
+    },
+  };
+  const start: DataFiles = { index: indexText(emptyIndex(CFG.boundary)), state: null };
+  const r1 = await hourly(store, start, hourIso(0), cut);
+  assert.equal(calls.length, 1, 'the count only');
+  assert.match(calls[0]!, /\/count\?.*starttime=2022-12-01/);
+  assert.deepEqual(r1.ctx.report.budget, ['usgs:2022-12']);
+  assert.deepEqual(r1.ctx.report.failed, [], 'not a failure: no streak for the month');
+  assert.equal(r1.files.index, start.index);
+  assert.deepEqual(parseState(r1.files.state!), { version: 1, attempts: {}, stall: { since: hourIso(0), runs: 1, unexplained: 0, alarmed_at: null } });
+
+  // Both months fetched, neither sealed, and the time is up before the first seal: the seals wait for the next run.
+  const idx = emptyIndex(CFG.boundary);
+  for (const period of ['2022-11', '2022-12']) {
+    const p = allPeriods(CFG).find((x) => x.key === period)!;
+    idx.raw.push({
+      source: 'usgs', period, tag: historyTag(period), asset: rawAssetName('usgs', period, 1), url: 'x', sha256: 'x', bytes: 1, rows: 0, provider_count: 0,
+      start: new Date(p.startMs).toISOString(), end: new Date(p.endMs).toISOString(), fetch_min_magnitude: null, fetched_at: NOW_ISO,
+    });
+  }
+  const idle = http(() => ({ status: 500, body: 'boom', latencyMs: 1, retryAfterMs: null }));
+  const r2 = await hourly(store, { index: indexText(idx), state: r1.files.state }, hourIso(1), idle, { deadline: Date.now() - 1 });
+  assert.deepEqual(idle.calls, [], 'nothing left to fetch');
+  assert.deepEqual(r2.run, { fatal: null, pending: 0, unsealed: 2 });
+  assert.ok(r2.ctx.report.budget.includes('sealing 2022-12 on'), JSON.stringify(r2.ctx.report.budget));
+  assert.deepEqual(r2.ctx.report.sealed, []);
+  assert.deepEqual(parseState(r2.files.state!).stall, { since: hourIso(0), runs: 2, unexplained: 0, alarmed_at: null });
+});

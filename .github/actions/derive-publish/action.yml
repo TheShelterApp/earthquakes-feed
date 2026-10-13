@@ -140,8 +140,11 @@ runs:
       # Idempotent (skip-by-sha). Off on purpose while every R2 setting is blank (a plain log line); some set = a
       # warning and a skip (src/publish-r2.ts). The R2 origin is additive, never a gate on the Pages deploy: this step
       # cannot fail; an R2 error is recorded and fails the job in the last step, after the Pages deploy (from 2026-09-06
-      # to 09-17 an R2 error skipped 8 Pages deploys). It stays before the deploy so the Pages copy of the v2 manifest
-      # never names a `cdn` origin whose objects are not uploaded yet.
+      # to 09-17 an R2 error skipped 8 Pages deploys). It runs before the deploy so that, when it succeeds, the Pages
+      # copy of the v2 manifest never names a `cdn` origin (R2_PUBLIC_BASE) whose objects are not uploaded yet. After an
+      # R2 error, or a skip with R2_PUBLIC_BASE set, the deployed manifest still names `cdn`, first of its origins: a
+      # changed file there is old or missing, its sha256 (in the manifest) does not match, and a reader takes the next
+      # origin (`pages`).
       id: r2
       shell: bash
       env:

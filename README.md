@@ -199,10 +199,12 @@ open, reachable source appears.
   pulled from their Release, merged, and re-rolled — no manual steps, no gaps.
 - **Serving split:** the live surface (summaries + recent day files + manifest) is
   published to **Cloudflare Pages** via Direct Upload (which doesn't consume the
-  500 git-builds/month cap). The deploy (`scripts/pages-deploy.sh`) caps each of its three attempts at 7 minutes inside
-  the job's budget; when every attempt fails, a live manifest under 15 minutes old keeps the run green with a warning
-  (the next run deploys again), and `health`'s 30-minute freshness check stays the alarm. The R2 origin (`publish-r2`)
-  is off while its settings are blank, and an R2 error never skips the Pages deploy. Full-history partitions serve from the `data` branch via
+  500 git-builds/month cap). The deploy (`scripts/pages-deploy.sh`) caps each of its
+  three attempts at 7 minutes inside the job's budget; when every attempt fails, a live
+  manifest under 15 minutes old keeps the run green with a warning (the next run deploys
+  again), and `health`'s 30-minute freshness check stays the alarm. The R2 origin
+  (`publish-r2`) is off while its settings are blank, and an R2 error never skips the
+  Pages deploy. Full-history partitions serve from the `data` branch via
   **jsDelivr** (branch refs cache ~12 h — resolve through the manifest). Never
   `raw.githubusercontent.com` (60 req/hr/IP).
 

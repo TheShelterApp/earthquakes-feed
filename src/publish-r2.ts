@@ -11,9 +11,11 @@ import { R2Publisher, cacheControlFor, contentTypeFor, r2Settings, type PutObjec
  *
  * The R2 origin is additive, never a gate (r2Settings): with every R2 setting blank, the publish is off on purpose and
  * says so in a plain log line (it printed a warning on every aggregate run, about 288 a day); with only some set, it
- * warns and exits 0. In .github/actions/derive-publish this step runs before the Pages deploy, so the v2 manifest never
- * advertises R2 objects not yet uploaded, and a failure here is recorded there and fails the job only after the Pages
- * deploy (from 2026-09-06 to 09-17 an R2 error skipped 8 Pages deploys).
+ * warns and exits 0. In .github/actions/derive-publish this step runs before the Pages deploy, so after a successful
+ * publish the v2 manifest never advertises R2 objects not yet uploaded. A failure here is recorded there and fails the
+ * job only after the Pages deploy (from 2026-09-06 to 09-17 an R2 error skipped 8 Pages deploys); that deploy's v2
+ * manifest still names the `cdn` origin when R2_PUBLIC_BASE is set, so a reader finds a changed file there old or
+ * missing by its sha256 and takes the next origin (`pages`). A skip with R2_PUBLIC_BASE set does the same.
  */
 interface V2Manifest {
   summaries: Record<string, { path: string }>;

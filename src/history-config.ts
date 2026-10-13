@@ -6,7 +6,8 @@ import type { ProviderConfig } from './types.js';
  * Deep history (PF-5j): the feed's history before the 3-year layer that `backfill` walked (the day partitions and
  * the monthly `archive-YYYY-MM` Releases, from `knowledge/index/backfill.json` `targetStart` on). It never commits a
  * day partition to the `data` branch and never touches an existing archive or a frozen day: every byte of it is an
- * immutable GitHub Release asset, and the `data` branch only gains the small index `knowledge/index/history.json`.
+ * immutable GitHub Release asset, and the `data` branch only gains the small index `knowledge/index/history.json` and
+ * the walk's smaller `knowledge/index/history-state.json` (its failure and no-progress streaks, src/history-state.ts).
  *
  * Two layers, both immutable once uploaded (an asset is never overwritten or deleted; a broken upload is replaced by
  * the next free name):

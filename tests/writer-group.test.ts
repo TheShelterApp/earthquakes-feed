@@ -179,7 +179,7 @@ test('workflows: derive runs at the end of every aggregate job, and derive.yml o
 
 test('workflows: the side-index commit jobs push without the lock and stage only their own files', () => {
   for (const [f, own] of [
-    ['history.yml', 'knowledge/index/history.json'],
+    ['history.yml', 'knowledge/index/history.json and history-state.json'],
     ['remediate.yml', 'knowledge/index/remediation.json'],
     ['first-solutions.yml', '$dir/cursor.json and chunks.ndjson'],
   ] as const) {

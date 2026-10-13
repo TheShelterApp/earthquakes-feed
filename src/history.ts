@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readArchivedDays, type ArchiveRef } from './archive-io.js';
 import { featureToNode } from './bitemporal.js';
@@ -38,6 +38,7 @@ import {
   periodsToSeal,
   rawOf,
 } from './history-index.js';
+import { type HistoryState, type StallEntry, emptyState, loadState, recordRun, stateText, walkTexts } from './history-state.js';
 import { type AssetInfo, DryRunStore, GitHubStore, type HistoryStore, LocalStore } from './history-store.js';
 import { verifyEdition } from './history-verify.js';
 import { loadRegistry } from './providers.js';
@@ -50,12 +51,16 @@ import type { ProviderConfig, RawObs } from './types.js';
  *
  * Environment:
  *   DATA_DIR             a checkout (or a copy) of the data branch; read only: knowledge/index/backfill.json (the
- *                        boundary), archives.json (the frozen 3-year archives) and history.json (where the walk stands)
- *   HISTORY_OUT          output directory (default history-out): history.json (the new index, written when it
- *                        changed), report.json; the commit job copies history.json to the data branch
+ *                        boundary), archives.json (the frozen 3-year archives), history.json (where the walk stands)
+ *                        and history-state.json (its streaks; absent before round 24)
+ *   HISTORY_OUT          output directory (default history-out): history.json (the index) and history-state.json (the
+ *                        walk's failure and no-progress streaks, src/history-state.ts), both written every run, and
+ *                        report.json; the step output `changed` says whether either differs from the data branch's copy,
+ *                        and the commit job copies both there (git commits only the one that changed)
  *   HISTORY_DRY_RUN=1    no Release is created and nothing is uploaded: assets go to HISTORY_OUT/releases/<tag>/; a
  *                        later dry run continues from HISTORY_OUT/history.json. The published assets the index lists
- *                        are read from the Releases (read only), so a dry run can build a month's next edition
+ *                        are read from the Releases (read only), so a dry run can build a month's next edition; it reads
+ *                        HISTORY_OUT/history-state.json with it
  *   HISTORY_ONLY_SOURCES dry runs only: fetch the months of these sources (comma-separated provider ids) and no other;
  *                        a month is sealed only once every source of its era is there, so such a run seals nothing
  *                        new unless the others are already fetched
@@ -64,10 +69,13 @@ import type { ProviderConfig, RawObs } from './types.js';
  *
  * The run writes nothing to DATA_DIR. It exits non-zero only for a broken invariant (after writing the index of the
  * work already uploaded); a source month that fails is retried next run and turns the run red once, after a day of
- * failed runs; a month that failed before no longer holds back its source's older months.
+ * failed runs; a month that failed before no longer holds back its source's older months. A walk that makes no progress
+ * (work left, nothing fetched, sealed or adopted) turns the run red after a day of such runs that no Retry-After and no
+ * time budget explain, or three days of any, and then once a day while it lasts (round 24, src/history-state.ts).
  */
 
-/** A source month that has failed this many runs turns the run red, once (the index keeps its attempts entry). */
+/** A source month that has failed this many runs turns the run red, once (history-state.json keeps its attempts entry);
+ *  a walk that has stopped turns runs red by its own streak (src/history-state.ts). */
 const ALARM_FAILURES = 24;
 /** Failed source months per source per run at most: a month that failed before (`attempts`) no longer holds back the
  *  source's older months, but a source that fails everything costs at most this many failed months a run. */
@@ -98,6 +106,30 @@ function setOutput(key: string, value: string): void {
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`);
 }
 
+/** What a run did, for report.json and the no-progress streak. */
+export interface Report {
+  fetched: string[];
+  sealed: string[];
+  adopted: string[];
+  /** Every failed source month, the rate-limited ones (`rate_limited`) included. */
+  failed: string[];
+  unused: string[];
+  blocked: string[];
+  empty_after_rows: string[];
+  gaps: string[];
+  /** Sources left alone this run because they asked (Retry-After) not to be asked before a time. */
+  held: string[];
+  /** Failed source months the source rate-limited (a Retry-After over the backoff cap, or HTTP 429 through every
+   *  retry): a subset of `failed`. */
+  rate_limited: string[];
+  /** What the run's time budget (maxSecondsPerRun) cut short: a source month's fetch, or the fetches and seals left. */
+  budget: string[];
+}
+
+export const emptyReport = (): Report => ({
+  fetched: [], sealed: [], adopted: [], failed: [], unused: [], blocked: [], empty_after_rows: [], gaps: [], held: [], rate_limited: [], budget: [],
+});
+
 /** One run's state. Exported with adoptOrphans and fetchUnits for tests/history-run.test.ts (FEED-TEST-1). */
 export interface Ctx {
   cfg: HistoryConfig;
@@ -113,7 +145,7 @@ export interface Ctx {
   assetCache: Map<string, AssetInfo[]>;
   rawCache: Map<string, RawInput>;
   now: () => string;
-  report: { fetched: string[]; sealed: string[]; adopted: string[]; failed: string[]; unused: string[]; blocked: string[]; empty_after_rows: string[]; gaps: string[] };
+  report: Report;
   /** Dry runs only (HISTORY_ONLY_SOURCES): fetch these sources' months and no other. */
   onlySources?: ReadonlySet<string>;
   /** Tests only: the HTTP layer and clock of fetchRange (production uses its defaults). */
@@ -345,15 +377,20 @@ export async function fetchUnits(ctx: Ctx, maxUnits: number, onMonthComplete?: (
   const failuresThisRun = new Map<string, number>();
   let done = 0;
   for (const u of pendingUnits(ctx.cfg, ctx.idx)) {
-    if (done >= maxUnits || Date.now() > ctx.deadline) break;
+    if (done >= maxUnits) break;
     if (ctx.onlySources && !ctx.onlySources.has(u.source)) continue;
     if (failedSources.has(u.source)) continue;
+    if (Date.now() > ctx.deadline) {
+      ctx.report.budget.push(`fetching from ${u.source}:${u.period.key} on`);
+      break;
+    }
     const waitUntil = Object.entries(ctx.idx.attempts)
       .filter(([k, v]) => k.startsWith(`${u.source}:`) && v.not_before)
       .map(([, v]) => Date.parse(v.not_before!))
       .reduce((m, t) => Math.max(m, t), -Infinity);
     if (waitUntil > Date.now()) {
       failedSources.add(u.source);
+      ctx.report.held.push(`${u.source} until ${new Date(waitUntil).toISOString()}`);
       console.log(`history: ${u.source} asked not to be asked before ${new Date(waitUntil).toISOString()} (Retry-After); its months wait`);
       continue;
     }
@@ -395,6 +432,7 @@ export async function fetchUnits(ctx: Ctx, maxUnits: number, onMonthComplete?: (
       }
     }
     if (!res.ok && res.budget) {
+      ctx.report.budget.push(key);
       console.log(`history: ${key} not finished within the run's ${ctx.cfg.maxSecondsPerRun} s; asked again next run`);
       break;
     }
@@ -405,14 +443,17 @@ export async function fetchUnits(ctx: Ctx, maxUnits: number, onMonthComplete?: (
       // A month that fails for the first time stops its source for the run (most failures are the source's, and pass).
       // One that failed before is likely the month's own (an answer the walk cannot read, round 23: EMSC 2017-12 held
       // the whole walk for six days): the source goes on with its older months, up to MAX_FAILED_UNITS_PER_SOURCE
-      // failed months a run. A Retry-After always stops it.
-      if (!failedBefore || n >= MAX_FAILED_UNITS_PER_SOURCE || res.retryAfterMs != null) failedSources.add(u.source);
+      // failed months a run. A rate limit always stops it: a pause asked for over the backoff cap (the source is then left
+      // alone until the time it named), or HTTP 429 through every retry (round 24).
+      const rateLimited = res.retryAfterMs != null || /\bHTTP 429\b/.test(res.error);
+      if (!failedBefore || n >= MAX_FAILED_UNITS_PER_SOURCE || rateLimited) failedSources.add(u.source);
       const a = (ctx.idx.attempts[key] ??= { failures: 0, since: fetchedAt, last_error: '' });
       a.failures++;
       a.last_error = res.error.slice(0, 300);
       if (res.retryAfterMs != null) a.not_before = new Date(Date.now() + res.retryAfterMs).toISOString();
       else delete a.not_before;
       ctx.report.failed.push(`${key}: ${res.error} (${a.failures} failed run(s) since ${a.since}; ${res.requests} request(s))`);
+      if (rateLimited) ctx.report.rate_limited.push(`${key}: ${res.error.slice(0, 120)}`);
       console.log(`::warning::history: ${key} failed: ${res.error} — ${a.failures} failed run(s) since ${a.since}`);
       if (a.failures === ALARM_FAILURES) {
         ctx.report.blocked.push(
@@ -493,9 +534,12 @@ function editionContext(ctx: Ctx, e: EditionEntry, day: string): ContextInput {
  *  until its newer neighbour is frozen). Exported for tests/history-run.test.ts. */
 export function sealPeriods(ctx: Ctx): void {
   for (const p of periodsToSeal(ctx.cfg, ctx.idx)) {
-    if (Date.now() > ctx.deadline) break;
     const nb = newerNeighbour(ctx.cfg, ctx.idx, p);
     if (nb.kind === 'wait') continue;
+    if (Date.now() > ctx.deadline) {
+      ctx.report.budget.push(`sealing ${p.key} on`);
+      break;
+    }
     const context = nb.kind === 'boundary' ? boundaryContext(ctx, nb.day) : nb.kind === 'edition' ? editionContext(ctx, nb.edition, nb.day) : null;
     const era = eraOf(ctx.cfg, p);
     const raws = era.sources.map((s) => {
@@ -530,6 +574,53 @@ export function sealPeriods(ctx: Ctx): void {
   }
 }
 
+/** The red-run text of a no-progress streak: what is left and the months that keep failing. */
+function stallMessage(ctx: Ctx, st: StallEntry, pending: number, unsealed: number): string {
+  const failing = Object.entries(ctx.idx.attempts)
+    .sort(([ka, a], [kb, b]) => b.failures - a.failures || (ka < kb ? -1 : 1))
+    .slice(0, 5)
+    .map(([k, a]) => `${k} (${a.failures} failed run(s) since ${a.since}: ${a.last_error.slice(0, 120)})`);
+  return (
+    `history: no progress for ${st.runs} run(s) since ${st.since} (${st.unexplained} of them with no Retry-After or time budget to explain them): ` +
+    `${pending} source month(s) to fetch and ${unsealed} complete month(s) to seal, and nothing fetched, sealed or adopted` +
+    (failing.length ? `; failing: ${failing.join('; ')}` : '') +
+    '; the walk has stopped: fix the source or take it out of the era (red once a day while it lasts)'
+  );
+}
+
+/**
+ * One run of the walk: take over assets an earlier run uploaded but never indexed, seal the months an earlier run left
+ * complete, fetch (sealing each month as its last source arrives), then count the run into the no-progress streak of
+ * `state` (whose `attempts` is `ctx.idx.attempts`, src/history-state.ts). A broken invariant comes back as `fatal`,
+ * after the run is counted, and is never thrown: the index of the work already uploaded must still be written.
+ * Exported for tests/history-run.test.ts.
+ */
+export async function runWalk(ctx: Ctx, state: HistoryState, maxUnits: number): Promise<{ fatal: unknown; pending: number; unsealed: number }> {
+  let fatal: unknown = null;
+  try {
+    adoptOrphans(ctx);
+    // Months left complete but unsealed by an earlier run first, then each month as its last source arrives: a run
+    // whose fetching uses the whole time budget (era A's walk) still seals what it completed.
+    sealPeriods(ctx);
+    await fetchUnits(ctx, maxUnits, () => sealPeriods(ctx));
+    sealPeriods(ctx);
+  } catch (e) {
+    fatal = e;
+  }
+  const pending = pendingUnits(ctx.cfg, ctx.idx).length;
+  const unsealed = periodsToSeal(ctx.cfg, ctx.idx).length;
+  const r = ctx.report;
+  const progress = r.fetched.length + r.sealed.length + r.adopted.length > 0;
+  // Explained: the run waited for a source's Retry-After or ran out of time, and nothing failed for another reason.
+  const explained = !fatal && r.failed.length === r.rate_limited.length && r.held.length + r.rate_limited.length + r.budget.length > 0;
+  if (recordRun(state, { progress, workLeft: pending + unsealed > 0, explained }, ctx.now())) r.blocked.push(stallMessage(ctx, state.stall!, pending, unsealed));
+  else if (state.stall) {
+    const st = state.stall;
+    console.log(`history: no progress this run: ${st.runs} run(s) in a row since ${st.since}, ${st.unexplained} of them unexplained${explained ? '' : ' (this one too)'}`);
+  }
+  return { fatal, pending, unsealed };
+}
+
 async function main(): Promise<void> {
   const cfg = loadHistoryConfig();
   const out = process.env.HISTORY_OUT ?? 'history-out';
@@ -551,10 +642,15 @@ async function main(): Promise<void> {
   const archives = existsSync(paths.archivesIndex) ? (JSON.parse(readFileSync(paths.archivesIndex, 'utf8')) as { list: (ArchiveRef & { sha256?: string })[] }).list : [];
   const archivedDays = new Set(archives.flatMap((a) => a.days ?? []));
   const localIndex = join(out, 'history.json');
+  const localState = join(out, 'history-state.json');
   const indexIn = process.env.HISTORY_INDEX_IN ?? (dryRun && existsSync(localIndex) ? localIndex : join(paths.indexDir, 'history.json'));
+  // The state is read beside the index it belongs to: the data branch's, or a local dry run's own.
+  const stateIn = join(dirname(indexIn), 'history-state.json');
   const before = existsSync(indexIn) ? readFileSync(indexIn, 'utf8') : null;
+  const stateBefore = existsSync(stateIn) ? readFileSync(stateIn, 'utf8') : null;
   const idx = before ? parseIndex(before) : emptyIndex(cfg.boundary);
   if (idx.boundary !== cfg.boundary) throw new Error(`history.json boundary ${idx.boundary} differs from the config's ${cfg.boundary}`);
+  const state = loadState(idx, stateBefore);
   const onlySources = process.env.HISTORY_ONLY_SOURCES?.trim()
     ? new Set(process.env.HISTORY_ONLY_SOURCES.split(',').map((x) => x.trim()).filter(Boolean))
     : undefined;
@@ -575,36 +671,47 @@ async function main(): Promise<void> {
     assetCache: new Map(),
     rawCache: new Map(),
     now: () => new Date().toISOString(),
-    report: { fetched: [], sealed: [], adopted: [], failed: [], unused: [], blocked: [], empty_after_rows: [], gaps: [] },
+    report: emptyReport(),
     ...(onlySources ? { onlySources } : {}),
   };
-  console.log(`history: ${ctx.store.label}; index from ${before ? indexIn : 'scratch'}; ${idx.raw.length} raw assets, ${idx.editions.length} editions`);
-  let fatal: unknown = null;
+  console.log(
+    `history: ${ctx.store.label}; index from ${before ? indexIn : 'scratch'}; ${idx.raw.length} raw assets, ${idx.editions.length} editions; ` +
+      `state from ${stateBefore ? stateIn : 'scratch'}: ${Object.keys(state.attempts).length} failing source month(s), ` +
+      (state.stall ? `no progress for ${state.stall.runs} run(s) since ${state.stall.since}` : 'no stall'),
+  );
+  let run: Awaited<ReturnType<typeof runWalk>>;
   try {
-    adoptOrphans(ctx);
     // An empty value (a blank workflow_dispatch input) means the config's number, never 0.
-    // Months left complete but unsealed by an earlier run first, then each month as its last source arrives: a run
-    // whose fetching uses the whole time budget (era A's walk) still seals what it completed.
-    sealPeriods(ctx);
-    await fetchUnits(ctx, process.env.HISTORY_MAX_UNITS ? Number(process.env.HISTORY_MAX_UNITS) : cfg.maxUnitsPerRun, () => sealPeriods(ctx));
-    sealPeriods(ctx);
-  } catch (e) {
-    fatal = e;
+    run = await runWalk(ctx, state, process.env.HISTORY_MAX_UNITS ? Number(process.env.HISTORY_MAX_UNITS) : cfg.maxUnitsPerRun);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
-  // Whatever was uploaded is indexed, also when a later step failed: the index never lags the Releases by choice.
-  const text = indexText(idx);
-  const changed = text !== before;
-  if (changed) writeFileSync(localIndex, text);
-  setOutput('changed', String(changed));
-  const pending = pendingUnits(cfg, idx).length;
-  const unsealed = periodsToSeal(cfg, idx).length;
-  const report = { ...ctx.report, pending_units: pending, unsealed_months: unsealed, index_changed: changed, index_bytes: Buffer.byteLength(text) };
+  const { fatal, pending, unsealed } = run;
+  // Whatever was uploaded is indexed, also when a later step failed: the index never lags the Releases by choice. The
+  // streaks go to the state file: a run that only counts one more failure leaves the index as it was (round 24).
+  const files = walkTexts(idx, state, indexText);
+  const indexChanged = files.index !== before;
+  const stateChanged = files.state !== (stateBefore ?? stateText(emptyState()));
+  writeFileSync(localIndex, files.index);
+  writeFileSync(localState, files.state);
+  setOutput('changed', String(indexChanged || stateChanged));
+  const report = {
+    ...ctx.report,
+    pending_units: pending,
+    unsealed_months: unsealed,
+    stall: state.stall,
+    index_changed: indexChanged,
+    index_bytes: Buffer.byteLength(files.index),
+    state_changed: stateChanged,
+    state_bytes: Buffer.byteLength(files.state),
+  };
   writeFileSync(join(out, 'report.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(
     `history: fetched=${ctx.report.fetched.length} sealed=${ctx.report.sealed.length} adopted=${ctx.report.adopted.length} failed=${ctx.report.failed.length} ` +
-      `unused=${ctx.report.unused.length} empty_after_rows=${ctx.report.empty_after_rows.length} gaps=${ctx.report.gaps.length} pending_units=${pending} unsealed_months=${unsealed} index_changed=${changed} (${Buffer.byteLength(text)} bytes)`,
+      `held=${ctx.report.held.length} rate_limited=${ctx.report.rate_limited.length} budget=${ctx.report.budget.length} ` +
+      `unused=${ctx.report.unused.length} empty_after_rows=${ctx.report.empty_after_rows.length} gaps=${ctx.report.gaps.length} pending_units=${pending} unsealed_months=${unsealed} ` +
+      `stall=${state.stall ? `${state.stall.runs}/${state.stall.unexplained}` : 'none'} ` +
+      `index_changed=${indexChanged} (${Buffer.byteLength(files.index)} bytes) state_changed=${stateChanged} (${Buffer.byteLength(files.state)} bytes)`,
   );
   const blocked = [...ctx.report.blocked];
   if (fatal) blocked.unshift(`history: ${fatal instanceof Error ? fatal.message : String(fatal)}`);

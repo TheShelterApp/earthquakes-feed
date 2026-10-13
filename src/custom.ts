@@ -23,7 +23,21 @@ interface GetOpts {
 
 /** Certificate-chain errors of a pinned fetch: the pins no longer complete the host's chain. */
 const CHAIN_ERRORS: ReadonlySet<string> = new Set(['UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'UNABLE_TO_GET_ISSUER_CERT']);
-export const PIN_HINT = 'the pinned intermediate no longer completes this host\'s chain: pin the one its leaf names, providers/tls/README.md';
+/** The other certificate errors a pinned fetch can meet: the chain is complete but a certificate in it does not verify
+ *  (expired, not yet valid, for another name, self-signed, revoked). */
+const CERT_ERRORS: ReadonlySet<string> = new Set([
+  'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'ERROR_IN_CERT_NOT_BEFORE_FIELD', 'ERROR_IN_CERT_NOT_AFTER_FIELD',
+  'ERR_TLS_CERT_ALTNAME_INVALID', 'HOSTNAME_MISMATCH', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN',
+  'CERT_SIGNATURE_FAILURE', 'CERT_REVOKED', 'CERT_UNTRUSTED', 'CERT_REJECTED', 'INVALID_CA', 'INVALID_PURPOSE',
+  'PATH_LENGTH_EXCEEDED', 'CERT_CHAIN_TOO_LONG', 'UNABLE_TO_DECRYPT_CERT_SIGNATURE', 'UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY',
+]);
+/** Every certificate error of a pinned fetch names this file in its message: status.json carries only the message, and
+ *  the aggregate tells a pinned source's certificate failure (`tls_errors`, kept by src/activity.ts) by it. */
+export const TLS_README = 'providers/tls/README.md';
+export const PIN_HINT = `the pinned intermediate no longer completes this host's chain: pin the one its leaf names, ${TLS_README}`;
+export const CERT_HINT = `the pinned host's certificate does not verify (expired, not yet valid or for another name): ${TLS_README}`;
+/** A pinned fetch's error message that is a certificate failure (the chain, or the leaf itself). */
+export const isPinnedCertError = (message: string | null | undefined): boolean => typeof message === 'string' && message.includes(TLS_README);
 
 /** Default bound on one getText call, all attempts included (FEED-SEC-1). */
 export const GET_DEADLINE_MS = 45_000;
@@ -109,6 +123,7 @@ function once(url: string, timeoutMs: number, ua: string, ca: readonly string[] 
       // The host's chain no longer matches the pins (its leaf was renewed under another intermediate): say what to do
       // in the message status.json shows. The code stays, so callers can still tell the cases apart.
       if (e.code != null && CHAIN_ERRORS.has(e.code)) e.message += ` (${PIN_HINT})`;
+      else if (e.code != null && CERT_ERRORS.has(e.code)) e.message += ` (${CERT_HINT})`;
       reject(e);
     });
     req.on('timeout', () => req.destroy(new Error('timeout')));
@@ -246,11 +261,13 @@ const tmd: CustomAdapter = async (cfg) => {
   return parseTmd(JSON.parse(await getText(cfg.base, { timeoutMs: 15_000, retries: 2, ca: pinnedCa(cfg) })), cfg.id);
 };
 
-/** TMD's `map-events.json` (`otime` is UTC). Since 2026-08-18 every row has `eventID: ""` (and `path: "event-info-"`),
+/** TMD's `map-events.json` (`otime` is UTC). From 2026-08-18 every row had `eventID: ""` (and `path: "event-info-"`),
  *  and the adapter dropped every row: TMD sent nothing for 47 days while its fetch looked healthy (FEED-3). A row
  *  without an id gets one from its origin time, `t` + the UTC digits of `otime` (`t20261004055457`): TMD publishes one
  *  final solution per event (none of its 184 ids logged 2026-07-05 → 08-17 was ever revised), so the origin second
- *  names it, and the `t` keeps those ids apart from TMD's old numeric ones. */
+ *  names it, and the `t` keeps those ids apart from TMD's old numeric ones. The file's new path (`/feed/map-events.json`,
+ *  read 2026-10-13; the old one answers 404) has numeric ids again (`"17218"`, `path: "EQ17218"`), continuing the
+ *  16794..16977 of July/August, so they are kept as given. */
 export function parseTmd(raw: unknown, providerId: string): RawObs[] {
   const out: RawObs[] = [];
   for (const e of ((raw as { events?: Record<string, unknown>[] }).events ?? [])) {

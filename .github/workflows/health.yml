@@ -132,7 +132,18 @@ jobs:
             });
             for (const t of leafText) console.log(`::warning::pinned certificate ${t}`);
             console.log(`tls_leaf_days=[${Object.keys(leaves).sort().map((id) => `${id}:${leaves[id].days_left}`).join(",")}]`);
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, `tls_set=${expiring.join(",")}\ntls=${leafText.join("; ")}\n`);
+            // A pinned source whose fetch fails on a certificate (its chain, or the leaf itself) keeps the issue open
+            // (status.json tls_errors, kept 6 h past the last such run): TMD failed that way from 2026-10-09, and its
+            // expired leaf alone would have closed the issue on 10-16 with TMD still cut off. Named cert:<id> in the set.
+            const tlsErrors = (s && s.tls_errors && typeof s.tls_errors === "object" && !Array.isArray(s.tls_errors)) ? s.tls_errors : {};
+            const certIds = Object.keys(tlsErrors).sort();
+            const certText = certIds.map((id) => {
+              const e = tlsErrors[id] || {};
+              return `${id}: the pinned fetch fails on a certificate since ${e.since || "?"} (last ${e.last_at || "?"}): ${String(e.error || "?").replace(/[;\r\n]+/g, ",")}`;
+            });
+            for (const t of certText) console.log(`::warning::pinned certificate ${t}`);
+            const tlsSet = [...expiring, ...certIds.map((id) => `cert:${id}`)].join(",");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `tls_set=${tlsSet}\ntls=${[...leafText, ...certText].join("; ")}\n`);
             const problems = [];
             // Name the queue in the alarm: a stall upstream of us reads as broken publishing.
             const queueNote = queuedS > 600 ? ` — this run itself waited ${Math.round(queuedS / 60)} min in the runner queue` : "";
@@ -182,10 +193,11 @@ jobs:
           silent-set: "
             gh issue close "$NUM" --repo "${{ github.repository }}"
           fi
-      - name: Pinned certificate issue (opened when a pinned leaf has under 7 days, closed when none; never fails the run)
+      - name: Pinned certificate issue (opened when a pinned leaf has under 7 days or a pinned fetch fails on a certificate, closed when neither; never fails the run)
         # FEED-SEC-1: TMD and PHIVOLCS serve their leaf without the intermediate, so the feed pins the intermediate
         # (providers/tls). A renewed leaf under the same intermediate needs nothing; under another one the source fails
-        # until the new intermediate is pinned (providers/tls/README.md). This gives a week's notice.
+        # until the new intermediate is pinned (providers/tls/README.md). This gives a week's notice, and stays open
+        # while the source fails on its certificate (tls_errors, cert:<id> in the set).
         if: steps.check.outputs.status_read == '1'
         continue-on-error: true
         env:
@@ -197,7 +209,7 @@ jobs:
           NUM=$(gh issue list --repo "${{ github.repository }}" --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
           RUN="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           if [ -n "$TLS_SET" ]; then
-            BODY="Automated watchdog: the leaf certificate of these pinned sources expires within 7 days (status.json \`tls_leaves\`). When the host renews it, check its issuer: a new intermediate must be pinned (providers/tls/README.md), the same one needs nothing.
+            BODY="Automated watchdog: the leaf certificate of these pinned sources expires within 7 days (status.json \`tls_leaves\`), or their pinned fetch fails on a certificate (\`tls_errors\`, kept 6 h past the last such run). When the host renews its leaf, check its issuer: a new intermediate must be pinned (providers/tls/README.md), the same one needs nothing.
 
           $(printf '%s\n' "$TLS" | tr ';' '\n' | sed 's/^ */- /')
 
@@ -214,7 +226,7 @@ jobs:
               fi
             fi
           elif [ -n "$NUM" ]; then
-            gh issue comment "$NUM" --repo "${{ github.repository }}" --body "No pinned leaf expires within 7 days as of $(date -u +%FT%TZ) (run ${RUN}).
+            gh issue comment "$NUM" --repo "${{ github.repository }}" --body "No pinned leaf expires within 7 days and no pinned fetch fails on a certificate as of $(date -u +%FT%TZ) (run ${RUN}).
 
           tls-set: "
             gh issue close "$NUM" --repo "${{ github.repository }}"

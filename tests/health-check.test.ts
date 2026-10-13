@@ -75,6 +75,32 @@ test('health check: a pinned leaf under 7 days is warned about and named for the
   assert.equal(run({ degraded: [], providers: providers(['tmd']) }).out['tls_set'], '');
 });
 
+test('health check: a pinned source failing on its certificate keeps the certificate issue open, with no leaf due (TMD, 2026-10-13)', () => {
+  // TMD failed every handshake from 2026-10-09 (its leaf renewed under another intermediate). Its last leaf, expired, was
+  // the only thing that held the issue open, and it leaves status.json a week after it was last read (10-16): the issue
+  // would have closed with TMD still cut off. status.json tls_errors (the aggregate, 6 h past the last failure) holds it.
+  const phivolcs = { not_after: '2026-11-19T05:01:03.000Z', days_left: 36.5, issuer: 'GlobalSign RSA OV SSL CA 2018', subject: '*.phivolcs.dost.gov.ph', seen_at: '2026-10-13T17:56:58.926Z' };
+  const tlsErrors = {
+    tmd: { error: 'unable to verify the first certificate (the pinned intermediate no longer completes this host\'s chain: pin the one its leaf names, providers/tls/README.md)', since: '2026-10-09T02:01:00.000Z', last_at: '2026-10-16T02:00:00.000Z' },
+  };
+  const failing = { degraded: ['tmd'], tls_leaves: { phivolcs }, tls_errors: tlsErrors, providers: providers(['tmd', 'phivolcs'], { tmd: { ok: false } }) };
+  const { out, stdout } = run(failing);
+  assert.equal(out['tls_set'], 'cert:tmd');
+  assert.equal(out['tls'], `tmd: the pinned fetch fails on a certificate since 2026-10-09T02:01:00.000Z (last 2026-10-16T02:00:00.000Z): ${tlsErrors.tmd.error}`);
+  assert.match(stdout, /::warning::pinned certificate tmd: the pinned fetch fails on a certificate/);
+  assert.equal(out['problem'], '', 'a warning, never a red run');
+  // With a leaf under 7 days as well, both are named; the issue's set line tells them apart.
+  const tmdLeaf = { not_after: '2026-10-09T01:59:47.000Z', days_left: -4.7, issuer: 'GlobalSign GCC R6 AlphaSSL CA 2025', subject: '*.tmd.go.th', seen_at: '2026-10-09T01:56:48.498Z' };
+  const both = run({ ...failing, tls_leaves: { phivolcs, tmd: tmdLeaf } });
+  assert.equal(both.out['tls_set'], 'tmd,cert:tmd');
+  assert.equal(both.out['tls']!.split('; ').length, 2);
+  // An entry never carries a semicolon or a line break into the one-line step output.
+  const odd = run({ ...failing, tls_errors: { tmd: { ...tlsErrors.tmd, error: 'a; b\nc' } } });
+  assert.match(odd.out['tls']!, /: a, b,c$/);
+  // Fixed (no tls_errors, the current leaf far from its end): nothing keeps the issue open.
+  assert.equal(run({ degraded: [], tls_leaves: { phivolcs }, tls_errors: {}, providers: providers(['tmd', 'phivolcs']) }).out['tls_set'], '');
+});
+
 test('health.yml: the certificate issue step never fails the run and closes when no leaf is due', () => {
   const step = yml.slice(yml.indexOf('- name: Pinned certificate issue'), yml.indexOf('- name: Open/refresh health issue and fail'));
   assert.match(step, /continue-on-error: true/);

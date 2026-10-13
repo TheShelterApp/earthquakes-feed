@@ -94,9 +94,9 @@ test('health check: a pinned source failing on its certificate keeps the certifi
   const both = run({ ...failing, tls_leaves: { phivolcs, tmd: tmdLeaf } });
   assert.equal(both.out['tls_set'], 'tmd,cert:tmd');
   assert.equal(both.out['tls']!.split('; ').length, 2);
-  // An entry never carries a semicolon or a line break into the one-line step output.
-  const odd = run({ ...failing, tls_errors: { tmd: { ...tlsErrors.tmd, error: 'a; b\nc' } } });
-  assert.match(odd.out['tls']!, /: a, b,c$/);
+  // An entry never carries a semicolon, a backtick or a line break into the one-line step output (the round-24 oneLine).
+  const odd = run({ ...failing, tls_errors: { tmd: { ...tlsErrors.tmd, error: 'a; b\nc`d' } } });
+  assert.match(odd.out['tls']!, /: a b c d$/);
   // Fixed (no tls_errors, the current leaf far from its end): nothing keeps the issue open.
   assert.equal(run({ degraded: [], tls_leaves: { phivolcs }, tls_errors: {}, providers: providers(['tmd', 'phivolcs']) }).out['tls_set'], '');
 });

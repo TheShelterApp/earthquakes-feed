@@ -163,7 +163,7 @@ jobs:
             const certIds = Object.keys(tlsErrors).sort();
             const certText = certIds.map((id) => {
               const e = tlsErrors[id] || {};
-              return `${id}: the pinned fetch fails on a certificate since ${e.since || "?"} (last ${e.last_at || "?"}): ${String(e.error || "?").replace(/[;\r\n]+/g, ",")}`;
+              return `${id}: the pinned fetch fails on a certificate since ${e.since || "?"} (last ${e.last_at || "?"}): ${oneLine(e.error) || "no error message"}`;
             });
             for (const t of certText) console.log(`::warning::pinned certificate ${t}`);
             const tlsSet = [...expiring, ...certIds.map((id) => `cert:${id}`)].join(",");

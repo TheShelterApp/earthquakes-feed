@@ -45,13 +45,15 @@ esac
       `#!/usr/bin/env bash
 if [ "$1" = -k ]; then shift 2; fi
 d=$1; shift
+mark=$(mktemp -u)
 "$@" &
 pid=$!
-( sleep "$d"; kill -TERM "$pid" ) >/dev/null 2>&1 &
+( sleep "$d"; : > "$mark"; kill -TERM "$pid" ) >/dev/null 2>&1 &
 w=$!
 wait "$pid"; rc=$?
-if kill -0 "$w" 2>/dev/null; then kill "$w" 2>/dev/null; exit "$rc"; fi
-exit 124
+if [ -e "$mark" ]; then rm -f "$mark"; exit 124; fi
+kill "$w" 2>/dev/null
+exit "$rc"
 `,
       { mode: 0o755 },
     );
@@ -133,11 +135,12 @@ test('pages-deploy: every attempt failed and the live manifest is unreadable or 
 test('pages-deploy: a hung attempt is stopped at its cap and the next one deploys', () => {
   const s = setup(['hang', 'ok']);
   const t0 = Date.now();
-  const r = run(s.env, { PAGES_ATTEMPT_TIMEOUT_S: '1', PAGES_KILL_AFTER_S: '1' });
+  // 2 s, not 1: the cap also bounds the second attempt, whose stub must start in time on a loaded machine.
+  const r = run(s.env, { PAGES_ATTEMPT_TIMEOUT_S: '2', PAGES_KILL_AFTER_S: '1' });
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.ok(Date.now() - t0 < 15_000, 'the 30 s hang was cut short');
   assert.equal(s.calls().length, 2);
-  assert.match(r.stdout, /::warning::Pages deploy attempt 1 stopped after its 1s cap \(exit 1(24|37)\)/);
+  assert.match(r.stdout, /::warning::Pages deploy attempt 1 stopped after its 2s cap \(exit 1(24|37)\)/);
 });
 
 test('pages-deploy: with 16 min of budget from now, all three attempts run at the full cap', () => {

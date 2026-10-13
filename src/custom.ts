@@ -238,8 +238,12 @@ const afad: CustomAdapter = async (cfg, nowMs, window) => {
 
 // --- China: CENC (Beijing time UTC+8) ---
 const cenc: CustomAdapter = async (cfg) => {
-  // Two retries (round 24, feed sweep 3.10): about a quarter of single fetches failed in the week to 2026-10-13.
-  const raw = JSON.parse(await getText(cfg.base, { timeoutMs: 12_000, retries: 2 })) as unknown;
+  // One retry, not two (review of round 24's #101). About a quarter of runs cannot reach CENC, and a retry seconds later
+  // almost never helps: in the 3,693 runs of 2026-10-01 to 10-13 the first attempt failed in 930 (each a connect timeout
+  // of about 10.5 s), and the retry failed too in 906 of them (97 %). Every failed run then cost about 22 s, and a third
+  // attempt added another 11 s to the aggregate's fetch phase (CENC was its slowest source in each such run). The next
+  // run, 5 minutes later, succeeds as often as any other (failures do not cluster from run to run).
+  const raw = JSON.parse(await getText(cfg.base, { timeoutMs: 12_000, retries: 1 })) as unknown;
   const list = Array.isArray(raw) ? raw : ((raw as { data?: unknown[] }).data ?? []);
   const out: RawObs[] = [];
   for (const e of list as Record<string, unknown>[]) {

@@ -44,6 +44,10 @@ intermediate), print the leaf's issuer and AIA URL, fetch that file and add it h
 fetch the source's URL once with the new chain: TMD moved its file the same week (`/map-events.json` → 404,
 `/feed/map-events.json`), and the pin alone would only have turned the TLS error into an HTTP 404.
 
+The commands need OpenSSL 1.1.1 or later: macOS's own `openssl` is LibreSSL, which has no `-ext`, `-no-CAfile` or
+`-verify_hostname` and prints its usage instead (use Homebrew's, `/opt/homebrew/bin/openssl`). Dump the roots with the
+Node of `.nvmrc` (`mise exec -- node`), the one CI runs, since each Node release ships its own root store.
+
 ```bash
 echo | openssl s_client -connect eq.tmd.go.th:443 -servername eq.tmd.go.th 2>/dev/null \
   | openssl x509 -noout -issuer -ext authorityInfoAccess

@@ -1,10 +1,11 @@
 import { type HistoryConfig, type Period, allPeriods, dayKeyOf } from './history-config.js';
 
 /**
- * Deep history (PF-5j): `knowledge/index/history.json` on the `data` branch, the only file history adds there. It
- * lists every raw asset and every events edition in the `history-YYYY` Releases with its checksum and counts, so a
- * consumer finds the deep months without listing Releases, and the walk knows where it stands. It mirrors the
- * Releases: an asset uploaded by a run whose index commit never landed is found and adopted by the next run.
+ * Deep history (PF-5j): `knowledge/index/history.json` on the `data` branch, the file history adds there for readers
+ * (beside it, the walk's own small `history-state.json`, src/history-state.ts). It lists every raw asset and every
+ * events edition in the `history-YYYY` Releases with its checksum and counts, so a consumer finds the deep months
+ * without listing Releases, and the walk knows where it stands. It mirrors the Releases: an asset uploaded by a run
+ * whose index commit never landed is found and adopted by the next run.
  */
 
 export const HISTORY_INDEX_VERSION = 1;
@@ -72,7 +73,9 @@ export interface HistoryIndex {
   raw: RawEntry[];
   editions: EditionEntry[];
   unused: UnusedEntry[];
-  /** Keyed `<source>:<YYYY-MM>`. */
+  /** Keyed `<source>:<YYYY-MM>`. In a run, the walk's working copy of the failure streaks; written to the published
+   *  index as `{}` since round 24 (they live in history-state.json, so a run that only counts a failure leaves the index
+   *  as it was); an older index's own streaks are moved there by loadState. */
   attempts: Record<string, AttemptEntry>;
 }
 

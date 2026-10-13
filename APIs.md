@@ -795,7 +795,9 @@ EMSC answers some events it counts as empty elements of its json `features` arra
 elements on 12-11 and 12-22). Such a window is narrowed by halves down to an hour and kept only when its rows plus its
 empty elements equal the source's count: the raw header says how many (`unserialized_rows`, and `unserialized` per
 window) and the index entry lists each such window with its count (`raw[].unserialized`: an explicit gap; the month's
-other rows are complete). Any other unreadable answer still fails the month. A month is sealed (its next edition built, verified and
+other rows are complete). Any other unreadable answer still fails the month. The live fetch and the EMSC revision sweep
+read such an answer too, with no count to check: the empty elements are left out and still take their places on the page,
+so a page they fill to the limit is full and the sweep asks for the next one (round 25). A month is sealed (its next edition built, verified and
 uploaded) as soon as its last source arrives, and a run first seals what an earlier run left complete. At most
 `maxUnitsPerRun` source months and `maxSecondsPerRun` per hourly run; neither job holds the writer lock (the index
 commit pushes through `scripts/push-data.sh`, FEED-OPS-4). A month a source answers empty right before a month of the

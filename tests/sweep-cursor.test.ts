@@ -208,6 +208,28 @@ test('paging: a full page asks for the next one (overlapping by SWEEP_PAGE_OVERL
   assert.equal(run.status.events_returned, run.obs.length);
 });
 
+test('paging: an EMSC page whose empty elements fill it to FETCH_LIMIT is full, so the sweep asks for the next page (round 25)', async () => {
+  // EMSC answers some events it counts as empty elements of its json array (src/fdsn.ts, round 23). They take places on
+  // the page: 3 empty elements and FETCH_LIMIT − 3 features are a full page, and the records after it are on page 2.
+  // Counted without them, the page read as short, the sweep completed after it and its cursor moved past page 2's
+  // records, which no later sweep asked for again.
+  const step = FETCH_LIMIT - SWEEP_PAGE_OVERLAP;
+  const empties = 3;
+  const page1 = features(0, FETCH_LIMIT - empties).map((f) => JSON.stringify(f));
+  page1.splice(10, 0, ...Array.from({ length: empties }, () => ''));
+  const { fetcher, calls } = recorder((u) =>
+    u.searchParams.get('offset') == null ? ok(`{"type":"FeatureCollection","features":[${page1.join(',')}]}`) : ok(body(features(FETCH_LIMIT, 50))),
+  );
+  const run = await runSweep(EMSC_UPDATED, { through: iso(NOW - 300_000), epoch: SWEEP_EPOCH }, { nowMs: NOW, originFloorMs: FLOOR, fetcher, clock: () => NOW });
+  assert.deepEqual(
+    calls.map((c) => c.url.searchParams.get('offset')),
+    [null, String(1 + step)],
+  );
+  assert.equal(run.complete, true);
+  assert.equal(run.status.pages, 2);
+  assert.equal(run.obs.length, FETCH_LIMIT - empties + 50, "page 2's records are read");
+});
+
 test('paging: a failed second page keeps the cursor but hands on the first page; a sweep past SWEEP_MAX_PAGES is unfinished', async () => {
   const cursor: SweepCursor = { through: iso(NOW - 300_000), epoch: SWEEP_EPOCH };
   const failing = recorder((_u, n) => (n === 1 ? ok(body(features(0, FETCH_LIMIT))) : new Error('This operation was aborted')));

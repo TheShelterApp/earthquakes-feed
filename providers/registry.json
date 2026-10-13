@@ -303,15 +303,15 @@
       "adapter": "custom",
       "parse": "custom",
       "queryFormat": "json",
-      "base": "https://eq.tmd.go.th/map-events.json",
+      "base": "https://eq.tmd.go.th/feed/map-events.json",
       "supportsTimeRange": false,
-      "tlsIntermediates": ["tls/globalsign-gcc-r6-alphassl-ca-2025.crt"],
+      "tlsIntermediates": ["tls/globalsign-gcc-r6-alphassl-ca-2025.crt", "tls/globalsign-gcc-r46-alphassl-ca-2025.crt"],
       "refreshSeconds": 300,
       "license": "unknown",
       "attribution": "Thai Meteorological Department (TMD), Earthquake Observation Division — earthquake.tmd.go.th",
       "doi": null,
       "contact": "https://earthquake.tmd.go.th",
-      "notes": "Custom JSON, otime already UTC. Covers Thailand AND Myanmar (Myanmar has no native open feed). The host sends its leaf without the GlobalSign intermediate: pinned in tlsIntermediates (FEED-SEC-1, 2026-10-04; verification was off before). Since 2026-08-18 every row has eventID \"\": such a row is named t + the UTC digits of otime (src/custom.ts parseTmd)."
+      "notes": "Custom JSON, otime already UTC. Covers Thailand AND Myanmar (Myanmar has no native open feed). The host sends its leaf without the GlobalSign intermediate: pinned in tlsIntermediates (FEED-SEC-1, 2026-10-04; verification was off before). From 2026-08-18 every row had eventID \"\": such a row is named t + the UTC digits of otime (src/custom.ts parseTmd). On 2026-10-09 the host's leaf was renewed under GlobalSign GCC R46 AlphaSSL CA 2025 (pinned beside the R6 one on 2026-10-13), and by 2026-10-13 the file had moved from /map-events.json (now 404) to /feed/map-events.json, whose rows carry TMD's numeric eventID again (17199.., after the 16794..16977 of July/August). The file lists only the last 20 events (about 2.5 days)."
     },
     {
       "id": "kagsr",

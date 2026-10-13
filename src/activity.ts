@@ -36,6 +36,16 @@ export interface ActivityRecord {
    *  several: PHIVOLCS's name resolves either to its own server (a GlobalSign leaf) or to CloudFront (an Amazon leaf)
    *  depending on the resolver, and consecutive runs on 2026-10-06 read 192.9, 44.1 and 192.9 days left. */
   tlsLeaves?: KeptLeaf[];
+  /** Pinned sources: the certificate failure of the pinned fetch (src/custom.ts isPinnedCertError), from the first run of
+   *  the streak to the last one, kept TLS_ERROR_MEMORY_MS after that last one. */
+  tlsError?: KeptTlsError;
+}
+
+/** A pinned source's certificate failure: the last message, the first and the last run that failed that way. */
+export interface KeptTlsError {
+  message: string;
+  sinceMs: number;
+  lastMs: number;
 }
 
 /** A leaf certificate a pinned host presented, and when it was last read. */
@@ -49,6 +59,16 @@ export interface KeptLeaf {
 /** How long a leaf no longer presented is still reported: a week, so a leaf served by only some of a host's addresses
  *  stays in view between the runs that reach it, and an expired one that fails every handshake stays in view a week. */
 export const TLS_LEAF_MEMORY_MS = 7 * 86_400_000;
+
+/**
+ * How long a pinned source's certificate failure stays reported after the last run that had it (status.json
+ * `tls_errors`, which keeps the health workflow's "[health] pinned certificate expiring" issue open). The kept leaves
+ * alone do not do it: TMD's host renewed its leaf under another intermediate on 2026-10-09, every handshake failed from
+ * then on, and the old leaf (last read at 01:56 UTC) would have left `tls_leaves` a week later, closing the issue on
+ * 10-16 with TMD still dead. A host behind geo-DNS can fail by turns (PHIVOLCS's two servers): six hours without one
+ * failure, about 70 aggregate runs, is far past any run of luck, and still closes the issue the same day a pin is fixed.
+ */
+export const TLS_ERROR_MEMORY_MS = 6 * 3_600_000;
 
 const leafKey = (l: Pick<KeptLeaf, 'issuer' | 'subject'>): string => l.issuer ?? l.subject ?? '';
 export type ActivityIndex = Record<string, ActivityRecord>;
@@ -73,12 +93,18 @@ const hasRows = (s: Pick<ProviderStatus, 'ok' | 'events_returned'>): boolean => 
 
 /** This run's answers into the index: a source with rows is active now; a new source starts its clock now. A leaf
  *  certificate read in this run (pinned sources) replaces the kept one of the same issuer (a renewal under the same
- *  intermediate), joins those of other issuers, and leaves unseen for TLS_LEAF_MEMORY_MS are dropped. */
+ *  intermediate), joins those of other issuers, and leaves unseen for TLS_LEAF_MEMORY_MS are dropped. A kept leaf that
+ *  has expired goes as soon as the host presents a valid one: no handshake can complete with it any more, so it no
+ *  longer describes what the host serves (TMD's R6 leaf, expired 2026-10-09, would otherwise have stood for the R46 one
+ *  until 10-16); a server that still presents it fails its fetches, and `tlsErrors` keeps that in view. A certificate
+ *  failure of a pinned fetch in this run (`tlsErrors`, by id: the message) is kept as the source's `tlsError` until
+ *  TLS_ERROR_MEMORY_MS pass without one. */
 export function updateActivity(
   prev: ActivityIndex,
   statuses: Record<string, Pick<ProviderStatus, 'ok' | 'events_returned'>>,
   nowMs: number,
   leaves: Record<string, { notAfterMs: number; issuer: string | null; subject: string | null }> = {},
+  tlsErrors: Record<string, string> = {},
 ): ActivityIndex {
   const next: ActivityIndex = { ...prev };
   for (const [id, s] of Object.entries(statuses)) {
@@ -90,7 +116,7 @@ export function updateActivity(
     const kept = rec.tlsLeaves ?? (rec.tlsLeaf ? [rec.tlsLeaf] : []);
     if (!leaf && !kept.length && !rec.tlsLeaf) continue;
     const seen = leaf ? { ...leaf, seenAt: nowMs } : null;
-    const list = [...kept.filter((l) => !seen || leafKey(l) !== leafKey(seen)), ...(seen ? [seen] : [])]
+    const list = [...kept.filter((l) => !seen || (leafKey(l) !== leafKey(seen) && l.notAfterMs > nowMs)), ...(seen ? [seen] : [])]
       .filter((l) => nowMs - l.seenAt <= TLS_LEAF_MEMORY_MS)
       .sort((a, b) => a.notAfterMs - b.notAfterMs || leafKey(a).localeCompare(leafKey(b)));
     const { tlsLeaf: _legacy, tlsLeaves: _kept, ...rest } = rec;
@@ -99,7 +125,31 @@ export function updateActivity(
   for (const [id, leaf] of Object.entries(leaves)) {
     if (!next[id]) next[id] = { lastNonEmptyAt: null, sinceMs: nowMs, tlsLeaves: [{ ...leaf, seenAt: nowMs }] };
   }
+  for (const [id, rec] of Object.entries(next)) {
+    const message = tlsErrors[id];
+    if (message != null) {
+      next[id] = { ...rec, tlsError: { message, sinceMs: rec.tlsError?.sinceMs ?? nowMs, lastMs: nowMs } };
+    } else if (rec.tlsError && nowMs - rec.tlsError.lastMs > TLS_ERROR_MEMORY_MS) {
+      const { tlsError: _cleared, ...rest } = rec;
+      next[id] = rest;
+    }
+  }
+  for (const [id, message] of Object.entries(tlsErrors)) {
+    if (!next[id]) next[id] = { lastNonEmptyAt: null, sinceMs: nowMs, tlsError: { message, sinceMs: nowMs, lastMs: nowMs } };
+  }
   return next;
+}
+
+/** status.json `tls_errors`: a pinned source's certificate failure, kept TLS_ERROR_MEMORY_MS past the last run that had
+ *  it (`error` its last message, `since` the streak's first run, `last_at` its last). */
+export interface TlsErrorStatus {
+  error: string;
+  since: string;
+  last_at: string;
+}
+
+export function tlsErrorStatus(e: KeptTlsError): TlsErrorStatus {
+  return { error: e.message, since: isoFromMs(e.sinceMs), last_at: isoFromMs(e.lastMs) };
 }
 
 /** The leaf to report for a source: the one that expires first among those it presented lately (undefined: none). */

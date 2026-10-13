@@ -2,8 +2,9 @@ name: derive and publish
 description: >-
   Phase 2 on the data checkout in .data: rebuild the derived views (rolling summaries, per-day partitions and Pages day
   files, manifest) as a pure function of the log, validate them, commit them to `data`, pin and sign the manifest, then
-  publish to R2 and Cloudflare Pages. Since FEED-OPS-4 (round 14) these are the last steps of every aggregate run (same
-  job, same checkout, same hold on the writer lock); derive.yml runs them alone when dispatched by hand.
+  publish to R2 (when configured) and Cloudflare Pages. Since FEED-OPS-4 (round 14) these are the last steps of every
+  aggregate run (same job, same checkout, same hold on the writer lock); derive.yml runs them alone when dispatched by
+  hand.
 
 # Summaries go to Cloudflare Pages ONLY (never committed — design §4.5); the data branch gets plain-NDJSON partitions +
 # the root manifest. Direct Upload deploys do NOT count against the 500-builds/month Pages cap. Each secret reaches only
@@ -23,8 +24,18 @@ inputs:
     description: vars.FEED_SIGNING_KID
     required: false
     default: ''
+  job-started-at:
+    description: >-
+      Epoch seconds when the calling job started (its first step notes it): with job-timeout-minutes, the Pages deploy
+      retries only while the job has time left (scripts/pages-deploy.sh). Blank = attempts capped, no budget check.
+    required: false
+    default: ''
+  job-timeout-minutes:
+    description: The calling job's timeout-minutes (tests/pages-deploy.test.ts checks they match)
+    required: false
+    default: ''
   r2-access-key-id:
-    description: secrets.R2_ACCESS_KEY_ID (blank = R2 skipped with a warning)
+    description: secrets.R2_ACCESS_KEY_ID (all R2 settings blank = R2 publish off, a plain log line; some = warn, skip)
     required: false
     default: ''
   r2-secret-access-key:
@@ -87,7 +98,8 @@ runs:
       env:
         # The writer lock keeps other data writers out, but the side-index commit jobs (history, first-solutions,
         # remediate) push without it: a rejected push fetches, rebases onto their commit and retries.
-        PUSH_ATTEMPTS: '3'
+        # Five attempts, 5 s backoff: at most 50 s of pauses, for a GitHub 5xx blip (scripts/push-data.sh).
+        PUSH_ATTEMPTS: '5'
         PUSH_BACKOFF_S: '5'
       run: |
         git config user.name  "earthquakes-feed-bot"
@@ -125,8 +137,12 @@ runs:
         curl -fsSL --max-time 20 https://raw.githubusercontent.com/TheShelterApp/region-tiles/main/regions-db.json -o .tiles-pointer.json || echo '::warning::regions-db.json fetch failed — tiles: null'
         DATA_COMMIT=$(git -C .data rev-parse HEAD) npx --no-install tsx src/sign-manifest.ts
     - name: Publish artifacts to R2 (data origin, S3 API)
-      # Idempotent (skip-by-sha); self-skips with a warning until the R2 keys exist. The R2
-      # origin is additive — never a gate on the Pages publish below.
+      # Idempotent (skip-by-sha). Off on purpose while every R2 setting is blank (a plain log line); some set = a
+      # warning and a skip (src/publish-r2.ts). The R2 origin is additive, never a gate on the Pages deploy: this step
+      # cannot fail; an R2 error is recorded and fails the job in the last step, after the Pages deploy (from 2026-09-06
+      # to 09-17 an R2 error skipped 8 Pages deploys). It stays before the deploy so the Pages copy of the v2 manifest
+      # never names a `cdn` origin whose objects are not uploaded yet.
+      id: r2
       shell: bash
       env:
         DATA_DIR: .data
@@ -135,21 +151,27 @@ runs:
         R2_SECRET_ACCESS_KEY: ${{ inputs.r2-secret-access-key }}
         R2_S3_ENDPOINT: ${{ inputs.r2-s3-endpoint }}
         R2_BUCKET: ${{ inputs.r2-bucket }}
-      run: npx --no-install tsx src/publish-r2.ts
+        R2_PUBLIC_BASE: ${{ inputs.r2-public-base }}
+      run: |
+        if ! npx --no-install tsx src/publish-r2.ts; then
+          echo '::error::R2 publish failed; the Pages deploy runs anyway, and the job fails after it'
+          echo 'failed=1' >> "$GITHUB_OUTPUT"
+        fi
     - name: Publish live feed to Cloudflare Pages (Direct Upload)
+      # scripts/pages-deploy.sh (tests/pages-deploy.test.ts): up to three attempts, each capped at 7 min and never past
+      # the job's budget, a retry only while 7 min of it are left; when every attempt fails, a live manifest under
+      # 15 min old keeps the run green with a warning (the next aggregate run deploys again), an older or unreadable one
+      # fails it. health.yml's 30-minute freshness check of the live manifest is the alarm either way.
       shell: bash
       env:
         CLOUDFLARE_API_TOKEN: ${{ inputs.cf-api-token }}
         CLOUDFLARE_ACCOUNT_ID: ${{ inputs.cf-account-id }}
+        JOB_STARTED_S: ${{ inputs.job-started-at }}
+        JOB_TIMEOUT_MIN: ${{ inputs.job-timeout-minutes }}
+      run: bash "$GITHUB_WORKSPACE/scripts/pages-deploy.sh"
+    - name: Fail on an R2 publish error
+      if: steps.r2.outputs.failed == '1'
+      shell: bash
       run: |
-        # Three deploys failed in 15 days, all control-plane-side and all after the upload
-        # succeeded (2026-07-12 'malformed response from the API'; runs 29588370032 /
-        # 30256024198 'Failed to publish your Function ... Unknown internal error'). Retrying
-        # is idempotent — assets are content-addressed and Direct Upload never touches the
-        # 500-builds/month Pages cap. Still exits red on a sustained outage so health.yml fires.
-        for i in 1 2 3; do
-          npx --no-install wrangler pages deploy public --project-name=earthquakes-feed --branch=main --commit-dirty=true && exit 0
-          [ "$i" = "3" ] || sleep 20
-        done
-        echo '::error::Cloudflare Pages deploy failed after 3 attempts'
+        echo '::error::R2 publish failed (see the R2 step); the Pages deploy above ran'
         exit 1

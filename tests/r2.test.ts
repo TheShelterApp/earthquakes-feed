@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { R2Publisher, cacheControlFor, contentTypeFor, sha256Hex, type R2Config } from '../src/r2.js';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { R2Publisher, R2_SETTINGS, cacheControlFor, contentTypeFor, r2Settings, sha256Hex, type R2Config } from '../src/r2.js';
 
 /** An in-memory S3 endpoint: records every request, answers HEAD/PUT like R2's S3 API. */
 function fakeS3() {
@@ -66,4 +68,43 @@ test('cacheControlFor: immutable for frozen partitions, short for the rest', () 
   assert.match(cacheControlFor('events/2026/09/06.ndjson', { frozen: false }), /max-age=0, s-maxage=60/);
   assert.match(cacheControlFor('v2/manifest.json'), /max-age=0, s-maxage=60, stale-while-revalidate=300/);
   assert.match(cacheControlFor('v1/status.json'), /stale-while-revalidate=120/);
+});
+
+// 2026-10-13: the R2 publish is off on purpose, and its warning appeared on every aggregate run (about
+// 288 a day). Every setting blank = off, a plain log line; some set = a warning and a skip, never a failed run.
+test('r2Settings: every setting blank (or only spaces) is off; the four publish settings make it on', () => {
+  assert.deepEqual(r2Settings({}), { state: 'off' });
+  assert.deepEqual(r2Settings(Object.fromEntries(R2_SETTINGS.map((k) => [k, ' ']))), { state: 'off' });
+  const all = { R2_ACCESS_KEY_ID: 'id', R2_SECRET_ACCESS_KEY: 'secret', R2_S3_ENDPOINT: 'https://acct.r2.cloudflarestorage.com', R2_BUCKET: 'feed' };
+  assert.deepEqual(r2Settings(all), { state: 'on', config: { endpoint: all.R2_S3_ENDPOINT, bucket: 'feed', accessKeyId: 'id', secretAccessKey: 'secret' } });
+  // The public base is not needed to publish (an origin is filled before the manifest names it).
+  assert.equal(r2Settings({ ...all, R2_PUBLIC_BASE: 'https://data.example' }).state, 'on');
+});
+
+test('r2Settings: some set and some blank is incomplete, naming both sides (the public base alone counts)', () => {
+  assert.deepEqual(r2Settings({ R2_ACCESS_KEY_ID: 'id', R2_SECRET_ACCESS_KEY: 'secret' }), {
+    state: 'incomplete', set: ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'], missing: ['R2_S3_ENDPOINT', 'R2_BUCKET'],
+  });
+  assert.deepEqual(r2Settings({ R2_S3_ENDPOINT: 'https://acct.r2.cloudflarestorage.com', R2_BUCKET: 'feed' }), {
+    state: 'incomplete', set: ['R2_S3_ENDPOINT', 'R2_BUCKET'], missing: ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'],
+  });
+  assert.deepEqual(r2Settings({ R2_PUBLIC_BASE: 'https://data.example' }), {
+    state: 'incomplete', set: ['R2_PUBLIC_BASE'], missing: ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_S3_ENDPOINT', 'R2_BUCKET'],
+  });
+});
+
+test('publish-r2: exits 0 with a plain line when off and with a warning when incomplete, before reading any file', () => {
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  const base: NodeJS.ProcessEnv = { ...process.env, PUBLIC_DIR: '/nonexistent', DATA_DIR: '/nonexistent' };
+  for (const k of R2_SETTINGS) delete base[k];
+  const run = (extra: Record<string, string>) =>
+    spawnSync(process.execPath, ['--import', 'tsx', 'src/publish-r2.ts'], { cwd: root, env: { ...base, ...extra }, encoding: 'utf8' });
+  const off = run({ R2_ACCESS_KEY_ID: '', R2_SECRET_ACCESS_KEY: '', R2_S3_ENDPOINT: '', R2_BUCKET: '', R2_PUBLIC_BASE: '' });
+  assert.equal(off.status, 0, off.stdout + off.stderr);
+  assert.match(off.stdout, /^R2 publish off: no R2 setting is set/m);
+  assert.doesNotMatch(off.stdout + off.stderr, /::(warning|error)::/);
+  const half = run({ R2_ACCESS_KEY_ID: 'id', R2_SECRET_ACCESS_KEY: 'secret' });
+  assert.equal(half.status, 0, half.stdout + half.stderr);
+  assert.match(half.stdout, /::warning::R2 settings incomplete \(set: R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY; blank: R2_S3_ENDPOINT, R2_BUCKET\) — skipping the R2 publish/);
+  assert.doesNotMatch(half.stdout + half.stderr, /::error::/);
 });

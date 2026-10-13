@@ -1,16 +1,19 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DATA_DIR, PUBLIC_DIR } from './config.js';
-import { R2Publisher, cacheControlFor, contentTypeFor, type PutObject } from './r2.js';
+import { R2Publisher, cacheControlFor, contentTypeFor, r2Settings, type PutObject } from './r2.js';
 
 /**
  * SD-E2: publish the feed artifacts to the R2 `data` origin (S3 API), idempotently. Runs after
- * sign-manifest in derive.yml. Uploads exactly what the signed v2 manifest advertises — its own
+ * sign-manifest in .github/actions/derive-publish. Uploads exactly what the signed v2 manifest advertises — its own
  * bytes, every summary and every partition (with the manifest's `frozen` flag driving immutable
  * caching) — plus the v1 manifest and status.json. skip-by-sha keeps each run to the changed set.
  *
- * Without R2 credentials it warns and exits 0 so the Pages pipeline keeps publishing during
- * rollout — the R2 origin is additive, never a gate.
+ * The R2 origin is additive, never a gate (r2Settings): with every R2 setting blank, the publish is off on purpose and
+ * says so in a plain log line (it printed a warning on every aggregate run, about 288 a day); with only some set, it
+ * warns and exits 0. In .github/actions/derive-publish this step runs before the Pages deploy, so the v2 manifest never
+ * advertises R2 objects not yet uploaded, and a failure here is recorded there and fails the job only after the Pages
+ * deploy (from 2026-09-06 to 09-17 an R2 error skipped 8 Pages deploys).
  */
 interface V2Manifest {
   summaries: Record<string, { path: string }>;
@@ -18,15 +21,16 @@ interface V2Manifest {
   changes: { path: string } | null;
 }
 
-const { R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_S3_ENDPOINT, R2_BUCKET } = process.env;
-if (!R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY) {
-  console.warn('::warning::R2 credentials not set — skipping R2 publish (Pages origin unaffected)');
+const settings = r2Settings(process.env);
+if (settings.state === 'off') {
+  console.log('R2 publish off: no R2 setting is set (the Pages origin is unaffected)');
   process.exit(0);
 }
-if (!R2_S3_ENDPOINT || !R2_BUCKET) {
-  console.error('::error::R2_S3_ENDPOINT and R2_BUCKET are required to publish to R2');
-  process.exit(1);
+if (settings.state === 'incomplete') {
+  console.log(`::warning::R2 settings incomplete (set: ${settings.set.join(', ')}; blank: ${settings.missing.join(', ')}) — skipping the R2 publish (the Pages origin is unaffected)`);
+  process.exit(0);
 }
+const r2 = settings.config;
 
 const publicDir = PUBLIC_DIR;
 const v1Dir = join(publicDir, 'v1');
@@ -52,7 +56,7 @@ function plan(manifest: V2Manifest): Array<{ key: string; local: string; frozen?
 
 async function main(): Promise<void> {
   const manifest = readSignedManifest();
-  const publisher = new R2Publisher({ endpoint: R2_S3_ENDPOINT!, bucket: R2_BUCKET!, accessKeyId: R2_ACCESS_KEY_ID!, secretAccessKey: R2_SECRET_ACCESS_KEY! });
+  const publisher = new R2Publisher(r2);
 
   let put = 0;
   let skipped = 0;
@@ -69,7 +73,7 @@ async function main(): Promise<void> {
     if (outcome === 'put') put++;
     else skipped++;
   }
-  console.log(`publish-r2: bucket=${R2_BUCKET} put=${put} skipped=${skipped} missing=${missing}`);
+  console.log(`publish-r2: bucket=${r2.bucket} put=${put} skipped=${skipped} missing=${missing}`);
 }
 
 await main();

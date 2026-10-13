@@ -785,15 +785,7 @@ red, once). A month's first failure stops its source for the run, and so does a 
 through every retry); a month that failed before no longer holds back the
 source's older months, which go on (at most three failed months per source a run), so one bad month never stalls the
 source's walk again (round 23: EMSC's 2017-12 held it six days), though no older month is sealed until it is fetched.
-**When the walk stops.** A run with work left (source months to fetch, or complete months to seal) that fetches, seals
-and takes over nothing is a no-progress run. It is explained when it only waited for a source's Retry-After, was
-rate-limited, or ran out of its time budget, and nothing failed for another reason. The 24th unexplained no-progress run
-in a row (a day of hourly runs), or the 72nd of any kind (a walk that only ever waits, or a month never fetched whole
-within `maxSecondsPerRun`, has stopped too), turns the run red with what is left and the months that keep failing, and
-then one run a day while it lasts (23 h apart at least). Progress, or no work left, ends the streak (round 24: with
-round 23's walk, a month that never succeeds lets the source's older months go on, and the walk would otherwise have
-stopped silently once only that month was left). The
-two sources with a count service, ComCat and EMSC (`fdsnws/event/1/count`, asked in the source's query format: ComCat
+The two sources with a count service, ComCat and EMSC (`fdsnws/event/1/count`, asked in the source's query format: ComCat
 `geojson`, EMSC `json`; measured 2026-10-06, none of the other 15 FDSN services the feed reads answers one), are asked
 for their count first and every window's rows must equal it. One exception, measured and checked against that count:
 EMSC answers some events it counts as empty elements of its json `features` array (`},,{`), and leaves them out of
@@ -827,6 +819,16 @@ wait and no cancellation in the group. The fallback for a Worker outage is `walk
 dispatches the walk as the Worker does only when that run is more than 2 h 5 min old (two missed ticks; the Worker
 missed 1 of 48 first-solutions ticks in those 48 hours, 10-06 19:48, and a single miss costs one hour of the walk). It
 holds a group of its own, so a delivery that finds nothing to do never waits behind a walk or cancels one.
+
+**When the walk stops.** A run with work left (source months to fetch, or complete months to seal) that fetches, seals
+and takes over nothing is a no-progress run. It is explained when it only waited for a source's Retry-After, was
+rate-limited, or ran out of its time budget, and nothing failed for another reason. The 24th unexplained no-progress run
+in a row (a day of hourly runs), or the 72nd of any kind (a walk that only ever waits, or a month never fetched whole
+within `maxSecondsPerRun`, has stopped too), turns the run red with what is left and the months that keep failing, and
+then one run a day while it lasts (23 h apart at least); the streak is `stall` in `history-state.json`. Progress, or no
+work left, ends it. Round 24 added it: since round 23 a month that never succeeds lets its source's older months go on,
+so its own alarm (one red run, at its 24th failure) came long before the walk ran out of other work, and the walk then
+stopped silently once only that month was left.
 
 **Dry runs.** `gh workflow run history.yml -f dry_run=true` (or `HISTORY_DRY_RUN=1 HISTORY_FORCE=1` locally, with
 `DATA_DIR` a copy of the `data` branch's `knowledge/index`) creates no Release, uploads nothing and commits nothing: the

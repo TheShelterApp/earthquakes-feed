@@ -8,9 +8,19 @@ import { test } from 'node:test';
 import { type RawHeader, RAW_KIND, rawFileText } from '../src/history-build.js';
 import { type HistoryConfig, type HistoryEra, allPeriods, historyTag, rawAssetName } from '../src/history-config.js';
 import type { HttpAnswer } from '../src/history-fetch.js';
-import { emptyIndex } from '../src/history-index.js';
-import { DryRunStore, LocalStore } from '../src/history-store.js';
-import { type Ctx, adoptOrphans, fetchUnits, sealPeriods } from '../src/history.js';
+import { emptyIndex, indexText, parseIndex } from '../src/history-index.js';
+import {
+  type HistoryState,
+  STALL_ALARM_RUNS,
+  STALL_ALARM_RUNS_ANY,
+  emptyState,
+  loadState,
+  parseState,
+  recordRun,
+  walkTexts,
+} from '../src/history-state.js';
+import { DryRunStore, type HistoryStore, LocalStore } from '../src/history-store.js';
+import { type Ctx, adoptOrphans, emptyReport, fetchUnits, runWalk, sealPeriods } from '../src/history.js';
 import { loadRegistry } from '../src/providers.js';
 
 // FEED-TEST-1: the deep-history walk's run decisions (src/history.ts): taking over assets a run uploaded but never
@@ -57,7 +67,7 @@ function ctxOf(over: Partial<Ctx> = {}): Ctx {
     assetCache: new Map(),
     rawCache: new Map(),
     now: () => NOW_ISO,
-    report: { fetched: [], sealed: [], adopted: [], failed: [], unused: [], blocked: [], empty_after_rows: [], gaps: [] },
+    report: emptyReport(),
     ...over,
   };
 }
@@ -353,4 +363,151 @@ test('fetch + seal: a month is sealed as soon as its last source arrives, newest
     ctx.assetCache.get('history-2022')!.map((a) => a.name).sort(),
     ctx.store.list('history-2022').map((a) => a.name),
   );
+});
+
+// Round 24: the walk's streaks (attempts, and the no-progress streak) live in knowledge/index/history-state.json, so a
+// run that only counts one more failure leaves the 2.5 MB index as it was; a walk that makes no progress turns the run
+// red after a day of unexplained runs, then once a day while it lasts.
+
+/** The two files of the data branch as the commit job leaves them (the state file absent before round 24). */
+interface DataFiles {
+  index: string;
+  state: string | null;
+}
+
+const hourIso = (h: number): string => new Date(Date.parse(NOW_ISO) + h * 3_600_000).toISOString();
+
+/** One production run: the index and the state read back from text, a fresh run context on the same Releases, the
+ *  run, and the two texts the commit job copies to the data branch. */
+async function hourly(store: HistoryStore, files: DataFiles, nowIso: string, h: ReturnType<typeof http>, over: Partial<Ctx> = {}) {
+  const idx = parseIndex(files.index);
+  const state = loadState(idx, files.state);
+  const ctx = ctxOf({ idx, store, now: () => nowIso, fetchOptions: h.fetchOptions, ...over });
+  const run = await runWalk(ctx, state, ctx.cfg.maxUnitsPerRun);
+  const out = walkTexts(idx, state, indexText);
+  return { ctx, run, files: { index: out.index, state: out.state } as DataFiles };
+}
+const stallAlarms = (ctx: Ctx): string[] => ctx.report.blocked.filter((m) => m.includes('no progress'));
+const failing = http(() => ({ status: 500, body: 'boom', latencyMs: 1, retryAfterMs: null }));
+const answering = () => http((url) => (url.includes('/count?') ? { status: 200, body: '{"count":0}', latencyMs: 1, retryAfterMs: null } : { status: 204, body: '', latencyMs: 1, retryAfterMs: null }));
+
+test('state: a run that only counts one more failure leaves history.json byte for byte; the next run reads the streak back from history-state.json and goes on; success clears it, and a run with nothing to do changes neither file', { skip: !hasZstd && 'zstd not installed' }, async () => {
+  const store = new LocalStore(join(mkdtempSync(join(tmpdir(), 'history-state-')), 'releases'));
+  const start: DataFiles = { index: indexText(emptyIndex(CFG.boundary)), state: null };
+  const r1 = await hourly(store, start, hourIso(0), failing);
+  assert.equal(r1.files.index, start.index, 'no index commit for a failure');
+  assert.deepEqual(parseState(r1.files.state!).attempts['usgs:2022-12'], { failures: 1, since: hourIso(0), last_error: r1.ctx.idx.attempts['usgs:2022-12']!.last_error });
+  const r2 = await hourly(store, r1.files, hourIso(1), failing);
+  assert.equal(r2.files.index, start.index);
+  const s2 = parseState(r2.files.state!);
+  assert.equal(s2.attempts['usgs:2022-12']?.failures, 2, 'counted on from the state file');
+  assert.equal(s2.attempts['usgs:2022-12']?.since, hourIso(0));
+  assert.equal(s2.attempts['usgs:2022-11']?.failures, 1, 'the failed month no longer holds back the older one (round 23)');
+  assert.deepEqual(s2.stall, { since: hourIso(0), runs: 2, unexplained: 2, alarmed_at: null });
+  // The source answers again: both months are fetched and sealed, the index gains them, the streaks go.
+  const r3 = await hourly(store, r2.files, hourIso(2), answering());
+  assert.notEqual(r3.files.index, start.index);
+  assert.deepEqual(parseIndex(r3.files.index).raw.map((r) => r.period), ['2022-11', '2022-12']);
+  assert.deepEqual(parseIndex(r3.files.index).attempts, {}, 'the index holds no streaks');
+  assert.deepEqual(parseState(r3.files.state!), emptyState());
+  // The era is walked to its end: a run finds nothing to do and changes nothing (the commit job commits nothing).
+  const quiet = answering();
+  const r4 = await hourly(store, r3.files, hourIso(3), quiet);
+  assert.deepEqual(r4.files, r3.files);
+  assert.deepEqual(quiet.calls, []);
+});
+
+test('state: the streaks an index still holds (written before round 24) move to the state file, and the index is written once without them', () => {
+  const idx = emptyIndex(CFG.boundary);
+  idx.attempts['emsc:2017-12'] = { failures: 150, since: '2026-10-07T01:33:00.000Z', last_error: 'unreadable answer' };
+  const before = indexText(idx);
+  const state = loadState(parseIndex(before), null);
+  assert.equal(state.attempts['emsc:2017-12']?.failures, 150);
+  const idx2 = parseIndex(before);
+  const out = walkTexts(idx2, loadState(idx2, null), indexText);
+  assert.equal(out.index, indexText(emptyIndex(CFG.boundary)));
+  assert.equal(parseState(out.state).attempts['emsc:2017-12']?.failures, 150);
+  // With the state file there and the index's own streaks empty, the state file's are the current ones.
+  const idx3 = parseIndex(out.index);
+  assert.equal(loadState(idx3, out.state).attempts['emsc:2017-12']?.failures, 150);
+  assert.equal(idx3.attempts['emsc:2017-12']?.failures, 150, 'the run works on the state file\'s streaks');
+});
+
+test('state: the streak of a source month the index already holds (fetched by a run whose commit was lost, then adopted) is dropped', () => {
+  const idx = emptyIndex(CFG.boundary);
+  idx.raw.push({ source: 'usgs', period: '2022-12', tag: 'history-2022', asset: 'raw-usgs-2022-12.ndjson.zst', url: 'x', sha256: 'x', bytes: 1, rows: 0, provider_count: 0, start: '2022-12-01T00:00:00.000Z', end: '2023-01-01T00:00:00.000Z', fetch_min_magnitude: null, fetched_at: NOW_ISO });
+  const state = loadState(idx, null);
+  state.attempts['usgs:2022-12'] = { failures: 3, since: NOW_ISO, last_error: 'timeout' };
+  state.attempts['usgs:2022-11'] = { failures: 1, since: NOW_ISO, last_error: 'timeout' };
+  assert.deepEqual(Object.keys(parseState(walkTexts(idx, state, indexText).state).attempts), ['usgs:2022-11']);
+});
+
+test('stall: a day of runs with work left and nothing fetched, sealed or adopted turns the run red, then once a day while it lasts; progress ends it', { skip: !hasZstd && 'zstd not installed' }, async () => {
+  const store = new LocalStore(join(mkdtempSync(join(tmpdir(), 'history-stall-')), 'releases'));
+  let files: DataFiles = { index: indexText(emptyIndex(CFG.boundary)), state: null };
+  const red: number[] = [];
+  let last: Ctx | null = null;
+  for (let h = 0; h < 48; h++) {
+    const r = await hourly(store, files, hourIso(h), failing);
+    if (stallAlarms(r.ctx).length) red.push(h);
+    if (h === STALL_ALARM_RUNS - 1) last = r.ctx;
+    files = r.files;
+  }
+  // The 24th run (hour 23), then 23 h later (hour 46); not every 24th failure of a month, not every run after.
+  assert.deepEqual(red, [23, 46]);
+  const msg = stallAlarms(last!)[0]!;
+  assert.match(msg, /no progress for 24 run\(s\) since 2026-10-04T11:26:00\.000Z \(24 of them with no Retry-After or time budget to explain them\): 2 source month\(s\) to fetch and 0 complete month\(s\) to seal/);
+  assert.match(msg, /failing: usgs:2022-12 \(24 failed run\(s\) since 2026-10-04T11:26:00\.000Z: .*HTTP 500.*\); usgs:2022-11 \(23 failed run\(s\)/);
+  assert.equal(files.index, indexText(emptyIndex(CFG.boundary)), '48 failed runs, not one index commit');
+  assert.deepEqual(parseState(files.state!).stall, { since: hourIso(0), runs: 48, unexplained: 48, alarmed_at: hourIso(46) });
+  const ok = await hourly(store, files, hourIso(48), answering());
+  assert.deepEqual(stallAlarms(ok.ctx), []);
+  assert.equal(parseState(ok.files.state!).stall, null);
+});
+
+test('stall: runs that only wait for a Retry-After or run out of time are explained and do not count toward the day; a failure does', async () => {
+  const store = new LocalStore(join(mkdtempSync(join(tmpdir(), 'history-held-')), 'releases'));
+  const idx = emptyIndex(CFG.boundary);
+  const state = loadState(idx, null);
+  state.attempts['usgs:2022-12'] = { failures: 1, since: NOW_ISO, last_error: 'HTTP 429', not_before: new Date(Date.now() + 3_600_000).toISOString() };
+  const start = walkTexts(idx, state, indexText);
+  // Held by its Retry-After: no request.
+  const held = http(() => ({ status: 500, body: 'boom', latencyMs: 1, retryAfterMs: null }));
+  const r1 = await hourly(store, start, hourIso(0), held);
+  assert.deepEqual(held.calls, []);
+  assert.equal(r1.ctx.report.held.length, 1);
+  assert.deepEqual(parseState(r1.files.state!).stall, { since: hourIso(0), runs: 1, unexplained: 0, alarmed_at: null });
+  // The pause is over; the run's time budget is spent before the first month is asked.
+  const s1 = parseState(r1.files.state!);
+  delete s1.attempts['usgs:2022-12']!.not_before;
+  const r2 = await hourly(store, { index: r1.files.index, state: JSON.stringify(s1) }, hourIso(1), held, { deadline: Date.now() - 1 });
+  assert.deepEqual(r2.ctx.report.budget, ['fetching from usgs:2022-12 on']);
+  assert.deepEqual(parseState(r2.files.state!).stall, { since: hourIso(0), runs: 2, unexplained: 0, alarmed_at: null });
+  // A source that answers 429 through every retry is rate-limited too, and is not asked for its older months.
+  const limited = http(() => ({ status: 429, body: 'slow down', latencyMs: 1, retryAfterMs: 1_000 }));
+  const r3 = await hourly(store, r2.files, hourIso(2), limited);
+  assert.deepEqual(r3.ctx.report.rate_limited.map((x) => x.split(':').slice(0, 2).join(':')), ['usgs:2022-12']);
+  assert.ok(limited.calls.every((u) => u.includes('starttime=2022-12-')), 'the source stops for the run');
+  assert.deepEqual(parseState(r3.files.state!).stall, { since: hourIso(0), runs: 3, unexplained: 0, alarmed_at: null });
+  // A failure of another kind counts.
+  const r4 = await hourly(store, r3.files, hourIso(3), held);
+  assert.deepEqual(parseState(r4.files.state!).stall, { since: hourIso(0), runs: 4, unexplained: 1, alarmed_at: null });
+});
+
+test('stall: the thresholds — 24 unexplained runs, or 72 runs of any kind; the repeat after 23 h; no work left ends the streak', () => {
+  const s: HistoryState = emptyState();
+  const idle = (explained: boolean) => ({ progress: false, workLeft: true, explained });
+  const t = (h: number): string => hourIso(h);
+  for (let h = 0; h < STALL_ALARM_RUNS_ANY - 1; h++) assert.equal(recordRun(s, idle(true), t(h)), false, `explained run ${h}`);
+  assert.equal(recordRun(s, idle(true), t(71)), true, 'the 72nd run of any kind');
+  assert.equal(recordRun(s, idle(true), t(72)), false);
+  assert.equal(recordRun(s, idle(true), t(71 + 23)), true, 'the repeat, 23 h later');
+  assert.equal(recordRun(s, { progress: false, workLeft: false, explained: false }, t(95)), false);
+  assert.equal(s.stall, null, 'no work left: the streak ends');
+  for (let h = 0; h < STALL_ALARM_RUNS - 1; h++) recordRun(s, idle(h % 2 === 0), t(100 + h));
+  assert.equal((s.stall as HistoryState['stall'])?.unexplained, 11, 'every other run unexplained');
+  for (let h = 0; h < 12; h++) assert.equal(recordRun(s, idle(false), t(123 + h)), false);
+  assert.equal(recordRun(s, idle(false), t(135)), true, 'the 24th unexplained run, explained ones between');
+  assert.equal(recordRun(s, { progress: true, workLeft: true, explained: false }, t(136)), false);
+  assert.equal(s.stall, null, 'progress ends the streak');
 });

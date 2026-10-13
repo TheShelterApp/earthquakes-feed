@@ -659,7 +659,8 @@ of distinct large files rewritten per hour, which grew from 2.8 partitions an ho
 events landed in, or were revised in, days 2–9 days old (43 rewrites of such partitions on 10-03, 216 on 10-05/06:
 ComCat's late publications, ENSN and GA back with older events, late NRCan and GeoSphere events, revisions). Rounds
 13–16 did not add commits (derive committed separately before round 14 too), and the files they added
-(`provider_activity.json`, `live_silent.json`, `correction.json`) or grew (`history.json`, about 3 commits a day) are
+(`provider_activity.json`, `live_silent.json`, `correction.json`) or grew (`history.json`, about 3 commits a day; one an
+hour during era A, round 24 moved its per-run failure counts to the small `history-state.json`) are
 under 0.1 MB a day; the live index and the detail hours of round 15 are Pages-only.
 
 Replays are not exact. Git 2.54's `receive-pack` starts `git maintenance run --auto` in the background after each push,
@@ -745,11 +746,18 @@ INGV reports, at its own hourly pace (about 43,000 ComCat reports a day: about t
 
 An asset is never overwritten or deleted. A failed upload leaves its name behind as `unused` and the walk takes the next
 free name (`raw-usgs-2022-12.g2.ndjson.zst`); when a source joins an era, each month gets a new edition (`e2`) built
-from all its raw assets, newest month first, and the older edition stays. The index of all of it is the only file the
-walk adds to the `data` branch: `knowledge/index/history.json` (read it through jsDelivr,
+from all its raw assets, newest month first, and the older edition stays. The index of all of it is the walk's one file
+for readers on the `data` branch: `knowledge/index/history.json` (read it through jsDelivr,
 `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/knowledge/index/history.json`). It lists each raw asset
 (`url`, `sha256`, `bytes`, `rows`, `provider_count`, `fetched_at`) and each edition (`url`, `sha256`, `events`, `days`,
-`sources`, `built_from`); a month's current edition is its highest `edition`. Each `_edition.json` names its newer
+`sources`, `built_from`); a month's current edition is its highest `edition`. It changes only when the walk publishes or
+takes over an asset. Its `attempts` is always `{}` since round 24 (2026-10-13): the walk's bookkeeping is in its other
+file, `knowledge/index/history-state.json` (a few hundred bytes, written in the same commit): `attempts`, keyed
+`<source>:<YYYY-MM>`, each source month whose fetch failed (`failures` in a row, `since`, `last_error`, `not_before`
+for a Retry-After), and `stall`, the run of no-progress runs (`since`, `runs`, `unexplained`, `alarmed_at`; null while
+the walk moves). Before, each run in which a month failed rewrote the whole index to count one more failure (about 150
+commits of the 2.3 MB file in the week of EMSC's 2017-12); now such a run commits only the small file, and a run that
+changes neither commits nothing. Each `_edition.json` names its newer
 neighbour (`context`: the asset and day it read, with that asset's `sha256` as its index listed it), so a later re-roll of
 `archive-2023-07` stays visible against the edition built on the earlier copy. A month is a calendar month: an era
 starts on the first day of a month and ends on the first day of a month or at the boundary. The manifest does not list the deep
@@ -773,12 +781,13 @@ backfilled rows. `feed.first_ingest_time` / `ingest_time` are that fetch time, a
 
 **Pace.** One request at a time per host, at least `requestSpacingMs` (1.1 s) apart, HTTP 429 / 5xx answered with
 Retry-After or a doubling pause from 5 s (at most 2 min; a source that asks for a longer pause is left alone until the
-time it named, `attempts[].not_before` in the index), a window that fills the page or times out split in two, a
-month that cannot be fetched whole fetched again next run (a month that has failed a day of runs turns the run red,
-once). A month's first failure stops its source for the run; a month that failed before no longer holds back the
+time it named, `attempts[].not_before` in `history-state.json`), a window that fills the page or times out split in
+two, a month that cannot be fetched whole fetched again next run (a month that has failed a day of runs turns the run
+red, once). A month's first failure stops its source for the run, and so does a rate limit (that pause, or HTTP 429
+through every retry); a month that failed before no longer holds back the
 source's older months, which go on (at most three failed months per source a run), so one bad month never stalls the
-source's walk again (round 23: EMSC's 2017-12 held it six days), though no older month is sealed until it is fetched. The
-two sources with a count service, ComCat and EMSC (`fdsnws/event/1/count`, asked in the source's query format: ComCat
+source's walk again (round 23: EMSC's 2017-12 held it six days), though no older month is sealed until it is fetched.
+The two sources with a count service, ComCat and EMSC (`fdsnws/event/1/count`, asked in the source's query format: ComCat
 `geojson`, EMSC `json`; measured 2026-10-06, none of the other 15 FDSN services the feed reads answers one), are asked
 for their count first and every window's rows must equal it. One exception, measured and checked against that count:
 EMSC answers some events it counts as empty elements of its json `features` array (`},,{`), and leaves them out of
@@ -813,11 +822,21 @@ dispatches the walk as the Worker does only when that run is more than 2 h 5 min
 missed 1 of 48 first-solutions ticks in those 48 hours, 10-06 19:48, and a single miss costs one hour of the walk). It
 holds a group of its own, so a delivery that finds nothing to do never waits behind a walk or cancels one.
 
+**When the walk stops.** A run with work left (source months to fetch, or complete months to seal) that fetches, seals
+and takes over nothing is a no-progress run. It is explained when it only waited for a source's Retry-After, was
+rate-limited, or ran out of its time budget, and nothing failed for another reason. The 24th unexplained no-progress run
+in a row (a day of hourly runs), or the 72nd of any kind (a walk that only ever waits, or a month never fetched whole
+within `maxSecondsPerRun`, has stopped too), turns the run red with what is left and the months that keep failing, and
+then one run a day while it lasts (23 h apart at least); the streak is `stall` in `history-state.json`. Progress, or no
+work left, ends it. Round 24 added it: since round 23 a month that never succeeds lets its source's older months go on,
+so its own alarm (one red run, at its 24th failure) came long before the walk ran out of other work, and the walk then
+stopped silently once only that month was left.
+
 **Dry runs.** `gh workflow run history.yml -f dry_run=true` (or `HISTORY_DRY_RUN=1 HISTORY_FORCE=1` locally, with
 `DATA_DIR` a copy of the `data` branch's `knowledge/index`) creates no Release, uploads nothing and commits nothing: the
 assets go to `history-out/releases/<tag>/` (a 3-day workflow artifact), and the published assets the index lists are
 read from the Releases, read only, so a dry run can build a month's next edition. A local dry run continues from its own
-`history-out/history.json`. `-f sources=ingv` (`HISTORY_ONLY_SOURCES`) limits a dry run to some sources; it seals
+`history-out/history.json` and `history-out/history-state.json` (a run writes both every time). `-f sources=ingv` (`HISTORY_ONLY_SOURCES`) limits a dry run to some sources; it seals
 nothing that needs another source. The dry run stays in the walk's concurrency group: it asks the same hosts.
 
 ## Saturated days

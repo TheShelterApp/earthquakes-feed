@@ -19,7 +19,8 @@ import {
   nextRawGeneration,
   rawAssetName,
 } from '../src/history-config.js';
-import { COUNT_SERVICE_PROVIDERS, type HttpAnswer, fetchRange, historyQueryUrl, parseRetryAfter } from '../src/history-fetch.js';
+import { type ParseStats, parseGeoJSON, repairEmptyArrayElements } from '../src/fdsn.js';
+import { COUNT_SERVICE_PROVIDERS, type HttpAnswer, fetchRange, historyQueryUrl, parseRetryAfter, unserializedWindows } from '../src/history-fetch.js';
 import { type HistoryIndex, emptyIndex, indexText, newerNeighbour, parseIndex, pendingUnits, periodsToSeal } from '../src/history-index.js';
 import { LocalStore } from '../src/history-store.js';
 import { verifyEdition } from '../src/history-verify.js';
@@ -109,7 +110,7 @@ test('history config: asset names are never reused (next generation / edition)',
 // ---------- fetch ----------
 
 /** A fake source over a fixed list of rows, answering FDSN text (or ComCat count + GeoJSON) for any window. */
-function fakeSource(p: ProviderConfig, times: number[], opts: { countSkew?: number; answers?: (url: string) => HttpAnswer | null } = {}) {
+function fakeSource(p: ProviderConfig, times: number[], opts: { countSkew?: number; answers?: (url: string) => HttpAnswer | null; unserialized?: number[] } = {}) {
   const calls: { url: string; at: number }[] = [];
   let clock = 1_000_000;
   const fetcher = async (url: string): Promise<HttpAnswer> => {
@@ -121,7 +122,16 @@ function fakeSource(p: ProviderConfig, times: number[], opts: { countSkew?: numb
     const s = Date.parse(`${q.get('starttime')}Z`);
     const e = Date.parse(`${q.get('endtime')}Z`);
     const inWin = times.filter((t) => t >= s && t <= e);
-    if (url.includes('/count?')) return { status: 200, body: JSON.stringify({ count: inWin.length + (opts.countSkew ?? 0) }), latencyMs: 1, retryAfterMs: null };
+    // Events the source counts but answers as empty elements of its json array (EMSC, round 23).
+    const hidden = new Set((opts.unserialized ?? []).filter((t) => t >= s && t <= e));
+    if (url.includes('/count?')) return { status: 200, body: JSON.stringify({ count: inWin.length + hidden.size + (opts.countSkew ?? 0) }), latencyMs: 1, retryAfterMs: null };
+    if (hidden.size) {
+      const all = [...inWin, ...hidden].sort((a, b) => b - a);
+      const parts = all.map((t) =>
+        hidden.has(t) ? '' : JSON.stringify({ id: `em${t}`, type: 'Feature', properties: { time: new Date(t).toISOString(), mag: 2, flynn_region: 'X', lastupdate: new Date(t).toISOString() }, geometry: { type: 'Point', coordinates: [10, 20, -5] } }),
+      );
+      return { status: 200, body: `{"type":"FeatureCollection","metadata":{"count":${all.length}},"features":[${parts.join(',\n')}]}`, latencyMs: 1, retryAfterMs: null };
+    }
     const limit = Number(q.get('limit') ?? Infinity);
     const page = inWin.slice(0, limit);
     if (!page.length) return { status: 204, body: '', latencyMs: 1, retryAfterMs: null };
@@ -260,6 +270,67 @@ test('history fetch: an unreadable count answer fails the range (a source failur
   });
   assert.equal(r.ok, false);
   assert.match(!r.ok ? r.error : '', /count .* unreadable answer/);
+});
+
+test('history fetch: EMSC events counted but answered as empty elements are narrowed to an hour and kept as an explicit gap (round 23)', async () => {
+  const d11 = dayMs('2022-12-11') + 12 * 3600_000;
+  const d22 = dayMs('2022-12-22') + 9 * 3600_000;
+  // As in EMSC's 2017-12: the uncounted events sit among events it does answer (the same hour here).
+  const shown = [...Array.from({ length: 40 }, (_, i) => S + i * 17 * 3600_000 + 60_000), d11 + 60_000, d22 + 600_000];
+  const hidden = [d11 + 5 * 60_000, d22 + 1_000, d22 + 2_000];
+  const f = fakeSource(emsc, shown, { unserialized: hidden });
+  const r = await fetchRange(emsc, S, E, { limit: 20000, minMagnitude: null, spacingMs: 1100, timeoutMs: 1000, ...f.opts });
+  assert.ok(r.ok, !r.ok ? r.error : '');
+  if (!r.ok) return;
+  assert.equal(r.rows.length, shown.length, 'every event the source answers is kept');
+  assert.equal(r.unserialized, 3);
+  assert.equal(r.providerCount, r.responseRows + r.unserialized, 'the count is met by the rows plus the recorded gap, nothing else');
+  const gaps = unserializedWindows(r.windows);
+  assert.deepEqual(gaps.map((g) => g.count), [1, 2]);
+  for (const g of gaps) assert.ok(Date.parse(g.end) - Date.parse(g.start) <= 3600_000, `gap ${g.start}..${g.end} narrowed to at most an hour`);
+  assert.ok(hidden.every((t) => gaps.some((g) => Date.parse(g.start) <= t && t <= Date.parse(g.end))));
+  // Windows tile the month without overlap.
+  for (let i = 1; i < r.windows.length; i++) assert.equal(r.windows[i]!.start, r.windows[i - 1]!.end);
+
+  // A half holding nothing but such events answers no count-matching rows (`[,]` here; EMSC may say `[]` or 204): the
+  // narrowing stops above it and the window that was answered whole is kept, its gap wider but still exact.
+  const g = fakeSource(emsc, [S + 60_000], { unserialized: [dayMs('2022-12-20'), dayMs('2022-12-20') + 1000] });
+  const r2 = await fetchRange(emsc, S, E, { limit: 20000, minMagnitude: null, spacingMs: 1100, timeoutMs: 1000, ...g.opts });
+  assert.ok(r2.ok, !r2.ok ? r2.error : '');
+  if (!r2.ok) return;
+  assert.equal(r2.rows.length, 1);
+  assert.equal(r2.unserialized, 2);
+  assert.equal(r2.providerCount, 3);
+  const gaps2 = unserializedWindows(r2.windows);
+  assert.equal(gaps2.length, 1);
+  assert.ok(Date.parse(gaps2[0]!.start) <= dayMs('2022-12-20') && dayMs('2022-12-20') + 1000 <= Date.parse(gaps2[0]!.end));
+  for (let i = 1; i < r2.windows.length; i++) assert.equal(r2.windows[i]!.start, r2.windows[i - 1]!.end);
+});
+
+test('history fetch: empty elements the count does not account for fail the range, and never pass without a count service', async () => {
+  const f = fakeSource(emsc, [S + 1000], { unserialized: [S + 5000], countSkew: 1 });
+  const r = await fetchRange(emsc, S, E, { limit: 20000, minMagnitude: null, spacingMs: 1100, timeoutMs: 1000, ...f.opts });
+  assert.equal(r.ok, false);
+  assert.match(!r.ok ? r.error : '', /1 rows and 1 empty element\(s\) where the count service said 3/);
+  // No count service (a source other than ComCat/EMSC): the empty elements cannot be checked, so they fail.
+  const body = '{"features":[{"id":"x1","properties":{"time":"2022-12-02T00:00:00Z"},"geometry":{"coordinates":[1,2,3]}},,{"id":"x2","properties":{"time":"2022-12-03T00:00:00Z"},"geometry":{"coordinates":[1,2,3]}}]}';
+  const uncounted = { ...emsc, id: 'emsc-uncounted' } as ProviderConfig;
+  const r2 = await fetchRange(uncounted, S, E, { limit: 20000, minMagnitude: null, spacingMs: 0, timeoutMs: 1000, sleep: async () => {}, fetcher: async () => ({ status: 200, body, latencyMs: 1, retryAfterMs: null }) });
+  assert.equal(r2.ok, false, 'the repair is EMSC-only, and EMSC is counted');
+});
+
+test('fdsn: EMSC empty array elements are removed outside strings only, and only from arrays; other sources still refuse them', () => {
+  const t = '{"a":[{"x":"a,,b"},,{"y":1},,,,{}],"o":{"k":1}}';
+  assert.deepEqual(repairEmptyArrayElements(t), { text: '{"a":[{"x":"a,,b"},{"y":1},{}],"o":{"k":1}}', removed: 4 });
+  assert.deepEqual(repairEmptyArrayElements('[,{}]'), { text: '[{}]', removed: 1 });
+  assert.deepEqual(repairEmptyArrayElements('[{},]'), { text: '[{}]', removed: 1 });
+  assert.deepEqual(repairEmptyArrayElements('[]'), { text: '[]', removed: 0 });
+  assert.deepEqual(repairEmptyArrayElements('{"a":1,,"b":2}'), { text: '{"a":1,,"b":2}', removed: 0 }, 'an object is never repaired');
+  const body = '{"features":[{"id":"e1","properties":{"time":"2017-12-22T12:49:23.0Z","flynn_region":"OFFSHORE OAXACA, MEXICO"},"geometry":{"coordinates":[1,2,-3]}},,{"id":"e2","properties":{"time":"2017-12-22T12:32:36.3Z"},"geometry":{"coordinates":[1,2,-3]}}]}';
+  const stats: ParseStats = { rows: 0 };
+  assert.deepEqual(parseGeoJSON(body, 'emsc', stats).map((r) => r.providerEventId), ['e1', 'e2']);
+  assert.deepEqual(stats, { rows: 2, emptySlots: 1 });
+  assert.throws(() => parseGeoJSON(body, 'usgs'), /JSON/);
 });
 
 test('history fetch: the count URL drops limit/orderby and the query keeps the provider params', () => {

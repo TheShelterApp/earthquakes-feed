@@ -13,11 +13,77 @@ export function isNoData(p: { params?: Record<string, string> }, status: number)
 /** How many records a response held before the parser dropped any (a sweep pages on it). */
 export interface ParseStats {
   rows: number;
+  /** EMSC only: empty elements of the answer's `features` array (see repairEmptyArrayElements), never rows. */
+  emptySlots?: number;
+}
+
+/**
+ * EMSC's `format=json` answer can hold empty array elements (`},,{`): an event its count service counts (and
+ * `metadata.count` lists) but its serializer writes as nothing, in `format=text` as well, so no format answers it.
+ * Measured 2026-10-13 for 2017-12: count 3803, 3793 features in json and 3793 rows in text with the same ids, and ten
+ * empty elements on 2017-12-11 and 2017-12-22 (unids missing from the per-day sequence). Removes the empty elements of
+ * arrays (outside strings, never inside an object) and returns how many it removed; an answer without them comes back
+ * unchanged. The caller decides whether that is acceptable (deep history: only where the count service confirms it).
+ */
+export function repairEmptyArrayElements(body: string): { text: string; removed: number } {
+  const drop = new Set<number>();
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  /** Inside an array, true right after `[` or `,` (an element is due): a comma or `]` there is an empty element. */
+  let expectElement = false;
+  /** The last comma kept since the innermost `[` opened: the one a trailing empty element (`,]`) hangs on. */
+  let keptComma = -1;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === ' ' || c === '\n' || c === '\r' || c === '\t') continue;
+    const inArray = stack[stack.length - 1] === '[';
+    if (inArray && expectElement && c === ',') {
+      drop.add(i);
+      continue;
+    }
+    if (inArray && expectElement && c === ']' && keptComma >= 0) drop.add(keptComma);
+    expectElement = false;
+    if (c === '"') inString = true;
+    else if (c === '[') {
+      stack.push('[');
+      expectElement = true;
+      keptComma = -1;
+    } else if (c === '{') stack.push('{');
+    else if (c === ']' || c === '}') stack.pop();
+    else if (c === ',' && inArray) {
+      expectElement = true;
+      keptComma = i;
+    }
+  }
+  if (!drop.size) return { text: body, removed: 0 };
+  let text = '';
+  let last = 0;
+  for (const i of [...drop].sort((x, y) => x - y)) {
+    text += body.slice(last, i);
+    last = i + 1;
+  }
+  return { text: text + body.slice(last), removed: drop.size };
 }
 
 /** Tolerant parser for USGS-GeoJSON and EMSC seismicportal `format=json` (a GeoJSON superset). */
 export function parseGeoJSON(body: string, provider: string, stats?: ParseStats): RawObs[] {
-  const json = JSON.parse(body) as { features?: unknown[] };
+  let json: { features?: unknown[] };
+  try {
+    json = JSON.parse(body) as { features?: unknown[] };
+  } catch (e) {
+    // EMSC's empty array elements (repairEmptyArrayElements): read the rest and say how many were empty.
+    const fixed = provider === 'emsc' ? repairEmptyArrayElements(body) : { text: body, removed: 0 };
+    if (!fixed.removed) throw e;
+    json = JSON.parse(fixed.text) as { features?: unknown[] };
+    if (stats) stats.emptySlots = fixed.removed;
+  }
   const features = Array.isArray(json.features) ? json.features : [];
   if (stats) stats.rows = features.length;
   const out: RawObs[] = [];

@@ -57,7 +57,7 @@ function ctxOf(over: Partial<Ctx> = {}): Ctx {
     assetCache: new Map(),
     rawCache: new Map(),
     now: () => NOW_ISO,
-    report: { fetched: [], sealed: [], adopted: [], failed: [], unused: [], blocked: [], empty_after_rows: [] },
+    report: { fetched: [], sealed: [], adopted: [], failed: [], unused: [], blocked: [], empty_after_rows: [], gaps: [] },
     ...over,
   };
 }
@@ -125,7 +125,7 @@ const http = (answer: (url: string) => HttpAnswer) => {
   };
 };
 
-test('fetch: a failing source month counts its failure, keeps the error and is blocked (red) on every 24th failed run', async () => {
+test('fetch: a failing source month counts its failure, keeps the error and turns the run red once, on its 24th failed run', async () => {
   const h = http(() => ({ status: 500, body: 'boom', latencyMs: 1, retryAfterMs: null }));
   const ctx = ctxOf({ fetchOptions: h.fetchOptions });
   await fetchUnits(ctx, 4);
@@ -143,6 +143,70 @@ test('fetch: a failing source month counts its failure, keeps the error and is b
   assert.equal(ctx.idx.attempts[key]?.failures, 24);
   assert.equal(ctx.report.blocked.length, 1);
   assert.match(ctx.report.blocked[0]!, /usgs:2022-12 has failed 24 runs since/);
+  // Once: the 48th failed run is not red again (the attempts entry in the index still says so).
+  ctx.idx.attempts[key]!.failures = 47;
+  ctx.report.blocked = [];
+  await fetchUnits(ctx, 4);
+  assert.equal(ctx.idx.attempts[key]?.failures, 48);
+  assert.deepEqual(ctx.report.blocked, []);
+});
+
+test('fetch: a month that failed before no longer holds back its source\'s older months (round 23); a fresh failure still stops the source', { skip: !hasZstd && 'zstd not installed' }, async () => {
+  // 2022-12 cannot be read (as EMSC's 2017-12 could not, for six days); 2022-11 answers.
+  const h = http((url) =>
+    url.includes('starttime=2022-12-')
+      ? url.includes('/count?') ? { status: 200, body: '{"count":2}', latencyMs: 1, retryAfterMs: null } : { status: 200, body: '<html>', latencyMs: 1, retryAfterMs: null }
+      : url.includes('/count?') ? { status: 200, body: '{"count":0}', latencyMs: 1, retryAfterMs: null } : { status: 204, body: '', latencyMs: 1, retryAfterMs: null },
+  );
+  // First failure: the source stops for the run, 2022-11 waits.
+  const ctx = ctxOf({ fetchOptions: h.fetchOptions });
+  await fetchUnits(ctx, 4);
+  assert.equal(ctx.idx.attempts['usgs:2022-12']?.failures, 1);
+  assert.equal(ctx.idx.raw.length, 0);
+  // Next run: 2022-12 fails again, and 2022-11 is fetched all the same.
+  await fetchUnits(ctx, 4);
+  assert.equal(ctx.idx.attempts['usgs:2022-12']?.failures, 2);
+  assert.deepEqual(ctx.idx.raw.map((r) => r.period), ['2022-11']);
+});
+
+test('fetch: a source failing everything costs at most three failed months a run, however many failed before', async () => {
+  const era: HistoryEra = { ...ERA, from: '2022-05-01' };
+  const h = http(() => ({ status: 500, body: 'boom', latencyMs: 1, retryAfterMs: null }));
+  const ctx = ctxOf({ cfg: { ...CFG, eras: [era] }, fetchOptions: h.fetchOptions });
+  for (const m of ['2022-12', '2022-11', '2022-10', '2022-09', '2022-08']) ctx.idx.attempts[`usgs:${m}`] = { failures: 5, since: NOW_ISO, last_error: 'HTTP 500' };
+  await fetchUnits(ctx, 10);
+  assert.equal(ctx.report.failed.length, 3);
+  assert.equal(ctx.idx.attempts['usgs:2022-09']?.failures, 5, 'the fourth month is not asked');
+});
+
+test('fetch + seal: EMSC events counted but answered as empty elements become an explicit gap in the raw header and the index; the month seals', { skip: !hasZstd && 'zstd not installed' }, async () => {
+  const era: HistoryEra = { ...ERA, from: '2022-12-01', sources: ['emsc'] };
+  const shown = Date.UTC(2022, 11, 22, 9, 10);
+  const hidden = [Date.UTC(2022, 11, 22, 9, 0, 1), Date.UTC(2022, 11, 22, 9, 0, 2)];
+  const feature = (t: number): string =>
+    JSON.stringify({ id: `20221222_${t}`, type: 'Feature', properties: { time: new Date(t).toISOString(), mag: 3, magtype: 'ml', flynn_region: 'OAXACA, MEXICO', lastupdate: new Date(t).toISOString() }, geometry: { type: 'Point', coordinates: [-96, 16, -10] } });
+  const h = http((url) => {
+    const q = new URL(url).searchParams;
+    const s = Date.parse(`${q.get('starttime')}Z`);
+    const e = Date.parse(`${q.get('endtime')}Z`);
+    const inWin = (t: number): boolean => t >= s && t <= e;
+    const all = [shown, ...hidden].filter(inWin).sort((a, b) => b - a);
+    if (url.includes('/count?')) return { status: 200, body: JSON.stringify({ count: all.length }), latencyMs: 1, retryAfterMs: null };
+    if (!all.length) return { status: 204, body: '', latencyMs: 1, retryAfterMs: null };
+    const parts = all.map((t) => (hidden.includes(t) ? '' : feature(t)));
+    return { status: 200, body: `{"type":"FeatureCollection","metadata":{"count":${all.length}},"features":[${parts.join(',')}]}`, latencyMs: 1, retryAfterMs: null };
+  });
+  const ctx = ctxOf({ cfg: { ...CFG, eras: [era] }, fetchOptions: h.fetchOptions });
+  await fetchUnits(ctx, 4, () => sealPeriods(ctx));
+  assert.deepEqual(ctx.report.failed, []);
+  const r = ctx.idx.raw[0]!;
+  assert.deepEqual([r.source, r.period, r.rows, r.provider_count], ['emsc', '2022-12', 1, 3]);
+  assert.equal(r.unserialized?.reduce((s, g) => s + g.count, 0), 2);
+  assert.ok(r.unserialized!.every((g) => Date.parse(g.end) - Date.parse(g.start) <= 3600_000));
+  assert.equal(ctx.report.gaps.length, 1);
+  assert.match(ctx.report.gaps[0]!, /emsc:2022-12: 2 event\(s\) the source counts but answers as empty elements/);
+  // The edition verifies against the raw asset: its rows plus its recorded gap meet the source's count.
+  assert.deepEqual(ctx.report.sealed.length, 1, ctx.report.sealed.join(' '));
 });
 
 test('fetch: a source that asked not to be asked before a time (Retry-After) gets no request until then', async () => {

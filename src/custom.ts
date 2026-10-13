@@ -238,7 +238,8 @@ const afad: CustomAdapter = async (cfg, nowMs, window) => {
 
 // --- China: CENC (Beijing time UTC+8) ---
 const cenc: CustomAdapter = async (cfg) => {
-  const raw = JSON.parse(await getText(cfg.base, { timeoutMs: 12_000, retries: 1 })) as unknown;
+  // Two retries (round 24, feed sweep 3.10): about a quarter of single fetches failed in the week to 2026-10-13.
+  const raw = JSON.parse(await getText(cfg.base, { timeoutMs: 12_000, retries: 2 })) as unknown;
   const list = Array.isArray(raw) ? raw : ((raw as { data?: unknown[] }).data ?? []);
   const out: RawObs[] = [];
   for (const e of list as Record<string, unknown>[]) {

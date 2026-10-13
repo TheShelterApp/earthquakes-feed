@@ -153,7 +153,7 @@ export interface SweepPageQuery {
 export interface SweepPage extends FetchOutcome {
   /** Records in the response before parsing dropped any (a full page has FETCH_LIMIT). */
   rows: number;
-  /** The page held FETCH_LIMIT records, so the query has more. */
+  /** The page held FETCH_LIMIT records (EMSC's empty array elements included), so the query has more. */
   full: boolean;
 }
 
@@ -164,7 +164,9 @@ export async function fetchSweepPage(p: ProviderConfig, q: SweepPageQuery, timeo
     timeoutMs,
     fetcher,
   );
-  return { provider: p.id, obs: r.obs, status: r.status, rows: r.rows, full: r.status.ok && !p.noLimit && r.rows >= FETCH_LIMIT };
+  // `overflow` counts EMSC's empty array elements too (src/fdsn.ts): they take places on the page, so a page they fill
+  // to FETCH_LIMIT is full although fewer records parse (round 25; `rows` alone ended the sweep there, a page early).
+  return { provider: p.id, obs: r.obs, status: r.status, rows: r.rows, full: r.status.ok && r.overflow };
 }
 
 /** Backfill path: a bounded [startMs, endMs] window; rows outside are dropped (providers

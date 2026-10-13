@@ -23,6 +23,9 @@ export interface RawEntry {
   end: string;
   fetch_min_magnitude: number | null;
   fetched_at: string;
+  /** An explicit gap: the windows in which the source counted events it answered as empty elements (EMSC, round 23),
+   *  with how many; absent when there is none. The month's other rows are complete against the source's count. */
+  unserialized?: { start: string; end: string; count: number }[];
 }
 
 export interface EditionEntry {

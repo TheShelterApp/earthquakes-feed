@@ -43,6 +43,9 @@ export interface RawHeader {
   duplicate_ids: number;
   /** The source's own count of the range (count service), or null where the source has none. */
   provider_count: number | null;
+  /** Events the source counted but answered as empty elements (EMSC; windows[].unserialized), absent when none:
+   *  provider_count = response_rows + this. */
+  unserialized_rows?: number;
   requests: number;
   windows: WindowLog[];
   user_agent: string;

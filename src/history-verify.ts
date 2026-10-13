@@ -107,9 +107,12 @@ export function verifyEdition(
       const h = r.header;
       fetched += r.rows.length;
       if (h.provider_count != null) {
-        const windowRows = h.windows.reduce((s, w) => s + w.rows, 0);
+        // Events the source counted but answered as empty elements (EMSC) are the asset's recorded gap, window by window.
+        const windowRows = h.windows.reduce((s, w) => s + w.rows + (w.unserialized ?? 0), 0);
+        const unserialized = h.unserialized_rows ?? 0;
+        if (h.windows.reduce((s, w) => s + (w.unserialized ?? 0), 0) !== unserialized) err(`${r.asset}: the windows' empty elements differ from unserialized_rows ${unserialized}`);
         if (windowRows !== h.provider_count) err(`${r.asset}: the windows hold ${windowRows} rows where the source counted ${h.provider_count}`);
-        if (h.response_rows !== h.provider_count) err(`${r.asset}: ${h.response_rows} rows answered where the source counted ${h.provider_count}`);
+        if (h.response_rows + unserialized !== h.provider_count) err(`${r.asset}: ${h.response_rows} rows answered (and ${unserialized} empty) where the source counted ${h.provider_count}`);
       }
       for (const row of r.rows) {
         if (screenReason(row)) {

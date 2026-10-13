@@ -13,6 +13,12 @@ import type { ProviderConfig, RawObs } from './types.js';
  * (`fdsnws/event/1/count`, USGS's extension of FDSN) and EMSC (`fdsnws/event/1/count`, the `counts` resource of its
  * WADL; it answers `{"count":N}` for `format=json`, HTTP 500 for `format=geojson`). Measured 2026-10-06: none of the
  * other 15 FDSN services the feed reads answers a count (14 answer 404 or 400; INGV was unreachable from the test host).
+ *
+ * EMSC answers some events it counts as empty elements of its json `features` array, and in no other format either
+ * (src/fdsn.ts, repairEmptyArrayElements; 2017-12 held ten, round 23). A window with such elements is split down to
+ * `minWindowMs` and then kept only when its rows plus its empty elements equal the count the source gave for it: the
+ * window log says how many (`unserialized`), the raw header and the index list each such window, and nothing else is
+ * ever accepted short of the count.
  */
 
 export interface HttpAnswer {
@@ -78,7 +84,20 @@ export interface WindowLog {
   count: number | null;
   http: number | null;
   ms: number | null;
+  /** Events the source counted in the window but answered as empty elements (EMSC); absent when none. */
+  unserialized?: number;
 }
+
+/** A window whose answer lacked events the source counted (WindowLog.unserialized): an explicit gap of the raw asset. */
+export interface UnserializedWindow {
+  start: string;
+  end: string;
+  count: number;
+}
+
+/** The gaps a raw asset's windows record (empty when none). */
+export const unserializedWindows = (windows: readonly WindowLog[]): UnserializedWindow[] =>
+  windows.filter((w) => (w.unserialized ?? 0) > 0).map((w) => ({ start: w.start, end: w.end, count: w.unserialized! }));
 
 export interface FetchedRange {
   rows: RawObs[];
@@ -91,6 +110,8 @@ export interface FetchedRange {
   duplicateIds: number;
   /** Sum of the windows' counts when the source has a count service, else null. */
   providerCount: number | null;
+  /** Events the source counted but answered as empty elements (windows[].unserialized): providerCount = responseRows + this. */
+  unserialized: number;
   requests: number;
 }
 
@@ -182,79 +203,88 @@ export async function fetchRange(p: ProviderConfig, startMs: number, endMs: numb
   let responseRows = 0;
   let parsedRows = 0;
   let duplicateIds = 0;
+  let unserialized = 0;
   let providerCount: number | null = counted ? 0 : null;
-  // Newest window first, so the answer order is stable whatever the splits.
-  const todo: [number, number][] = [[startMs, endMs]];
-  while (todo.length) {
-    const [ws, we] = todo.shift()!;
-    const split = (why: string): FetchRangeResult | null => {
-      if (we - ws <= minWindowMs) return fail(`${why} at a ${Math.round((we - ws) / 60_000)}-minute window ${fdsnTime(ws)}..${fdsnTime(we)}`);
-      const mid = ws + Math.floor((we - ws) / 2 / 1000) * 1000;
-      todo.unshift([mid, we], [ws, mid]);
-      return null;
-    };
+
+  /** One window's answer: kept as is, split (too full / too slow), or the range's failure. */
+  type Asked =
+    | { kind: 'fail'; error: string }
+    | { kind: 'split'; why: string }
+    | { kind: 'answer'; log: WindowLog; obs: RawObs[]; empty: number };
+  const ask = async (ws: number, we: number): Promise<Asked> => {
+    const span = `${fdsnTime(ws)}..${fdsnTime(we)}`;
     let count: number | null = null;
     if (counted) {
       const c = await get(historyQueryUrl(p, ws, we, { limit: o.limit, minMagnitude: o.minMagnitude, count: true }));
-      if (c.status == null) return fail(`count ${fdsnTime(ws)}..${fdsnTime(we)}: ${c.error}`);
+      if (c.status == null) return { kind: 'fail', error: `count ${span}: ${c.error}` };
       let n: unknown = null;
       try {
         n = c.status === 200 ? (JSON.parse(c.body) as { count?: unknown }).count : isNoData(p, c.status) ? 0 : null;
       } catch {
-        return fail(`count ${fdsnTime(ws)}..${fdsnTime(we)}: unreadable answer`);
+        return { kind: 'fail', error: `count ${span}: unreadable answer` };
       }
-      if (typeof n !== 'number') return fail(`count ${fdsnTime(ws)}..${fdsnTime(we)}: HTTP ${c.status}`);
+      if (typeof n !== 'number') return { kind: 'fail', error: `count ${span}: HTTP ${c.status}` };
       count = n;
-      if (count >= o.limit) {
-        const r = split(`count ${count} over the page of ${o.limit}`);
-        if (r) return r;
-        continue;
-      }
-      if (count === 0) {
-        windows.push({ start: new Date(ws).toISOString(), end: new Date(we).toISOString(), rows: 0, count: 0, http: c.status, ms: c.latencyMs });
-        continue;
-      }
+      if (count >= o.limit) return { kind: 'split', why: `count ${count} over the page of ${o.limit}` };
+      if (count === 0) return { kind: 'answer', log: { start: new Date(ws).toISOString(), end: new Date(we).toISOString(), rows: 0, count: 0, http: c.status, ms: c.latencyMs }, obs: [], empty: 0 };
     }
     const a = await get(historyQueryUrl(p, ws, we, { limit: o.limit, minMagnitude: o.minMagnitude }));
-    if (a.status == null) {
-      if (a.timeout) {
-        const r = split('timeout');
-        if (r) return r;
-        continue;
-      }
-      return fail(`${fdsnTime(ws)}..${fdsnTime(we)}: ${a.error}`);
-    }
+    if (a.status == null) return a.timeout ? { kind: 'split', why: 'timeout' } : { kind: 'fail', error: `${span}: ${a.error}` };
     let obs: RawObs[] = [];
     const stats: ParseStats = { rows: 0 };
     if (a.status === 200) {
       try {
         obs = p.parse === 'geojson' ? parseGeoJSON(a.body, p.id, stats) : parseFdsnText(a.body, p.id, stats);
       } catch (e) {
-        return fail(`${fdsnTime(ws)}..${fdsnTime(we)}: unreadable answer (${e instanceof Error ? e.message : String(e)})`);
+        return { kind: 'fail', error: `${span}: unreadable answer (${e instanceof Error ? e.message : String(e)})` };
       }
     } else if (!isNoData(p, a.status)) {
       // 4xx other than "no data": a query the source refuses (413 / 400 for too many rows on some nodes) splits.
-      if (a.status === 413 || a.status === 400) {
-        const r = split(`HTTP ${a.status}`);
-        if (r) return r;
-        continue;
-      }
-      return fail(`${fdsnTime(ws)}..${fdsnTime(we)}: HTTP ${a.status}`);
+      if (a.status === 413 || a.status === 400) return { kind: 'split', why: `HTTP ${a.status}` };
+      return { kind: 'fail', error: `${span}: HTTP ${a.status}` };
     }
-    if (!p.noLimit && stats.rows >= o.limit) {
-      const r = split(`answer filled the page of ${o.limit}`);
-      if (r) return r;
-      continue;
-    }
-    if (count != null && stats.rows !== count) {
+    const empty = stats.emptySlots ?? 0;
+    if (!p.noLimit && stats.rows + empty >= o.limit) return { kind: 'split', why: `answer filled the page of ${o.limit}` };
+    if (empty > 0) {
+      // Events the source counted but did not send: only its count can say nothing else is missing.
+      if (count == null) return { kind: 'fail', error: `${span}: ${empty} empty element(s) in the answer and no count to check them against` };
+      if (stats.rows + empty !== count) return { kind: 'fail', error: `${span}: ${stats.rows} rows and ${empty} empty element(s) where the count service said ${count}` };
+    } else if (count != null && stats.rows !== count) {
       // The catalogue changed between the count and the query (an event added or deleted in those seconds), or the
       // two disagree: never keep a window the source's own count does not confirm.
-      return fail(`${fdsnTime(ws)}..${fdsnTime(we)}: ${stats.rows} rows where the count service said ${count}`);
+      return { kind: 'fail', error: `${span}: ${stats.rows} rows where the count service said ${count}` };
     }
-    responseRows += stats.rows;
-    if (providerCount != null && count != null) providerCount += count;
-    windows.push({ start: new Date(ws).toISOString(), end: new Date(we).toISOString(), rows: stats.rows, count, http: a.status, ms: a.latencyMs });
-    for (const r of obs) {
+    const log: WindowLog = { start: new Date(ws).toISOString(), end: new Date(we).toISOString(), rows: stats.rows, count, http: a.status, ms: a.latencyMs };
+    if (empty > 0) log.unserialized = empty;
+    return { kind: 'answer', log, obs, empty };
+  };
+
+  /**
+   * A window kept with empty elements, narrowed: its halves are asked in turn, down to `minWindowMs`, so the gap the
+   * asset records is as small as the source allows. Any half that is not a clean, count-confirmed answer (a window of
+   * nothing but such events can answer `[]`, `[,]` or 204, which no count matches) ends the narrowing there and the
+   * window is kept as it was answered.
+   */
+  const narrow = async (ws: number, we: number, whole: Extract<Asked, { kind: 'answer' }>): Promise<Extract<Asked, { kind: 'answer' }>[]> => {
+    if (we - ws <= minWindowMs) return [whole];
+    const mid = ws + Math.floor((we - ws) / 2 / 1000) * 1000;
+    const out: Extract<Asked, { kind: 'answer' }>[] = [];
+    for (const [hs, he] of [[ws, mid], [mid, we]] as const) {
+      const h = await ask(hs, he);
+      if (h.kind !== 'answer') return [whole];
+      out.push(...(h.empty > 0 ? await narrow(hs, he, h) : [h]));
+    }
+    // The halves must account for the whole window's count (an event added or deleted meanwhile keeps the whole).
+    const sum = (xs: Extract<Asked, { kind: 'answer' }>[]): number => xs.reduce((s, x) => s + x.log.rows + x.empty, 0);
+    return sum(out) === sum([whole]) ? out : [whole];
+  };
+
+  const keep = (w: Extract<Asked, { kind: 'answer' }>): void => {
+    windows.push(w.log);
+    responseRows += w.log.rows;
+    unserialized += w.empty;
+    if (providerCount != null && w.log.count != null) providerCount += w.log.count;
+    for (const r of w.obs) {
       if (r.eventTimeMs < startMs || r.eventTimeMs >= endMs) continue;
       parsedRows++;
       const prev = byId.get(r.providerEventId);
@@ -264,7 +294,22 @@ export async function fetchRange(p: ProviderConfig, startMs: number, endMs: numb
       }
       byId.set(r.providerEventId, r);
     }
+  };
+
+  // Newest window first, so the answer order is stable whatever the splits.
+  const todo: [number, number][] = [[startMs, endMs]];
+  while (todo.length) {
+    const [ws, we] = todo.shift()!;
+    const r = await ask(ws, we);
+    if (r.kind === 'fail') return fail(r.error);
+    if (r.kind === 'split') {
+      if (we - ws <= minWindowMs) return fail(`${r.why} at a ${Math.round((we - ws) / 60_000)}-minute window ${fdsnTime(ws)}..${fdsnTime(we)}`);
+      const mid = ws + Math.floor((we - ws) / 2 / 1000) * 1000;
+      todo.unshift([mid, we], [ws, mid]);
+      continue;
+    }
+    for (const w of r.empty > 0 ? await narrow(ws, we, r) : [r]) keep(w);
   }
   windows.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
-  return { ok: true, rows: [...byId.values()], windows, responseRows, parsedRows, duplicateIds, providerCount, requests };
+  return { ok: true, rows: [...byId.values()], windows, responseRows, parsedRows, duplicateIds, providerCount, unserialized, requests };
 }

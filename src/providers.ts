@@ -89,7 +89,8 @@ async function fetchFdsnAt(p: ProviderConfig, base: string, params: FetchParams,
     return {
       obs,
       status: { ok: true, http_status: res.status, latency_ms: res.latencyMs, events_returned: obs.length },
-      overflow: !p.noLimit && Math.max(obs.length, stats.rows) >= FETCH_LIMIT,
+      // EMSC's empty array elements (src/fdsn.ts) take places on the page too.
+      overflow: !p.noLimit && Math.max(obs.length, stats.rows + (stats.emptySlots ?? 0)) >= FETCH_LIMIT,
       rows: stats.rows,
     };
   } catch (err) {

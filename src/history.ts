@@ -24,7 +24,7 @@ import {
   rawAssetName,
   releaseAssetUrl,
 } from './history-config.js';
-import { type FetchRangeOptions, type FetchRangeResult, HISTORY_USER_AGENT, fetchRange } from './history-fetch.js';
+import { type FetchRangeOptions, type FetchRangeResult, HISTORY_USER_AGENT, fetchRange, unserializedWindows } from './history-fetch.js';
 import {
   type EditionEntry,
   type HistoryIndex,
@@ -63,10 +63,15 @@ import type { ProviderConfig, RawObs } from './types.js';
  *   HISTORY_MAX_UNITS    override maxUnitsPerRun
  *
  * The run writes nothing to DATA_DIR. It exits non-zero only for a broken invariant (after writing the index of the
- * work already uploaded); a source that fails is retried next run and turns the run red once it has failed a day.
+ * work already uploaded); a source month that fails is retried next run and turns the run red once, after a day of
+ * failed runs; a month that failed before no longer holds back its source's older months.
  */
 
+/** A source month that has failed this many runs turns the run red, once (the index keeps its attempts entry). */
 const ALARM_FAILURES = 24;
+/** Failed source months per source per run at most: a month that failed before (`attempts`) no longer holds back the
+ *  source's older months, but a source that fails everything costs at most this many failed months a run. */
+const MAX_FAILED_UNITS_PER_SOURCE = 3;
 const sha256File = (f: string): string => createHash('sha256').update(readFileSync(f)).digest('hex');
 
 function requireZstd(): void {
@@ -108,7 +113,7 @@ export interface Ctx {
   assetCache: Map<string, AssetInfo[]>;
   rawCache: Map<string, RawInput>;
   now: () => string;
-  report: { fetched: string[]; sealed: string[]; adopted: string[]; failed: string[]; unused: string[]; blocked: string[]; empty_after_rows: string[] };
+  report: { fetched: string[]; sealed: string[]; adopted: string[]; failed: string[]; unused: string[]; blocked: string[]; empty_after_rows: string[]; gaps: string[] };
   /** Dry runs only (HISTORY_ONLY_SOURCES): fetch these sources' months and no other. */
   onlySources?: ReadonlySet<string>;
   /** Tests only: the HTTP layer and clock of fetchRange (production uses its defaults). */
@@ -156,6 +161,7 @@ function loadRaw(ctx: Ctx, tag: string, asset: string, sha256?: string): RawInpu
 }
 
 function rawEntryOf(tag: string, asset: string, sha256: string, bytes: number, h: RawHeader): RawEntry {
+  const gaps = unserializedWindows(h.windows);
   return {
     source: h.source,
     period: h.period,
@@ -170,6 +176,7 @@ function rawEntryOf(tag: string, asset: string, sha256: string, bytes: number, h
     end: h.end,
     fetch_min_magnitude: h.fetch_min_magnitude,
     fetched_at: h.fetched_at,
+    ...(gaps.length ? { unserialized: gaps } : {}),
   };
 }
 
@@ -335,6 +342,7 @@ export async function stillAnswersRows(
 export async function fetchUnits(ctx: Ctx, maxUnits: number, onMonthComplete?: (p: Period) => void): Promise<void> {
   const paces = new Map<string, { lastEndMs: number }>();
   const failedSources = new Set<string>();
+  const failuresThisRun = new Map<string, number>();
   let done = 0;
   for (const u of pendingUnits(ctx.cfg, ctx.idx)) {
     if (done >= maxUnits || Date.now() > ctx.deadline) break;
@@ -391,7 +399,14 @@ export async function fetchUnits(ctx: Ctx, maxUnits: number, onMonthComplete?: (
       break;
     }
     if (!res.ok) {
-      failedSources.add(u.source);
+      const failedBefore = (ctx.idx.attempts[key]?.failures ?? 0) > 0;
+      const n = (failuresThisRun.get(u.source) ?? 0) + 1;
+      failuresThisRun.set(u.source, n);
+      // A month that fails for the first time stops its source for the run (most failures are the source's, and pass).
+      // One that failed before is likely the month's own (an answer the walk cannot read, round 23: EMSC 2017-12 held
+      // the whole walk for six days): the source goes on with its older months, up to MAX_FAILED_UNITS_PER_SOURCE
+      // failed months a run. A Retry-After always stops it.
+      if (!failedBefore || n >= MAX_FAILED_UNITS_PER_SOURCE || res.retryAfterMs != null) failedSources.add(u.source);
       const a = (ctx.idx.attempts[key] ??= { failures: 0, since: fetchedAt, last_error: '' });
       a.failures++;
       a.last_error = res.error.slice(0, 300);
@@ -399,8 +414,11 @@ export async function fetchUnits(ctx: Ctx, maxUnits: number, onMonthComplete?: (
       else delete a.not_before;
       ctx.report.failed.push(`${key}: ${res.error} (${a.failures} failed run(s) since ${a.since}; ${res.requests} request(s))`);
       console.log(`::warning::history: ${key} failed: ${res.error} — ${a.failures} failed run(s) since ${a.since}`);
-      if (a.failures >= ALARM_FAILURES && a.failures % ALARM_FAILURES === 0) {
-        ctx.report.blocked.push(`history: ${key} has failed ${a.failures} runs since ${a.since} (last error: ${a.last_error}); fix the source or take it out of the era`);
+      if (a.failures === ALARM_FAILURES) {
+        ctx.report.blocked.push(
+          `history: ${key} has failed ${a.failures} runs since ${a.since} (last error: ${a.last_error}); the source's older months go on, ` +
+            `but no month from ${u.period.key} back is sealed until it is fetched: fix the source or take it out of the era`,
+        );
       }
       continue;
     }
@@ -418,6 +436,7 @@ export async function fetchUnits(ctx: Ctx, maxUnits: number, onMonthComplete?: (
       parsed_rows: res.parsedRows,
       duplicate_ids: res.duplicateIds,
       provider_count: res.providerCount,
+      ...(res.unserialized > 0 ? { unserialized_rows: res.unserialized } : {}),
       requests: res.requests,
       windows: res.windows,
       user_agent: HISTORY_USER_AGENT,
@@ -435,6 +454,11 @@ export async function fetchUnits(ctx: Ctx, maxUnits: number, onMonthComplete?: (
     delete ctx.idx.attempts[key];
     rmSync(file, { force: true });
     const count = res.providerCount != null ? `, the source's count ${res.providerCount}` : '';
+    if (res.unserialized > 0) {
+      const gaps = unserializedWindows(res.windows).map((g) => `${g.start}..${g.end} ${g.count}`).join(', ');
+      ctx.report.gaps.push(`${key}: ${res.unserialized} event(s) the source counts but answers as empty elements (${gaps})`);
+      console.log(`::warning::history: ${key}: ${res.unserialized} event(s) the source counts but does not answer, recorded as a gap in the index (${gaps})`);
+    }
     if (emptyAfter) {
       ctx.report.empty_after_rows.push(`${key}: no rows, ${emptyAfter.rows} in ${emptyAfter.newer} (which still answers rows: the source's catalogue starts here)`);
       console.log(`::warning::history: ${key} answered no rows where ${emptyAfter.newer} has ${emptyAfter.rows}, and ${emptyAfter.newer} still answers rows: the start of the catalogue`);
@@ -551,7 +575,7 @@ async function main(): Promise<void> {
     assetCache: new Map(),
     rawCache: new Map(),
     now: () => new Date().toISOString(),
-    report: { fetched: [], sealed: [], adopted: [], failed: [], unused: [], blocked: [], empty_after_rows: [] },
+    report: { fetched: [], sealed: [], adopted: [], failed: [], unused: [], blocked: [], empty_after_rows: [], gaps: [] },
     ...(onlySources ? { onlySources } : {}),
   };
   console.log(`history: ${ctx.store.label}; index from ${before ? indexIn : 'scratch'}; ${idx.raw.length} raw assets, ${idx.editions.length} editions`);
@@ -580,7 +604,7 @@ async function main(): Promise<void> {
   writeFileSync(join(out, 'report.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(
     `history: fetched=${ctx.report.fetched.length} sealed=${ctx.report.sealed.length} adopted=${ctx.report.adopted.length} failed=${ctx.report.failed.length} ` +
-      `unused=${ctx.report.unused.length} empty_after_rows=${ctx.report.empty_after_rows.length} pending_units=${pending} unsealed_months=${unsealed} index_changed=${changed} (${Buffer.byteLength(text)} bytes)`,
+      `unused=${ctx.report.unused.length} empty_after_rows=${ctx.report.empty_after_rows.length} gaps=${ctx.report.gaps.length} pending_units=${pending} unsealed_months=${unsealed} index_changed=${changed} (${Buffer.byteLength(text)} bytes)`,
   );
   const blocked = [...ctx.report.blocked];
   if (fatal) blocked.unshift(`history: ${fatal instanceof Error ? fatal.message : String(fatal)}`);

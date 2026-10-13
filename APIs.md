@@ -772,10 +772,19 @@ backfilled rows. `feed.first_ingest_time` / `ingest_time` are that fetch time, a
 **Pace.** One request at a time per host, at least `requestSpacingMs` (1.1 s) apart, HTTP 429 / 5xx answered with
 Retry-After or a doubling pause from 5 s (at most 2 min; a source that asks for a longer pause is left alone until the
 time it named, `attempts[].not_before` in the index), a window that fills the page or times out split in two, a
-month that cannot be fetched whole fetched again next run (a source that fails a day of runs turns the run red). The
+month that cannot be fetched whole fetched again next run (a month that has failed a day of runs turns the run red,
+once). A month's first failure stops its source for the run; a month that failed before no longer holds back the
+source's older months, which go on (at most three failed months per source a run), so one bad month never stalls the
+source's walk again (round 23: EMSC's 2017-12 held it six days), though no older month is sealed until it is fetched. The
 two sources with a count service, ComCat and EMSC (`fdsnws/event/1/count`, asked in the source's query format: ComCat
 `geojson`, EMSC `json`; measured 2026-10-06, none of the other 15 FDSN services the feed reads answers one), are asked
-for their count first and every window's rows must equal it. A month is sealed (its next edition built, verified and
+for their count first and every window's rows must equal it. One exception, measured and checked against that count:
+EMSC answers some events it counts as empty elements of its json `features` array (`},,{`), and leaves them out of
+`format=text` too, so no format answers them (2017-12: count 3,803, 3,793 events in json and in text, ten empty
+elements on 12-11 and 12-22). Such a window is narrowed by halves down to an hour and kept only when its rows plus its
+empty elements equal the source's count: the raw header says how many (`unserialized_rows`, and `unserialized` per
+window) and the index entry lists each such window with its count (`raw[].unserialized`: an explicit gap; the month's
+other rows are complete). Any other unreadable answer still fails the month. A month is sealed (its next edition built, verified and
 uploaded) as soon as its last source arrives, and a run first seals what an earlier run left complete. At most
 `maxUnitsPerRun` source months and `maxSecondsPerRun` per hourly run; neither job holds the writer lock (the index
 commit pushes through `scripts/push-data.sh`, FEED-OPS-4). A month a source answers empty right before a month of the

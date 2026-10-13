@@ -38,10 +38,15 @@ jobs:
     # Pinned, not ubuntu-latest: ubuntu-latest moves to Ubuntu 26.04 from 2026-10-19
     # (actions/runner-images#14748). Move to ubuntu-26.04 deliberately, after a green test run.
     runs-on: ubuntu-24.04
-    # The aggregate part had 5 minutes and derive 12 as jobs of their own (three Pages deploy attempts + backoff cannot
-    # fit in 6 min; a failing deploy alone runs ~3 min before erroring out). The Aggregate step keeps its own bound.
+    # The aggregate part had 5 minutes and derive 12 as jobs of their own (a failing Pages deploy runs ~3 min before
+    # erroring out). The Aggregate step keeps its own bound. The Pages deploy reads this budget (job-timeout-minutes
+    # below, kept equal by tests/pages-deploy.test.ts): each attempt is capped and a retry starts only while 7 min are
+    # left, so a hung upload no longer runs the job into this timeout (run 38112591591, 2026-10-11).
     timeout-minutes: 16
     steps:
+      # First, so the Pages deploy (.github/actions/derive-publish) counts the job's budget from about its start.
+      - name: Note the job's start
+        run: echo "FEED_JOB_STARTED_S=$(date -u +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -76,9 +81,10 @@ jobs:
           git add knowledge status status.json .gitignore
           git commit -m "aggregate: seq=$(node -e "process.stdout.write(String(require('./knowledge/index/head.json').seq))") @ $(date -u +%FT%TZ)" \
             || { echo 'no changes'; exit 0; }
-          # Fail-loud push loop: a swallowed rebase conflict here silently loses data (H3). Three attempts, rebasing
-          # onto a concurrent writer's commit; a conflict aborts the rebase and fails (tests/push-data.test.ts).
-          bash "$GITHUB_WORKSPACE/scripts/push-data.sh"
+          # Fail-loud push loop: a swallowed rebase conflict here silently loses data (H3). Five attempts with a 5 s
+          # backoff (at most 50 s of pauses under the writer lock) ride out a GitHub 5xx blip, rebasing onto a
+          # concurrent writer's commit; a conflict aborts the rebase and fails (tests/push-data.test.ts).
+          PUSH_ATTEMPTS=5 PUSH_BACKOFF_S=5 bash "$GITHUB_WORKSPACE/scripts/push-data.sh"
       # Phase 2. Only after a pushed (or unchanged) aggregate: a failed step above skips it, so derive never builds on
       # a failed aggregate (M6).
       - name: Derive and publish
@@ -86,6 +92,8 @@ jobs:
         with:
           cf-api-token: ${{ secrets.CF_API_TOKEN }}
           cf-account-id: ${{ secrets.CF_ACCOUNT_ID }}
+          job-started-at: ${{ env.FEED_JOB_STARTED_S }}
+          job-timeout-minutes: 16
           feed-signing-key: ${{ secrets.FEED_SIGNING_KEY }}
           feed-signing-kid: ${{ vars.FEED_SIGNING_KID }}
           r2-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}

@@ -98,3 +98,30 @@ export function contentTypeFor(key: string): string {
   if (key.endsWith('.json')) return 'application/json';
   return 'application/octet-stream';
 }
+
+/** The settings the R2 publish reads (secrets for the key pair, repository variables for the rest). R2_PUBLIC_BASE is
+ *  read by sign-manifest only (the v2 manifest's `cdn` origin), but it counts here: a public base without a publish
+ *  advertises an origin nobody fills. */
+export const R2_PUBLISH_SETTINGS = ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_S3_ENDPOINT', 'R2_BUCKET'] as const;
+export const R2_SETTINGS = [...R2_PUBLISH_SETTINGS, 'R2_PUBLIC_BASE'] as const;
+
+export type R2Settings =
+  /** Every setting blank: the R2 publish is off on purpose, nothing to warn about. */
+  | { state: 'off' }
+  /** Some set, some blank: a half-done setup; warn and skip, never fail the run. */
+  | { state: 'incomplete'; set: string[]; missing: string[] }
+  | { state: 'on'; config: Pick<R2Config, 'endpoint' | 'bucket' | 'accessKeyId' | 'secretAccessKey'> };
+
+/** What the R2 publish does with these settings (src/publish-r2.ts). The four publish settings make it `on`, whatever
+ *  R2_PUBLIC_BASE holds (an origin is published before the manifest advertises it). A value of only spaces is blank. */
+export function r2Settings(env: Record<string, string | undefined>): R2Settings {
+  const value = (k: string): string => (env[k] ?? '').trim();
+  const set = R2_SETTINGS.filter((k) => value(k) !== '');
+  if (set.length === 0) return { state: 'off' };
+  const missing = R2_PUBLISH_SETTINGS.filter((k) => value(k) === '');
+  if (missing.length > 0) return { state: 'incomplete', set: [...set], missing: [...missing] };
+  return {
+    state: 'on',
+    config: { endpoint: value('R2_S3_ENDPOINT'), bucket: value('R2_BUCKET'), accessKeyId: value('R2_ACCESS_KEY_ID'), secretAccessKey: value('R2_SECRET_ACCESS_KEY') },
+  };
+}

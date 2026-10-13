@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 // FEED-TEST-1: the data-branch push loop (scripts/push-data.sh, called by aggregate.yml) against real git repositories
 // in a temporary directory: a concurrent writer's commit is rebased onto and pushed, a conflict aborts the rebase and
-// fails loudly with both sides intact, an unreachable origin fails after its attempts.
+// fails loudly with both sides intact, an unreachable origin fails after its attempts, and a push or a fetch that fails
+// once (GitHub's HTTP 5xx, 2026-10-07) is retried.
 
 const SCRIPT = fileURLToPath(new URL('../scripts/push-data.sh', import.meta.url));
 
@@ -84,13 +85,53 @@ test('push-data: a conflict aborts the rebase, keeps both sides and fails with a
   assert.equal(s.git(s.a, 'log', '-1', '--format=%s', 'origin/data').trim(), 'writer b', 'origin keeps the other writer');
 });
 
-test('push-data: an unreachable origin fails with an annotation instead of looping', () => {
+test('push-data: an unreachable origin fails with an annotation after its attempts instead of looping', () => {
   const s = setup();
   commit(s, s.a, 'status.json', '{"seq":2}\n', 'aggregate: seq=2');
   s.git(s.a, 'remote', 'set-url', 'origin', join(s.dir, 'missing.git'));
-  const r = push(s, s.a, { PUSH_ATTEMPTS: '2' });
+  const r = push(s, s.a, { PUSH_ATTEMPTS: '3' });
   assert.equal(r.status, 1);
-  assert.match(r.stdout, /::error::fetching origin\/data failed after a rejected push \(attempt 1\)/);
+  // Each failed fetch is a warning and the next attempt pushes again; the last failed push is not followed by a fetch.
+  assert.equal((r.stdout.match(/::warning::fetching origin\/data failed after a failed push \(attempt \d of 3\); pushing again/g) ?? []).length, 2, r.stdout);
+  assert.match(r.stdout, /::error::push to data failed after 3 attempts/);
+});
+
+/** A `git` first on PATH that fails the first `git fetch` the way GitHub did on 2026-10-07 and runs the real git
+ *  otherwise. */
+function gitFailingFirstFetch(s: ReturnType<typeof setup>): Record<string, string> {
+  const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  const bin = join(s.dir, 'bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(
+    join(bin, 'git'),
+    `#!/bin/sh\nif [ "$1" = fetch ] && [ ! -e "${join(s.dir, 'fetch-failed')}" ]; then\n  : > "${join(s.dir, 'fetch-failed')}"\n  echo "fatal: unable to access 'https://github.com/TheShelterApp/earthquakes-feed/': The requested URL returned error: 500" >&2\n  exit 128\nfi\nexec "${real}" "$@"\n`,
+    { mode: 0o755 },
+  );
+  return { PATH: `${bin}${delimiter}${process.env.PATH}` };
+}
+
+test('push-data: a failed fetch is a warning; the next attempt pushes, fetches and rebases, and both writers land', () => {
+  const s = setup();
+  commit(s, s.b, 'changes.ndjson', '{"derive":1}\n', 'derive: views');
+  s.git(s.b, 'push', '-q', 'origin', 'HEAD:data');
+  commit(s, s.a, 'status.json', '{"seq":2}\n', 'aggregate: seq=2');
+  const r = push(s, s.a, gitFailingFirstFetch(s));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /::warning::fetching origin\/data failed after a failed push \(attempt 1 of 3\); pushing again/);
+  assert.match(r.stderr, /returned error: 500/);
+  assert.deepEqual(s.git(s.a, 'log', '--format=%s', 'origin/data').trim().split('\n'), ['aggregate: seq=2', 'derive: views', 'seed']);
+});
+
+test('push-data: a push that fails once on the server side (no rejection to rebase onto) is retried and lands', () => {
+  const s = setup();
+  // GitHub's HTTP 500 on a push, as a hook that fails the first push only.
+  const mark = join(s.dir, 'push-failed');
+  writeFileSync(join(s.dir, 'origin.git', 'hooks', 'pre-receive'), `#!/bin/sh\nif [ ! -e "${mark}" ]; then : > "${mark}"; echo 'remote: Internal Server Error'; exit 1; fi\nexit 0\n`, { mode: 0o755 });
+  commit(s, s.a, 'status.json', '{"seq":2}\n', 'aggregate: seq=2');
+  const r = push(s, s.a);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stderr, /Internal Server Error/);
+  assert.equal(s.git(s.a, 'rev-parse', 'HEAD'), s.git(s.a, 'ls-remote', 'origin', 'refs/heads/data').split('\t')[0] + '\n');
 });
 
 test('push-data: a conflict names the conflicting files', () => {

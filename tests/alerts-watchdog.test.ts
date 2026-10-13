@@ -17,6 +17,7 @@ import {
   main,
   parseArgs,
   parseUsageResponse,
+  primaryFailure,
   SELFTEST_MIN_HEADROOM_PCT,
   STATUS_URL,
   usageWindow,
@@ -673,4 +674,48 @@ test('main: a failing deletions query is a warning annotation and keeps exit 0',
   assert.doesNotMatch(r.out, /::error/);
   assert.match(r.out, /::warning title=Alert pipeline::provider usgs's deletions query has failed 5 times in a row/);
   assert.match(r.out, /alert pipeline healthy/);
+});
+
+// --- the USGS primary live query (2026-10-13 gateways): the summary-feed fallback is a warning, never a failure ---
+
+/** What a 2026-10-13 gateway publishes while ComCat's FDSN live query fails and the summary feed delivers. */
+function onSummary(failures: unknown, lastError: unknown = 'timeout', extra: Record<string, unknown> = {}): Record<string, any> {
+  const doc = structuredClone(HEALTHY);
+  Object.assign(doc.detector.providers[0], { ok: true, consecutiveFailures: 0, fallback: 'summary', primaryConsecutiveFailures: failures, primaryLastError: lastError, ...extra });
+  return doc;
+}
+
+test('primary: a streak of 3 on the summary fallback warns with the reason; the run stays healthy', () => {
+  assert.equal(DEFAULT_THRESHOLDS.primaryFailures, 3);
+  const v = evaluateStatus(onSummary(18), { nowMs: NOW });
+  assert.deepEqual(v.problems, []);
+  assert.deepEqual(v.warnings, [
+    "provider usgs's primary live query has failed 18 times in a row, last error timeout (slower than the gateway's fetch timeout): its live events come from the summary feed (fallback: summary), up to about two minutes later (warning at 3)",
+  ]);
+  assert.match(v.summary, /providers=usgs:ok\/primary-FAIL\(18\)\+summary,feed:ok,emsc:ok,gfz:ok/);
+  const two = evaluateStatus(onSummary(2, 'http'), { nowMs: NOW });
+  assert.deepEqual(two.warnings, []);
+  assert.match(two.notes[0]!, /^provider usgs's primary live query has failed 2 times in a row, last error http .*\(below the warning at 3\)$/);
+  assert.equal(parseArgs(['--primary-failures', '5']).thresholds.primaryFailures, 5);
+});
+
+test('primary: with the provider failing too, the provider line fails the run and no fallback warning is added', () => {
+  const doc = onSummary(4, 'http', { ok: false, consecutiveFailures: 4, lastError: 'http', consecutiveTimeouts: 0, httpStatus: 503 });
+  delete doc.detector.providers[0].fallback;
+  const v = evaluateStatus(doc, { nowMs: NOW });
+  assert.equal(v.problems.length, 1);
+  assert.match(v.problems[0]!, /^provider usgs is down: ok:false with 4 consecutive failures/);
+  assert.deepEqual(v.warnings, []);
+  assert.match(v.summary, /usgs:FAIL\(4\)\/primary-FAIL\(4\),/);
+});
+
+test('primary: missing or malformed values never break the check', () => {
+  for (const bad of [0, -1, null, '7', Number.NaN, { n: 1 }]) {
+    const v = evaluateStatus(onSummary(bad), { nowMs: NOW });
+    assert.deepEqual([v.problems, v.warnings, v.notes], [[], [], []], String(bad));
+    assert.doesNotMatch(v.summary, /primary/, String(bad));
+  }
+  assert.equal(primaryFailure(HEALTHY.detector.providers[0]), null);
+  assert.equal(primaryFailure(null), null);
+  assert.deepEqual(primaryFailure({ primaryConsecutiveFailures: 3, primaryLastError: { x: 1 } }), { failures: 3, why: '', fallback: false });
 });

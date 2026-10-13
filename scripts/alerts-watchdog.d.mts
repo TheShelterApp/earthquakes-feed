@@ -10,6 +10,8 @@ export interface Thresholds {
   maxConfigBundleAgeSec: number;
   /** a provider's deletions query failing this many times in a row warns (never fails). */
   deletionsFailures: number;
+  /** a provider's primary live query (USGS FDSN) failing this many times in a row warns while its fallback keeps it ok. */
+  primaryFailures: number;
 }
 
 export const STATUS_URL: string;
@@ -34,6 +36,9 @@ export function failureReason(provider: unknown): string;
 export const DELETIONS_MAX_WINDOW_MS: number;
 /** The failing deletions query of a provider entry (round-16 gateways); null when it carries no positive streak. */
 export function deletionsFailure(provider: unknown): { failures: number; why: string } | null;
+/** The failing primary live query of a provider entry (2026-10-13 gateways); null when it carries no positive streak.
+ *  `fallback` is true while the provider is ok on its summary-feed fallback. */
+export function primaryFailure(provider: unknown): { failures: number; why: string; fallback: boolean } | null;
 
 export type FetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
 export type FetchResult =

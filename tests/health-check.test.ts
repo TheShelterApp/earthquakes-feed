@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -207,4 +207,170 @@ test('health.yml: the size steps run after a red feed check, never fail the run,
   assert.match(issue, /size-set: \$\{SIZE_SET\}/);
   assert.match(issue, /gh issue close/);
   assert.doesNotMatch(issue, /exit 1/);
+});
+
+// --- round 24: a silent source whose fetch fails is named with its error, and the issue is commented again after 48 h of
+// failure (TMD: certificate chain failing from 2026-10-09, one comment saying "no rows") ---
+
+const HOUR_MS = 3_600_000;
+/** The live status.json of 2026-10-13 18:07 UTC in miniature: TMD silent because its fetch fails (v2 error object). */
+const tmdStatus = (generatedAt: number, lastOkAgoH = 112.2, message: unknown = "unable to verify the first certificate (the pinned intermediate no longer completes this host's chain: pin the one its leaf names, providers/tls/README.md)"): Record<string, any> => ({
+  generated: new Date(generatedAt).toISOString(),
+  generatedAt,
+  degraded: ['tmd'],
+  silent: { tmd: { last_non_empty_at: '2026-10-09T01:56:48.498Z', counted_from: '2026-07-05T05:42:10.043Z', silent_hours: lastOkAgoH, budget_hours: 12 } },
+  frozen: {},
+  providers: {
+    ...providers(['emsc', 'kagsr']),
+    tmd: { ok: false, latency_ms: 6281, error: { kind: 'error', message, since: generatedAt - lastOkAgoH * HOUR_MS }, observations: 0, lastSuccessAt: generatedAt - lastOkAgoH * HOUR_MS, lastNonEmptyAt: generatedAt - lastOkAgoH * HOUR_MS, silent: true },
+  },
+});
+
+test('health check: a silent source whose fetch fails is named with its error and failing time, not only "no rows"', () => {
+  const gen = Date.parse('2026-10-13T18:07:01.145Z');
+  const { out, stdout } = run(tmdStatus(gen));
+  const entry = "tmd: fetch failing for 112 h (last successful fetch 2026-10-09T01:55:01.145Z), no rows for 112 h (budget 12 h, last rows 2026-10-09T01:56:48.498Z), error: unable to verify the first certificate (the pinned intermediate no longer completes this host's chain: pin the one its leaf names, providers/tls/README.md)";
+  assert.equal(out['silent'], entry);
+  assert.ok(stdout.includes(`::warning::silent provider ${entry}\n`));
+  assert.equal(out['silent_set'], 'tmd');
+  assert.equal(out['problem'], '', 'still a warning and an issue, never a red run');
+  // It has failed for 48 h or more: the time it reached 48 h (epoch s) is handed to the issue step.
+  assert.equal(out['failing_48h_at'], String(Math.floor((gen - 112.2 * HOUR_MS) / 1000) + 48 * 3600));
+});
+
+test('health check: an answer without rows still says "no rows"; a shorter failure or an unknown start is not a 48 h one', () => {
+  const gen = Date.parse('2026-10-13T18:07:01.145Z');
+  const quiet = tmdStatus(gen);
+  quiet.providers.tmd = { ...quiet.providers.tmd, ok: true, error: null };
+  const q = run(quiet);
+  assert.equal(q.out['silent'], 'tmd: no rows for 112 h (budget 12 h, last rows 2026-10-09T01:56:48.498Z)');
+  assert.equal(q.out['failing_48h_at'], '');
+  // 47 h of failure: named, but not yet 48 h.
+  const young = run(tmdStatus(gen, 47));
+  assert.match(young.out['silent']!, /^tmd: fetch failing for 47 h /);
+  assert.equal(young.out['failing_48h_at'], '');
+  // No last success on record (a source that never succeeded): named, its failing time unknown, never a 48 h reminder.
+  const never = tmdStatus(gen);
+  never.providers.tmd = { ...never.providers.tmd, lastSuccessAt: null };
+  const n = run(never);
+  assert.match(n.out['silent']!, /^tmd: fetch failing \(no successful fetch on record\), no rows for 112 h/);
+  assert.equal(n.out['failing_48h_at'], '');
+});
+
+test('health check: the error text is cut to one line without ";" or backticks; a v1 string error and no message work too', () => {
+  const gen = Date.now();
+  const nasty = run(tmdStatus(gen, 60, 'HTTP 502;\n::error::injected `code`\r\nproblem=x' + 'y'.repeat(400)));
+  const entry = nasty.out['silent']!;
+  assert.ok(!/[;`\r\n]/.test(entry), entry);
+  assert.match(entry, /error: HTTP 502 ::error::injected code problem=xy+$/);
+  assert.equal(nasty.out['problem'], '', 'the text cannot write another step output');
+  assert.equal(entry.slice(entry.indexOf('error: ') + 7).length, 240);
+  const v1 = tmdStatus(gen, 60);
+  v1.providers.tmd = { ...v1.providers.tmd, error: 'deadline: 45000 ms spent after 3 attempt(s); last: This operation was aborted' };
+  assert.match(run(v1).out['silent']!, /error: deadline: 45000 ms spent after 3 attempt\(s\) last: This operation was aborted$/);
+  const none = tmdStatus(gen, 60);
+  none.providers.tmd = { ...none.providers.tmd, error: null };
+  assert.match(run(none).out['silent']!, /error: no error message$/);
+});
+
+// The issue step's shell script, run with a `gh` stub that applies each --jq expression to canned answers with jq.
+const silentIssueStep = yml.slice(yml.indexOf('- name: Silent providers issue'), yml.indexOf('- name: Pinned certificate issue'));
+const silentIssueScript = (() => {
+  const lines = silentIssueStep.split('\n');
+  const at = lines.findIndex((l) => /^\s+run: \|$/.test(l));
+  assert.ok(at > 0, 'the issue script');
+  const body = lines.slice(at + 1);
+  const indent = /^(\s*)/.exec(body[0]!)![1]!.length;
+  const end = body.findIndex((l) => l.trim() !== '' && /^(\s*)/.exec(l)![1]!.length < indent);
+  return (end < 0 ? body : body.slice(0, end))
+    .map((l) => l.slice(indent))
+    .join('\n')
+    .replace(/\$\{\{ github\.repository \}\}/g, 'TheShelterApp/earthquakes-feed')
+    .replace(/\$\{\{ github\.server_url \}\}/g, 'https://github.com')
+    .replace(/\$\{\{ github\.run_id \}\}/g, '1');
+})();
+const GH_STUB = `#!/bin/bash
+n=$(ls "$GH_STUB_DIR" | grep -c '^call-' || true)
+printf '%s\\0' "$@" > "$GH_STUB_DIR/call-$n"
+prev=""; expr=""
+for a in "$@"; do if [ "$prev" = "--jq" ]; then expr="$a"; fi; prev="$a"; done
+case "$1 $2" in
+  "issue list") jq -r "$expr" "$GH_STUB_DIR/list.json" ;;
+  "issue view") jq -r "$expr" "$GH_STUB_DIR/view.json" ;;
+esac
+`;
+const hasJq = spawnSync('jq', ['--version']).status === 0;
+
+/** Run the step: `issue` is the open issue (null: none), its posts as [createdAt ISO, body]. Returns the gh calls. */
+function runSilentIssue(env: { SILENT: string; SILENT_SET: string; FAILING_48H_AT: string }, issue: { posts: Array<[string, string]> } | null) {
+  const dir = mkdtempSync(join(tmpdir(), 'health-silent-issue-'));
+  writeFileSync(join(dir, 'gh'), GH_STUB, { mode: 0o755 });
+  writeFileSync(join(dir, 'list.json'), JSON.stringify(issue ? [{ number: 94 }] : []));
+  if (issue) {
+    const [first, ...rest] = issue.posts;
+    writeFileSync(join(dir, 'view.json'), JSON.stringify({ createdAt: first![0], body: first![1], comments: rest.map(([createdAt, body]) => ({ createdAt, body })) }));
+  }
+  const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', silentIssueScript], {
+    env: { ...process.env, ...env, PATH: `${dir}:${process.env.PATH}`, GH_STUB_DIR: dir, GH_TOKEN: 'x' },
+    encoding: 'utf8',
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const calls = readdirSync(dir).filter((f) => f.startsWith('call-')).sort((a, b) => Number(a.slice(5)) - Number(b.slice(5)))
+    .map((f) => readFileSync(join(dir, f), 'utf8').split('\0').slice(0, -1));
+  return { calls, writes: calls.filter((c) => c[0] === 'issue' && c[1] !== 'list' && c[1] !== 'view'), stdout: r.stdout };
+}
+const iso = (ms: number): string => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+const bodyOf = (call: string[]): string => call[call.indexOf('--body') + 1]!;
+
+test('silent issue: unchanged set, no 48 h failure: no comment (as before)', { skip: hasJq ? false : 'no jq' }, () => {
+  const now = Date.now();
+  const r = runSilentIssue({ SILENT: 'kagsr: no rows for 13 h', SILENT_SET: 'kagsr', FAILING_48H_AT: '' }, { posts: [[iso(now - 100 * HOUR_MS), 'x\n\nsilent-set: kagsr\nRun: y']] });
+  assert.deepEqual(r.writes, []);
+  assert.match(r.stdout, /issue #94 already lists kagsr/);
+});
+
+test('silent issue: a fetch failing for 48 h is commented again once it reaches 48 h, then every 48 h, with the set unchanged', { skip: hasJq ? false : 'no jq' }, () => {
+  const now = Date.now();
+  const set = 'tmd';
+  const silent = 'tmd: fetch failing for 60 h (last successful fetch x), no rows for 60 h (budget 12 h, last rows x), error: unable to verify the first certificate';
+  const post = (agoH: number): [string, string] => [iso(now - agoH * HOUR_MS), `Automated watchdog\n\n- tmd: no rows\n\nsilent-set: ${set}\nRun: y`];
+  const reached = String(Math.floor((now - 12 * HOUR_MS) / 1000)); // TMD reached 48 h of failure 12 h ago
+  // The last post naming the set is older than that: comment once, saying why.
+  const due = runSilentIssue({ SILENT: silent, SILENT_SET: set, FAILING_48H_AT: reached }, { posts: [post(30)] });
+  assert.equal(due.writes.length, 1);
+  assert.deepEqual(due.writes[0]!.slice(0, 3), ['issue', 'comment', '94']);
+  assert.match(bodyOf(due.writes[0]!), /^Still failing: the fetch of a source listed here has failed for 48 h or more/);
+  assert.match(bodyOf(due.writes[0]!), /\n- tmd: fetch failing for 60 h .*error: unable to verify the first certificate\n\nsilent-set: tmd\n/);
+  // Posted after it reached 48 h, less than 48 h ago: nothing (the next run after a reminder stays quiet).
+  assert.deepEqual(runSilentIssue({ SILENT: silent, SILENT_SET: set, FAILING_48H_AT: reached }, { posts: [post(30), post(1)] }).writes, []);
+  assert.deepEqual(runSilentIssue({ SILENT: silent, SILENT_SET: set, FAILING_48H_AT: reached }, { posts: [post(11.9)] }).writes, []);
+  // 48 h after the last post, still failing: again.
+  const again = runSilentIssue({ SILENT: silent, SILENT_SET: set, FAILING_48H_AT: String(Math.floor((now - 100 * HOUR_MS) / 1000)) }, { posts: [post(200), post(48.1)] });
+  assert.equal(again.writes.length, 1);
+  assert.match(bodyOf(again.writes[0]!), /^Still failing:/);
+  // A comment that does not name the set (a person's) does not count as the last post.
+  const human = runSilentIssue({ SILENT: silent, SILENT_SET: set, FAILING_48H_AT: reached }, { posts: [post(30), [iso(now - HOUR_MS), 'Looking into it.']] });
+  assert.equal(human.writes.length, 1);
+});
+
+test('silent issue: a changed set is commented as before, a new one is opened, an empty one is closed', { skip: hasJq ? false : 'no jq' }, () => {
+  const now = Date.now();
+  const changed = runSilentIssue({ SILENT: 'ign: no rows for 13 h; tmd: fetch failing for 60 h', SILENT_SET: 'ign,tmd', FAILING_48H_AT: String(Math.floor(now / 1000) - 3600) },
+    { posts: [[iso(now - HOUR_MS), 'a\n\nsilent-set: tmd\nRun: y']] });
+  assert.equal(changed.writes.length, 1);
+  assert.match(bodyOf(changed.writes[0]!), /^Automated watchdog: /);
+  assert.match(bodyOf(changed.writes[0]!), /\n- ign: no rows for 13 h\n- tmd: fetch failing for 60 h\n\nsilent-set: ign,tmd\n/);
+  const opened = runSilentIssue({ SILENT: 'tmd: no rows for 13 h', SILENT_SET: 'tmd', FAILING_48H_AT: '' }, null);
+  assert.deepEqual(opened.writes.map((c) => c.slice(0, 2)), [['issue', 'create']]);
+  const closed = runSilentIssue({ SILENT: '', SILENT_SET: '', FAILING_48H_AT: '' }, { posts: [[iso(now - HOUR_MS), 'silent-set: tmd']] });
+  assert.deepEqual(closed.writes.map((c) => c.slice(0, 2)), [['issue', 'comment'], ['issue', 'close']]);
+  // An unreadable post time never turns into a comment every run.
+  const odd = runSilentIssue({ SILENT: 'tmd: x', SILENT_SET: 'tmd', FAILING_48H_AT: 'abc' }, { posts: [['', 'silent-set: tmd']] });
+  assert.deepEqual(odd.writes, []);
+});
+
+test('health.yml: the silent issue step gets the 48 h output and never fails the run', () => {
+  assert.match(silentIssueStep, /continue-on-error: true/);
+  assert.match(silentIssueStep, /FAILING_48H_AT: \$\{\{ steps\.check\.outputs\.failing_48h_at \}\}/);
+  assert.doesNotMatch(silentIssueStep, /exit 1/);
 });

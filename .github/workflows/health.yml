@@ -108,11 +108,35 @@ jobs:
             const degLimit = Math.max(8, Math.ceil(total * 0.3));
             console.log(`age=${Math.round(ageS)}s (stale_after=${staleAfter}) head_seq=${m.head_seq} events=${m.event_count} failing=${failing.length}/${total} limit=${degLimit} [${failing.join(",")}] silent=[${silentIds.join(",")}] frozen=[${frozenIds.join(",")}] queued=${queuedS}s`);
             const hours = (x) => (typeof x === "number" ? Math.round(x) : "?");
+            // Round 24: a silent source whose fetch FAILS in this run is named by its error and how long its fetch has failed
+            // (providers.<id>.error, lastSuccessAt), not as "no rows": TMD failed its certificate chain for days from
+            // 2026-10-09 while the warning and the issue said "no rows". The error text comes from the source, so it is cut
+            // to one line without the entry separator ";" or backticks.
+            const oneLine = (x) => String(x == null ? "" : x).replace(/[\u0000-\u001f\u007f;`]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 240);
+            const genMs = (s && (typeof s.generatedAt === "number" ? s.generatedAt : Date.parse(s.generated))) || Date.now();
+            const fetchFailure = (id) => {
+              const p = s && s.providers && s.providers[id];
+              if (!p || p.ok !== false) return null;
+              const err = p.error && typeof p.error === "object" ? p.error.message : p.error;
+              const lastOk = typeof p.lastSuccessAt === "number" ? p.lastSuccessAt : null;
+              return { message: oneLine(err) || "no error message", lastOk, hours: lastOk == null ? null : Math.max(0, (genMs - lastOk) / 3600000) };
+            };
+            const failingFor = {};
             const silentText = silentIds.map((id) => {
               const e = silent[id] || {};
-              return `${id}: no rows for ${hours(e.silent_hours)} h (budget ${hours(e.budget_hours)} h, last rows ${e.last_non_empty_at || "not since " + (e.counted_from || "?")})`;
+              const rows = `no rows for ${hours(e.silent_hours)} h (budget ${hours(e.budget_hours)} h, last rows ${e.last_non_empty_at || "not since " + (e.counted_from || "?")})`;
+              const f = fetchFailure(id);
+              if (!f) return `${id}: ${rows}`;
+              failingFor[id] = f;
+              const since = f.lastOk == null ? "no successful fetch on record" : `last successful fetch ${new Date(f.lastOk).toISOString()}`;
+              return `${id}: fetch failing${f.hours == null ? "" : ` for ${hours(f.hours)} h`} (${since}), ${rows}, error: ${f.message}`;
             });
             for (const t of silentText) console.log(`::warning::silent provider ${t}`);
+            // The issue step comments again, with the set unchanged, once a listed source has failed its fetch for 48 h, and
+            // every 48 h after: the latest time one of them reached 48 h of failure (epoch s), empty when none has.
+            const FAIL_REMIND_H = 48;
+            const reached = Object.values(failingFor).filter((f) => f.hours != null && f.hours >= FAIL_REMIND_H).map((f) => Math.floor(f.lastOk / 1000) + FAIL_REMIND_H * 3600);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `failing_48h_at=${reached.length ? Math.max(...reached) : ""}\n`);
             const frozenText = frozenIds.map((id) => {
               const e = frozen[id] || {};
               return `${id}: frozen, ${e.rows ?? "?"} rows whose newest origin (${e.newest_origin || "?"}) is ${hours(e.newest_origin_age_hours)} h old (window ${hours(e.window_hours)} h + budget ${hours(e.budget_hours)} h)`;
@@ -141,12 +165,14 @@ jobs:
             else if (failing.length >= degLimit) problems.push(`${failing.length}/${total} providers failing: ${failing.join(", ")}`);
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `problem=${problems.join("; ")}\n`);
           '
-      - name: Silent providers issue (opened, updated when the set changes, closed when none; never fails the run)
+      - name: Silent providers issue (opened, commented when the set changes or a fetch has failed for 48 h, closed when none; never fails the run)
         # A silent source loses events quietly (NOA, 2026-09-24 → 10-04: 352 Greek events) but is usually one
         # agency, not an outage of the feed: an issue (GitHub emails it) instead of a red run every 15 minutes. Frozen
         # sources (rows, but the newest origin stands still; round 14) are listed here too, as frozen:<id> in the set.
-        # An unreadable status.json changes nothing (state unknown). The entries are joined with "; " for the
-        # one-line step output and split back into a list here, so an entry itself never contains a semicolon.
+        # A source whose fetch fails is listed with its error (round 24), and while one has failed for 48 h or more the
+        # issue is commented again every 48 h even when the set stays the same (TMD's fetch failed from 2026-10-09 with a
+        # single comment). An unreadable status.json changes nothing (state unknown). The entries are joined with "; " for
+        # the one-line step output and split back into a list here, so an entry itself never contains a semicolon.
         # continue-on-error: a GitHub API error while filing the issue must not turn a healthy run red.
         if: steps.check.outputs.status_read == '1'
         continue-on-error: true
@@ -154,12 +180,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SILENT: ${{ steps.check.outputs.silent }}
           SILENT_SET: ${{ steps.check.outputs.silent_set }}
+          FAILING_48H_AT: ${{ steps.check.outputs.failing_48h_at }}
         run: |
           TITLE="[health] silent providers"
           NUM=$(gh issue list --repo "${{ github.repository }}" --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
           RUN="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           if [ -n "$SILENT_SET" ]; then
-            BODY="Automated watchdog: these sources answer with no rows for longer than their activity budget, or (frozen) with rows whose newest origin has stood still past their query window plus their frozen budget (src/activity.ts, providers/registry.json \`activityBudgetHours\` / \`frozenBudgetHours\`). Their events reach the feed only through other agencies.
+            BODY="Automated watchdog: these sources have brought no rows for longer than their activity budget, or (frozen) rows whose newest origin has stood still past their query window plus their frozen budget (src/activity.ts, providers/registry.json \`activityBudgetHours\` / \`frozenBudgetHours\`). A source whose fetch fails is listed with its error and how long it has failed; one that answers without rows says only \"no rows\". Their events reach the feed only through other agencies.
 
           $(printf '%s\n' "$SILENT" | tr ';' '\n' | sed 's/^ */- /')
 
@@ -168,10 +195,23 @@ jobs:
             if [ -z "$NUM" ]; then
               gh issue create --repo "${{ github.repository }}" --title "$TITLE" --body "$BODY" --label bug
             else
-              # Comment only when the set of silent sources changed: the hours grow every run.
-              LAST=$(gh issue view "$NUM" --repo "${{ github.repository }}" --json body,comments --jq '[.body, (.comments[].body)] | map(select(test("silent-set: "))) | last // ""' | sed -n 's/^ *silent-set: //p' | tail -1)
+              # Comment when the set of silent sources changed (the hours grow every run), and, with the set unchanged, when a
+              # listed source's fetch has failed for 48 h since the last post naming the set, or the last such post is 48 h old
+              # while one still fails that long (FAILING_48H_AT: the latest time one of them reached 48 h of failure, epoch s).
+              POST=$(gh issue view "$NUM" --repo "${{ github.repository }}" --json body,createdAt,comments --jq '[{b: .body, t: .createdAt}] + [.comments[] | {b: .body, t: .createdAt}] | map(select(.b | test("silent-set: "))) | last // {b: "", t: ""} | "\(if .t == "" then 0 else (.t | fromdateiso8601 | floor) end)\n\(.b)"')
+              NOW_S=$(date -u +%s)
+              LAST_AT=${POST%%$'\n'*}
+              LAST_AT=${LAST_AT%%.*}
+              LAST=$(printf '%s\n' "${POST#*$'\n'}" | sed -n 's/^ *silent-set: //p' | tail -1)
+              # An unreadable post time counts as now: no reminder rather than one every run.
+              case "$LAST_AT" in ''|0|*[!0-9]*) LAST_AT=$NOW_S;; esac
+              case "$FAILING_48H_AT" in *[!0-9]*) FAILING_48H_AT="";; esac
               if [ "$LAST" != "$SILENT_SET" ]; then
                 gh issue comment "$NUM" --repo "${{ github.repository }}" --body "$BODY"
+              elif [ -n "$FAILING_48H_AT" ] && { [ "$LAST_AT" -lt "$FAILING_48H_AT" ] || [ $(( NOW_S - LAST_AT )) -ge 172800 ]; }; then
+                gh issue comment "$NUM" --repo "${{ github.repository }}" --body "Still failing: the fetch of a source listed here has failed for 48 h or more (this issue is commented again every 48 h while that lasts, even when the set stays the same).
+
+          ${BODY}"
               else
                 echo "issue #$NUM already lists ${SILENT_SET}"
               fi

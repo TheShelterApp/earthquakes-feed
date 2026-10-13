@@ -25,6 +25,9 @@
 // (`deletionsConsecutiveFailures` / `deletionsLastError`, published only while it fails). The provider stays ok
 // meanwhile (its live events still go out), but deleted events are not withdrawn and its watermark (the deletions
 // cursor) stands still; the gateway asks again from that cursor, at most 7 days back, so a shorter gap recovers.
+// It also only warns when a provider's primary live query (USGS: ComCat FDSN, 2026-10-13 gateways) has failed 3 times
+// in a row (`primaryConsecutiveFailures` / `primaryLastError`, with `fallback: 'summary'` while the provider is ok):
+// the live events then come from USGS's summary feed, up to about two minutes later, and alerts still go out.
 // Fields an older gateway does not publish (apns.mode/production/problems, fanout) are never a problem.
 // Optional usage half: when CF_ANALYTICS_TOKEN (Account Analytics: Read) is set, it also reads today's
 // (UTC) account-wide Workers requests and D1 rows written from the GraphQL Analytics API and fails at 80 %
@@ -40,6 +43,7 @@
 //   node scripts/alerts-watchdog.mjs --status-file doc.json # judge a saved document instead of fetching
 //   flags: --url <url> --max-age-sec <n> --provider-failures <n> --min-headroom-pct <n> --usage-fail-pct <n>
 //          --max-feed-manifest-age-sec <n> --max-config-bundle-age-sec <n> --deletions-failures <n>
+//          --primary-failures <n>
 //
 // Dependency-free (Node >= 22, global fetch). The pure helpers are exported for
 // tests/alerts-watchdog.test.ts, which never touches the network.
@@ -67,6 +71,9 @@ export const DEFAULT_THRESHOLDS = Object.freeze({
    *  streak that turns a provider down. The gateway backs the query off to every 60 s after 3 failures and every 300 s
    *  after 10, so a health run every 15 min sees a streak of 3 or more only when it lasted minutes, not one slow poll. */
   deletionsFailures: 3,
+  /** a provider's primary live query (USGS FDSN, 2026-10-13) failing this many times in a row warns (never fails) while
+   *  its fallback (the summary feed) keeps the provider ok; the gateway backs it off by the same steps. */
+  primaryFailures: 3,
 });
 
 /** How far back the gateway's USGS deletions query reaches (alerts-gateway USGS_DELETIONS_MAX_WINDOW_MS = the
@@ -143,6 +150,24 @@ export function deletionsFailure(p) {
 }
 
 /**
+ * The primary live query of a provider entry (2026-10-13 gateways, USGS FDSN): `primaryConsecutiveFailures` and
+ * `primaryLastError` are published only while it fails; `fallback: 'summary'` says the provider stays ok on USGS's
+ * summary feed meanwhile (absent while the provider itself fails too). Null when the entry carries no positive streak.
+ */
+export function primaryFailure(p) {
+  if (!isObject(p)) return null;
+  const n = p.primaryConsecutiveFailures;
+  if (!isNum(n) || n <= 0) return null;
+  let why = '';
+  if (typeof p.primaryLastError === 'string' && p.primaryLastError !== '') {
+    const code = p.primaryLastError.slice(0, 32);
+    const gloss = Object.hasOwn(PROVIDER_ERRORS, code) ? ` (${PROVIDER_ERRORS[code]})` : '';
+    why = `, last error ${code}${gloss}`;
+  }
+  return { failures: n, why, fallback: p.fallback === 'summary' };
+}
+
+/**
  * Judge a parsed status.json. Pure: `nowMs` is injected.
  * @returns {{ problems: string[], warnings: string[], notes: string[], summary: string }}
  *   problems fail the run; warnings become ::warning:: annotations; notes are log lines only.
@@ -186,7 +211,15 @@ export function evaluateStatus(doc, { nowMs, thresholds = DEFAULT_THRESHOLDS } =
       const id = typeof p.id === 'string' ? p.id : '?';
       const fails = isNum(p.consecutiveFailures) ? p.consecutiveFailures : null;
       const del = deletionsFailure(p);
-      tags.push(`${id}:${p.ok === false ? `FAIL(${fails ?? '?'})` : 'ok'}${del ? `/deletions-FAIL(${del.failures})` : ''}`);
+      const prim = primaryFailure(p);
+      tags.push(`${id}:${p.ok === false ? `FAIL(${fails ?? '?'})` : 'ok'}${prim ? `/primary-FAIL(${prim.failures})${prim.fallback ? '+summary' : ''}` : ''}${del ? `/deletions-FAIL(${del.failures})` : ''}`);
+      // The primary live query (USGS FDSN): while the provider is ok on its fallback, a warning only — alerts still go
+      // out, from the summary feed. While the provider fails too, the provider line below says so.
+      if (prim && p.ok !== false && prim.fallback) {
+        const text = `provider ${id}'s primary live query has failed ${prim.failures} time${prim.failures === 1 ? '' : 's'} in a row${prim.why}: its live events come from the summary feed (fallback: summary), up to about two minutes later`;
+        if (prim.failures >= t.primaryFailures) warnings.push(`${text} (warning at ${t.primaryFailures})`);
+        else notes.push(`${text} (below the warning at ${t.primaryFailures})`);
+      }
       // The deletions query (USGS): judged whatever `ok` says, since it never fails the provider. A warning only — a
       // gap shorter than the gateway's 7-day deletions window recovers by itself on the next successful query.
       if (del) {
@@ -500,6 +533,7 @@ const NUMERIC_FLAGS = {
   '--max-feed-manifest-age-sec': 'maxFeedManifestAgeSec',
   '--max-config-bundle-age-sec': 'maxConfigBundleAgeSec',
   '--deletions-failures': 'deletionsFailures',
+  '--primary-failures': 'primaryFailures',
 };
 
 /** Parse argv + env into options; throws an Error with a readable message on a bad argument. */

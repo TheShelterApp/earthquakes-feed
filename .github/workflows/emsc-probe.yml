@@ -1,0 +1,23 @@
+name: emsc-probe
+# Temporary (round 23): reproduce what EMSC answers for deep history's 2017-12 month. Lives on the r23/emsc-probe branch
+# only, never on main.
+on:
+  push:
+    branches: [r23/emsc-probe]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 probe/emsc_probe.py
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: emsc-probe
+          path: probe-out/
+          retention-days: 3

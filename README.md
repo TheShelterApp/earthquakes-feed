@@ -251,7 +251,11 @@ as a fallback). It runs three independent jobs; any one failing turns the run re
   than its activity budget: 12 h by default, `activityBudgetHours` in the registry; see
   [APIs.md](APIs.md#get-v1statusjson)) is not counted as failing: it gets a `::warning::` and
   the `[health] silent providers` issue, opened when one appears, commented when the set of
-  silent sources changes and closed when none is left. The run does not go red for it.
+  silent sources changes and closed when none is left. The run does not go red for it. A silent
+  source whose fetch fails in the run is listed with its error (`providers.<id>.error`) and how
+  long its fetch has failed (from `lastSuccessAt`), not as "no rows"; once such a fetch has
+  failed for 48 h the issue is commented again, and every 48 h after while it lasts, even when
+  the set stays the same.
   Two size checks never turn the run red either: the repository's size (a warning above 6 GB),
   and every file on the `data` branch, read from the API's tree listing: the status history under
   `status/history/` (whatever its layout) is summed and its largest file named, and a status-history
@@ -268,7 +272,7 @@ as a fallback). It runs three independent jobs; any one failing turns the run re
   | Condition in `status.json` | Meaning |
   |---|---|
   | `generatedAtMs` older than 300 s | the detector stopped ticking or publishing (it publishes every 60 s) |
-  | a `detector.providers[]` entry with `ok: false` and `consecutiveFailures >= 3` | an alert source is down (a single failed poll is only logged); the message names why when the gateway says so: `lastError` (`timeout`, `http`, `network`, `invalid`) and `consecutiveTimeouts` |
+  | a `detector.providers[]` entry with `ok: false` and `consecutiveFailures` at its limit: 3 for `usgs` and `feed` (polled every 60 s: about 2 min), 6 for `emsc` and `gfz` (polled every 15 s detector tick: about 3.5 min, 3 to 5 is a warning), 3 for any of `usgs`, `emsc`, `gfz` while another of them is at 3 or more too | an alert source is down (a single failed poll is only logged); the message gives about how long the streak has lasted at the gateway's polling and names why when the gateway says so: `lastError` (`timeout`, `http`, `network`, `invalid`) and `consecutiveTimeouts` |
   | `policy.fallback == true` | the restrictive compiled alerts policy runs instead of the signed one |
   | `degraded.active == true` | the free-tier degradation ladder is shedding alert tiers |
   | `budget.headroomPct < 20` (when present) | the gateway is close to a Workers Free daily cap |
@@ -278,6 +282,12 @@ as a fallback). It runs three independent jobs; any one failing turns the run re
   | `feed_manifest_age_s` over 1,800 s (age now, from `feed_manifest_generated_ms` when present) | the feed manifest the gateway reads every minute is stale: the feed stopped publishing (heartbeat Worker, `GH_PAT`, Actions, Pages) |
   | `config_bundle_age_s` over 10 days (from `config_bundle_generated_ms` when present) | the signed config bundle stopped refreshing; apps fall back to compiled defaults once it expires |
 
+  The polling cadences are the gateway's (`TICK_INTERVAL_MS` 15 s, each source's `minIntervalMs`, the
+  backoff to 60 s from the 3rd failure and 300 s from the 10th; mirrored in the script, and checked
+  against a sibling `platform` checkout by `npm test` when one is present); `--provider-failures <n>`
+  and `--fast-provider-failures <n>` set the two limits. A USGS provider that stays `ok` on its
+  summary-feed fallback is not down.
+
   It only **warns** (the run stays green) when today's `fanout.skipped_no_key` or
   `fanout.retry_dropped_budget` is above 0, and when a provider's `deletionsConsecutiveFailures`
   is 3 or more (`--deletions-failures <n>`): the gateway's separate USGS deletions query
@@ -285,7 +295,11 @@ as a fallback). It runs three independent jobs; any one failing turns the run re
   is failing, so a quake USGS deletes is not withdrawn while the provider itself stays `ok`. The
   message gives the age of the provider's `watermarkMs`, the cursor the gateway asks from again once
   the query succeeds (at most 7 days back, so a shorter gap recovers by itself); a shorter streak is a
-  log line. Fields an older gateway does not publish
+  log line. It also only warns when `emsc` or `gfz` is `ok: false` with 3 to 5 failures in a row (see
+  the table), and when a provider's `primaryConsecutiveFailures` is 3 or more while it stays `ok` with
+  `fallback: "summary"` (`--primary-failures <n>`, gateways from 2026-10-13: USGS's ComCat FDSN live
+  query is failing, and its live events come from the summary feed, up to about two minutes later).
+  Fields an older gateway does not publish
   (`apns.mode`, `apns.production`, `apns.problems`, `fanout`, the two ages, a provider's `lastError` /
   `consecutiveTimeouts` / `deletionsConsecutiveFailures` / `deletionsLastError`) are never treated as a problem;
   a null age (not read since the gateway deployed) is a warning.

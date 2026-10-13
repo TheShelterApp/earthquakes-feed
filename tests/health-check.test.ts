@@ -393,6 +393,11 @@ test('silent issue: a changed set is commented as before, a new one is opened, a
   // An unreadable post time never turns into a comment every run.
   const odd = runSilentIssue({ SILENT: 'tmd: x', SILENT_SET: 'tmd', FAILING_48H_AT: 'abc' }, { posts: [['', 'silent-set: tmd']] });
   assert.deepEqual(odd.writes, []);
+  // Each guard on its own (the case above trips both, so either alone passes it): an unreadable post time while a source
+  // has failed for 100 h, and a malformed 48 h time under a post 100 h old.
+  const longAgo = String(Math.floor((now - 100 * HOUR_MS) / 1000));
+  assert.deepEqual(runSilentIssue({ SILENT: 'tmd: x', SILENT_SET: 'tmd', FAILING_48H_AT: longAgo }, { posts: [['', 'silent-set: tmd']] }).writes, []);
+  assert.deepEqual(runSilentIssue({ SILENT: 'tmd: x', SILENT_SET: 'tmd', FAILING_48H_AT: '12x' }, { posts: [[iso(now - 100 * HOUR_MS), 'silent-set: tmd']] }).writes, []);
 });
 
 test('health.yml: the silent issue step gets the 48 h output and never fails the run', () => {

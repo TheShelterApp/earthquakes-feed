@@ -68,6 +68,16 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      - name: Snapshot the silent-change baseline
+        # Before anything writes the data checkout: the day partitions of the live window rebuilt from the event map the
+        # previous derive read (src/live-baseline.ts), into the runner's temp directory, outside .data. derive's
+        # silent-change check verifies them against the sha256 that run recorded; without a snapshot it reads the
+        # committed partitions, so this step never stops the aggregate.
+        continue-on-error: true
+        env:
+          DATA_DIR: .data
+          LIVE_BASELINE_DIR: ${{ runner.temp }}/live-baseline
+        run: npx --no-install tsx src/live-baseline.ts
       - name: Aggregate
         timeout-minutes: 4
         env:

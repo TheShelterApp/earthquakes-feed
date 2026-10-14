@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Deploy the built site (public/) to Cloudflare Pages by Direct Upload, the last step of every aggregate run
 # (.github/actions/derive-publish; tests/pages-deploy.test.ts). Retrying is safe: assets are content-addressed, and
-# Direct Upload never counts against the 500-builds/month Pages cap.
+# Direct Upload deploys have not counted against the 500-builds/month Pages cap (about 8,600 a month so far; Cloudflare's
+# limits page describes that cap for builds from Git pushes).
 #
 # Failures seen: control-plane errors after a finished upload (2026-07-12 'malformed response from the API'; runs
 # 29588370032, 30256024198 and 38254416999 on 2026-10-12, 'Failed to publish your Function'), and an asset upload that

@@ -7,8 +7,9 @@ description: >-
   hand.
 
 # Summaries go to Cloudflare Pages ONLY (never committed — design §4.5); the data branch gets plain-NDJSON partitions +
-# the root manifest. Direct Upload deploys do NOT count against the 500-builds/month Pages cap. Each secret reaches only
-# the step that needs it.
+# the root manifest, and Pages a byte-identical copy of each unfrozen day's partition (events/YYYY/MM/DD.ndjson, round
+# 25). Direct Upload deploys have not counted against the 500-builds/month Pages cap in practice (about 8,600 a month;
+# Cloudflare's limits page describes only builds from Git pushes). Each secret reaches only the step that needs it.
 inputs:
   cf-api-token:
     description: secrets.CF_API_TOKEN (Pages deploy)
@@ -85,6 +86,8 @@ runs:
       env:
         DATA_DIR: .data
         PUBLIC_DIR: public
+        # The calling workflow's snapshot step writes it (src/live-baseline.ts); absent = the committed partitions.
+        LIVE_BASELINE_DIR: ${{ runner.temp }}/live-baseline
       run: npx --no-install tsx src/derive.ts
     - name: Validate output (schema + seq + size gates)
       shell: bash

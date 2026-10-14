@@ -40,7 +40,8 @@ import { isoFromMs } from './util.js';
  * represents nothing in its event replaces the stored row and leaves the event's `lastSeq` as it was (PF-5h (2)), yet
  * it can change the compact feature through the fill-only fields (`updated`, `author`, `magAuthor`, `tsunami`, ...).
  * Replaying a client over the real derive commits of 2026-10-05 14:00..10-06 02:45 found 20 such features. So derive
- * also compares each window event's partition line with the one the previous run committed (detectSilentChanges):
+ * also compares each window event's partition line with the one the previous run wrote (detectSilentChanges; since
+ * round 25 rebuilt from the event map the run checked out, live-baseline.ts, not read from the committed partitions):
  * one that differs while its `lastSeq` is not above the previous run's head is a silent change, kept for a day in
  * `knowledge/index/live_silent.json` with that previous head (`head_before`), and every delta whose `from_seq` is at
  * most `head_before` carries it. A client at a cursor c >= from_seq that has not seen the change synced at or before
@@ -138,19 +139,37 @@ const ID_IN_LINE = /^\{"type":"Feature","id":"([^"]+)"/;
 /**
  * The window events whose partition line differs from the line the previous run committed while their `lastSeq` is
  * not above that run's head `prevHead`. Reads the day partitions as they are on disk, so it must run before derive
- * rewrites them. The line is compared whole (full-fat): a superset of the compact feature's changes.
+ * rewrites them. The line is compared whole (full-fat): a superset of the compact feature's changes. Since round 25
+ * derive reads the previous lines from the event map instead (live-baseline.ts previousWindowLines) and runs this one
+ * beside it as a check until the unfrozen partitions leave the `data` branch (storage option 4 phase 2).
  */
 export function detectSilentChanges(root: string, nodes: Iterable<EventNode>, days: Iterable<string>, prevHead: number): string[] {
-  const window = new Set(days);
+  const window = [...new Set(days)];
+  return silentChangesAgainst(partitionLines(root, window), nodes, window, prevHead);
+}
+
+/** The lines of the committed day partitions of `days`, by feed id (a later day wins an id found twice). */
+export function partitionLines(root: string, days: Iterable<string>): Map<string, string> {
   const previous = new Map<string, string>();
-  for (const day of window) {
+  for (const day of new Set(days)) {
     const file = dayPartitionFile(root, day);
-    if (!existsSync(file)) continue;
-    for (const line of readFileSync(file, 'utf8').split('\n')) {
-      const id = ID_IN_LINE.exec(line)?.[1];
-      if (id) previous.set(id, line);
-    }
+    if (existsSync(file)) addPartitionLines(previous, readFileSync(file, 'utf8'));
   }
+  return previous;
+}
+
+/** Adds each line of a day partition's text to `into`, by its feature id. */
+export function addPartitionLines(into: Map<string, string>, text: string): void {
+  for (const line of text.split('\n')) {
+    const id = ID_IN_LINE.exec(line)?.[1];
+    if (id) into.set(id, line);
+  }
+}
+
+/** detectSilentChanges against previous lines from any source: the window nodes at or below `prevHead` whose full-fat
+ *  line differs from the one in `previous`. */
+export function silentChangesAgainst(previous: ReadonlyMap<string, string>, nodes: Iterable<EventNode>, days: Iterable<string>, prevHead: number): string[] {
+  const window = new Set(days);
   const out: string[] = [];
   for (const n of nodes) {
     if (n.lastSeq > prevHead || !window.has(eventDayKey(n.eventTimeMs))) continue;

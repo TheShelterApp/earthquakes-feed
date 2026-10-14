@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { JSDELIVR_BASE, LIVE_INDEX_DAYS, RETIRED_VISIBLE_MS, SCHEMA_VERSION, dataPaths } from './config.js';
 import { featureToNode, nodeToFeature, writeIfChanged } from './bitemporal.js';
@@ -30,8 +30,58 @@ export type Inventory = Record<string, PartStat>;
 const dayToPath = (dayKey: string): string => dayKey.replace(/-/g, '/');
 const dayFromMs = (ms: number): string => isoFromMs(ms).slice(0, 10);
 
+/** A day partition's path, the same on the `data` branch, on Pages and in every v2 origin: `events/YYYY/MM/DD.ndjson`. */
+export const partitionPath = (dayKey: string): string => `events/${dayToPath(dayKey)}.ndjson`;
+
 export const dayPartitionFile = (root: string, dayKey: string): string =>
   join(dataPaths(root).eventsDir, `${dayToPath(dayKey)}.ndjson`);
+
+/** The first unfrozen day at `nowMs`: a day before it is frozen (today never is, whatever FROZEN_AFTER_DAYS says). */
+export const frozenBefore = (nowMs: number): string => dayFromMs(nowMs - FROZEN_AFTER_DAYS * 86_400_000);
+
+/** The manifest's `frozen` flag (manifestPartitions): older than the days the 5-minute aggregate can still change. */
+export const isFrozenDay = (dayKey: string, nowMs: number): boolean => dayKey < frozenBefore(nowMs) && dayKey !== dayFromMs(nowMs);
+
+/**
+ * Pages copy of an unfrozen day partition (round 25, storage option 4 phase 1): the same bytes as the `data` branch file,
+ * at the path the v2 manifest's `pages` origin builds (`https://<domain>/` + `partition.path`). The manifest's `url`
+ * names it for each unfrozen day it was written for (manifestPartitions). A frozen day is never published here: its
+ * immutable copy is jsDelivr `@<data_commit>`.
+ */
+export const pagesPartitionUrl = (dayKey: string): string => `${DOMAIN}/${partitionPath(dayKey)}`;
+
+export function writePagesPartition(publicDir: string, dayKey: string, ndjson: string): boolean {
+  return writeIfChanged(join(publicDir, partitionPath(dayKey)), ndjson);
+}
+
+/** Removes the Pages copies under `publicDir/events/` of days not in `keep` (only `YYYY/MM/DD.ndjson` files); returns
+ *  their days. */
+export function removeStalePagesPartitions(publicDir: string, keep: ReadonlySet<string>): string[] {
+  const root = join(publicDir, 'events');
+  const removed: string[] = [];
+  if (!existsSync(root)) return removed;
+  for (const y of readdirSync(root).filter((n) => /^\d{4}$/.test(n))) {
+    for (const m of readdirSync(join(root, y)).filter((n) => /^\d{2}$/.test(n))) {
+      for (const f of readdirSync(join(root, y, m)).filter((n) => /^\d{2}\.ndjson$/.test(n))) {
+        const day = `${y}-${m}-${f.slice(0, 2)}`;
+        if (keep.has(day)) continue;
+        rmSync(join(root, y, m, f));
+        removed.push(day);
+      }
+    }
+  }
+  return removed.sort();
+}
+
+/** A day partition's bytes: every node of the day (all states), by event time then feed id, one full-fat Feature per
+ *  line. A pure function of the nodes, so the event_map alone rebuilds it (live-baseline.ts). */
+export function dayPartitionText(nodes: Iterable<EventNode>): string {
+  return ndjsonOf(partitionOrder(nodes).map((n) => nodeToFeature(n)));
+}
+
+const partitionOrder = (nodes: Iterable<EventNode>): EventNode[] =>
+  [...nodes].sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : 1));
+const ndjsonOf = (feats: unknown[]): string => feats.map((f) => JSON.stringify(f) + '\n').join('');
 
 /** A retired node — superseded by an op:merge, or tombstoned — that the live surfaces (Pages
  *  day file, rolling summaries) still publish, compact and flagged non-live: within
@@ -54,22 +104,23 @@ export function readDayPartitionNodes(root: string, dayKey: string): EventNode[]
 }
 
 /**
- * Write one UTC day's partition: plain NDJSON in the tree (git delta-compresses text,
- * byte-compare avoids churn) plus, for recent days, a ready-to-render GeoJSON on Pages.
+ * Write one UTC day's partition: plain NDJSON in the tree (the byte-compare leaves an unchanged
+ * day alone; a changed one costs the repository about one compressed copy per GitHub roll-up,
+ * APIs.md Repository size) plus, for recent days, a ready-to-render GeoJSON on Pages.
  * Includes ALL node states (live/tombstoned/superseded) so the round-trip is lossless.
  * The Pages day file carries the live events full-fat plus, in compact form, the recently
  * retired ones (superseded or tombstoned) flagged non-live (publishesRetired) — the summaries
- * follow the same rule.
+ * follow the same rule. Returns the NDJSON it wrote (derive copies an unfrozen day's to Pages).
  */
 export function writeDayPartition(
   root: string,
   dayKey: string,
   nodes: EventNode[],
   opts: { publicV1?: string; nowMs: number; headIngestTime: string },
-): { written: boolean; stat: PartStat } {
-  const sorted = [...nodes].sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : 1));
+): { written: boolean; stat: PartStat; ndjson: string } {
+  const sorted = partitionOrder(nodes);
   const feats = sorted.map((n) => nodeToFeature(n));
-  const ndjson = feats.map((f) => JSON.stringify(f)).join('\n') + (feats.length ? '\n' : '');
+  const ndjson = ndjsonOf(feats);
   const written = writeIfChanged(dayPartitionFile(root, dayKey), ndjson);
 
   if (opts.publicV1 && dayKey >= dayFromMs(opts.nowMs - PAGES_DAY_WINDOW * 86_400_000)) {
@@ -108,6 +159,7 @@ export function writeDayPartition(
   return {
     written,
     stat: { count: nodes.length, bytes: Buffer.byteLength(ndjson), min_mag: mags.length ? Math.min(...mags) : null, max_mag: mags.length ? Math.max(...mags) : null },
+    ndjson,
   };
 }
 
@@ -141,27 +193,36 @@ export interface ManifestPartition {
  *  THIS run. Each Direct Upload deploy is a full snapshot — files not in it 404 — so
  *  pages_url is advertised ONLY for those days (previously the whole 120-day window was
  *  advertised while only the ~45-day event-map load existed on Pages: 104/121 were 404s).
- *  Older days resolve through `url` (jsDelivr NDJSON, full-fat). */
-export function manifestPartitions(inv: Inventory, nowMs: number, pagesDays?: ReadonlySet<string>): ManifestPartition[] {
-  const today = dayFromMs(nowMs);
+ *  Older days resolve through `url` (jsDelivr NDJSON, full-fat).
+ *
+ *  `pagesNdjsonDays` = the unfrozen days whose NDJSON partition this run copied to Pages (writePagesPartition): their
+ *  `url` is that copy, always the current bytes, instead of jsDelivr `@data` (cached up to 12 h). A frozen day keeps
+ *  `@data` whatever the set says; so does an unfrozen day missing from it (`url` only ever names a file that exists).
+ *  `path`, `pages_url` and the v2 `sha256` (the same bytes) do not change. */
+export function manifestPartitions(
+  inv: Inventory,
+  nowMs: number,
+  pagesDays?: ReadonlySet<string>,
+  pagesNdjsonDays?: ReadonlySet<string>,
+): ManifestPartition[] {
   const pagesFloor = dayFromMs(nowMs - PAGES_DAY_WINDOW * 86_400_000);
-  const frozenBefore = dayFromMs(nowMs - FROZEN_AFTER_DAYS * 86_400_000);
   return Object.keys(inv)
     .sort()
     .map((date) => {
       const s = inv[date]!;
-      const p = dayToPath(date);
+      const path = partitionPath(date);
       const onPages = pagesDays ? pagesDays.has(date) : date >= pagesFloor;
+      const frozen = isFrozenDay(date, nowMs);
       return {
         date,
-        path: `events/${p}.ndjson`,
-        url: `${JSDELIVR_BASE}@data/events/${p}.ndjson`,
+        path,
+        url: !frozen && pagesNdjsonDays?.has(date) ? pagesPartitionUrl(date) : `${JSDELIVR_BASE}@data/${path}`,
         ...(onPages && date >= pagesFloor ? { pages_url: `${DOMAIN}/v1/events/${date}.geojson` } : {}),
         count: s.count,
         bytes: s.bytes,
         min_mag: s.min_mag,
         max_mag: s.max_mag,
-        frozen: date < frozenBefore && date !== today,
+        frozen,
       };
     });
 }

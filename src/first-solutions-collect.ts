@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { extractTarball } from './archive-io.js';
-import { eventDayKey } from './bitemporal.js';
-import { REPO, dataPaths } from './config.js';
+import { eventDayKey, loadEventMap } from './bitemporal.js';
+import { EVENT_MAP_HORIZON_DAYS, REPO, dataPaths } from './config.js';
 import {
   type FirstSolutionsCursor,
   type SourceCursor,
@@ -34,7 +34,8 @@ import {
 } from './first-solutions.js';
 import { gh, ghRetry, ghRetryNet, sleepMs } from './gh.js';
 import { GitHubStore } from './history-store.js';
-import { FROZEN_AFTER_DAYS, dayPartitionFile } from './partitions.js';
+import { partitionTexts } from './live-baseline.js';
+import { FROZEN_AFTER_DAYS, dayPartitionFile, frozenBefore } from './partitions.js';
 import { isoFromMs } from './util.js';
 
 /**
@@ -235,8 +236,37 @@ export function reopenChangedDeepMonths(provider: string, cur: SourceCursor, dee
   return reopened;
 }
 
-/** Day partitions: in the tree when there, else from the month's Release archive, else (before the 3-year layer) from
- *  the month's current deep-history edition; each asset downloaded once per run. */
+/** An unfrozen day's partition rebuilt from the event map: `from` is the first unfrozen day (partitions.ts
+ *  frozenBefore), `text` the day's partition (dayPartitionText; '' for a day without events). */
+export interface UnfrozenDays {
+  from: string;
+  text(day: string): string;
+}
+
+/** UnfrozenDays from the data checkout's event map, loaded once, on the first unfrozen day asked for. */
+export function unfrozenFromEventMap(root: string, nowMs: number): UnfrozenDays {
+  let byDay: Map<string, string> | null = null;
+  const from = frozenBefore(nowMs);
+  return {
+    from,
+    text(day) {
+      if (!byDay) {
+        const days = new Set<string>();
+        const map = loadEventMap(root, { sinceDays: EVENT_MAP_HORIZON_DAYS, nowMs });
+        for (const n of map.values()) {
+          const d = eventDayKey(n.eventTimeMs);
+          if (d >= from) days.add(d);
+        }
+        byDay = partitionTexts(map.values(), days);
+      }
+      return byDay.get(day) ?? '';
+    },
+  };
+}
+
+/** Day partitions: an unfrozen day from the event map (when given), else in the tree when there, else from the month's
+ *  Release archive, else (before the 3-year layer) from the month's current deep-history edition; each asset downloaded
+ *  once per run. */
 export class PartitionReader {
   private readonly archivedDay = new Map<string, ArchiveEntry>();
   private readonly assets = new Map<string, Promise<string>>();
@@ -247,6 +277,10 @@ export class PartitionReader {
     archives: ArchiveEntry[],
     private readonly download: (e: { tag: string; asset: string }, intoDir: string) => void = downloadArchive,
     private readonly deep: DeepHistory = { boundary: null, current: new Map(), start: null },
+    /** Days the 5-minute run can still change: read from the event map, never from the tree, which holds such a day
+     *  only until storage option 4 phase 2 (APIs.md Repository size). The walk stops at the last frozen day; only a
+     *  one-off FIRST_SOLUTIONS_DAYS slice reaches these. */
+    private readonly unfrozen: UnfrozenDays | null = null,
   ) {
     for (const a of archives) for (const d of a.days ?? []) this.archivedDay.set(d, a);
   }
@@ -270,6 +304,7 @@ export class PartitionReader {
   /** The partition's text, '' when the feed has no partition of that day; throws when an archive or edition cannot be
    *  read. */
   async dayText(day: string): Promise<string> {
+    if (this.unfrozen && day >= this.unfrozen.from) return this.unfrozen.text(day);
     const inTree = dayPartitionFile(this.root, day);
     if (existsSync(inTree)) return readFileSync(inTree, 'utf8');
     let entry: { tag: string; asset: string } | undefined = this.archivedDay.get(day);
@@ -712,7 +747,7 @@ async function main(): Promise<void> {
       if (reopened.length) console.log(`first-solutions ${s.provider}: deep month(s) ${reopened.join(', ')} have a new edition with other ${s.provider} rows; collected again`);
     }
   }
-  const partitions = new PartitionReader(root, archives, undefined, deep);
+  const partitions = new PartitionReader(root, archives, undefined, deep, unfrozenFromEventMap(root, startedMs));
   const deepKeyOf = (provider: string, day: string): string | null => {
     if (!deep.boundary || day >= deep.boundary) return null;
     const e = deep.current.get(day.slice(0, 7));

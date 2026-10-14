@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
-import { DATA_DIR, MAX_PUBLISHED_BYTES, PUBLIC_DIR, SCHEMA_DIR, dataPaths } from './config.js';
+import { DATA_DIR, DOMAIN, MAX_PUBLISHED_BYTES, PUBLIC_DIR, SCHEMA_DIR, dataPaths } from './config.js';
 import { deltaBoundViolations, readSilentLog } from './live-sync.js';
 
 const ajv = new Ajv2020({ allErrors: true, strict: false });
@@ -16,6 +16,10 @@ const vObs = compile('observation.schema.json');
 const vFeat = compile('feature.schema.json');
 const vManifest = compile('manifest.schema.json');
 const vLiveIndex = compile('live-index.schema.json');
+
+/** Cloudflare Pages, Free plan: files per site (deploy) and bytes per file. */
+const PAGES_MAX_FILES = 20_000;
+const PAGES_MAX_FILE_BYTES = 25 * 1024 * 1024;
 
 let errors = 0;
 const fail = (msg: string): void => {
@@ -127,6 +131,36 @@ for (const file of walk(p.eventsDir, (f) => f.endsWith('.ndjson'))) {
   }
 }
 
+// 3b. The Pages copies of the unfrozen day partitions (round 25, storage option 4 phase 1; partitions.ts
+//     writePagesPartition): byte for byte the partition derive wrote to the data checkout (sign-manifest.ts hashes that
+//     one for the v2 sha256), and every manifest `url` on Pages names one of them, of an unfrozen day, with its `bytes`.
+const pagesEventsDir = join(PUBLIC_DIR, 'events');
+const pagesNdjson = walk(pagesEventsDir, (f) => f.endsWith('.ndjson'));
+for (const file of pagesNdjson) {
+  const rel = relative(PUBLIC_DIR, file).split(sep).join('/');
+  const inData = join(DATA_DIR, rel);
+  if (!existsSync(inData)) fail(`${file}: no partition ${rel} in the data checkout`);
+  else if (!readFileSync(file).equals(readFileSync(inData))) fail(`${file}: differs from the data checkout's ${rel}`);
+}
+try {
+  const m = JSON.parse(readFileSync(join(publicV1, 'manifest.json'), 'utf8')) as {
+    partitions?: { date: string; path: string; url?: string; bytes?: number; frozen?: boolean }[];
+  };
+  let onPages = 0;
+  for (const part of m.partitions ?? []) {
+    if (!part.url?.startsWith(`https://${DOMAIN}/`)) continue;
+    onPages++;
+    if (part.url !== `https://${DOMAIN}/${part.path}`) fail(`manifest: partition ${part.date} url ${part.url} is not the Pages copy of ${part.path}`);
+    if (part.frozen) fail(`manifest: frozen partition ${part.date} has a Pages url (frozen days stay on jsDelivr @data_commit)`);
+    const f = join(PUBLIC_DIR, part.path);
+    if (!existsSync(f)) fail(`manifest: partition ${part.date} url ${part.url} names no deployed file`);
+    else if (part.bytes != null && statSync(f).size !== part.bytes) fail(`manifest: partition ${part.date} bytes ${part.bytes} != ${statSync(f).size} on Pages`);
+  }
+  if (onPages !== pagesNdjson.length) fail(`manifest: ${onPages} partition url(s) on Pages, ${pagesNdjson.length} NDJSON file(s) deployed`);
+} catch (err) {
+  if (existsSync(join(publicV1, 'manifest.json'))) fail(`manifest: unreadable (${err instanceof Error ? err.message : String(err)})`);
+}
+
 // 4. The live index (PRB-2, live-sync.ts): every day file and delta it lists exists with the listed bytes and sha256,
 //    the days are consecutive, and a delta holds only features above its from_seq (a client applies it on that bound)
 //    or silent changes the log names (live-sync.ts: such a feature keeps its older seq).
@@ -182,6 +216,21 @@ try {
   }
 } catch {
   console.warn('· no public manifest.json yet (run derive first)');
+}
+
+// 6. Cloudflare Pages limits (developers.cloudflare.com/pages/platform/limits, Free plan): at most 20,000 files per
+//    deploy and 25 MiB per file. A deploy past either fails; warn from 75 % of the file count.
+const deployed = walk(PUBLIC_DIR, () => true);
+if (deployed.length) {
+  if (deployed.length > PAGES_MAX_FILES) fail(`Pages: ${deployed.length} files, over the ${PAGES_MAX_FILES}-file limit`);
+  else if (deployed.length > PAGES_MAX_FILES * 0.75) console.warn(`::warning::Pages: ${deployed.length} files, ${((deployed.length / PAGES_MAX_FILES) * 100).toFixed(1)}% of the ${PAGES_MAX_FILES}-file limit`);
+  let total = 0;
+  for (const f of deployed) {
+    const size = statSync(f).size;
+    total += size;
+    if (size > PAGES_MAX_FILE_BYTES) fail(`Pages: ${f} is ${size} bytes, over the ${PAGES_MAX_FILE_BYTES}-byte file limit`);
+  }
+  console.log(`validate: Pages deploy ${deployed.length} files (limit ${PAGES_MAX_FILES}), ${(total / 1e6).toFixed(1)} MB, ${pagesNdjson.length} NDJSON partition(s)`);
 }
 
 if (errors) {

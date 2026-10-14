@@ -50,6 +50,8 @@ export const PROVIDER_MIN_INTERVAL_MS: Readonly<Record<string, number>>;
 export const PROVIDER_BACKOFF_STEPS: ReadonlyArray<Readonly<{ atFailures: number; intervalMs: number }>>;
 /** The gateway's own upstream sources (usgs, emsc, gfz); the feed is the backstop. */
 export const DIRECT_PROVIDERS: ReadonlyArray<string>;
+/** The feed backstop's provider id ('feed'); its state is named in the coverage messages, never judged as direct. */
+export const BACKSTOP_PROVIDER: string;
 /** How often the gateway polls a healthy provider (ms, whole ticks; 60 s for an unknown id). */
 export function pollIntervalMs(id: string): number;
 /** Whether the gateway polls the provider on every detector tick (EMSC, GFZ). */

@@ -917,6 +917,34 @@ test('coverage: all three direct providers failing together for 1 min fail the r
   assert.match(long.problems[2]!, /^provider gfz is down/);
 });
 
+test('coverage: the messages say when the feed backstop is failing too (an egress outage takes every source)', () => {
+  // Round-25 review: the egress outage that fails all three direct providers fails the backstop too, and the page must
+  // not tell the reader that the gateway still sees quakes through it. The verdicts stay as they were.
+  const all = evaluateStatus(failingFor({ usgs: 65, emsc: 95, gfz: 80, feed: 65 }), { nowMs: NOW });
+  assert.equal(all.problems.length, 1);
+  assert.equal(
+    all.problems[0],
+    "all three direct providers (usgs, emsc, gfz) have been failing together for 65 s (limit 60 s): the feed backstop is failing too for 65 s, so the gateway sees no new quakes at all; every source failing at once points at the gateway's side (its egress, DNS, the Workers runtime or a deploy)",
+  );
+  const pair = evaluateStatus(failingFor({ emsc: 150, gfz: 125, feed: 30 }), { nowMs: NOW });
+  assert.deepEqual(pair.problems, ['two of the three direct providers (emsc and gfz) have been failing together for 2 min (limit 2 min): one direct source is left (usgs); the feed backstop is failing too for 30 s']);
+  // ok:false without a published streak is still failing, with no duration to give.
+  const bare = failingFor({ emsc: 150, gfz: 125 });
+  Object.assign(bare.detector.providers.find((p: { id: string }) => p.id === 'feed'), { ok: false });
+  assert.match(evaluateStatus(bare, { nowMs: NOW }).problems[0]!, /: one direct source is left \(usgs\); the feed backstop is failing too$/);
+  // A document without the backstop's entry claims nothing about it.
+  const none = failingFor({ usgs: 65, emsc: 95, gfz: 80 });
+  none.detector.providers = none.detector.providers.filter((p: { id: string }) => p.id !== 'feed');
+  assert.match(evaluateStatus(none, { nowMs: NOW }).problems[0]!, /: the gateway sees no new quakes from a direct source \(status\.json lists no feed backstop\); three agencies/);
+  const nonePair = failingFor({ emsc: 150, gfz: 125 });
+  nonePair.detector.providers = nonePair.detector.providers.filter((p: { id: string }) => p.id !== 'feed');
+  assert.match(evaluateStatus(nonePair, { nowMs: NOW }).problems[0]!, /: one direct source is left \(usgs\)$/);
+  // The backstop is no direct provider: failing or not, the verdicts are those of the direct providers alone.
+  for (const [spec, n] of [[{ usgs: 59, emsc: 100, gfz: 100, feed: 200 }, 0], [{ emsc: 119, gfz: 119, feed: 299 }, 0], [{ emsc: 120, gfz: 120, feed: 10 }, 1]] as const) {
+    assert.equal(evaluateStatus(failingFor(spec), { nowMs: NOW }).problems.length, n, JSON.stringify(spec));
+  }
+});
+
 test('coverage counts direct providers only: the feed backstop, a USGS on its summary fallback and an unknown streak do not', () => {
   // The feed is not a direct provider: EMSC and the feed failing for 2.5 min are two warnings, no coverage problem.
   const feed = evaluateStatus(failingFor({ feed: 150, emsc: 150 }), { nowMs: NOW });

@@ -249,6 +249,30 @@ test('far: in a dense cell the twins still fold, into the global agencies’ eve
   }
 });
 
+test('two quakes the global agencies list stay two events whatever OVSICORI’s two ids pair (round 27 review)', () => {
+  // A quake inside the box (ComCat M4.6 at the automatic solution's place, 0 s) and the M6.1 159 km and 20 s away: the
+  // automatic one is the M4.6's, the reviewed one the M6.1's, and the far window pairs them (195 km, 27 s, 7.2 km/s,
+  // |ΔM| 1.4). ComCat's two ids keep the quakes apart, each represented by its own solution, whatever the order (the
+  // reviewed row sits in the M4.6's event when it comes after the automatic one, which it joins at first sight, and in
+  // the M6.1's when it comes first: a provenance row, never the representative).
+  const seed = (r: Resolver): void => {
+    r.ingest(obs('us7000x001', { eventTimeMs: P_AUTO.eventTimeMs, status: 'reviewed', lat: P_AUTO.lat, lon: P_AUTO.lon, mag: 4.6, magType: 'mb' }, 'usgs'), '2026-10-12T23:40:00Z');
+    r.ingest(obs('us6000u1wn', { eventTimeMs: Date.parse('2026-10-12T23:20:36Z'), status: 'reviewed', lat: 7.6896, lon: -81.4896, mag: 6.1, magType: 'mww' }, 'usgs'), '2026-10-12T23:40:00Z');
+  };
+  for (const autoLast of [false, true]) {
+    const map = far({ mag: 6.0 }, { mag: 4.6 }, seed, autoLast);
+    const x = holding(map, 'usgs:us7000x001');
+    const y = holding(map, 'usgs:us6000u1wn');
+    assert.equal(x.length, 1, `autoLast=${autoLast}`);
+    assert.equal(y.length, 1, `autoLast=${autoLast}`);
+    assert.notEqual(x[0], y[0], `autoLast=${autoLast}`);
+    assert.equal(chosenKey(x[0]!), 'usgs:us7000x001', `autoLast=${autoLast}`);
+    assert.equal(chosenKey(y[0]!), 'usgs:us6000u1wn', `autoLast=${autoLast}`);
+    const keys = live(map).flatMap((n) => n.provenance.map((r) => `${r.provider}:${r.nativeId}`));
+    assert.equal(new Set(keys).size, keys.length, `autoLast=${autoLast}`);
+  }
+});
+
 test('an automatic solution beside its reviewed twin never represents the event, whatever the other rows', () => {
   // EMSC's own solution (no status) and OVSICORI's reviewed one outside the box (outranked beside a partner): without the
   // rule the automatic solution inside the box (status rank 1 against EMSC's 0) would place the M6.1 at its phantom spot.

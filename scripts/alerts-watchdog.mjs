@@ -10,8 +10,9 @@
 //     round-25 gateways; for an older gateway, or a streak older than the field, the time its consecutiveFailures span
 //     at the gateway's polling): 3 min for EMSC and GFZ (polled every 15 s detector tick), 5 min for USGS, the feed
 //     backstop and any other id (polled every 60 s); two of the three direct providers (USGS, EMSC, GFZ) failing
-//     together for 2 min; all three failing together for 1 min. A shorter streak from 1 min is a warning. The message
-//     names the gateway's lastError and consecutiveTimeouts when the document carries them,
+//     together for 2 min; all three failing together for 1 min (both messages say when the feed backstop is failing
+//     too). A shorter streak from 1 min is a warning. The message names the gateway's lastError and
+//     consecutiveTimeouts when the document carries them,
 //   - policy.fallback is true (the restrictive compiled policy runs instead of the signed one),
 //   - degraded.active is true (the free-tier degradation ladder is shedding alert tiers),
 //   - budget.headroomPct is below 20 (checked only when present),
@@ -128,6 +129,8 @@ export const PROVIDER_BACKOFF_STEPS = Object.freeze([
 ]);
 /** The gateway's own upstream sources (its ALL_SOURCES); the feed is the backstop behind them. */
 export const DIRECT_PROVIDERS = Object.freeze(['usgs', 'emsc', 'gfz']);
+/** The backstop's provider id (alerts-gateway src/detect/feed-source.ts): this feed, read every 60 s. */
+export const BACKSTOP_PROVIDER = 'feed';
 
 /** Whole detector ticks covering `ms`: a poll can only happen on a tick. */
 const onTicks = (ms) => Math.max(1, Math.ceil(ms / GATEWAY_TICK_MS)) * GATEWAY_TICK_MS;
@@ -346,17 +349,30 @@ export function evaluateStatus(doc, { nowMs, thresholds = DEFAULT_THRESHOLDS } =
       const est = ids.filter((id) => !durations.get(id).measured);
       return est.length > 0 ? ` (${est.join(' and ')} judged by ${est.length === 1 ? 'its failure count' : 'their failure counts'}: no failingSinceMs)` : '';
     };
+    // What is left besides the direct providers: the feed backstop, unless it fails too. An outage of the gateway's
+    // egress (the likely cause when every direct provider fails at once) takes the backstop with it, and then the
+    // gateway sees no new quake at all; the coverage messages must not say it still has the backstop then. Text only:
+    // the backstop's state changes no verdict.
+    const backstop = providers.find((p) => isObject(p) && p.id === BACKSTOP_PROVIDER);
+    const backstopDown = isObject(backstop) && backstop.ok === false;
+    const backstopFor = durations.has(BACKSTOP_PROVIDER) ? ` for ${spanText(durations.get(BACKSTOP_PROVIDER).sec)}` : '';
     const inGroup = new Set();
     if (directFailing.length === DIRECT_PROVIDERS.length && together(directFailing) >= t.allDirectDownSec) {
       for (const id of directFailing) inGroup.add(id);
-      problems.push(`all three direct providers (${DIRECT_PROVIDERS.join(', ')}) have been failing together for ${spanText(together(directFailing))} (limit ${spanText(t.allDirectDownSec)})${byCount(directFailing)}: the gateway sees new quakes only through the feed backstop, minutes late; three agencies failing at once points at the gateway's side (its egress, DNS, the Workers runtime or a deploy)`);
+      const left = backstopDown
+        ? `the feed backstop is failing too${backstopFor}, so the gateway sees no new quakes at all; every source failing at once`
+        : backstop
+          ? 'the gateway sees new quakes only through the feed backstop, minutes late; three agencies failing at once'
+          : 'the gateway sees no new quakes from a direct source (status.json lists no feed backstop); three agencies failing at once';
+      problems.push(`all three direct providers (${DIRECT_PROVIDERS.join(', ')}) have been failing together for ${spanText(together(directFailing))} (limit ${spanText(t.allDirectDownSec)})${byCount(directFailing)}: ${left} points at the gateway's side (its egress, DNS, the Workers runtime or a deploy)`);
     } else if (directFailing.length >= 2 && together(directFailing.slice(0, 2)) >= t.twoDirectDownSec) {
       const pair = directFailing.slice(0, 2);
       for (const id of pair) inGroup.add(id);
       const left = DIRECT_PROVIDERS.filter((id) => !pair.includes(id))
         .map((id) => (durations.has(id) ? `${id}, failing too for ${spanText(durations.get(id).sec)}` : id))
         .join(', ');
-      problems.push(`two of the three direct providers (${pair.join(' and ')}) have been failing together for ${spanText(together(pair))} (limit ${spanText(t.twoDirectDownSec)})${byCount(pair)}: one direct source is left (${left}), with the feed backstop`);
+      const behind = backstopDown ? `; the feed backstop is failing too${backstopFor}` : backstop ? ', with the feed backstop' : '';
+      problems.push(`two of the three direct providers (${pair.join(' and ')}) have been failing together for ${spanText(together(pair))} (limit ${spanText(t.twoDirectDownSec)})${byCount(pair)}: one direct source is left (${left})${behind}`);
     }
     for (const p of providers) {
       if (!isObject(p)) continue;

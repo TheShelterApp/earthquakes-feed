@@ -275,8 +275,8 @@ as a fallback). It runs three independent jobs; any one failing turns the run re
   |---|---|
   | `generatedAtMs` older than 300 s | the detector stopped ticking or publishing (it publishes every 60 s) |
   | a `detector.providers[]` entry `ok: false` for 3 min (`emsc`, `gfz`: polled every 15 s detector tick) or 5 min (`usgs`, `feed`, any other id: polled every 60 s) | an alert source is down; from 1 min it is a warning, a shorter streak is a log line. The message says how long and why when the gateway says so: `lastError` (`timeout`, `http`, `network`, `invalid`) and `consecutiveTimeouts` |
-  | two of the three direct providers (`usgs`, `emsc`, `gfz`) `ok: false` together for 2 min | one direct source is left, with the feed backstop |
-  | all three direct providers `ok: false` together for 1 min | the gateway sees new quakes only through the feed backstop, minutes late; three agencies at once points at the gateway's side (egress, DNS, the Workers runtime, a deploy) |
+  | two of the three direct providers (`usgs`, `emsc`, `gfz`) `ok: false` together for 2 min | one direct source is left, with the feed backstop (the message says when the backstop is failing too) |
+  | all three direct providers `ok: false` together for 1 min | the gateway sees new quakes only through the feed backstop, minutes late; three agencies at once points at the gateway's side (egress, DNS, the Workers runtime, a deploy). An egress outage takes the backstop too: the message then says the gateway sees no new quakes at all |
   | `policy.fallback == true` | the restrictive compiled alerts policy runs instead of the signed one |
   | `degraded.active == true` | the free-tier degradation ladder is shedding alert tiers |
   | `budget.headroomPct < 20` (when present) | the gateway is close to a Workers Free daily cap |
@@ -287,8 +287,9 @@ as a fallback). It runs three independent jobs; any one failing turns the run re
   | `config_bundle_age_s` over 10 days (from `config_bundle_generated_ms` when present) | the signed config bundle stopped refreshing; apps fall back to compiled defaults once it expires |
 
   Outages are judged by time, not by a failure count (round 25, 2026-10-14): a count meant 30 s on
-  EMSC and GFZ and 2 min on USGS, and the round-24 rule "3 failures while another direct provider is
-  down" turned a 40 s blip red. The duration is `generatedAtMs - failingSinceMs`, published by the
+  EMSC and GFZ and 2 min on USGS: a count of 3 turned the 40 s GEOFON blip of 2026-10-09 red, and
+  the round-24 rule "3 failures while another direct provider is down" would still turn a 40 s blip
+  of two providers red. The duration is `generatedAtMs - failingSinceMs`, published by the
   gateway from 2026-10-14 while a streak lasts (absent while healthy). For an older gateway, or a
   streak that began before the field, it is the span of `consecutiveFailures` at the gateway's
   polling (`TICK_INTERVAL_MS` 15 s, each source's `minIntervalMs`, the backoff to 60 s from the 3rd
@@ -308,6 +309,13 @@ as a fallback). It runs three independent jobs; any one failing turns the run re
   - 2 min for two direct providers at once is above the 90–110 s a fast provider's blip can read and
     below every single-provider limit; 1 min for all three is reached only when USGS fails two polls
     60 s apart.
+
+  A model of the gateway's polling (its own backoff code, 15 s ticks plus the poll time, 4 s
+  timeouts, status.json written on the 60 s flush), run against outages at random phases, agrees
+  (round-25 review): one or both fast providers out for up to 90 s, or every source for up to 60 s,
+  never turn a run red; red takes an outage of about 100 s for two direct providers, 70 s for all
+  three, 3 min for EMSC or GFZ alone and 6 min for USGS (FDSN and summary feed both down); a
+  ComCat-only slowdown stays a warning.
 
   `--provider-down-sec`, `--fast-provider-down-sec`, `--two-direct-down-sec`, `--all-direct-down-sec`
   and `--provider-warn-sec` (seconds) set the limits. A USGS provider that stays `ok` on its

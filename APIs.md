@@ -549,8 +549,16 @@ OVSICORI's 1450630, below).
 
 The rules run in the aggregate run only (the regular heal and the held withdrawal reach the 7-day hot window), so the
 days already frozen keep what they hold. OVSICORI's automatic 1450630 (M6.5 for the M6.1, 159 km and 20 s off) lay
-inside its region and stayed an event of its own until round 27 (above); OVSICORI's reviewed solutions of aftershocks
-no other agency listed stay events of their own.
+inside its region and stayed an event of its own until round 27 (above); OVSICORI's reviewed solutions of aftershocks no
+other agency listed stay events of their own. No other agency was given these rules. In the replayed state the lone live
+events of M ≥ 4.5 that other regional agencies place outside their own boxes are another pattern: GeoNet 124 (Tonga,
+Kermadec, Vanuatu), SSN 34, GA 18, INGV 14, NCS 11 and fewer for the rest, almost none automatic (IG-EPN and IMO one
+each, against OVSICORI's 99); 17 of them (INGV 6, GeoNet 5, GA 2, CENC 2, JMA 1, SSN 1) lie within such a window of a
+USGS, EMSC or GFZ event of M ≥ 5.5, with |ΔM| ≤ 0.6: 10 of distant quakes 46–82 km from the partner's place, 6 in the
+Flores swarm of 2026-08-14…20 (4–24 km, held apart by its dense cells) and one JMA row 30 s off. Those are splits of
+real large quakes the windows themselves leave, not OVSICORI's mislocations and phantoms; after the change OVSICORI
+places no automatic solution of M ≥ 4.5 outside its region as an event of its own, and 22 reviewed ones remain (14 with
+no other agency's event within 60 s and 300 km).
 
 An event's representative is re-derived from its rows whenever one of them changes. Since round 27 every run also
 re-derives, in the hot window, an event whose stored representative is a row these rules rank behind another of its rows
@@ -563,19 +571,11 @@ then also takes GFZ's event of the quake).
 Round 27 was measured the same way, over the log of 2026-07-05…10-14 (233,118 lines): the review pairs fold 62 groups
 (63 fewer events per connected group of ids), and with the lower partner floor 66 groups fold (68 fewer); 0 more events
 anywhere, one regrouping with the same count (two reviews of one quake), rows in two live events 0, the held solutions
-unchanged. In 24 of the 66 groups every row's nearest
-ComCat or EMSC quake is one and the same, with no second quake within 30 s; ComCat and EMSC list nothing near the other
-42 (Costa Rica's M1–3 quakes, and OVSICORI's reviews of aftershocks nobody else listed). Left apart: an automatic
-solution EMSC copied (author UNA) whose review joined another agency's event that holds EMSC's own event of the quake
-(EMSC's two ids keep them apart: 1450622 beside ComCat's M4.5 `us6000u1w6`), and two reviews of one quake under two ids. No other agency was given these rules. In the replayed state the lone live events of M ≥ 4.5 that other regional
-agencies place outside their own boxes are another pattern: GeoNet 124 (Tonga, Kermadec, Vanuatu), SSN 34, GA 18,
-INGV 14, NCS 11 and fewer for the rest, almost none automatic (IG-EPN and IMO one each, against OVSICORI's 99); 17 of
-them (INGV 6, GeoNet 5, GA 2, CENC 2, JMA 1, SSN 1) lie within such a window of a USGS, EMSC or GFZ event of M ≥ 5.5,
-with |ΔM| ≤ 0.6: 10 of distant quakes 46–82 km from the partner's place, 6 in the Flores swarm of 2026-08-14…20 (4–24 km,
-held apart by its dense cells) and one JMA row 30 s off. Those are splits of real large quakes the windows themselves
-leave, not OVSICORI's mislocations and phantoms; after the change OVSICORI places no automatic solution of M ≥ 4.5
-outside its region as an event of its own, and 22 reviewed ones remain (14 with no other agency's event within 60 s
-and 300 km).
+unchanged. In 24 of the 66 groups every row's nearest ComCat or EMSC quake is one and the same, with no second quake
+within 30 s; ComCat and EMSC list nothing near the other 42 (Costa Rica's M1–3 quakes, and OVSICORI's reviews of
+aftershocks nobody else listed). Left apart: an automatic solution EMSC copied (author UNA) whose review joined another
+agency's event that holds EMSC's own event of the quake (EMSC's two ids keep them apart: 1450622 beside ComCat's M4.5
+`us6000u1w6`), and two reviews of one quake under two ids.
 
 ## Retired events
 

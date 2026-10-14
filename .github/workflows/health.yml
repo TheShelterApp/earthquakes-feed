@@ -312,13 +312,16 @@ jobs:
         # LIVE-2: the data branch's history only grows (nothing is ever rewritten) and GitHub asks to keep repositories
         # small; finished months of status/history and changes/ leave the tree (archive.yml). The growth is the large
         # files every commit rewrites (day partitions, event_map shards): GitHub keeps about one compressed copy of each
-        # per repack, about 67 MB a day in October 2026 (APIs.md Repository size). GitHub reports `size` in KB.
+        # per roll-up, 55-60 MB a day from 2026-10-06 to 10-14 and up to about 90 on busy days (APIs.md Repository
+        # size). GitHub reports `size` in KB.
         if: always()
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-          # 6 GB: 5.48 GB on 2026-10-04.
-          REPO_SIZE_WARN_KB: '6000000'
+          # 8 GB (round 25): 6.10 GB on 2026-10-14, when the 6 GB threshold had warned on every run since 10-13. At 90 MB
+          # a day it leaves 22 days before GitHub's recommended 10 GB; storage option 4 (APIs.md Repository size) is
+          # meant to keep the repository well under it. After a repack by GitHub: the new size + 1,000,000.
+          REPO_SIZE_WARN_KB: '8000000'
         run: |
           KB=$(gh api "repos/${{ github.repository }}" --jq .size || true)
           case "$KB" in ''|*[!0-9]*) echo "repository size: unknown"; exit 0;; esac

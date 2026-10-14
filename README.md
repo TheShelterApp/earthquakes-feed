@@ -36,8 +36,11 @@ curl -s https://earthquakes-feed.theshelter.app/v1/live/index.json
 # One event's full detail: the live events of its UTC hour, full-fat (APIs.md, Event detail):
 curl -s https://earthquakes-feed.theshelter.app/v1/detail/2026-10-05T09.geojson
 
-# Any historical day as NDJSON, straight from the data branch (full history):
+# Any frozen day as NDJSON, straight from the data branch (full history):
 curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2026/07/04.ndjson
+
+# A day of the last 11 (not frozen yet) as NDJSON: the manifest's `url` for it, on Pages:
+curl -s https://earthquakes-feed.theshelter.app/events/2026/10/13.ndjson
 ```
 
 ### Rolling summary feeds (USGS-style matrix)
@@ -62,8 +65,11 @@ Same Features, two shapes per UTC day:
   in the live window (~45 days); present **iff** the partition entry in `manifest.json`
   carries `pages_url`. Convenient for map time-sliders.
 - `events/YYYY/MM/DD.ndjson` — one Feature per line, full history, on the `data`
-  branch (via jsDelivr `@data`). Discover paths, counts, and `frozen`/`pages_url`
-  through `manifest.json`.
+  branch (via jsDelivr `@data`), and for the unfrozen days (the last 11) also on Pages
+  at `https://earthquakes-feed.theshelter.app/events/YYYY/MM/DD.ndjson`, which their
+  `url` names. Discover paths, counts, and `frozen`/`pages_url` through `manifest.json`.
+  **From 2026-11-04, `@data/events/...` holds a day only once it is frozen; use
+  `pages_url` / the manifest** (APIs.md, *Historical day partitions*).
 
 Both shapes are **full-fat** (complete `feed.provenance[]` with each provider's original
 `fields`) — only the rolling summaries are compact.

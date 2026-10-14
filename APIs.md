@@ -12,7 +12,8 @@ archival, redaction).
 | Surface | Base | Use | Cache |
 |---|---|---|---|
 | Cloudflare Pages | `https://earthquakes-feed.theshelter.app/v1/` | live feed, recent day files, manifest, live index, per-hour detail | summaries + manifest + live index and deltas `max-age=30` + SWR; day files `max-age=300` (today, yesterday) / `3600` (older); live index day files `max-age=0, must-revalidate`; detail hours `max-age=300` |
-| jsDelivr (branch) | `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/` | full-history partitions | ~12 h |
+| Cloudflare Pages | `https://earthquakes-feed.theshelter.app/events/` | the unfrozen day partitions (NDJSON, the last 11 days), byte for byte the `data` branch files (since 2026-10) | `max-age=0, must-revalidate` |
+| jsDelivr (branch) | `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/` | full-history partitions; **from 2026-11-04 frozen days only** (*Historical day partitions*) | ~12 h |
 | jsDelivr (`@sha`) | `…@<data_commit>/` | immutable frozen partitions | 1 year, immutable |
 | GitHub Releases | `archive-YYYY-MM` assets | very old months (bulk) | immutable, no CORS |
 | GitHub Releases | `remediation-YYYY` assets | complete editions of days a source's backfill could not fetch whole (*Saturated days*) | immutable, no CORS |
@@ -33,7 +34,7 @@ The catalog. Fields:
 | `freshness.stale_after_seconds` | treat the feed as degraded past this age (default 1800) |
 | `data_commit` | git SHA for building immutable partition URLs |
 | `summaries` | map of `{name: {path, url, count}}` for the 20 rolling feeds (`count` = live events in that file) |
-| `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}` |
+| `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}`; `url` is the NDJSON: the Pages copy for an unfrozen day, jsDelivr `@data` for a frozen one (*Historical day partitions*) |
 | `archives[]` | rolled-up cold months: `{period, tag, asset, url, bytes, sha256, count, days[]}` |
 | `live` | the live index: `{path, url, head_seq, window_days}` (see *Live index* below; since 2026-10) |
 | `event_detail` | the per-hour detail files: `{path_template, url_template, first_hour, last_hour}` (see *Event detail* below; since 2026-10) |
@@ -60,7 +61,7 @@ forward with the same names, plus:
 | `expires` | `generated + freshness.stale_after_seconds·1000` — past this, show "data may be delayed" |
 | `freshness.offline_after_seconds` | past this since the last successful fetch, treat the client as offline (default 2× stale) |
 | `data_commit` | always set (the data-branch commit every URL below is pinned to) |
-| `origins[]` | `{id, base, max_object_bytes?, mutable_only?}` — prefixes a `path` is appended to: `pages`, `jsdelivr-sha`, `raw-sha`, `raw-data` (head only), `release` |
+| `origins[]` | `{id, base, max_object_bytes?, mutable_only?}` — prefixes a `path` is appended to: `pages`, `jsdelivr-sha`, `raw-sha`, `raw-data` (head only), `release`. For a partition, `pages` serves the unfrozen days only (a frozen one is a 404 there: take `jsdelivr-sha`); from 2026-11-04 `jsdelivr-sha`, `raw-sha` and `raw-data` serve a partition only once it is frozen (*Historical day partitions*) |
 | `status_url` | where `/v1/status.json` lives |
 | `summaries` | v1 entries plus `bytes` and `sha256` of the file |
 | `partitions[]` | v1 entries plus `sha256`; `frozen: true` means the bytes never change again (a day is frozen once it is older than the 10 days the 5-minute run can still revise, delete or add to — see *Late publications*) |
@@ -196,11 +197,25 @@ One Feature per line (NDJSON), all states (`live`/`tombstoned`/`superseded`), ev
 line full-fat. Resolve the path and freshness from `manifest.partitions[]`:
 
 ```bash
-# via branch (12 h cache):
-curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2026/07/04.ndjson
+# an unfrozen day (the last 11 days): its `url`, the Pages copy, always the current bytes:
+curl -s https://earthquakes-feed.theshelter.app/events/2026/10/13.ndjson
 # immutable (cache forever) — use manifest.data_commit for a frozen day:
 curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@<data_commit>/events/2026/07/04.ndjson
+# via branch (12 h cache), any frozen day:
+curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2026/07/04.ndjson
 ```
+
+Since 2026-10 every unfrozen day (`frozen: false`: today and the 10 days before it, the days the 5-minute run can
+still change) is also on Pages at `/events/YYYY/MM/DD.ndjson`, the bytes of the `data` branch file (the v2 manifest's
+`sha256` covers both), and its `url` names that copy (`max-age=0, must-revalidate`: an ETag check, a 304 when
+unchanged). A frozen day's `url` stays jsDelivr `@data`, and its immutable copy `@<data_commit>`. `pages_url`, the
+GeoJSON day file, is unchanged.
+
+**From 2026-11-04, `@data/events/...` holds a day only once it is frozen.** The 5-minute run will stop committing
+the unfrozen days to the `data` branch (*Repository size*): a day is committed once, when it freezes (and again only
+on a rare remediation or re-roll). For an unfrozen day use the manifest: `url` / `pages_url`, or the v2 `pages`
+origin; a jsDelivr `@data` / `@<sha>` or raw.githubusercontent URL of an unfrozen day built by hand will then answer
+404 (or an old copy from jsDelivr's cache). Frozen days, `data_commit` and every other path stay as they are.
 
 ### `GET /v1/status.json`
 
@@ -720,11 +735,57 @@ GitHub's 67 MB a day that is about 48 MB. What remains is about three quarters d
 (jsDelivr `@data` / `@<data_commit>`, the manifest's `partitions`) and keep their layout. They shrink only by being
 rewritten less often, which changes what the `data` branch shows between runs: a partition of a day 2 or more days old
 written at most every 3 hours (Pages, the live index and the summaries unchanged) replays the days to 10-04, 10-05 and
-10-06 to 19, 30 and 40 MB. That, and how large the repository may grow (GitHub's on-disk limit is 10 GB,
+10-06 to 19, 30 and 40 MB. That, and how large the repository may grow (GitHub recommends at most 10 GB on disk,
 [Repository limits](https://docs.github.com/en/repositories/creating-and-managing-repositories/repository-limits),
-read 2026-10-06), are owner decisions. So is a full repack on GitHub's side, which only GitHub can run: the whole
+read 2026-10-06; a recommendation, not an enforced limit, see round 25 below), are owner decisions. So is a full
+repack on GitHub's side, which only GitHub can run: the whole
 repository repacked locally (`git repack -adf` of a mirror clone of 2026-10-06, all 808,450 objects, default window and
 depth) is 0.69 GiB, against the 5.38 GiB GitHub serves and counts.
+
+**Round 25 (2026-10-14): what is unlimited, and the plan.** GitHub counted 6,098,544 KB on 10-14 07:17 UTC: 59 MB a
+day since 10-06 12:52, 87 MB a day over the 42 hours before (the deep-history index `history.json`, committed hourly
+until era A finished at 10-14 00:37, and more late revisions of days 2–9 days old). The limits, read that day:
+
+- Release assets (deep history, archives, first solutions, run logs, remediation: about 1.39 GB in 7,186 assets) are
+  not counted in `size`, and GitHub sets no limit on a release's total size or bandwidth: 2 GiB per file, 1,000 assets
+  per release ([About releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)).
+  The fair-use policies still apply (Acceptable Use §9, bandwidth; the Actions terms: not a CDN).
+- Cloudflare Pages holds only the rolling window: Free plan 20,000 files per deploy and 25 MiB per file
+  ([Pages limits](https://developers.cloudflare.com/pages/platform/limits/)). A deploy is about 1,183 files and 306 MB
+  with the partitions below; `validate` logs both and fails past either limit.
+- The git repository is not unlimited: GitHub recommends at most 10 GB on disk and, for a repository, "less than 5 GB
+  is strongly recommended"; above that it warns of degraded repository health and may ask the owner to take corrective
+  action ([About large files](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github)).
+  Only 100 MB per file and 2 GB per push are enforced. At 55–90 MB a day 10 GB comes between late November and late
+  December 2026. The `health` warning threshold is 8,000,000 KB since round 25 (22 days before 10 GB at 90 MB a day).
+
+The cause is the 5-minute views committed to git: every run rewrites the unfrozen day partitions (2.5–2.8 MB each),
+about 79 % of the bytes GitHub keeps. The fix (storage option 4) takes them out of git without rewriting anything:
+
+- Phase 1 (round 25, nothing changes for a consumer): each unfrozen day's partition is also deployed to Pages, byte for
+  byte, at `/events/YYYY/MM/DD.ndjson`, the path the v2 `pages` origin builds, and the manifest's `url` names that copy
+  (*Historical day partitions*); derive's silent-change check reads the previous run's lines from the event map instead
+  of the committed partitions (`src/live-baseline.ts`, beside the old check until phase 2). The commits still hold the
+  partitions as before, plus the 1 KB `knowledge/index/live_baseline.json`.
+- Phase 2 (from 2026-11-04, announced above): derive stops committing the unfrozen days; a day is committed once, when
+  it freezes. The files stay on disk in the job but out of the commit (`sign-manifest.ts` hashes them for the v2
+  `sha256` and throws on a missing one; `validate.ts` and `publish-r2.ts` read them), so derive-publish's `git add -A`
+  and backfill's and archive's `git add events` must not stage them (they leave the index; history is never
+  rewritten), and the old silent-change check goes. The v2 origins `jsdelivr-sha`, `raw-sha` and `raw-data` then serve
+  frozen partitions only. Expected: about 75–85 % less growth, which the `health` log measures over a week. After that
+  a full repack by GitHub would bring the repository to about 0.8 GB; it is an owner request, and on the Free plan
+  GitHub Support may decline it.
+
+Readers of the committed unfrozen partitions, and what phase 1 did with them: derive's silent-change check (switched to
+the event map, above); the first-solutions one-off slice (`FIRST_SOLUTIONS_DAYS` naming an unfrozen day: switched to
+the event map; the walk itself stops at the last frozen day); `writeDayPartition`'s byte compare (only avoids a
+rewrite); `validate.ts`, `sign-manifest.ts`, `publish-r2.ts` (they read the files derive just wrote: kept on disk);
+`scripts/first-observations.ts` (reads `events/` only for an event the observation log no longer holds, a frozen
+one). They never read an unfrozen day: backfill (days before the earliest event_map shard), archive (months over 120
+days old), onboard and heal (they write the event map), remediate (frozen days, from the Release archives), the deep
+history and the heartbeat Worker. The in-house consumers read Pages: iOS builds 437–587 take `pages_url` for every day
+that has one (all unfrozen days do), `@<data_commit>` for an older frozen day and `url` only for an unfrozen day
+without `pages_url`; the alerts gateway takes `pages_url` and falls back to `url`, checked against the signed `sha256`.
 
 ## Deep history (before 2023-07-06)
 

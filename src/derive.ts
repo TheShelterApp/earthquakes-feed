@@ -1,12 +1,15 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { DATA_DIR, EVENT_MAP_HORIZON_DAYS, JSDELIVR_BASE, PUBLIC_DIR, REPO, SCHEMA_VERSION, dataPaths } from './config.js';
 import { loadState, pruneEventMapShards, writeIfChanged } from './bitemporal.js';
 import {
+  isFrozenDay,
   loadInventory,
   manifestPartitions,
+  removeStalePagesPartitions,
   saveInventory,
   writeDayPartition,
+  writePagesPartition,
   type Inventory,
 } from './partitions.js';
 import { summaries, summaryFeats } from './summaries.js';
@@ -17,7 +20,8 @@ import { enrichStatusV2, updateProviderHealth, type AggregateStatus, type Provid
 import { appendChanges } from './changes.js';
 import { FRESHNESS_EXPECTED_INTERVAL_SECONDS, FRESHNESS_STALE_AFTER_SECONDS } from './freshness.js';
 import { pagesHeaders } from './pages-headers.js';
-import { detectSilentChanges, liveWindowDays, nextSilentLog, readSilentLog, writeLiveIndex, writeSilentLog } from './live-sync.js';
+import { detectSilentChanges, liveWindowDays, nextSilentLog, readSilentLog, silentChangesAgainst, writeLiveIndex, writeSilentLog } from './live-sync.js';
+import { baselineDays, baselineRecord, previousWindowLines, readBaselineRecord, readBaselineSnapshot, writeBaselineRecord } from './live-baseline.js';
 import { writeDetailHours } from './event-detail.js';
 
 function main(): void {
@@ -32,11 +36,43 @@ function main(): void {
   const liveCount = feats.filter((f) => f.live).length;
   const summ = summaries(feats, nowMs, publicV1, state.head.ingest_time);
 
-  // PRB-2: window events whose line changed without a new seq since the previous run (live-sync.ts), read from the
-  // partitions the previous run committed, before they are rewritten below.
+  // PRB-2: window events whose line changed without a new seq since the previous run (live-sync.ts). The previous
+  // run's lines come from the snapshot of the event map this job checked out, verified against the sha256 that run
+  // recorded (live-baseline.ts), else from the partitions it committed; read before they are rewritten below.
   const prevManifest = join(DATA_DIR, 'manifest.json');
-  const prevHead = existsSync(prevManifest) ? ((JSON.parse(readFileSync(prevManifest, 'utf8')) as { head_seq?: number }).head_seq ?? null) : null;
-  const silentNow = prevHead == null ? [] : detectSilentChanges(DATA_DIR, allNodes, liveWindowDays(nowMs), prevHead);
+  const prev = existsSync(prevManifest) ? (JSON.parse(readFileSync(prevManifest, 'utf8')) as { head_seq?: number; generated?: number }) : null;
+  const prevHead = prev?.head_seq ?? null;
+  const window = liveWindowDays(nowMs);
+  let silentNow: string[] = [];
+  if (prevHead != null) {
+    const previous = previousWindowLines({
+      root: DATA_DIR,
+      days: window,
+      record: readBaselineRecord(DATA_DIR),
+      prev: { generated: prev?.generated ?? -1, head_seq: prevHead },
+      snapshot: readBaselineSnapshot(process.env.LIVE_BASELINE_DIR),
+      compare: true,
+    });
+    const fromBaseline = silentChangesAgainst(previous.lines, allNodes, window, prevHead);
+    // Phase 1 (until the unfrozen partitions leave `data`): the committed partitions' check beside it. The union is
+    // kept: an extra entry only repeats a feature in a delta, a missing one would lose a change for a client.
+    const fromPartitions = detectSilentChanges(DATA_DIR, allNodes, window, prevHead);
+    silentNow = [...new Set([...fromBaseline, ...fromPartitions])].sort();
+    const onlyBaseline = fromBaseline.filter((id) => !fromPartitions.includes(id));
+    const onlyPartitions = fromPartitions.filter((id) => !fromBaseline.includes(id));
+    console.log(
+      `derive: silent-change baseline ${previous.fromSnapshot.length} day(s) from the event-map snapshot, ${previous.fromPartitions.length} from the committed partitions` +
+        (previous.recordUnused ? ` (${previous.recordUnused})` : '') +
+        `; silent=${fromBaseline.length}, the committed partitions give ${onlyBaseline.length || onlyPartitions.length ? 'another set' : 'the same'}`,
+    );
+    if (previous.partitionDiffers.length || onlyBaseline.length || onlyPartitions.length) {
+      console.warn(
+        `::warning::silent-change baseline: the snapshot and the committed partitions differ` +
+          (previous.partitionDiffers.length ? ` on ${previous.partitionDiffers.join(', ')}` : '') +
+          `; only the snapshot: ${onlyBaseline.slice(0, 5).join(', ') || 'none'}; only the partitions: ${onlyPartitions.slice(0, 5).join(', ') || 'none'} (both kept)`,
+      );
+    }
+  }
   const silentPrior = readSilentLog(DATA_DIR);
 
   // Partitions: every state, one file per event-day, only for the days we loaded.
@@ -44,12 +80,30 @@ function main(): void {
   for (const n of allNodes) (byDay.get(eventDayKey(n.eventTimeMs)) ?? byDay.set(eventDayKey(n.eventTimeMs), []).get(eventDayKey(n.eventTimeMs))!).push(n);
   const inv: Inventory = loadInventory(DATA_DIR);
   let rewritten = 0;
+  // Storage option 4 phase 1 (round 25): an unfrozen day's partition also goes to Pages, byte for byte, at
+  // /events/YYYY/MM/DD.ndjson (the v2 `pages` origin's path); the manifest's `url` names that copy.
+  if (resolve(PUBLIC_DIR) === resolve(DATA_DIR)) throw new Error('derive: PUBLIC_DIR must not be the data checkout');
+  const pagesNdjsonDays = new Set<string>();
+  let pagesNdjsonBytes = 0;
+  const baselineWanted = new Set(baselineDays(nowMs));
+  const written = new Map<string, string>();
   for (const [day, nodes] of byDay) {
-    const { written, stat } = writeDayPartition(DATA_DIR, day, nodes, { publicV1, nowMs, headIngestTime: state.head.ingest_time });
-    if (written) rewritten++;
-    inv[day] = stat;
+    const out = writeDayPartition(DATA_DIR, day, nodes, { publicV1, nowMs, headIngestTime: state.head.ingest_time });
+    if (out.written) rewritten++;
+    inv[day] = out.stat;
+    if (baselineWanted.has(day)) written.set(day, out.ndjson);
+    if (!isFrozenDay(day, nowMs)) {
+      writePagesPartition(PUBLIC_DIR, day, out.ndjson);
+      pagesNdjsonDays.add(day);
+      pagesNdjsonBytes += out.stat.bytes;
+    }
   }
+  // A copy left in public/ from an earlier local run of a day that froze since: never deployed (CI starts empty).
+  const stale = removeStalePagesPartitions(PUBLIC_DIR, pagesNdjsonDays);
+  if (stale.length) console.log(`derive: removed ${stale.length} stale Pages partition(s) from ${PUBLIC_DIR}: ${stale.join(', ')}`);
   saveInventory(DATA_DIR, inv);
+  // What the next run's silent-change check verifies its snapshot against (live-baseline.ts).
+  writeBaselineRecord(DATA_DIR, baselineRecord(nowMs, state.head.seq, written));
   // Days whose Pages day file exists in THIS deploy snapshot (drives truthful pages_url).
   const pagesDays = new Set(byDay.keys());
 
@@ -76,7 +130,7 @@ function main(): void {
       // of any frozen partition: `${jsdelivr_base%@data}@<data_commit>/<partition.path>`.
       data_commit: null,
       summaries: summ,
-      partitions: manifestPartitions(inv, nowMs, pagesDays),
+      partitions: manifestPartitions(inv, nowMs, pagesDays, pagesNdjsonDays),
       archives: loadArchives(),
       // Additive (round 15): the live index (APIs.md, Live index) and the per-hour detail files (APIs.md, Event detail).
       live: live.pointer,
@@ -139,6 +193,7 @@ function main(): void {
 
   console.log(
     `derive: live=${liveCount} summaries=${Object.keys(summ).length} partitions=${byDay.size} rewritten=${rewritten}` +
+      ` pages_ndjson=${pagesNdjsonDays.size} (${pagesNdjsonBytes} B)` +
       (pruned.length ? ` pruned_shards=${pruned.length}` : ''),
   );
   console.log(

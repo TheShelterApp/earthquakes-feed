@@ -37,7 +37,7 @@ The catalog. Fields:
 | `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}`; `url` is the NDJSON: the Pages copy for an unfrozen day, jsDelivr `@data` for a frozen one (*Historical day partitions*). `count` is every feature of the file (all states); since round 26 (2026-10-14) `min_mag` / `max_mag` are the day's **live** events' range, recorded while the day is unfrozen and kept when it freezes (a retired event keeps its last solution: a phantom M8.2 folded into the Panama M7.7 of 2026-10-09 had kept that day at 8.2); days frozen before then keep the range over every feature |
 | `archives[]` | rolled-up cold months: `{period, tag, asset, url, bytes, sha256, count, days[]}` |
 | `live` | the live index: `{path, url, head_seq, window_days}` (see *Live index* below; since 2026-10) |
-| `live_month` | the month index: `{path, url, head_seq, min_mag, window_days}` (see *Month index* below; since 2026-10-15) |
+| `live_month` | the month index: `{path, url, head_seq, min_mag, window_days}` (see *Month index* below; since 2026-10-14) |
 | `event_detail` | the per-hour detail files: `{path_template, url_template, first_hour, last_hour}` (see *Event detail* below; since 2026-10) |
 
 `partitions[]` overrides `archives[]` for any day present in both.
@@ -198,8 +198,14 @@ Measured over the 943 derive commits of 2026-10-11 18:00 → 10-14 18:48 UTC (ea
 partitions; brotli 4 × 1.078, the ratio Pages served `all_month` at): the first sync is 976 KB; after it a refresh
 moves the index and 0.22 changed days on average, 10 KB every 30 minutes, 25 KB after 2 h, 57 KB after 8 h and 93 KB
 after 24 h, against ~1,100 KB of `all_month` every time (99 %, 98 %, 95 % and 92 % less). Days newer than today − 6
-would add today's and yesterday's files, which change on nearly every run (96–349 KB a refresh). `all_month` and the
-other summaries stay as they are. Schema: `schema/live-month.schema.json`.
+would add today's and yesterday's files, which change on nearly every run (96–349 KB a refresh). The review replay
+(writeLiveMonth itself at 17 derive commits of 2026-10-08 → 10-14, brotli 4 × 1.078) found the same order with more
+spread: 30-minute refreshes of 1.7–87 KB (25 KB mean over 7 pairs; 3 of them moved one or two day files of ~40 KB
+each), 87 KB after 2 h, 123 KB after 8 h and 165 KB after 24 h on 10-13/14, against 1,051–1,098 KB of `all_month`
+(85–99.8 % less); every `all_month` feature of the days was held byte for byte (0 missing, 0 different), the only extra
+features are the oldest day's hours before now − 30 d, and Pages served a live day file at 1.049 × brotli 4. Building
+the index adds ~0.6 s to derive. `all_month` and the other summaries stay as they are. Schema:
+`schema/live-month.schema.json`.
 
 ### `GET /v1/detail/YYYY-MM-DDTHH.geojson` — event detail (one UTC hour)
 

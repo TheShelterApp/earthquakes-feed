@@ -12,7 +12,8 @@
  * --now defaults to head.ingest_time + 5 min (the next aggregate run).
  *
  * The report lists every group the heal folds (each member's providers, solution, distance and
- * Δt to the survivor, the op:merge reason) with sanity flags for a false merge, the coordinate-
+ * Δt to the survivor, the op:merge reason) with sanity flags for a false merge, the held solutions the run withdraws
+ * (round 26, Resolver.retractHeld), the coordinate-
  * less retraction, the lines it would append (validated against observation.schema.json), and
  * every live M ≥ 5.5 pair within 50 km / 60 s that stays split, with the gate that keeps it so.
  */
@@ -23,7 +24,7 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { loadState } from '../src/bitemporal.js';
 import { EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HEAL_MAX_FOLDS_PER_RUN, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS } from '../src/config.js';
-import { REHOMED_REASON_PREFIX, Resolver } from '../src/dedup.js';
+import { HELD_REASON, REHOMED_REASON_PREFIX, Resolver } from '../src/dedup.js';
 import { runFeedSideSteps } from '../src/heal.js';
 import { haversineKm } from '../src/geo.js';
 import { LogBuffer } from '../src/oplog.js';
@@ -64,15 +65,18 @@ rmSync(scratch, { recursive: true, force: true });
 // op:tombstone lines are the retraction's, or a re-homed EMSC row's withdrawal (FEED-2's copies and round 14's re-pointed
 // rows, Resolver.rehomeStranded, with their own reason).
 const isRehome = (l: Observation): boolean => l.op === 'tombstone' && (l.reason ?? '').startsWith(REHOMED_REASON_PREFIX);
+// Round 26: a held solution's withdrawal (Resolver.retractHeld, its own reason).
+const isHeld = (l: Observation): boolean => l.op === 'tombstone' && l.reason === HELD_REASON;
 const rehomes = log.lines.filter(isRehome);
-const afterRetraction = log.lines.filter((l) => l.op === 'tombstone' && !isRehome(l)).length;
+const heldLines = log.lines.filter(isHeld);
+const afterRetraction = log.lines.filter((l) => l.op === 'tombstone' && !isRehome(l) && !isHeld(l)).length;
 const retractions = log.lines
-  .filter((l) => l.op === 'tombstone' && !isRehome(l))
+  .filter((l) => l.op === 'tombstone' && !isRehome(l) && !isHeld(l))
   .map((l) => ({ raw: { provider: l.provider, eventTimeMs: Date.parse(l.event_time), mag: l.mag, depth: l.depth }, result: { node: state.eventMap.get(l.feed_id)! } }));
 const merges = log.lines
   .filter((l) => l.op === 'merge')
   .map((l) => ({ loser: state.eventMap.get(l.feed_id)!, survivor: state.eventMap.get(l.superseded_by!)!, reason: l.reason ?? '' }));
-if ((regular ? side.regularHeal?.merged : side.heal?.merged) !== merges.length || side.retracted !== retractions.length || side.rehomed + side.stranded !== rehomes.length) throw new Error('dry run: the logged lines disagree with the step result');
+if ((regular ? side.regularHeal?.merged : side.heal?.merged) !== merges.length || side.retracted !== retractions.length || side.rehomed + side.stranded !== rehomes.length || side.held !== heldLines.length) throw new Error('dry run: the logged lines disagree with the step result');
 
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 addFormats(ajv);
@@ -90,9 +94,9 @@ md.push(regular ? `# Heal dry run (regular heal, at most ${HEAL_MAX_FOLDS_PER_RU
 md.push('');
 md.push(`Data: head seq ${head.seq} @ ${head.ingest_time}; simulated run at ${ingestTime}; event_map days loaded: ${loadDays} (${before.size} nodes, ${liveBefore.length} live); hot window from ${isoFromMs(hotFloor)} (${liveBefore.filter((n) => n.eventTimeMs >= hotFloor).length} live nodes).`);
 md.push('');
-md.push(`| lines | op:tombstone (retraction) | op:merge | op:correction | schema-invalid | seq contiguous from ${head.seq + 1} |`);
-md.push('|---|---|---|---|---|---|');
-md.push(`| ${log.lines.length} | ${afterRetraction} | ${log.lines.filter((l) => l.op === 'merge').length} | ${log.lines.filter((l) => l.op === 'correction').length} | ${invalid.length} | ${seqOk ? 'yes' : 'NO'} |`);
+md.push(`| lines | op:tombstone (retraction) | op:tombstone (held) | op:merge | op:correction | schema-invalid | seq contiguous from ${head.seq + 1} |`);
+md.push('|---|---|---|---|---|---|---|');
+md.push(`| ${log.lines.length} | ${afterRetraction} | ${heldLines.length} | ${log.lines.filter((l) => l.op === 'merge').length} | ${log.lines.filter((l) => l.op === 'correction').length} | ${invalid.length} | ${seqOk ? 'yes' : 'NO'} |`);
 md.push('');
 
 // --- retraction ---
@@ -120,6 +124,15 @@ for (const t of rehomes) {
   md.push(`- ${t.provider}:${t.provider_event_id} ${t.event_time} M${t.mag ?? '?'}: ${t.feed_id} → ${next?.feed_id ?? '?'} (${t.reason})`);
 }
 if (!rehomes.length) md.push('None.');
+md.push('');
+
+// --- held solutions (round 26) ---
+md.push(`## Held solutions withdrawn (${heldLines.length})`);
+md.push('');
+md.push('A regional agency\'s solution outside its own region that no event takes (config REGION_RULES `hold`): its event leaves the live set.');
+md.push('');
+for (const l of heldLines) md.push(`- ${l.provider}:${l.provider_event_id} ${l.event_time} M${l.mag ?? '?'} ${l.status ?? ''} ${fmt(l.lat, 2)}, ${fmt(l.lon, 2)} ${l.place ?? ''} (${l.feed_id}${state.eventMap.get(l.feed_id)?.state === 'tombstoned' ? ', tombstoned' : ''})`);
+if (!heldLines.length) md.push('None.');
 md.push('');
 
 // --- heal groups ---
@@ -206,4 +219,4 @@ if (invalid.length) {
 const report = md.join('\n');
 if (outPath) writeFileSync(outPath, report + '\n');
 console.log(md.slice(0, 8).join('\n'));
-console.log(`\nretracted=${retractions.length} rehomed=${rehomes.length} merges=${merges.length} groups=${rows.length} flagged=${flagged.length} large_apart=${apart.length} invalid=${invalid.length}` + (outPath ? ` → ${outPath}` : ''));
+console.log(`\nretracted=${retractions.length} held=${heldLines.length} rehomed=${rehomes.length} merges=${merges.length} groups=${rows.length} flagged=${flagged.length} large_apart=${apart.length} invalid=${invalid.length}` + (outPath ? ` → ${outPath}` : ''));

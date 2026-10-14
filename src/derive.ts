@@ -3,6 +3,7 @@ import { join, resolve } from 'node:path';
 import { DATA_DIR, EVENT_MAP_HORIZON_DAYS, JSDELIVR_BASE, PUBLIC_DIR, REPO, SCHEMA_VERSION, dataPaths } from './config.js';
 import { loadState, pruneEventMapShards, writeIfChanged } from './bitemporal.js';
 import {
+  dayMagRange,
   isFrozenDay,
   loadInventory,
   manifestPartitions,
@@ -90,7 +91,7 @@ function main(): void {
   for (const [day, nodes] of byDay) {
     const out = writeDayPartition(DATA_DIR, day, nodes, { publicV1, nowMs, headIngestTime: state.head.ingest_time });
     if (out.written) rewritten++;
-    inv[day] = out.stat;
+    inv[day] = { ...out.stat, ...dayMagRange(nodes, inv[day], isFrozenDay(day, nowMs)) };
     if (baselineWanted.has(day)) written.set(day, out.ndjson);
     if (!isFrozenDay(day, nowMs)) {
       writePagesPartition(PUBLIC_DIR, day, out.ndjson);

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { HEAL_EPOCH, HEAL_MAX_FOLDS_PER_RUN, dataPaths } from './config.js';
-import type { Resolver } from './dedup.js';
+import { HELD_REASON, type Resolver } from './dedup.js';
 import type { LogBuffer } from './oplog.js';
 import { byIngestOrder } from './quality.js';
 import type { RawObs } from './types.js';
@@ -80,11 +80,15 @@ export interface FeedSideResult {
   /** The regular heal of a run without an epoch heal (FEED-6), else null: its op:merge lines, the survivors whose
    *  revision moved, and whether it stopped at HEAL_MAX_FOLDS_PER_RUN. */
   regularHeal: { merged: number; survivors: number; capped: boolean } | null;
+  /** Held solutions withdrawn from the live set (Resolver.retractHeld, round 26; one op:tombstone line each). */
+  held: number;
+  heldByProvider: Record<string, number>;
 }
 
 /** aggregate's feed-side steps, after the provider paths of the run: the coordinate-less
  *  retraction (every run; a no-op once nothing is left), the copy re-home pass (every run, FEED-2) and, when
- *  `healDue`, the one-time heal (Resolver.heal) and its marker, else the regular heal (FEED-6). Every change is logged through `log` like the normal path:
+ *  `healDue`, the one-time heal (Resolver.heal) and its marker, else the regular heal (FEED-6), then the held
+ *  solutions' withdrawal (Resolver.retractHeld, round 26). Every change is logged through `log` like the normal path:
  *  op:tombstone per withdrawn row (with a reason), op:merge per fold, op:correction per heal
  *  survivor. */
 export function runFeedSideSteps(
@@ -135,5 +139,14 @@ export function runFeedSideSteps(
     log.recordFolds(merges, survivors, 'heal');
     regularHeal = { merged: merges.length, survivors: survivors.length, capped };
   }
-  return { retracted: retractions.length, retractedByProvider, heal, rehomed: rehomed.length, stranded: stranded.length, regularHeal };
+  // A regional agency's solutions outside its own region that no event takes (config REGION_RULES `hold`, round 26):
+  // after the heal, so an event the heal folds is not withdrawn; op:tombstone lines with HELD_REASON. A no-op once
+  // nothing is held.
+  const heldByProvider: Record<string, number> = {};
+  const held = resolver.retractHeld(opts.ingestTime);
+  for (const { raw, result } of held) {
+    log.record(raw, result, 'tombstone', HELD_REASON);
+    heldByProvider[raw.provider] = (heldByProvider[raw.provider] ?? 0) + 1;
+  }
+  return { retracted: retractions.length, retractedByProvider, heal, rehomed: rehomed.length, stranded: stranded.length, regularHeal, held: held.length, heldByProvider };
 }

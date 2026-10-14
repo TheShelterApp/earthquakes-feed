@@ -161,6 +161,9 @@ export function fdsnTextColumns(header: readonly string[]): Record<FdsnTextColum
   return Object.fromEntries(keys.map((k) => [k, byName ? named(k) : FDSN_TEXT_COLUMNS[k].standard])) as Record<FdsnTextColumn, number | null>;
 }
 
+/** A place cell that is a template's placeholder, not a place (parseFdsnText). */
+export const PLACEHOLDER_PLACE = /#{2,}/;
+
 /** Sources whose place is written in English and French, "<English>/<French>" (Earthquakes Canada:
  *  "16 km SSE of Duncan, BC/16 km SSE de Duncan, BC"). The feed's `place` is the English half, as the JMA adapter
  *  takes `en_anm`; `fields.EventLocationName` keeps the original. */
@@ -211,7 +214,10 @@ export function parseFdsnText(body: string, provider: string, stats?: ParseStats
       const val = (c[i] ?? '').trim();
       if (val) fields[name] = val;
     }
-    const place = (cell('place') ?? '').trim() || null;
+    // A place made of `#` placeholders is no place (round 26, FIND-3 (b)): SCEDC fills a distant quake's place from a
+    // template it never filled ("###.# km ( ###.# mi) ESE (az= 121.8) from Fortuna Foothills, AZ"). `fields` keeps the original.
+    const sent = (cell('place') ?? '').trim();
+    const place = sent && !PLACEHOLDER_PLACE.test(sent) ? sent : null;
     out.push({
       provider,
       providerEventId,

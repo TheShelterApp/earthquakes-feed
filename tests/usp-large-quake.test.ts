@@ -120,7 +120,9 @@ test('outside the allowance the pair stays two events', () => {
   assert.equal(pair(25, 5.3, 6.4), 2, '|ΔM| 1.1');
   assert.equal(pair(25, 4.7, 5.4), 2, 'partner below M5.5 (|ΔM| 0.7)');
   assert.equal(pair(25, 6.4, 5.7, { over: { magType: 'Mw' } }), 2, 'USP above the partner (|ΔM| 0.7)');
-  assert.equal(pair(51, 5.6, 6.4), 2, '51 km');
+  // Round 26: against a partner of M6.0 or more the distance grows with its magnitude (M6.4 → 70 km).
+  assert.equal(pair(71, 5.6, 6.4), 2, '71 km');
+  assert.equal(pair(51, 5.6, 5.9), 2, '51 km below M6.0');
   assert.equal(pair(25, 5.6, 6.4, { over: { eventTimeMs: T0 + 21_000 } }), 2, 'dt 21 s');
   assert.equal(pair(25, 5.6, 6.4, { partner: 'csn' }), 2, 'CSN is not a USP partner');
   assert.equal(pair(25, 5.6, 6.4, { provider: TMD_PROVIDER }), 2, 'TMD has no allowance (its window keeps |ΔM| ≤ 0.5)');
@@ -155,7 +157,7 @@ test('the merge pass folds a USP event beside a large partner and names the allo
   assert.equal(healer.whyNotMerged(a!, b!), null);
   const { merges } = healer.heal('2026-07-13T09:40:00Z');
   assert.equal(merges.length, 1);
-  assert.match(merges[0]!.reason, /dM=0\.52 USP large-quake window=50\.0 km\/20 s/);
+  assert.match(merges[0]!.reason, /dM=0\.52 USP large-quake window=70\.0 km\/20 s/);
   assert.equal(live(map).length, 1);
   assert.equal(providersOf(live(map)[0]!), 'usgs+usp');
   assert.equal(healer.heal('2026-07-13T09:45:00Z').merges.length, 0, 'the next run folds nothing');

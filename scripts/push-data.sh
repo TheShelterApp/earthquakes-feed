@@ -8,7 +8,8 @@
 # commit. Every writer calls it (FEED-OPS-4, tests/push-data.test.ts): aggregate and its derive steps
 # (.github/actions/derive-publish), backfill and archive under the writer lock, and the side-index commit jobs of
 # history, first-solutions and remediate without it (each writes only its own files, so their rebase cannot conflict).
-# Works in the shallow (fetch-depth 1), sparse and blobless checkouts those jobs use.
+# Works in the shallow (fetch-depth 1), sparse and blobless checkouts those jobs use, and with derive's unfrozen day
+# partitions left untracked in the checkout (storage option 4 phase 2: stashed around the rebase).
 #
 #   PUSH_BRANCH=data PUSH_ATTEMPTS=3 PUSH_BACKOFF_S=0 bash "$GITHUB_WORKSPACE/scripts/push-data.sh"
 #
@@ -31,11 +32,25 @@ while [ "$i" -le "$attempts" ]; do
     i=$((i + 1))
     continue
   fi
+  # Storage option 4 phase 2 (src/stage-data.ts): derive's unfrozen day partitions stay in the checkout as untracked
+  # files for the steps after the push. A rebase onto a commit that still tracks such a path refuses to start ("untracked
+  # working tree files would be overwritten by checkout"): the first phase-2 run deletes the 11 unfrozen days from the
+  # branch, and a side-index job may push onto the branch that still holds them before it does. They are stashed for the
+  # rebase and put back after it; nothing else is untracked under events/.
+  stashed=''
+  if [ -n "$(git ls-files --others --exclude-standard -- events | head -1)" ]; then
+    git stash push -q --include-untracked -m 'push-data: untracked day partitions' -- events && stashed=1
+  fi
   if ! git rebase "origin/${branch}"; then
     conflicts=$(git diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ' ')
     # `|| true`: with no rebase in progress --abort exits 128; the annotation below must still be printed.
     git rebase --abort || true
+    if [ -n "$stashed" ]; then git stash pop -q || true; fi
     echo "::error::rebase conflict pushing to ${branch}${conflicts:+: ${conflicts}}"
+    exit 1
+  fi
+  if [ -n "$stashed" ] && ! git stash pop -q; then
+    echo "::error::the untracked day partitions could not be put back after the rebase onto ${branch} (git stash list)"
     exit 1
   fi
   i=$((i + 1))

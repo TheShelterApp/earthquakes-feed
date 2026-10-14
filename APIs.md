@@ -852,7 +852,10 @@ about 79 % of the bytes GitHub keeps. The fix (storage option 4) takes them out 
   `validate.ts` and `publish-r2.ts`; the first phase-2 run deletes the 11 unfrozen days from the branch (history is
   never rewritten). A day is committed once, by the first run after it freezes: derive writes every day of the event
   map's 45-day horizon into a checkout that lacks it, and the staging reads the clock after derive, so a day that froze
-  between the two is committed by that run. remediate commits only its index, as before. The old silent-change check
+  between the two is committed by that run. remediate commits only its index, as before. `scripts/push-data.sh`
+  stashes the untracked day partitions around its rebase: git refuses to rebase over an untracked file at a path the
+  other commit tracks, which is the first phase-2 run's case when a side-index job pushed onto the branch that still
+  holds the unfrozen days (round 27 review). The old silent-change check
   goes: the previous run's lines come from the event-map snapshot or, for a day a failed derive changed, from that
   derive's Pages copy, each only when its sha256 is the one `knowledge/index/live_baseline.json` records; a day with
   neither has no baseline for that run (a warning). The day that froze last keeps its Pages copy and its `url` for one

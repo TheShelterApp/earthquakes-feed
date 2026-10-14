@@ -27,9 +27,11 @@ import { isFrozenDay } from './partitions.js';
  * a backfill re-roll) and is then committed again. remediate.yml commits only knowledge/index/remediation.json and
  * refuses anything else; aggregate.yml and the side-index jobs stage no `events/` path.
  *
- * The unstaged files stay untracked in the checkout, which no later step of the job reads through git; push-data.sh's
- * rebase keeps untracked files (no other writer adds an unfrozen day). A run is never left with a tracked unfrozen day
- * modified but unstaged, the state that broke the push retry's rebase in run 30301900011.
+ * The unstaged files stay untracked in the checkout, which no later step of the job reads through git. push-data.sh
+ * stashes them around its rebase: the first phase-2 run's commit deletes the unfrozen days from the branch, and when a
+ * side-index job pushed onto the branch that still holds them, git refuses to rebase over untracked files at those
+ * paths (tests/push-data.test.ts). A run is never left with a tracked unfrozen day modified but unstaged, the state
+ * that broke the push retry's rebase in run 30301900011.
  *
  *   DATA_DIR=.data npx --no-install tsx src/stage-data.ts <pathspec> ...
  */

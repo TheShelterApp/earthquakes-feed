@@ -22,42 +22,65 @@ export interface ParseStats {
  * `metadata.count` lists) but its serializer writes as nothing, in `format=text` as well, so no format answers it.
  * Measured 2026-10-13 for 2017-12: count 3803, 3793 features in json and 3793 rows in text with the same ids, and ten
  * empty elements on 2017-12-11 and 2017-12-22 (unids missing from the per-day sequence). Removes the empty elements of
- * arrays (outside strings, never inside an object) and returns how many it removed; an answer without them comes back
- * unchanged. The caller decides whether that is acceptable (deep history: only where the count service confirms it).
+ * the top-level `features` array only (outside strings), the one place EMSC writes them, and returns how many it
+ * removed; an answer without them comes back unchanged. An empty element anywhere else (a `[lon,,depth]` would read the
+ * depth as the latitude) is left, so the answer still fails to parse: the live and sweep paths have no count check to
+ * catch a shifted value (R24-FOLLOWUPS (3)). The caller decides whether the removed ones are acceptable (deep history:
+ * only where the count service confirms them).
  */
 export function repairEmptyArrayElements(body: string): { text: string; removed: number } {
   const drop = new Set<number>();
-  const stack: string[] = [];
+  const stack: ('[' | '{')[] = [];
   let inString = false;
   let escaped = false;
-  /** Inside an array, true right after `[` or `,` (an element is due): a comma or `]` there is an empty element. */
+  /** Where the string being read (or the last one read) opened, and its raw text once closed. */
+  let stringStart = -1;
+  let lastString = '';
+  /** The key of the top-level object's member being read (set at its `:`). */
+  let rootKey: string | null = null;
+  /** True while the innermost open container is the top-level `features` array, the only one repaired. */
+  let inFeatures = false;
+  /** In that array, true right after `[` or `,` (an element is due): a comma or `]` there is an empty element. */
   let expectElement = false;
-  /** The last comma kept since the innermost `[` opened: the one a trailing empty element (`,]`) hangs on. */
+  /** The last comma kept in that array: the one a trailing empty element (`,]`) hangs on. */
   let keptComma = -1;
   for (let i = 0; i < body.length; i++) {
     const c = body[i]!;
     if (inString) {
       if (escaped) escaped = false;
       else if (c === '\\') escaped = true;
-      else if (c === '"') inString = false;
+      else if (c === '"') {
+        inString = false;
+        lastString = body.slice(stringStart + 1, i);
+      }
       continue;
     }
     if (c === ' ' || c === '\n' || c === '\r' || c === '\t') continue;
-    const inArray = stack[stack.length - 1] === '[';
-    if (inArray && expectElement && c === ',') {
+    if (inFeatures && expectElement && c === ',') {
       drop.add(i);
       continue;
     }
-    if (inArray && expectElement && c === ']' && keptComma >= 0) drop.add(keptComma);
+    if (inFeatures && expectElement && c === ']' && keptComma >= 0) drop.add(keptComma);
     expectElement = false;
-    if (c === '"') inString = true;
+    if (c === '"') {
+      inString = true;
+      stringStart = i;
+    } else if (c === ':' && stack.length === 1 && stack[0] === '{') rootKey = lastString;
     else if (c === '[') {
       stack.push('[');
-      expectElement = true;
-      keptComma = -1;
-    } else if (c === '{') stack.push('{');
-    else if (c === ']' || c === '}') stack.pop();
-    else if (c === ',' && inArray) {
+      if (stack.length === 2 && stack[0] === '{' && rootKey === 'features') {
+        inFeatures = true;
+        expectElement = true;
+        keptComma = -1;
+      } else inFeatures = false;
+    } else if (c === '{') {
+      stack.push('{');
+      inFeatures = false;
+    } else if (c === ']' || c === '}') {
+      stack.pop();
+      // Back in the features array after one of its elements closed.
+      inFeatures = stack.length === 2 && stack[1] === '[' && stack[0] === '{' && rootKey === 'features';
+    } else if (c === ',' && inFeatures) {
       expectElement = true;
       keptComma = i;
     }

@@ -47,8 +47,10 @@ export class GitHubStore implements HistoryStore {
       throw e;
     }
     this.knownReleases.add(tag);
-    // The assets endpoint, paginated: a year of the full walk holds a few hundred assets.
-    const out = ghRetryNet(['api', '--paginate', `repos/${REPO}/releases/${id}/assets?per_page=100`, '--jq', '.[] | [.name, .size, .state] | @tsv']);
+    // The assets endpoint, paginated: a year of the full walk holds a few hundred assets. The Release was just resolved
+    // by its tag, so a 404 here is GitHub's eventual consistency and is retried like any transient error (PN-2: run
+    // 38506296121, 2026-10-14 03:26 UTC, went red on one). Only the tag lookup above treats a 404 as "no Release".
+    const out = ghRetry(['api', '--paginate', `repos/${REPO}/releases/${id}/assets?per_page=100`, '--jq', '.[] | [.name, .size, .state] | @tsv']);
     const assets = out
       .split('\n')
       .filter(Boolean)

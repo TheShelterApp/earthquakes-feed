@@ -554,7 +554,7 @@ test('stall: a month whose fetch the time budget cuts short, and a seal the budg
   const r2 = await hourly(store, { index: indexText(idx), state: r1.files.state }, hourIso(1), idle, { deadline: Date.now() - 1 });
   assert.deepEqual(idle.calls, [], 'nothing left to fetch');
   assert.deepEqual(r2.run, { fatal: null, pending: 0, unsealed: 2 });
-  assert.ok(r2.ctx.report.budget.includes('sealing 2022-12 on'), JSON.stringify(r2.ctx.report.budget));
+  assert.deepEqual(r2.ctx.report.budget, ['sealing 2022-12 on'], 'listed once, though the walk tried to seal twice');
   assert.deepEqual(r2.ctx.report.sealed, []);
   assert.deepEqual(parseState(r2.files.state!).stall, { since: hourIso(0), runs: 2, unexplained: 0, alarmed_at: null });
 });

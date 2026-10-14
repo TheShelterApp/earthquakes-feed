@@ -152,7 +152,8 @@ export async function recoverReports(
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const held = heldIds(eventMap, parsed.provider);
   const started = now();
-  let lastStart = -Infinity;
+  // The run's live fetch of the same host has just ended: the first page waits one spacing too.
+  let lastStart = started;
   for (const [i, id] of parsed.ids.entries()) {
     let body: string | null = null;
     let lastErr = '';

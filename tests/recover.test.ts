@@ -110,6 +110,7 @@ test('recover: one request at a time, at least RECOVER_SPACING_MS apart, one spa
   assert.deepEqual(starts.map((s) => s.url), [
     'https://eq.tmd.go.th/EQ17189', 'https://eq.tmd.go.th/EQ17190', 'https://eq.tmd.go.th/EQ17190', 'https://eq.tmd.go.th/EQ17191',
   ]);
+  assert.ok(starts[0]!.at - NOW >= RECOVER_SPACING_MS, 'the first page waits one spacing after the live fetch of the host');
   for (let i = 1; i < starts.length; i++) assert.ok(starts[i]!.at - starts[i - 1]!.at >= RECOVER_SPACING_MS, `request ${i} too soon`);
   assert.deepEqual(out.rows.map((r) => r.providerEventId), ['17189', '17190']);
   assert.deepEqual(out.empty, ['17191']);

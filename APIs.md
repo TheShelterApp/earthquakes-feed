@@ -500,8 +500,9 @@ within 90 s and 400 km). Each stood as an event of its own: OVSICORI-led events 
   EMSC or GFZ row (the agency's own solution, not EMSC's copy of OVSICORI's) and no OVSICORI row, of M ≥ 5.5, are one
   quake when the origins are ≤ 30 s apart, |ΔM| ≤ 2.0 and the distance is within `50 + 100·(M − 5.5)` km of the partner's
   magnitude, capped at 200 km (M5.5 → 50, M6.0 → 100, M6.5 → 150, M7.0 and above → 200). Since round 27 a reviewed
-  OVSICORI solution also takes a partner of M4.5–5.5: within 50 km, or up to 120 km when the distance over the time
-  difference is 6–10 km/s (1450391, reviewed M6.0, joins ComCat's M5.0 `us6000u1ax` 63.5 km and 7.9 s away). Best match only, ranked after
+  OVSICORI solution also takes a partner of M4.5–5.5: within 50 km when the origins are at most the distance at 6 km/s
+  plus 2 s apart, or up to 120 km when the distance over the time difference is 6–10 km/s (1450391, reviewed M6.0,
+  joins ComCat's M5.0 `us6000u1ax` 63.5 km and 7.9 s away). Best match only, ranked after
   the windows above; a dense cell does not block it (the M6.1's aftershock cell held 87 events). The partner's solution
   represents the quake: in an event that holds a USGS, EMSC or GFZ solution of its own, an OVSICORI row outside its
   region never represents it, whatever its status (OVSICORI's rows say "reviewed" or "automatic", EMSC's and GFZ's say
@@ -517,8 +518,9 @@ within 90 s and 400 km). Each stood as an event of its own: OVSICORI-led events 
   "olDbg…") and its analyst's review (`status` "reviewed", "UNA:…"), published hours later under a higher id while
   the automatic one stays listed, are one quake when the two are each other's best such pair among the live rows and
   lie within 4 s, 45 km and |ΔM| 0.5; or, when the reviewed solution lies outside OVSICORI's box, within 40 s, 300 km
-  and |ΔM| 2.0 with the distance over the time difference between 6 and 9 km/s (outside its network OVSICORI's
-  automatic locator moves a quake toward its stations and its origin time later by about the P-wave travel time). The
+  and |ΔM| 2.0 with the distance over the time difference between 6 and 9 km/s and the automatic origin time the later
+  one (outside its network OVSICORI's automatic locator moves a quake toward its stations and its origin time later by
+  about the P-wave travel time). The
   reviewed report joins the automatic one's event, dense cells included, and the merge pass folds two events holding
   such a pair. The reviewed solution represents the event, or the agency whose event it joined; the automatic one never
   does. 1450630, OVSICORI's automatic M6.5 of 2026-10-12 23:20:56 inside its box, is the M6.1 its review 1450632 placed
@@ -576,6 +578,18 @@ within 30 s; ComCat and EMSC list nothing near the other 42 (Costa Rica's M1–3
 aftershocks nobody else listed). Left apart: an automatic solution EMSC copied (author UNA) whose review joined another
 agency's event that holds EMSC's own event of the quake (EMSC's two ids keep them apart: 1450622 beside ComCat's M4.5
 `us6000u1w6`), and two reviews of one quake under two ids.
+
+The round 27 review measured how often a distinct quake meets the two new windows: with OVSICORI's 96 reviewed solutions
+outside its box moved by ±2–60 min (118 shifts; no real pair survives a shift), the far review window found an automatic
+solution 0.60 times a shift and the M4.5 partner floor a USGS, EMSC or GFZ row of M4.5–5.5 0.71 times, against 11 real
+far pairs and 6 floor folds in the same log. So the far window asks for the later automatic origin time (all 11 real
+pairs are 8–38 s later; 0.26 a shift), and within 50 km the floor caps the time difference at the distance at 6 km/s
+plus 2 s (the two folds there are 4.5 s for 35 km and 5.3 s for 39 km; 0.27 a shift). The near window (4 s, 45 km,
+|ΔM| 0.5) meets 0.36 a shift among 799 reviewed solutions, against 64 real candidates. Replayed again over 2026-07-05…10-14
+(233,207 lines), the reviewed rules give the same events as before the review, node for node: 66 groups fold (68 fewer
+events), 0 splits, rows in two live events 0; in 24 groups ComCat and EMSC list one and the same quake near every
+member and no second one within 30 s, near the other 42 nothing. Two quakes the global agencies list stay two events
+whatever OVSICORI's two ids pair: their own ids keep them apart, and each is led by its own solution.
 
 ## Retired events
 

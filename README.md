@@ -274,7 +274,9 @@ as a fallback). It runs three independent jobs; any one failing turns the run re
   | Condition in `status.json` | Meaning |
   |---|---|
   | `generatedAtMs` older than 300 s | the detector stopped ticking or publishing (it publishes every 60 s) |
-  | a `detector.providers[]` entry with `ok: false` and `consecutiveFailures` at its limit: 3 for `usgs` and `feed` (polled every 60 s: about 2 min), 6 for `emsc` and `gfz` (polled every 15 s detector tick: about 3.5 min, 3 to 5 is a warning), 3 for any of `usgs`, `emsc`, `gfz` while another of them is at 3 or more too | an alert source is down (a single failed poll is only logged); the message gives about how long the streak has lasted at the gateway's polling and names why when the gateway says so: `lastError` (`timeout`, `http`, `network`, `invalid`) and `consecutiveTimeouts` |
+  | a `detector.providers[]` entry `ok: false` for 3 min (`emsc`, `gfz`: polled every 15 s detector tick) or 5 min (`usgs`, `feed`, any other id: polled every 60 s) | an alert source is down; from 1 min it is a warning, a shorter streak is a log line. The message says how long and why when the gateway says so: `lastError` (`timeout`, `http`, `network`, `invalid`) and `consecutiveTimeouts` |
+  | two of the three direct providers (`usgs`, `emsc`, `gfz`) `ok: false` together for 2 min | one direct source is left, with the feed backstop |
+  | all three direct providers `ok: false` together for 1 min | the gateway sees new quakes only through the feed backstop, minutes late; three agencies at once points at the gateway's side (egress, DNS, the Workers runtime, a deploy) |
   | `policy.fallback == true` | the restrictive compiled alerts policy runs instead of the signed one |
   | `degraded.active == true` | the free-tier degradation ladder is shedding alert tiers |
   | `budget.headroomPct < 20` (when present) | the gateway is close to a Workers Free daily cap |
@@ -284,10 +286,31 @@ as a fallback). It runs three independent jobs; any one failing turns the run re
   | `feed_manifest_age_s` over 1,800 s (age now, from `feed_manifest_generated_ms` when present) | the feed manifest the gateway reads every minute is stale: the feed stopped publishing (heartbeat Worker, `GH_PAT`, Actions, Pages) |
   | `config_bundle_age_s` over 10 days (from `config_bundle_generated_ms` when present) | the signed config bundle stopped refreshing; apps fall back to compiled defaults once it expires |
 
-  The polling cadences are the gateway's (`TICK_INTERVAL_MS` 15 s, each source's `minIntervalMs`, the
-  backoff to 60 s from the 3rd failure and 300 s from the 10th; mirrored in the script, and checked
-  against a sibling `platform` checkout by `npm test` when one is present); `--provider-failures <n>`
-  and `--fast-provider-failures <n>` set the two limits. A USGS provider that stays `ok` on its
+  Outages are judged by time, not by a failure count (round 25, 2026-10-14): a count meant 30 s on
+  EMSC and GFZ and 2 min on USGS, and the round-24 rule "3 failures while another direct provider is
+  down" turned a 40 s blip red. The duration is `generatedAtMs - failingSinceMs`, published by the
+  gateway from 2026-10-14 while a streak lasts (absent while healthy). For an older gateway, or a
+  streak that began before the field, it is the span of `consecutiveFailures` at the gateway's
+  polling (`TICK_INTERVAL_MS` 15 s, each source's `minIntervalMs`, the backoff to 60 s from the 3rd
+  failure and 300 s from the 10th; mirrored in the script and checked against a sibling `platform`
+  checkout by `npm test` when one is present), a lower bound, so such a streak is never judged
+  earlier. Two streaks are "together" for as long as the shorter one. Why these limits (measured in
+  the round-24 sweep of 2026-10-06..13):
+
+  - 3 min for EMSC and GFZ is about 5 failed polls in a row (15 s, 15 s, then 60 s apart under the
+    backoff), close to the round-24 line of 6 failures (3.5 min). A streak can read up to one backoff
+    interval longer than the outage (the poll that clears it waits), so the 40 s GEOFON blip of
+    2026-10-09 reads as at most 90–110 s: a warning.
+  - 5 min for USGS, the feed and new ids is 5 failed polls at 60 s, the same evidence. Since
+    2026-10-13 USGS `ok: false` means both ComCat FDSN and its summary feed fail (the 15–50 min ComCat
+    slowdowns stay green with the fallback warning), and the backstop's own source moves every 5 min.
+    Every measured real outage is red at the first health run past it.
+  - 2 min for two direct providers at once is above the 90–110 s a fast provider's blip can read and
+    below every single-provider limit; 1 min for all three is reached only when USGS fails two polls
+    60 s apart.
+
+  `--provider-down-sec`, `--fast-provider-down-sec`, `--two-direct-down-sec`, `--all-direct-down-sec`
+  and `--provider-warn-sec` (seconds) set the limits. A USGS provider that stays `ok` on its
   summary-feed fallback is not down.
 
   It only **warns** (the run stays green) when today's `fanout.skipped_no_key` or
@@ -297,13 +320,15 @@ as a fallback). It runs three independent jobs; any one failing turns the run re
   is failing, so a quake USGS deletes is not withdrawn while the provider itself stays `ok`. The
   message gives the age of the provider's `watermarkMs`, the cursor the gateway asks from again once
   the query succeeds (at most 7 days back, so a shorter gap recovers by itself); a shorter streak is a
-  log line. It also only warns when `emsc` or `gfz` is `ok: false` with 3 to 5 failures in a row (see
-  the table), and when a provider's `primaryConsecutiveFailures` is 3 or more while it stays `ok` with
-  `fallback: "summary"` (`--primary-failures <n>`, gateways from 2026-10-13: USGS's ComCat FDSN live
-  query is failing, and its live events come from the summary feed, up to about two minutes later).
+  log line. It also only warns when a provider has been `ok: false` for 1 min or more but less than
+  its limit (see the table), and when a provider's `primaryConsecutiveFailures` is 3 or more while it
+  stays `ok` with `fallback: "summary"` (`--primary-failures <n>`, gateways from 2026-10-13: USGS's
+  ComCat FDSN live query is failing, and its live events come from the summary feed, up to about two
+  minutes later). Both sub-query warnings say how long the streak has lasted when the gateway
+  publishes `deletionsFailingSinceMs` / `primaryFailingSinceMs`.
   Fields an older gateway does not publish
   (`apns.mode`, `apns.production`, `apns.problems`, `fanout`, the two ages, a provider's `lastError` /
-  `consecutiveTimeouts` / `deletionsConsecutiveFailures` / `deletionsLastError`) are never treated as a problem;
+  `consecutiveTimeouts` / `deletionsConsecutiveFailures` / `deletionsLastError` / `failingSinceMs`) are never treated as a problem;
   a null age (not read since the gateway deployed) is a warning.
 
   The fetch is retried twice (2 s, then 5 s backoff) before it gives up. A document it cannot

@@ -6,11 +6,12 @@
 // publishes the public, no-store document https://data.theshelter.app/alerts/status.json once a minute
 // from its tick; this script reads it and exits non-zero when:
 //   - generatedAtMs is older than 300 s (the detector stopped ticking or cannot publish),
-//   - a detector provider is ok:false with a streak of consecutiveFailures at its limit, which follows how often the
-//     gateway polls it (PROVIDER_MIN_INTERVAL_MS below): 3 for USGS and the feed backstop (polled every 60 s, so about
-//     2 min of failures), 6 for EMSC and GFZ (polled every 15 s detector tick, so about 3.5 min; 3 to 5 is a warning),
-//     and 3 for EMSC or GFZ while another direct provider (USGS, EMSC, GFZ) is down too. The message names the
-//     gateway's lastError and consecutiveTimeouts when the document carries them,
+//   - a detector provider has been ok:false for longer than its limit, judged by TIME (the gateway's failingSinceMs,
+//     round-25 gateways; for an older gateway, or a streak older than the field, the time its consecutiveFailures span
+//     at the gateway's polling): 3 min for EMSC and GFZ (polled every 15 s detector tick), 5 min for USGS, the feed
+//     backstop and any other id (polled every 60 s); two of the three direct providers (USGS, EMSC, GFZ) failing
+//     together for 2 min; all three failing together for 1 min. A shorter streak from 1 min is a warning. The message
+//     names the gateway's lastError and consecutiveTimeouts when the document carries them,
 //   - policy.fallback is true (the restrictive compiled policy runs instead of the signed one),
 //   - degraded.active is true (the free-tier degradation ladder is shedding alert tiers),
 //   - budget.headroomPct is below 20 (checked only when present),
@@ -30,8 +31,10 @@
 // cursor) stands still; the gateway asks again from that cursor, at most 7 days back, so a shorter gap recovers.
 // It also only warns when a provider's primary live query (USGS: ComCat FDSN, 2026-10-13 gateways) has failed 3 times
 // in a row (`primaryConsecutiveFailures` / `primaryLastError`, with `fallback: 'summary'` while the provider is ok):
-// the live events then come from USGS's summary feed, up to about two minutes later, and alerts still go out.
-// Fields an older gateway does not publish (apns.mode/production/problems, fanout) are never a problem.
+// the live events then come from USGS's summary feed, up to about two minutes later, and alerts still go out. Both
+// warnings say how long the streak has lasted when the gateway publishes its start (deletionsFailingSinceMs /
+// primaryFailingSinceMs, round 25).
+// Fields an older gateway does not publish (apns.mode/production/problems, fanout, failingSinceMs) are never a problem.
 // Optional usage half: when CF_ANALYTICS_TOKEN (Account Analytics: Read) is set, it also reads today's
 // (UTC) account-wide Workers requests and D1 rows written from the GraphQL Analytics API and fails at 80 %
 // of the Workers Free daily caps (100,000 each; at 100 % every Worker on the account fails closed until
@@ -44,9 +47,9 @@
 //   node scripts/alerts-watchdog.mjs                        # the CI invocation
 //   node scripts/alerts-watchdog.mjs --selftest             # forces a failing headroom limit (proves the red path)
 //   node scripts/alerts-watchdog.mjs --status-file doc.json # judge a saved document instead of fetching
-//   flags: --url <url> --max-age-sec <n> --provider-failures <n> --fast-provider-failures <n> --min-headroom-pct <n>
-//          --usage-fail-pct <n> --max-feed-manifest-age-sec <n> --max-config-bundle-age-sec <n> --deletions-failures <n>
-//          --primary-failures <n>
+//   flags: --url <url> --max-age-sec <n> --provider-down-sec <n> --fast-provider-down-sec <n> --two-direct-down-sec <n>
+//          --all-direct-down-sec <n> --provider-warn-sec <n> --min-headroom-pct <n> --usage-fail-pct <n>
+//          --max-feed-manifest-age-sec <n> --max-config-bundle-age-sec <n> --deletions-failures <n> --primary-failures <n>
 //
 // Dependency-free (Node >= 22, global fetch). The pure helpers are exported for
 // tests/alerts-watchdog.test.ts, which never touches the network.
@@ -60,14 +63,33 @@ export const GRAPHQL_URL = 'https://api.cloudflare.com/client/v4/graphql';
 export const DEFAULT_THRESHOLDS = Object.freeze({
   /** status.json older than this fails (the detector publishes every 60 s). */
   maxAgeSec: 300,
-  /** a provider with ok:false polled every 60 s (USGS, the feed backstop, an unknown id) fails once its consecutive-failure
-   *  streak reaches this (about 2 min of failures). A provider polled every detector tick (EMSC, GFZ) warns from it, and
-   *  fails at it while another direct provider is down at it too. */
-  providerFailures: 3,
-  /** a provider with ok:false polled every 15 s detector tick (EMSC, GFZ) fails once its streak reaches this: 3 failures
-   *  15 s apart, then one a minute under the gateway's backoff, so 6 is about 3.5 min, where 3 was 30 s (one GEOFON blip
-   *  of about 40 s turned the run red on 2026-10-09). */
-  fastProviderFailures: 6,
+  // Provider outages are judged by how long they have lasted, not by a failure count (round 25, 2026-10-14): a count
+  // means 30 s on EMSC/GFZ and 2 min on USGS, and the old "3 while another direct provider is down" rule turned a 40 s
+  // GEOFON blip red. The limits, from what was measured (round-24 sweep, 2026-10-06..13): USGS outages of 15-50 min
+  // (since 2026-10-13 absorbed by its summary-feed fallback, so ok:false means FDSN AND the summary feed fail), one
+  // GEOFON blip of about 40 s (2026-10-09), EMSC/GFZ polled every 15 s tick and backed off to 60 s from the 3rd failure,
+  // USGS and the feed every 60 s, the feed's own data every 5 min, a health run every 15 min. A provider's streak can
+  // look up to one backoff interval (60 s) longer than the outage (the poll that would clear it waits), so a 40 s blip
+  // reads as at most about 90-110 s on EMSC/GFZ.
+  /** a provider polled every 60 s (USGS, the feed backstop, an unknown id) failing this long fails the run: 5 failed polls
+   *  in a row, the same evidence as 3 min of EMSC/GFZ. A USGS ok:false already means both FDSN and its summary feed fail,
+   *  and the backstop's own source moves every 5 min (one aggregate cycle), so a shorter gap costs at most one cycle.
+   *  Every measured real outage (15-50 min) is red at the first health run past it. */
+  providerDownSec: 300,
+  /** a provider polled every 15 s tick (EMSC, GFZ) failing this long fails the run: about 5 failed polls in a row (15 s,
+   *  15 s, then 60 s apart under the backoff), about the old 6-failure line (3.5 min), and twice the longest a 40 s
+   *  blip can look (90-110 s). */
+  fastProviderDownSec: 180,
+  /** two of the three direct providers (USGS, EMSC, GFZ) failing together this long fails the run: one direct source is
+   *  left. Above the 90-110 s a fast provider's blip can look, below every single-provider limit. */
+  twoDirectDownSec: 120,
+  /** all three direct providers failing together this long fails the run: the gateway sees quakes only through the feed
+   *  backstop, minutes late. USGS reaches 60 s only by failing two polls 60 s apart, so this is never one blip; three
+   *  agencies failing at once points at the gateway's side (egress, DNS, the Workers runtime, a deploy). */
+  allDirectDownSec: 60,
+  /** a provider failing this long, below its limit, is a warning; a shorter streak (a single failed poll: up to 60 s on
+   *  USGS, 15 s on EMSC/GFZ) is a log note. */
+  providerWarnSec: 60,
   /** budget.headroomPct below this fails. */
   minHeadroomPct: 20,
   /** account usage at or above this share (percent) of a Free daily cap fails. */
@@ -123,7 +145,8 @@ export function isFastProvider(id) {
 /**
  * About how long a streak of `failures` polls in a row has lasted (s), from the first failed poll to the latest: the
  * poll interval between them, widened by the gateway's backoff. A lower bound: a tick that waits on a 4 s timeout
- * starts the next one later.
+ * starts the next one later. Used only when the gateway publishes no failingSinceMs (before round 25, or a streak that
+ * began before the field), so such a streak is judged a little later, never earlier.
  */
 export function streakSpanSec(id, failures) {
   let ms = 0;
@@ -134,22 +157,42 @@ export function streakSpanSec(id, failures) {
   return ms / 1000;
 }
 
-/** "45 s", "3.5 min", "31.6 h". */
+/** "45 s", "3.5 min", "31.6 h"; seconds and minutes round down, so a streak short of its limit never reads as it. */
 function spanText(sec) {
-  if (sec < 120) return `${Math.round(sec)} s`;
-  if (sec < 7_200) return `${Math.round(sec / 30) / 2} min`;
+  if (sec < 120) return `${Math.floor(sec)} s`;
+  if (sec < 7_200) return `${Math.floor(sec / 30) / 2} min`;
   return `${(sec / 3_600).toFixed(1)} h`;
 }
 
+/** A failingSinceMs this far past the document's own time is damage, not a start (a newer field, a broken clock). */
+const START_SKEW_MS = 60_000;
+
 /**
- * The red line for a failing provider's streak: `providerFailures` (3) for a provider polled every 60 s; for one polled
- * every tick (EMSC, GFZ) `fastProviderFailures` (6), with a warning from `providerFailures`, or `providerFailures` while
- * another direct provider is down at it too (`together`).
+ * How long a failing provider entry has failed (s), as of `refMs` (the document's generatedAtMs): from the gateway's
+ * `failingSinceMs` (round-25 gateways, published while the streak lasts) when it is a usable time, else estimated from
+ * `consecutiveFailures` at the gateway's polling (streakSpanSec, a lower bound). Null when the entry carries neither.
+ * @returns {{ sec: number, measured: boolean, since?: number, failures: number | null } | null}
  */
-export function providerLimit(id, t, together = false) {
-  const base = t.providerFailures;
-  if (!isFastProvider(id)) return { warn: base, red: base };
-  return { warn: base, red: together ? base : Math.max(base, t.fastProviderFailures) };
+export function streakDuration(p, refMs) {
+  if (!isObject(p)) return null;
+  const id = typeof p.id === 'string' ? p.id : '?';
+  const failures = isNum(p.consecutiveFailures) && p.consecutiveFailures >= 0 ? p.consecutiveFailures : null;
+  if (isNum(p.failingSinceMs) && p.failingSinceMs > 0 && isNum(refMs) && p.failingSinceMs <= refMs + START_SKEW_MS) {
+    return { sec: Math.max(0, refMs - p.failingSinceMs) / 1000, measured: true, since: p.failingSinceMs, failures };
+  }
+  if (failures === null || failures < 1) return null;
+  return { sec: streakSpanSec(id, failures), measured: false, failures };
+}
+
+/** The red line (s) for one failing provider on its own: fastProviderDownSec for EMSC/GFZ, providerDownSec otherwise. */
+export function providerDownSec(id, t) {
+  return isFastProvider(id) ? t.fastProviderDownSec : t.providerDownSec;
+}
+
+/** "for 6.5 min (since 05:12:30 UTC)" or "for about 5 min (6 consecutive failures at 60 s polls; no failingSinceMs)". */
+function durationText(id, d) {
+  if (d.measured) return `for ${spanText(d.sec)} (since ${new Date(d.since).toISOString().slice(11, 19)} UTC)`;
+  return `for about ${spanText(d.sec)} (${d.failures} consecutive failure${d.failures === 1 ? '' : 's'} at ${pollIntervalMs(id) / 1000} s polls; the gateway publishes no failingSinceMs for it)`;
 }
 
 /** Workers Free daily caps (account-wide, reset 00:00 UTC). */
@@ -206,9 +249,10 @@ export function failureReason(p) {
  * The deletions half of a provider entry (round-16 gateways, GW-R15-1): `deletionsConsecutiveFailures` and
  * `deletionsLastError` are published only while the provider's separate deletions query fails, and `ok` stays true
  * meanwhile. Returns null when the entry carries no positive streak (a healthy query, an older gateway, a provider
- * without a deletions query, or a malformed value), else the streak and a readable reason.
+ * without a deletions query, or a malformed value), else the streak, a readable reason and, when the gateway publishes
+ * `deletionsFailingSinceMs` (round 25), how long it has lasted as of `refMs` (`lasted`: " over 22 min", else '').
  */
-export function deletionsFailure(p) {
+export function deletionsFailure(p, refMs) {
   if (!isObject(p)) return null;
   const n = p.deletionsConsecutiveFailures;
   if (!isNum(n) || n <= 0) return null;
@@ -218,15 +262,22 @@ export function deletionsFailure(p) {
     const gloss = Object.hasOwn(PROVIDER_ERRORS, code) ? ` (${PROVIDER_ERRORS[code]})` : '';
     why = `, last error ${code}${gloss}`;
   }
-  return { failures: n, why };
+  return { failures: n, why, lasted: lastedText(p.deletionsFailingSinceMs, refMs) };
+}
+
+/** " over 22 min" for a sub-query streak whose start the gateway publishes (round 25), '' otherwise. */
+function lastedText(sinceMs, refMs) {
+  if (!isNum(sinceMs) || sinceMs <= 0 || !isNum(refMs) || sinceMs > refMs + START_SKEW_MS) return '';
+  return ` over ${spanText(Math.max(0, refMs - sinceMs) / 1000)}`;
 }
 
 /**
  * The primary live query of a provider entry (2026-10-13 gateways, USGS FDSN): `primaryConsecutiveFailures` and
  * `primaryLastError` are published only while it fails; `fallback: 'summary'` says the provider stays ok on USGS's
  * summary feed meanwhile (absent while the provider itself fails too). Null when the entry carries no positive streak.
+ * `lasted` is " over N min" from `primaryFailingSinceMs` (round 25) as of `refMs`, else ''.
  */
-export function primaryFailure(p) {
+export function primaryFailure(p, refMs) {
   if (!isObject(p)) return null;
   const n = p.primaryConsecutiveFailures;
   if (!isNum(n) || n <= 0) return null;
@@ -236,7 +287,7 @@ export function primaryFailure(p) {
     const gloss = Object.hasOwn(PROVIDER_ERRORS, code) ? ` (${PROVIDER_ERRORS[code]})` : '';
     why = `, last error ${code}${gloss}`;
   }
-  return { failures: n, why, fallback: p.fallback === 'summary' };
+  return { failures: n, why, fallback: p.fallback === 'summary', lasted: lastedText(p.primaryFailingSinceMs, refMs) };
 }
 
 /**
@@ -270,10 +321,11 @@ export function evaluateStatus(doc, { nowMs, thresholds = DEFAULT_THRESHOLDS } =
     }
   }
 
-  // 2. Providers: a single failed poll is normal (backoff handles it); a streak is an outage of that source. The streak
-  //    is judged against how often the gateway polls the provider (providerLimit): EMSC and GFZ are polled four times as
-  //    often as USGS and the feed, so the same count is a quarter of the time. Two direct providers down at once leave
-  //    alerts to a single direct source plus the feed backstop, so then the shorter limit applies to them all.
+  // 2. Providers: an outage is judged by how long it has lasted (round 25; see DEFAULT_THRESHOLDS for the measured
+  //    limits). One provider: 3 min for EMSC/GFZ, 5 min for the rest. Coverage: two of the three direct providers
+  //    failing together for 2 min leave one direct source; all three for 1 min leave only the feed backstop. Ongoing
+  //    streaks overlap for as long as the shortest of them, so "together" is the shortest duration of the group. A
+  //    duration comes from the gateway's failingSinceMs, else from the failure count (streakDuration).
   const providers = isObject(doc.detector) ? doc.detector.providers : undefined;
   if (!Array.isArray(providers)) {
     problems.push('detector.providers is missing: provider health cannot be judged');
@@ -281,23 +333,42 @@ export function evaluateStatus(doc, { nowMs, thresholds = DEFAULT_THRESHOLDS } =
   } else {
     if (providers.length === 0) warnings.push('detector.providers is empty: no alert source is being polled');
     const tags = [];
-    const directDown = new Set();
+    const refMs = isNum(doc.generatedAtMs) ? doc.generatedAtMs : nowMs;
+    const durations = new Map();
     for (const p of providers) {
-      if (!isObject(p) || p.ok !== false || !DIRECT_PROVIDERS.includes(p.id)) continue;
-      if (isNum(p.consecutiveFailures) && p.consecutiveFailures >= t.providerFailures) directDown.add(p.id);
+      if (!isObject(p) || p.ok !== false || typeof p.id !== 'string' || durations.has(p.id)) continue;
+      const d = streakDuration(p, refMs);
+      if (d) durations.set(p.id, d);
     }
-    const together = directDown.size >= 2;
+    const directFailing = DIRECT_PROVIDERS.filter((id) => durations.has(id)).sort((a, b) => durations.get(b).sec - durations.get(a).sec);
+    const together = (ids) => Math.min(...ids.map((id) => durations.get(id).sec));
+    const byCount = (ids) => {
+      const est = ids.filter((id) => !durations.get(id).measured);
+      return est.length > 0 ? ` (${est.join(' and ')} judged by ${est.length === 1 ? 'its failure count' : 'their failure counts'}: no failingSinceMs)` : '';
+    };
+    const inGroup = new Set();
+    if (directFailing.length === DIRECT_PROVIDERS.length && together(directFailing) >= t.allDirectDownSec) {
+      for (const id of directFailing) inGroup.add(id);
+      problems.push(`all three direct providers (${DIRECT_PROVIDERS.join(', ')}) have been failing together for ${spanText(together(directFailing))} (limit ${spanText(t.allDirectDownSec)})${byCount(directFailing)}: the gateway sees new quakes only through the feed backstop, minutes late; three agencies failing at once points at the gateway's side (its egress, DNS, the Workers runtime or a deploy)`);
+    } else if (directFailing.length >= 2 && together(directFailing.slice(0, 2)) >= t.twoDirectDownSec) {
+      const pair = directFailing.slice(0, 2);
+      for (const id of pair) inGroup.add(id);
+      const left = DIRECT_PROVIDERS.filter((id) => !pair.includes(id))
+        .map((id) => (durations.has(id) ? `${id}, failing too for ${spanText(durations.get(id).sec)}` : id))
+        .join(', ');
+      problems.push(`two of the three direct providers (${pair.join(' and ')}) have been failing together for ${spanText(together(pair))} (limit ${spanText(t.twoDirectDownSec)})${byCount(pair)}: one direct source is left (${left}), with the feed backstop`);
+    }
     for (const p of providers) {
       if (!isObject(p)) continue;
       const id = typeof p.id === 'string' ? p.id : '?';
       const fails = isNum(p.consecutiveFailures) ? p.consecutiveFailures : null;
-      const del = deletionsFailure(p);
-      const prim = primaryFailure(p);
+      const del = deletionsFailure(p, refMs);
+      const prim = primaryFailure(p, refMs);
       tags.push(`${id}:${p.ok === false ? `FAIL(${fails ?? '?'})` : 'ok'}${prim ? `/primary-FAIL(${prim.failures})${prim.fallback ? '+summary' : ''}` : ''}${del ? `/deletions-FAIL(${del.failures})` : ''}`);
       // The primary live query (USGS FDSN): while the provider is ok on its fallback, a warning only — alerts still go
       // out, from the summary feed. While the provider fails too, the provider line below says so.
       if (prim && p.ok !== false && prim.fallback) {
-        const text = `provider ${id}'s primary live query has failed ${prim.failures} time${prim.failures === 1 ? '' : 's'} in a row${prim.why}: its live events come from the summary feed (fallback: summary), up to about two minutes later`;
+        const text = `provider ${id}'s primary live query has failed ${prim.failures} time${prim.failures === 1 ? '' : 's'} in a row${prim.lasted}${prim.why}: its live events come from the summary feed (fallback: summary), up to about two minutes later`;
         if (prim.failures >= t.primaryFailures) warnings.push(`${text} (warning at ${t.primaryFailures})`);
         else notes.push(`${text} (below the warning at ${t.primaryFailures})`);
       }
@@ -312,28 +383,30 @@ export function evaluateStatus(doc, { nowMs, thresholds = DEFAULT_THRESHOLDS } =
             ? `; its cursor (watermarkMs) is ${lag} old, past the gateway's 7-day deletions window: a deletion from the start of the gap is no longer asked for, and that event stays live`
             : `; its cursor (watermarkMs) is ${lag} old (the next successful query asks from there, at most 7 days back)`;
         }
-        const text = `provider ${id}'s deletions query has failed ${del.failures} time${del.failures === 1 ? '' : 's'} in a row${del.why}: deleted events are not being withdrawn${cursor}`;
+        const text = `provider ${id}'s deletions query has failed ${del.failures} time${del.failures === 1 ? '' : 's'} in a row${del.lasted}${del.why}: deleted events are not being withdrawn${cursor}`;
         if (del.failures >= t.deletionsFailures) warnings.push(`${text} (warning at ${t.deletionsFailures})`);
         else notes.push(`${text} (below the warning at ${t.deletionsFailures})`);
       }
       if (p.ok !== false) continue;
       const http = isNum(p.httpStatus) ? `, last HTTP ${p.httpStatus}` : '';
       const why = failureReason(p);
-      const fast = isFastProvider(id);
-      const alone = providerLimit(id, t);
-      const limit = providerLimit(id, t, together && directDown.has(id));
-      // How long the streak has lasted at the gateway's polling (a fast provider's count means a quarter of the time).
-      const span = fails !== null && fails >= 2 ? `about ${spanText(streakSpanSec(id, fails))} at ${pollIntervalMs(id) / 1000} s polls; ` : '';
-      if (fails !== null && fails >= limit.red) {
-        const others = [...directDown].filter((x) => x !== id);
-        const rule = limit.red < alone.red ? `limit ${limit.red} while ${others.join(' and ')} ${others.length === 1 ? 'is' : 'are'} down too, ${alone.red} alone` : `limit ${limit.red}`;
-        problems.push(`provider ${id} is down: ok:false with ${fails} consecutive failures (${span}${rule})${http}${why}`);
-      } else if (fast && fails !== null && fails >= limit.warn) {
-        warnings.push(`provider ${id} is failing: ok:false with ${fails} consecutive failures (${span}a warning from ${limit.warn}, down at ${limit.red})${http}${why}: the other providers still deliver, so alerts still go out (a quake only ${id} reports may come later)`);
-      } else if (fast) {
-        notes.push(`provider ${id} is ok:false with ${fails ?? 'an unknown number of'} consecutive failures (below the warning at ${limit.warn}, down at ${limit.red})${http}${why}`);
+      const d = streakDuration(p, refMs);
+      if (!d) {
+        notes.push(`provider ${id} is ok:false with no failure streak published (neither failingSinceMs nor consecutiveFailures)${http}${why}`);
+        continue;
+      }
+      const downSec = providerDownSec(id, t);
+      const count = d.measured && fails !== null ? `, ${fails} consecutive failure${fails === 1 ? '' : 's'}` : '';
+      const tail = `${count}${http}${why}`;
+      if (d.sec >= downSec) {
+        problems.push(`provider ${id} is down: ok:false ${durationText(id, d)}, limit ${spanText(downSec)} for a provider polled every ${pollIntervalMs(id) / 1000} s${tail}`);
+      } else if (d.sec >= t.providerWarnSec) {
+        const consequence = inGroup.has(id)
+          ? 'see the direct-provider problem above'
+          : `the other providers still deliver, so alerts still go out (a quake only ${id} reports may come later)`;
+        warnings.push(`provider ${id} is failing: ok:false ${durationText(id, d)}, a warning from ${spanText(t.providerWarnSec)}, down at ${spanText(downSec)}${tail}: ${consequence}`);
       } else {
-        notes.push(`provider ${id} is ok:false with ${fails ?? 'an unknown number of'} consecutive failures (below the limit of ${limit.red})${http}${why}`);
+        notes.push(`provider ${id} is ok:false ${durationText(id, d)}, below the warning at ${spanText(t.providerWarnSec)}, down at ${spanText(downSec)}${tail}`);
       }
     }
     parts.push(`providers=${tags.join(',') || 'none'}`);
@@ -619,8 +692,11 @@ export function annotation(level, title, message) {
 
 const NUMERIC_FLAGS = {
   '--max-age-sec': 'maxAgeSec',
-  '--provider-failures': 'providerFailures',
-  '--fast-provider-failures': 'fastProviderFailures',
+  '--provider-down-sec': 'providerDownSec',
+  '--fast-provider-down-sec': 'fastProviderDownSec',
+  '--two-direct-down-sec': 'twoDirectDownSec',
+  '--all-direct-down-sec': 'allDirectDownSec',
+  '--provider-warn-sec': 'providerWarnSec',
   '--min-headroom-pct': 'minHeadroomPct',
   '--usage-fail-pct': 'usageFailPct',
   '--max-feed-manifest-age-sec': 'maxFeedManifestAgeSec',

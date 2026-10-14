@@ -28,8 +28,8 @@ export const CACHE_CONTROL = {
   /** The v2 manifest (signed envelope, ~KBs): clients revalidate with ETag, the edge absorbs it. */
   v2: 'public, max-age=0, s-maxage=60, stale-while-revalidate=120, stale-if-error=86400',
   /** The live index's day files (live-sync.ts): stable bytes that a client fetches when the index's sha256 for the day
-   *  differs from its copy, so a cached copy must never be served without asking (an ETag revalidation is a 304). Also
-   *  the unfrozen day partitions (`/events/YYYY/MM/DD.ndjson`, round 25): the v2 manifest's sha256 names their current
+   *  differs from its copy, so a cached copy must never be served without asking (an ETag revalidation is a 304). The
+   *  month index's day files likewise (live-month.ts, round 27). Also the unfrozen day partitions (`/events/YYYY/MM/DD.ndjson`, round 25): the v2 manifest's sha256 names their current
    *  bytes, and a reader that gets other bytes moves to the next origin. */
   liveDay: 'public, max-age=0, must-revalidate',
 } as const;
@@ -64,9 +64,11 @@ export function pagesHeaders(nowMs: number, dayKeys: Iterable<string>): string {
     // Only the day's change-log (`<day>.ndjson`) is published here.
     rule('/v1/changes/:file', CACHE_CONTROL.changes, NDJSON_CONTENT_TYPE),
     rule('/v2/*', CACHE_CONTROL.v2),
-    // The live index (index.json + the deltas, rewritten every run) and its day files (live-sync.ts).
+    // The live index (index.json + the deltas, rewritten every run) and its day files (live-sync.ts); the month index
+    // (month.json, rewritten every run) and its day files (live-month.ts), fetched by fingerprint like the live days.
     rule('/v1/live/:file', CACHE_CONTROL.top),
     rule('/v1/live/days/:file', CACHE_CONTROL.liveDay),
+    rule('/v1/live/month/:file', CACHE_CONTROL.liveDay),
     // The per-hour detail files (event-detail.ts): recent hours still fill, like the hot day files.
     rule('/v1/detail/:file', CACHE_CONTROL.hotDay),
     // The unfrozen day partitions (NDJSON, partitions.ts writePagesPartition): the manifest's `url` and the v2 `pages`

@@ -11,7 +11,7 @@ archival, redaction).
 
 | Surface | Base | Use | Cache |
 |---|---|---|---|
-| Cloudflare Pages | `https://earthquakes-feed.theshelter.app/v1/` | live feed, recent day files, manifest, live index, per-hour detail | summaries + manifest + live index and deltas `max-age=30` + SWR; day files `max-age=300` (today, yesterday) / `3600` (older); live index day files `max-age=0, must-revalidate`; detail hours `max-age=300` |
+| Cloudflare Pages | `https://earthquakes-feed.theshelter.app/v1/` | live feed, recent day files, manifest, live index, month index, per-hour detail | summaries + manifest + live index, deltas and month index `max-age=30` + SWR; day files `max-age=300` (today, yesterday) / `3600` (older); live index and month index day files `max-age=0, must-revalidate`; detail hours `max-age=300` |
 | Cloudflare Pages | `https://earthquakes-feed.theshelter.app/events/` | the unfrozen day partitions (NDJSON, the last 11 days), byte for byte the `data` branch files (since 2026-10); served as `text/plain; charset=utf-8`, brotli or gzip when the request accepts it (since 2026-10-14; the manifest's `sha256` and `bytes` name the decoded bytes) | `max-age=0, must-revalidate` |
 | jsDelivr (branch) | `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/` | full-history partitions; **from 2026-11-04 frozen days only** (*Historical day partitions*) | ~12 h |
 | jsDelivr (`@sha`) | `…@<data_commit>/` | immutable frozen partitions | 1 year, immutable |
@@ -37,6 +37,7 @@ The catalog. Fields:
 | `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}`; `url` is the NDJSON: the Pages copy for an unfrozen day, jsDelivr `@data` for a frozen one (*Historical day partitions*). `count` is every feature of the file (all states); since round 26 (2026-10-14) `min_mag` / `max_mag` are the day's **live** events' range, recorded while the day is unfrozen and kept when it freezes (a retired event keeps its last solution: a phantom M8.2 folded into the Panama M7.7 of 2026-10-09 had kept that day at 8.2); days frozen before then keep the range over every feature |
 | `archives[]` | rolled-up cold months: `{period, tag, asset, url, bytes, sha256, count, days[]}` |
 | `live` | the live index: `{path, url, head_seq, window_days}` (see *Live index* below; since 2026-10) |
+| `live_month` | the month index: `{path, url, head_seq, min_mag, window_days}` (see *Month index* below; since 2026-10-15) |
 | `event_detail` | the per-hour detail files: `{path_template, url_template, first_hour, last_hour}` (see *Event detail* below; since 2026-10) |
 
 `partitions[]` overrides `archives[]` for any day present in both.
@@ -170,6 +171,35 @@ deltas 4.0 KB (15 min), 11.1 KB (1 h), 54.7 KB (6 h), 173.8 KB (24 h). So a clie
 the index and a 15-minute delta (~5 KB) instead of the week (~870 KB), one back after a night moves the 24-hour delta,
 and one away for longer moves the changed days. `all_week` and the other summaries stay as they are. Schema:
 `schema/live-index.schema.json`.
+
+### `GET /v1/live/month.json` — month index (incremental refresh of the month under the week)
+
+The M ≥ 2.5 month that `all_month.geojson` carries, older than the live week, in the live index's form (PRB-2's last
+piece, round 27). `all_month` is one ~9.5 MB file (~1.1 MB brotli) whose bytes change on every 5-minute run, so a map
+that shows the month under the live week downloaded all of it on every refresh. The index lists `days[]`:
+`{date, path, url, count, bytes, sha256}` for each UTC day from the first day the month window reaches (the day of now
+− 30 days, `window_days`) through today − 6 (`newest_offset_days`). Each `/v1/live/month/YYYY-MM-DD.geojson` is a
+compact `FeatureCollection` with exactly the features `all_month` carries for that day (live events, plus the events
+retired in the last 48 h flagged non-live, see *Retired events*) at its floor `min_mag` (2.5; it stays at 2.5 should
+`all_month` ever climb the size ladder), for the whole day, with no run clock inside (`metadata.generated` is the newest
+`ingest_time` among its features), so its `sha256` changes only when that day's events do. `count` counts live events;
+`features_format` is the live index's. There are no deltas.
+
+How to use it: keep the day files you fetched and their `sha256`. On a refresh fetch the index (7 KB, ~1.7 KB
+compressed), fetch only the days whose `sha256` differs from your copy, replace those days whole, drop the days that
+left the list, and filter by your own window (`time >= now − 30 days`, as `all_month` does: the oldest day reaches a
+little further back). Take the week from the live index (or `all_week`). The two oldest days of the live window
+(today − 7 and today − 6) are in both on purpose: cut the month at your live set's oldest event and an event the live
+set drops between two refreshes of the month (also across a UTC midnight) is already held. A day file that does not
+hash to the index's `sha256` (a deploy landed between the two requests) is kept but compared again on the next
+refresh. When the manifest names no `live_month`, read `all_month`.
+
+Measured over the 943 derive commits of 2026-10-11 18:00 → 10-14 18:48 UTC (each day rebuilt from the committed
+partitions; brotli 4 × 1.078, the ratio Pages served `all_month` at): the first sync is 976 KB; after it a refresh
+moves the index and 0.22 changed days on average, 10 KB every 30 minutes, 25 KB after 2 h, 57 KB after 8 h and 93 KB
+after 24 h, against ~1,100 KB of `all_month` every time (99 %, 98 %, 95 % and 92 % less). Days newer than today − 6
+would add today's and yesterday's files, which change on nearly every run (96–349 KB a refresh). `all_month` and the
+other summaries stay as they are. Schema: `schema/live-month.schema.json`.
 
 ### `GET /v1/detail/YYYY-MM-DDTHH.geojson` — event detail (one UTC hour)
 

@@ -236,8 +236,10 @@ const byTimeThenId = (a: Feat, b: Feat): number => a.timeMs - b.timeMs || (idOf(
 const idOf = (f: Feat): string => (f.feature as { id: string }).id;
 
 /** One day file: deterministic bytes for the same features (no run clock inside). `generated` is the newest ingest
- *  time among them, or the day's midnight when it is empty: it moves only when the content does. */
-export function liveDayJson(date: string, feats: Feat[]): string {
+ *  time among them, or the day's midnight when it is empty: it moves only when the content does. `opts` names another
+ *  kind of day file (the month index's, live-month.ts: its title and magnitude floor); without it the bytes are the live
+ *  index's day file as published since round 15. */
+export function liveDayJson(date: string, feats: Feat[], opts?: { title: string; minMag: number }): string {
   const sorted = [...feats].sort(byTimeThenId);
   const generated = sorted.reduce((m, f) => Math.max(m, Number.isFinite(f.ingestMs) ? f.ingestMs : 0), Date.parse(`${date}T00:00:00Z`));
   return JSON.stringify({
@@ -245,10 +247,11 @@ export function liveDayJson(date: string, feats: Feat[]): string {
     metadata: {
       generated,
       generated_iso: isoFromMs(generated),
-      title: `earthquakes-feed live day ${date}`,
+      title: opts?.title ?? `earthquakes-feed live day ${date}`,
       api: '1',
       date,
       count: sorted.filter((f) => f.live).length,
+      ...(opts ? { min_mag: opts.minMag } : {}),
       schema_version: SCHEMA_VERSION,
       attribution: NOTICE,
     },

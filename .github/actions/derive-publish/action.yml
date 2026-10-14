@@ -6,10 +6,11 @@ description: >-
   aggregate run (same job, same checkout, same hold on the writer lock); derive.yml runs them alone when dispatched by
   hand.
 
-# Summaries go to Cloudflare Pages ONLY (never committed — design §4.5); the data branch gets plain-NDJSON partitions +
-# the root manifest, and Pages a byte-identical copy of each unfrozen day's partition (events/YYYY/MM/DD.ndjson, round
-# 25). Direct Upload deploys have not counted against the 500-builds/month Pages cap in practice (about 8,600 a month;
-# Cloudflare's limits page describes only builds from Git pushes). Each secret reaches only the step that needs it.
+# Summaries go to Cloudflare Pages ONLY (never committed — design §4.5); the data branch gets plain-NDJSON partitions of
+# the frozen days + the root manifest, and Pages a byte-identical copy of each unfrozen day's partition
+# (events/YYYY/MM/DD.ndjson, round 25), its only published copy until it freezes (storage option 4 phase 2). Direct
+# Upload deploys have not counted against the 500-builds/month Pages cap in practice (about 8,600 a month; Cloudflare's
+# limits page describes only builds from Git pushes). Each secret reaches only the step that needs it.
 inputs:
   cf-api-token:
     description: secrets.CF_API_TOKEN (Pages deploy)
@@ -86,7 +87,7 @@ runs:
       env:
         DATA_DIR: .data
         PUBLIC_DIR: public
-        # The calling workflow's snapshot step writes it (src/live-baseline.ts); absent = the committed partitions.
+        # The calling workflow's snapshot step writes it (src/live-baseline.ts); absent = no silent-change baseline.
         LIVE_BASELINE_DIR: ${{ runner.temp }}/live-baseline
       run: npx --no-install tsx src/derive.ts
     - name: Validate output (schema + seq + size gates)
@@ -107,12 +108,13 @@ runs:
       run: |
         git config user.name  "earthquakes-feed-bot"
         git config user.email "bot@users.noreply.github.com"
-        # -A, not `events manifest.json`: derive also rewrites knowledge/index/partitions.json
-        # (saveInventory) and deletes pruned knowledge/index/event_map shards, both tracked.
-        # Staging only events+manifest froze the inventory 30 partitions behind the manifest,
-        # never landed a single shard prune, and left the tree dirty on every run — which then
-        # turned any push retry into `cannot rebase: You have unstaged changes` (run 30301900011).
-        git add -A
+        # Everything (`git add -A`), not `events manifest.json`: derive also rewrites knowledge/index/partitions.json
+        # (saveInventory) and deletes pruned knowledge/index/event_map shards, both tracked. Staging only
+        # events+manifest froze the inventory 30 partitions behind the manifest, never landed a single shard prune, and
+        # left the tree dirty on every run — which then turned any push retry into `cannot rebase: You have unstaged
+        # changes` (run 30301900011). Storage option 4 phase 2: everything but the unfrozen day partitions, which stay on
+        # disk for the steps below and leave the index (src/stage-data.ts; a day is committed once, when it freezes).
+        ( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/stage-data.ts . )
         if git commit -q -m "derive: views @ $(date -u +%FT%TZ)"; then
           # Fail-loud push loop (H3; tests/push-data.test.ts).
           bash "$GITHUB_WORKSPACE/scripts/push-data.sh"

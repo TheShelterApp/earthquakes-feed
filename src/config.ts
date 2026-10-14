@@ -219,9 +219,9 @@ export interface OutOfRegionWindow {
   maxDtMs: number;
   maxDeltaMag: number;
   /** A partner below `minPartnerMag` (round 27): from `fromMag`, when the provider's side is reviewed, the pair is one
-   *  quake within `baseKm` (and the limits above), or up to `km` when the distance over the time difference is between
-   *  `minKmPerS` and `maxKmPerS`. */
-  low?: { fromMag: number; km: number; minKmPerS: number; maxKmPerS: number };
+   *  quake within `baseKm` (and the limits above) when the time difference is at most the distance at `minKmPerS` plus
+   *  `slackMs`, or up to `km` when the distance over the time difference is between `minKmPerS` and `maxKmPerS`. */
+  low?: { fromMag: number; km: number; minKmPerS: number; maxKmPerS: number; slackMs: number };
 }
 /** What the feed does with a regional agency's solutions outside its own region (Resolver, round 26): `boxes` is the
  *  region; `window` the out-of-region window, if any; `hold` the solutions outside it that no event takes and that are
@@ -252,7 +252,13 @@ export const NOA_REGION: readonly RegionBox[] = [[34, 42, 19, 30]];
  *  above; 1450629 joined its automatic twin 1450622 first, whose EMSC copy keeps that event apart), 0 splits and 0
  *  regroupings. Only for reviewed solutions: OVSICORI's automatic ones outside its box are often phantoms or hundreds of
  *  km off (the hold). After the M7.7 ComCat listed 24 quakes of M ≥ 4.5 in 3–15 N, 92–76 W in 7 h; at 100 km the speed
- *  band leaves 10–17 s of the 30 s, so another aftershock rarely meets it, and mutual best decides between two. */
+ *  band leaves 10–17 s of the 30 s, so another aftershock rarely meets it, and mutual best decides between two.
+ *  Round 27 review: within 50 km the time difference is capped too, at the distance at 6 km/s plus 2 s (`slackMs`, for
+ *  OVSICORI's whole-second origin times): the two folds within 50 km are 4.5 s for 35 km and 5.3 s for 39 km, and of the
+ *  14 reviewed solutions outside the box with a partner of M4.5–5.5 in the window (whole log) the cap keeps all 14. A
+ *  distinct aftershock is what a time shift measures: OVSICORI's reviewed solutions outside its box moved by ±2–60 min
+ *  (118 shifts) against the USGS, EMSC and GFZ rows of M ≥ 4.5 in 0–18 N, 95–72 W find a partner 0.71 times a shift
+ *  without the cap (a free 30 s within 50 km) and 0.27 times with it. */
 export const OVSICORI_WINDOW: OutOfRegionWindow = {
   partners: new Set(['usgs', 'emsc', 'geofon']),
   minPartnerMag: LARGE_EVENT_MAG,
@@ -261,7 +267,7 @@ export const OVSICORI_WINDOW: OutOfRegionWindow = {
   maxKm: 200,
   maxDtMs: 30_000,
   maxDeltaMag: 2.0,
-  low: { fromMag: 4.5, km: 120, minKmPerS: 6, maxKmPerS: 10 },
+  low: { fromMag: 4.5, km: 120, minKmPerS: 6, maxKmPerS: 10, slackMs: 2_000 },
 };
 /** From this magnitude an OVSICORI automatic solution outside its region that no event takes is held. In the day
  *  partitions of 2026-07-05..10-08, before the Panama sequence, 83 of the 85 OVSICORI automatic solutions of M ≥ 4.0
@@ -356,8 +362,8 @@ export const REVISED_ID_WINDOWS: ReadonlyMap<string, { dtMs: number; km: number;
 ]);
 /** A REVIEWED_ID_WINDOWS provider's two windows (round 27, Resolver.reviewedPairScore). `near`: origin times, places and
  *  magnitudes at most this far apart. `far`, only when the reviewed solution lies outside the provider's region
- *  (`boxes`): origin times and places at most this far apart, magnitudes at most `maxDeltaMag`, and the distance over
- *  the time difference between `minKmPerS` and `maxKmPerS`. */
+ *  (`boxes`): origin times and places at most this far apart, magnitudes at most `maxDeltaMag`, the distance over the
+ *  time difference between `minKmPerS` and `maxKmPerS`, and the automatic solution's origin time the later one. */
 export interface ReviewedIdWindow {
   boxes: readonly RegionBox[];
   near: { dtMs: number; km: number; maxDeltaMag: number };
@@ -387,8 +393,11 @@ export interface ReviewedIdWindow {
  *    frozen days apart (an automatic M5.7 for IGC's M4.0 on 2026-08-15 among them).
  *  - `far`: outside its network OVSICORI's automatic locator moves a quake toward its stations, and the origin time
  *    moves later by about the P-wave travel time over that distance. 11 pairs, the reviewed solution outside the box,
- *    63–293 km and 8–38 s apart, 6.8–8.4 km/s, |ΔM| 0.1–1.8; neither ComCat nor EMSC lists another quake within 40 s and
- *    120 km of any of those automatic solutions. Six of them lie inside the box: 1450630 (automatic M6.5, 2026-10-12
+ *    63–293 km and 8–38 s apart, 6.8–8.4 km/s, |ΔM| 0.1–1.8, the automatic solution 8–38 s later every time; neither
+ *    ComCat nor EMSC lists another quake within 40 s and 120 km of any of those automatic solutions. The window asks
+ *    for the later automatic origin time (round 27 review): with OVSICORI's reviewed solutions outside its box moved by
+ *    ±2–60 min (118 shifts), an automatic solution meets the window 0.60 times a shift without that sign and 0.26
+ *    times with it, against the 11 real pairs, which all keep it. Six of them lie inside the box: 1450630 (automatic M6.5, 2026-10-12
  *    23:20:56) for 1450632 (reviewed M6.8, 195 km, 27 s; ComCat's M6.1 us6000u1wn), 1450622 and 1450624 (M3.9, for
  *    ComCat's M4.5 us6000u1w6 and us6000u1w7), 1450340 (M3.5, for ComCat's M5.0 us6000u197) and two of July and August
  *    (INET's quakes). With the reviewed solution inside the box (the quake inside the network) 13 mutual-best pairs lie

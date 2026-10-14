@@ -211,7 +211,7 @@ function far(rev: Partial<RawObs>, auto: Partial<RawObs> = {}, seed?: (r: Resolv
 }
 const farTogether = (map: Map<string, EventNode>): boolean => together(map, 'ovsicori:1450630', 'ovsicori:1450632');
 
-test('far: the reviewed solution outside the box, the automatic one up to 40 s and 300 km off at 6–9 km/s, one event', () => {
+test('far: the reviewed solution outside the box, the automatic one later, up to 40 s and 300 km off at 6–9 km/s, one event', () => {
   const map = far({});
   assert.ok(farTogether(map));
   assert.equal(chosenKey(holding(map, 'ovsicori:1450630')[0]!), 'ovsicori:1450632');
@@ -220,6 +220,10 @@ test('far: the reviewed solution outside the box, the automatic one up to 40 s a
   assert.ok(!farTogether(far({ eventTimeMs: P_AUTO.eventTimeMs - 16_000 })), '12 km/s');
   assert.ok(!farTogether(far({ lat: 8.2, lon: -82.6 }, { lat: 9.95, lon: -83.7, eventTimeMs: P_REV.eventTimeMs + 27_000 })), 'reviewed inside the box');
   assert.ok(!farTogether(far({ mag: 8.7 })), '|ΔM| 2.2');
+  // Round 27 review: the automatic origin time is the later one (the locator moved the quake toward the stations); the
+  // same 195 km and 27 s with the automatic one earlier are two quakes.
+  assert.ok(!farTogether(far({ eventTimeMs: P_AUTO.eventTimeMs + 27_000 })), 'the automatic one 27 s earlier');
+  assert.ok(farTogether(far({ eventTimeMs: P_AUTO.eventTimeMs - 22_000 })), '22 s, 8.9 km/s');
 });
 
 test('far: in a dense cell the twins still fold, into the global agencies’ event the reviewed one joined', () => {
@@ -325,7 +329,7 @@ function low(ovs: Partial<RawObs> = {}, us: Partial<RawObs> = {}, ovsFirst = fal
 }
 
 test('config: the out-of-region window takes a reviewed solution’s partner from M4.5, within 50 km or up to 120 km at 6–10 km/s', () => {
-  assert.deepEqual(OVSICORI_WINDOW.low, { fromMag: 4.5, km: 120, minKmPerS: 6, maxKmPerS: 10 });
+  assert.deepEqual(OVSICORI_WINDOW.low, { fromMag: 4.5, km: 120, minKmPerS: 6, maxKmPerS: 10, slackMs: 2_000 });
 });
 
 test('a reviewed OVSICORI solution outside its region joins a partner of M4.5–5.5 at the P-wave speed, either order', () => {
@@ -337,8 +341,14 @@ test('a reviewed OVSICORI solution outside its region joins a partner of M4.5–
     assert.equal(low({}, { mag: 4.4 }, ovsFirst), 2, `partner M4.4, ovsFirst=${ovsFirst}`);
     assert.equal(low({ status: 'automatic', mag: 5.4 }, {}, ovsFirst), 2, `automatic, ovsFirst=${ovsFirst}`);
   }
-  // Within 50 km the time difference is free (up to 30 s), as for a larger partner.
-  assert.equal(low({ lat: Q_US.lat - 40 / KM_PER_DEG, lon: Q_US.lon, eventTimeMs: Q_US.eventTimeMs - 1000 }), 1, '40 km, 1 s');
+  // Within 50 km the time difference is at most the distance at 6 km/s plus 2 s (round 27 review): 40 km, 8.6 s is one
+  // quake, 40 km, 9 s two (a larger partner's window leaves it free up to 30 s).
+  for (const ovsFirst of [false, true]) {
+    assert.equal(low({ lat: Q_US.lat - 40 / KM_PER_DEG, lon: Q_US.lon, eventTimeMs: Q_US.eventTimeMs - 1000 }, {}, ovsFirst), 1, `40 km, 1 s, ovsFirst=${ovsFirst}`);
+    assert.equal(low({ lat: Q_US.lat - 40 / KM_PER_DEG, lon: Q_US.lon, eventTimeMs: Q_US.eventTimeMs - 8600 }, {}, ovsFirst), 1, `40 km, 8.6 s, ovsFirst=${ovsFirst}`);
+    assert.equal(low({ lat: Q_US.lat - 40 / KM_PER_DEG, lon: Q_US.lon, eventTimeMs: Q_US.eventTimeMs - 9000 }, {}, ovsFirst), 2, `40 km, 9 s, ovsFirst=${ovsFirst}`);
+    assert.equal(low({ lat: Q_US.lat - 40 / KM_PER_DEG, lon: Q_US.lon, eventTimeMs: Q_US.eventTimeMs + 25_000 }, {}, ovsFirst), 2, `40 km, 25 s, ovsFirst=${ovsFirst}`);
+  }
   // 121 km at 8 km/s: two.
   assert.equal(low({ lat: Q_US.lat - 121 / KM_PER_DEG, lon: Q_US.lon, eventTimeMs: Q_US.eventTimeMs - 15_125 }), 2, '121 km');
 });

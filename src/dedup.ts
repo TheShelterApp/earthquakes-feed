@@ -80,7 +80,7 @@ const REGIONAL_LARGE_GATHER_MAG = Math.min(
 /** An out-of-region window (config REGION_RULES `window`, round 26) a pair gets: its provider, its distance (set by the
  *  partner side's magnitude), its time and magnitude limits, and whether the pair's first side holds the provider's
  *  rows. */
-type FarWindow = { provider: string; km: number; ms: number; maxDelta: number; providerIsA: boolean; speed: { fromKm: number; min: number; max: number } | null };
+type FarWindow = { provider: string; km: number; ms: number; maxDelta: number; providerIsA: boolean; speed: { fromKm: number; min: number; max: number; slackMs: number } | null };
 const FAR_WINDOWS = [...REGION_RULES.values()].flatMap((r) => (r.window ? [r.window] : []));
 /** The smallest partner magnitude an out-of-region window takes (its `low` partner floor, round 27, else minPartnerMag). */
 const farMinPartnerMag = (w: OutOfRegionWindow): number => Math.min(w.minPartnerMag, w.low?.fromMag ?? Infinity);
@@ -399,9 +399,9 @@ export class Resolver {
 
   /** Two rows of a REVIEWED_ID_WINDOWS provider that may be one quake its analyst re-published under a new id (round
    *  27): one automatic, the other reviewed under a higher numeric id, within the provider's `near` window (score
-   *  d/km + |dt|/dtMs), or its `far` window when the reviewed one lies outside the provider's region (the same plus
-   *  MODERATE_SCORE_OFFSET, so a `near` pair always ranks first); else null. Whether they are one quake is mutual best
-   *  (mutualReviewedTwins). */
+   *  d/km + |dt|/dtMs), or its `far` window when the reviewed one lies outside the provider's region and the automatic
+   *  one's origin time is the later (the same plus MODERATE_SCORE_OFFSET, so a `near` pair always ranks first); else
+   *  null. Whether they are one quake is mutual best (mutualReviewedTwins). */
   private static reviewedPairScore(a: SourcedSolution, b: SourcedSolution): number | null {
     if (a.provider !== b.provider) return null;
     const w = REVIEWED_ID_WINDOWS.get(a.provider);
@@ -417,6 +417,8 @@ export class Resolver {
     const { near, far } = w;
     if (dt <= near.dtMs && d <= near.km && !magsApart(auto.mag, rev.mag, near.maxDeltaMag)) return d / near.km + dt / near.dtMs;
     if (inBoxes(w.boxes, rev.lat, rev.lon) || dt > far.dtMs || d > far.km || magsApart(auto.mag, rev.mag, far.maxDeltaMag)) return null;
+    // The automatic locator moved the quake toward the provider's stations: its origin time is the later one.
+    if (auto.eventTimeMs <= rev.eventTimeMs) return null;
     const kmPerS = dt > 0 ? d / (dt / 1000) : Infinity;
     if (kmPerS < far.minKmPerS || kmPerS > far.maxKmPerS) return null;
     return MODERATE_SCORE_OFFSET + d / far.km + dt / far.dtMs;
@@ -716,7 +718,7 @@ export class Resolver {
       // A partner below minPartnerMag (`low`, round 27): only for the provider's reviewed solutions.
       const superseded = this.supersededAutomaticRows(own);
       if (!w.low || !own.every((r) => superseded.includes(r) || r.status === 'reviewed')) continue;
-      return { provider, km: w.low.km, ms: w.maxDtMs, maxDelta: w.maxDeltaMag, providerIsA, speed: { fromKm: w.baseKm, min: w.low.minKmPerS, max: w.low.maxKmPerS } };
+      return { provider, km: w.low.km, ms: w.maxDtMs, maxDelta: w.maxDeltaMag, providerIsA, speed: { fromKm: w.baseKm, min: w.low.minKmPerS, max: w.low.maxKmPerS, slackMs: w.low.slackMs } };
     }
     return null;
   }
@@ -741,6 +743,9 @@ export class Resolver {
     if (w.speed && d > w.speed.fromKm) {
       const kmPerS = dt > 0 ? d / (dt / 1000) : Infinity;
       if (kmPerS < w.speed.min || kmPerS > w.speed.max) return `${label}: d ${d.toFixed(1)} km over dt ${(dt / 1000).toFixed(1)} s is ${kmPerS.toFixed(1)} km/s, outside ${w.speed.min}–${w.speed.max} km/s`;
+    } else if (w.speed && dt > (d / w.speed.min) * 1000 + w.speed.slackMs) {
+      // Within `fromKm` the time difference is at most what the distance explains at the slowest speed (round 27 review).
+      return `${label}: dt ${(dt / 1000).toFixed(1)} s > ${d.toFixed(1)} km at ${w.speed.min} km/s + ${(w.speed.slackMs / 1000).toFixed(0)} s`;
     }
     return null;
   }

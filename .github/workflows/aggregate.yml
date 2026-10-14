@@ -24,6 +24,14 @@ on:
   schedule:
     - cron: '9,24,39,54 * * * *'
   workflow_dispatch:
+    inputs:
+      recover:
+        # Blank on every scheduled and heartbeat run (the heartbeat dispatches without inputs). By hand only, once per
+        # outage: src/recover.ts, APIs.md "Late publications" (recovered reports).
+        description: "Also read these events from the source's per-event pages and ingest them (e.g. tmd:17182-17198); blank = a normal run"
+        type: string
+        required: false
+        default: ''
 
 concurrency:
   group: earthquakes-feed-writer
@@ -72,6 +80,8 @@ jobs:
           # waits for a thread: the slowest took 3.1 s whatever its place. Must be set before
           # node starts; an empty value would mean ONE thread.
           UV_THREADPOOL_SIZE: '64'
+          # Passed through the environment, never written into the script: src/recover.ts parses it strictly.
+          FEED_RECOVER: ${{ inputs.recover }}
         run: npx --no-install tsx src/aggregate.ts
       - name: Commit & push observation log
         working-directory: .data

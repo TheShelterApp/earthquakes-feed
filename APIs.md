@@ -222,7 +222,8 @@ asks for the same window again), `epoch` (the catch-up epoch recorded with that 
 (`count`, the first 20 `ids`) the live AEC ids younger than 10 days that AEC's file no longer
 lists (see *Alaska (AEC)*; logged, never retracted). `absent.mexico` does the same for SSN's RSS, which lists only its
 last 15 items: only ids younger than the oldest item it still lists are counted. `preliminary_superseded` and
-`preliminary_skipped` count SSN preliminary solutions withdrawn or not ingested (see *Mexico (SSN)*).
+`preliminary_skipped` count SSN preliminary solutions withdrawn or not ingested (see *Mexico (SSN)*). A run dispatched
+with the input `recover` also carries `recovered` (see *Late publications*, recovered reports).
 
 **Frozen sources (round 14).** A source whose file is still served but no longer regenerated keeps answering `ok` with
 rows, so it is never silent. Each run records the newest origin every answer lists (`providers.<id>.newest_origin` in
@@ -533,6 +534,21 @@ must gate on `properties.time`, not on arrival; the feed never presents a late e
 one. Because a late event (like a revision or an upstream delete) can still change a day up to
 10 days old, `manifest.partitions[].frozen` turns true only after that (it was 3 days until
 2026-09-30).
+
+**Recovered reports.** Some sources publish only a rolling list: TMD's file holds its last 20 events (about 2.5 days).
+When the feed cannot read such a list for longer than that, events leave it unread. TMD keeps a page per event
+(`https://eq.tmd.go.th/EQ<id>`, the `path` its file names), so an aggregate run dispatched by hand with the input
+`recover` (`tmd:17182-17198`: ids and ranges, at most 50; `src/recover.ts`) reads those pages, one request every 1.2 s
+or slower, after the run's live fetches, and ingests them in that run exactly like the source's live rows (the same
+parser, dedup windows and day partitions). Their `op:observe` lines carry a `reason` ("recovered from the provider's
+event page …, N d after origin"), and that run's `status.json` has `recovered` (`asked`, `rows` (the ids ingested),
+`empty`, `held_as`, `outside_window`, `failed`, `unasked`). Only reports inside the 7-day matching window are ingested,
+so frozen days never change; a report the feed already holds changes nothing, so the run can be repeated, for example
+for the ids listed as `failed` or `unasked`. A report TMD named by origin second while its ids were empty (`t2026…`,
+2026-08-18 → 10-13) is not taken again under its number (`held_as`). The alerts gateway reads only today's partition
+and origins of the last 7 hours, so a recovered event is never alerted. On 2026-10-14 this recovered TMD's 17182–17198
+(2026-10-09 11:32 → 10-10 15:02 UTC), the events its file listed while the feed could not read it (2026-10-09 02:00 →
+10-13 18:26: a renewed certificate under another intermediate, then a moved file).
 
 ## History and backfill
 

@@ -291,6 +291,44 @@ export function parseTmd(raw: unknown, providerId: string): RawObs[] {
   return out.filter((o) => o.providerEventId);
 }
 
+/** The page TMD publishes per event, the one map-events.json's `path` names (`https://eq.tmd.go.th/EQ17199`), read
+ *  back into the map-events.json row it stands for, so parseTmd turns it into the report the live file would have
+ *  given: `eventID`, `otime` (the page's UTC origin time), `lat`, `lon`, `depth`, `mag`, `region` (the Thai name, the
+ *  first line of the page's Region cell; the second is English) and `path`. The file's `timeth` (Thai time, written
+ *  out in Thai) is left out: nothing reads it. The page does not name its own id, so `id` is the one asked for. Null
+ *  when the page holds no event (no UTC origin time or no epicentre), or when its UTC and Thai (UTC+7) times
+ *  disagree. Used to recover events the file listed while the feed could not read it (src/recover.ts): the file keeps
+ *  only its last 20 events, the pages stay. */
+export function tmdEventPageRow(html: string, id: string): Record<string, unknown> | null {
+  const cell = (label: string): string | null => {
+    const m = html.match(new RegExp(`\\(${label}\\)[\\s\\S]*?<td[^>]*>([\\s\\S]*?)</td>`));
+    return m ? m[1]! : null;
+  };
+  const text = (s: string): string => htmlDecode(s.replace(/<[^>]*>/g, ' ')).replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+  const timeCell = cell('Origin Time') ?? '';
+  const utc = timeCell.match(/(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[^<\d]*UTC/)?.[1];
+  const tst = timeCell.match(/(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[^<\d]*TST/)?.[1];
+  const t = utc ? parseUtcMs(utc) : null;
+  if (t == null || (tst && parseUtcMs(tst) !== t + 7 * 3_600_000)) return null;
+  const epi = (cell('Epicenter') ?? '').match(/([\d.]+)\s*°\s*([NS])\s*,\s*([\d.]+)\s*°\s*([EW])/);
+  const lat = epi ? num(epi[1]) : null;
+  const lon = epi ? num(epi[3]) : null;
+  if (lat == null || lon == null) return null;
+  const regionCell = cell('Region');
+  const region = regionCell == null ? '' : text(regionCell.split(/<br\s*\/?>/i)[0]!);
+  const row: Record<string, unknown> = {
+    eventID: id,
+    otime: utc,
+    lat: epi![2] === 'S' ? -lat : lat,
+    lon: epi![4] === 'W' ? -lon : lon,
+    depth: num(text(cell('Depth') ?? '').match(/^(-?[\d.]+)\s*Km/i)?.[1] ?? null),
+    mag: num(text(cell('Magnitude') ?? '').match(/^(-?[\d.]+)$/)?.[1] ?? null),
+    region: region || null,
+    path: `EQ${id}`,
+  };
+  return row;
+}
+
 // --- Russia (Kamchatka/Kurils): KAGSR — non-standard FDSN geojson (UTC), flaky ---
 const kagsr: CustomAdapter = async (cfg, nowMs, window) => {
   const startMs = window ? window.startMs : nowMs - QUERY_LOOKBACK_MS;

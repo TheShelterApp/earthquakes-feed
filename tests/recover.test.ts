@@ -80,6 +80,33 @@ test('recover spec: ids and ranges of one provider with a page reader, at most R
   for (const bad of ['tmd', 'tmd:', 'tmd:17182;rm -rf', 'tmd:EQ17182', 'TMD:1', 'tmd:1-2-3']) assert.throws(() => parseRecoverSpec(bad), /is not|no page reader/, bad);
 });
 
+test('recover spec: ids of at most 9 digits, and an error message of one bounded line (round 25 review)', () => {
+  assert.deepEqual(parseRecoverSpec('tmd:123456789').ids, ['123456789']);
+  // A 10-digit id is refused. Without the bound, an id above 2^53 never ended the expansion loop (i++ leaves it
+  // unchanged): the aggregate step spun until its timeout. The 10-digit case runs first, so the unfixed code fails
+  // here instead of hanging the test.
+  assert.throws(() => parseRecoverSpec('tmd:1234567890'), /is not/);
+  for (const big of ['tmd:9007199254740993', 'tmd:99999999999999999999', 'tmd:17182-99999999999999999999']) {
+    assert.throws(() => parseRecoverSpec(big), /is not/, big);
+  }
+  // The message goes into a ::warning workflow command: a newline in the input must not start another command.
+  for (const bad of ['tmd:1\n::error::forged', `tmd:${'x'.repeat(500)}`]) {
+    const err = (() => {
+      try {
+        parseRecoverSpec(bad);
+      } catch (e) {
+        return (e as Error).message;
+      }
+      return '';
+    })();
+    assert.match(err, /is not/);
+    assert.ok(!/[\r\n]/.test(err), 'one line');
+    assert.ok(err.length < 200, `bounded: ${err.length}`);
+  }
+  // Many parts stop as soon as the count passes the cap.
+  assert.throws(() => parseRecoverSpec(`tmd:${Array.from({ length: 2 * RECOVER_MAX_IDS }, (_, i) => 17000 + i).join(',')}`), /more than/);
+});
+
 /** A fake clock: sleep moves it, each fetch takes `latencyMs`. */
 function clock(latencyMs = 300): { now: () => number; sleep: (ms: number) => Promise<void>; tick: (ms: number) => void } {
   let t = Date.parse('2026-10-14T05:00:00Z');

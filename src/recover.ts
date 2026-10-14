@@ -63,11 +63,20 @@ export interface RecoverSpec {
   ids: string[];
 }
 
-/** `tmd:17182-17198` or `tmd:17182-17190,17195`: one provider with a page reader, numeric ids and ranges, ascending
- *  and unique after expansion, at most RECOVER_MAX_IDS. Throws on anything else. */
+/** The digits of one id: TMD's have 5. Above 2^53 `i++` no longer changes a number, so an unbounded id (a pasted
+ *  20-digit string) spun the expansion loop until the step's timeout, holding the writer group (round 25 review). */
+const ID = '\\d{1,9}';
+const SPEC_RE = new RegExp(`^([a-z0-9_-]+):(${ID}(?:-${ID})?(?:,${ID}(?:-${ID})?)*)$`);
+
+/** The input as an error message may quote it: one line, bounded. The message goes into a `::warning` workflow
+ *  command (aggregate.ts), where a newline would end the command and start another. */
+const quoted = (spec: string): string => JSON.stringify(spec.length > 80 ? `${spec.slice(0, 80)}...` : spec);
+
+/** `tmd:17182-17198` or `tmd:17182-17190,17195`: one provider with a page reader, numeric ids of at most 9 digits and
+ *  ranges, ascending and unique after expansion, at most RECOVER_MAX_IDS. Throws on anything else. */
 export function parseRecoverSpec(spec: string): RecoverSpec {
-  const m = spec.trim().match(/^([a-z0-9_-]+):(\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)$/);
-  if (!m) throw new Error(`recover: "${spec}" is not <provider>:<id>[-<id>][,...] (e.g. tmd:17182-17198)`);
+  const m = spec.trim().match(SPEC_RE);
+  if (!m) throw new Error(`recover: ${quoted(spec)} is not <provider>:<id>[-<id>][,...] with ids of at most 9 digits (e.g. tmd:17182-17198)`);
   const provider = m[1]!;
   if (!PAGE_READERS[provider]) throw new Error(`recover: no page reader for "${provider}" (only ${Object.keys(PAGE_READERS).join(', ')})`);
   const ids = new Set<number>();
@@ -77,8 +86,8 @@ export function parseRecoverSpec(spec: string): RecoverSpec {
     if (hi < a) throw new Error(`recover: range ${part} runs backwards`);
     if (hi - a >= RECOVER_MAX_IDS) throw new Error(`recover: more than ${RECOVER_MAX_IDS} ids`);
     for (let i = a; i <= hi; i++) ids.add(i);
+    if (ids.size > RECOVER_MAX_IDS) throw new Error(`recover: more than ${RECOVER_MAX_IDS} ids`);
   }
-  if (ids.size > RECOVER_MAX_IDS) throw new Error(`recover: more than ${RECOVER_MAX_IDS} ids`);
   return { provider, ids: [...ids].sort((x, y) => x - y).map(String) };
 }
 

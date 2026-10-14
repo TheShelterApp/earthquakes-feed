@@ -876,23 +876,34 @@ about 79 % of the bytes GitHub keeps. The fix (storage option 4) takes them out 
   committed partitions' check and to production, every window day from the snapshot; as if every previous derive had
   failed, 113 of 113 equal, 223 of 904 window days from the Pages copies, none without a baseline (without the Pages
   copies those 223 days had no baseline and 44 of the 113 runs missed silent changes: 13 found instead of 83).
+  The round 27 review repeated both on its own sample, at a real midnight: production's aggregate commits of 10-11
+  23:57 – 10-12 00:07 UTC replayed at their own times (the transition run: 133 of 133 partitions production's; the
+  first run after midnight committed 10-01 once, byte for byte production's frozen file, and so did a run with derive
+  at 23:59:59 and the staging at 00:00:01; the next run committed no day; the silent changes equal to production's),
+  and `live-baseline-replay.ts` over the 75 derive commits of 10-12 00:02–06:07 UTC: 72 of 72 runs equal to the old
+  check and to production; as if every previous derive had failed, 69 of 69 equal, 136 of 552 window days from the
+  Pages copies; without them 25 of the 69 runs missed silent changes (4 found instead of 60). It fixed two things: the
+  first phase-2 run's push retry (above), and a day the previous derive wrote no partition of (the new UTC day after a
+  failed derive at 00:07) counted as a day without a baseline, a warning with no effect on the deltas.
 
-  Growth, replayed with `scripts/repo-growth/replay.sh` (a roll-up every 12 pushes) over three 24-hour windows ending
-  18:48 UTC, in today's layout and in phase 2's (`relayout.py --frozen-only 10`):
+  Growth, replayed with `scripts/repo-growth/replay.sh` (a roll-up every 12 pushes) over four 24-hour windows ending
+  18:48 UTC (the first one replayed by the round 27 review), in today's layout and in phase 2's
+  (`relayout.py --frozen-only 10`):
 
   | Window | Pushes | Today | Phase 2 | Less | Day partitions after an all-into-one repack |
   |---|---|---|---|---|---|
+  | to 10-11 | 634 | 12.8 MB | 6.5 MB | 49 % | 4.8 → 0.32 MB |
   | to 10-12 | 630 | 23.9 MB | 8.9 MB | 63 % | 14.1 → 0.34 MB |
   | to 10-13 | 616 | 27.3 MB | 10.5 MB | 61 % | 18.5 → 0.33 MB |
   | to 10-14 (doubled dispatches 04:40–10:05) | 749 | 35.5 MB | 10.0 MB | 72 % | 23.8 → 0.30 MB |
 
   The day partitions drop to the one day written at its freeze; what remains is mostly the event_map hour shards
-  (5.2–6.1 MB a day in both layouts, about 60 % of phase 2's growth), then the manifest, inventory and status files.
-  Applied to GitHub's rate (55–60 MB a day before the doubled dispatches; 6,098,544 KB at 07:17 and 6,150,505 KB at
-  19:17 UTC on 10-14, about 100 MB a day over hours that include them), phase 2 grows the repository by about 15–30 MB
-  a day: the target of 15 MB a day or less holds only at the low end. The `health` log measures it over the first week;
-  the event_map shards are the next lever if it is needed. After that a full repack by GitHub would bring the
-  repository to about 0.8 GB; it is an owner request, and on the Free plan GitHub Support may decline it.
+  (2.9–6.1 MB a day in both layouts, about half to 60 % of phase 2's growth), then the manifest, inventory and status
+  files. Applied to GitHub's rate (55–60 MB a day before the doubled dispatches; 6,098,544 KB at 07:17 and
+  6,150,505 KB at 19:17 UTC on 10-14, about 100 MB a day over hours that include them), phase 2 grows the repository by
+  about 15–30 MB a day: the target of 15 MB a day or less holds only at the low end. The `health` log measures it over
+  the first week; the event_map shards are the next lever if it is needed. After that a full repack by GitHub would
+  bring the repository to about 0.8 GB; it is an owner request, and on the Free plan GitHub Support may decline it.
 
 Readers of the committed unfrozen partitions, and what phases 1 and 2 did with them: derive's silent-change check
 (switched to the event map in phase 1, with the previous derive's Pages copy after a failed derive in phase 2); the

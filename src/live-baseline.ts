@@ -66,7 +66,8 @@ export interface BaselineSnapshot {
 export interface PreviousLines {
   /** The previous run's line of every window event, by feed id. */
   lines: Map<string, string>;
-  /** Window days read from the snapshot (the recorded sha256 matched). */
+  /** Window days with a verified baseline: read from the snapshot (the recorded sha256 matched), or recorded without a
+   *  partition (no lines). */
   fromSnapshot: string[];
   /** Window days without a verified baseline (no record, no snapshot, or a sha256 mismatch): none for this run. */
   missing: string[];
@@ -184,6 +185,13 @@ export function previousWindowLines(opts: {
   const out: PreviousLines = { lines: new Map(), fromSnapshot: [], missing: [], recordUnused };
   for (const day of new Set(opts.days)) {
     const recorded = usable ? usable.days[day] : undefined;
+    if (recorded === null) {
+      // The previous derive wrote no partition of this day: no lines, known from the record alone. After a failed derive
+      // the snapshot can hold the day's first events (the new UTC day's, a few minutes after midnight), which that
+      // derive never saw; they are not a missing baseline (round 27 review: replayed 10-12 00:12 UTC).
+      out.fromSnapshot.push(day);
+      continue;
+    }
     const snap = recorded !== undefined && snapshot!.covered.has(day) ? snapshot!.text(day) : undefined;
     if (snap !== undefined && fingerprint(snap) === recorded) {
       out.fromSnapshot.push(day);

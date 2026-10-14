@@ -362,6 +362,26 @@ test('recoverFromPages: only days that differ from a recorded partition, verifie
   assert.deepEqual(r2.failed, ['2026-10-01 (HTTP 404)', '2026-10-03 (no time left)', '2026-10-04 (no time left)', '2026-10-05 (no time left)']);
 });
 
+test('a day the previous derive wrote no partition of has a verified, empty baseline, whatever the snapshot holds', () => {
+  // Replayed 10-12 00:12 UTC as if the 00:07 derive had failed: the 00:02 derive saw no event of 10-12 yet (record
+  // null), the failed run's aggregate added the day's first ones, so the snapshot holds a partition the record never
+  // named. That is no missing baseline: the previous run had no line of that day.
+  const line = (id: string): string => `{"type":"Feature","id":"${id}","properties":{}}\n`;
+  const texts = new Map([
+    ['2026-10-11', line('efd_a')],
+    ['2026-10-12', line('efd_new')],
+  ]);
+  const snapshot = { covered: new Set(texts.keys()), fromPages: new Set<string>(), text: (d: string) => texts.get(d) ?? null };
+  const record = { generated: T0, head_seq: 7, days: { '2026-10-11': sha256Hex(line('efd_a')), '2026-10-12': null } };
+  const p = previousWindowLines({ days: ['2026-10-11', '2026-10-12'], record, prev: { generated: T0, head_seq: 7 }, snapshot });
+  assert.deepEqual(p.missing, []);
+  assert.deepEqual(p.fromSnapshot, ['2026-10-11', '2026-10-12']);
+  assert.deepEqual([...p.lines.keys()], ['efd_a'], 'no line of a day the previous run had no partition of');
+  // A day the record does not name at all is still missing.
+  const other = previousWindowLines({ days: ['2026-10-13'], record, prev: { generated: T0, head_seq: 7 }, snapshot });
+  assert.deepEqual(other.missing, ['2026-10-13']);
+});
+
 test('the record: the days around the window, null for a day without a partition, about a kilobyte', () => {
   const texts = new Map([[eventDayKey(T0), 'a\n']]);
   const r = baselineRecord(T0, 7, texts);

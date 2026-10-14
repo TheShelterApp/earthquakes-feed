@@ -428,10 +428,11 @@ export const LOCATION_JOIN_MAX_DM = 1.5;
  *  - Not added: GFZ (geofon) 91.6 / 84.4 %; ReNaSS (renass, resif) 86.8 / 85.1 %; ETHZ 79.7 %, NOA 74.9 %, IMO
  *    72.0 %; BMKG (bmkg) 14.7 % of the 197 copies beside a BMKG row (BMKG's public lists carry another solution);
  *    PIVS (phivolcs) 4.7 % and JMA (jma) 0 % (both lists give the origin to the minute); GSRAS (kagsr) 1.7 % (another
- *    agency than KAGSR); CN (nrcan) equal in time and place, but the feed's NRCan rows carry no magnitude, so no copy
- *    could link; fewer than 50 copies beside an agency row: IPMA, LIM (igp), AUST (ga), CWA, OVSG and OVSM (ipgp),
- *    BGS, USP, KNMI, AK (aec, read since 2026-09-30). The US networks EMSC names (NEIC, PR, HV, TX, …) reach the feed
- *    only through ComCat, whose rows authorsRow maps to a network only for NC and SCSN.
+ *    agency than KAGSR); CN (nrcan) equal in time and place, but the feed's NRCan rows then carried no magnitude, so no
+ *    copy could link (they do since PF-5h (1), 2026-10-02; CN has not been measured again: PF-5h (7)); fewer than 50
+ *    copies beside an agency row: IPMA, LIM (igp), AUST (ga), CWA, OVSG and OVSM (ipgp), BGS, USP, KNMI, AK (aec, read
+ *    since 2026-09-30). The US networks EMSC names (NEIC, PR, HV, TX, …) reach the feed only through ComCat, whose rows
+ *    authorsRow maps to a network only for NC and SCSN.
  *  None of these 29 codes had a copy within sameSolution of two distinct agency events or linked to the wrong one. EMSC
  *  does point an event id at another agency event later now and then (over the versions the feed holds: CSN 27, IGN 18,
  *  UNA 6, AFAD 3, GNS 1, some of them an agency's own duplicate ids): the row stays in the event it joined, and the

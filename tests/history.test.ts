@@ -319,13 +319,30 @@ test('history fetch: empty elements the count does not account for fail the rang
   assert.equal(r2.ok, false, 'the repair is EMSC-only, and EMSC is counted');
 });
 
-test('fdsn: EMSC empty array elements are removed outside strings only, and only from arrays; other sources still refuse them', () => {
-  const t = '{"a":[{"x":"a,,b"},,{"y":1},,,,{}],"o":{"k":1}}';
-  assert.deepEqual(repairEmptyArrayElements(t), { text: '{"a":[{"x":"a,,b"},{"y":1},{}],"o":{"k":1}}', removed: 4 });
-  assert.deepEqual(repairEmptyArrayElements('[,{}]'), { text: '[{}]', removed: 1 });
-  assert.deepEqual(repairEmptyArrayElements('[{},]'), { text: '[{}]', removed: 1 });
-  assert.deepEqual(repairEmptyArrayElements('[]'), { text: '[]', removed: 0 });
+test('fdsn: EMSC empty array elements are removed outside strings only, and only from the top-level features array; other sources still refuse them', () => {
+  const t = '{"type":"FeatureCollection","features":[{"x":"a,,b"},,{"y":1},,,,{}],"o":{"k":1}}';
+  assert.deepEqual(repairEmptyArrayElements(t), { text: '{"type":"FeatureCollection","features":[{"x":"a,,b"},{"y":1},{}],"o":{"k":1}}', removed: 4 });
+  assert.deepEqual(repairEmptyArrayElements('{"features":[,{}]}'), { text: '{"features":[{}]}', removed: 1 });
+  assert.deepEqual(repairEmptyArrayElements('{"features":[{},]}'), { text: '{"features":[{}]}', removed: 1 });
+  assert.deepEqual(repairEmptyArrayElements('{"features" : [ {} , , {"a":[1,2]} ]}'), { text: '{"features" : [ {} ,  {"a":[1,2]} ]}', removed: 1 });
+  assert.deepEqual(repairEmptyArrayElements('{"features":[]}'), { text: '{"features":[]}', removed: 0 });
   assert.deepEqual(repairEmptyArrayElements('{"a":1,,"b":2}'), { text: '{"a":1,,"b":2}', removed: 0 }, 'an object is never repaired');
+  // R24-FOLLOWUPS (3): any other array is left as it is, so the answer still fails to parse instead of shifting a value
+  // (a `[lon,,depth]` read as [lon, depth]: the depth as the latitude). EMSC writes empty elements in `features` only.
+  for (const other of [
+    '{"features":[{"geometry":{"coordinates":[1,,-3]}}]}',
+    '{"features":[{"properties":{"a":[,1]}},,{}]}',
+    '{"metadata":{"features":[1,,2]},"features":[]}',
+    '{"a":[{"x":1},,{}]}',
+    '[,{}]',
+    '[{"features":[,{}]}]',
+  ]) {
+    const r = repairEmptyArrayElements(other);
+    assert.throws(() => JSON.parse(r.text), /JSON/, `${other}: not repaired into something parseable (${r.text})`);
+  }
+  assert.deepEqual(repairEmptyArrayElements('{"features":[{"properties":{"a":[,1]}},,{}]}'), { text: '{"features":[{"properties":{"a":[,1]}},{}]}', removed: 1 }, 'the features element is repaired, the nested one is not');
+  const shifted = '{"features":[{"id":"e1","properties":{"time":"2017-12-22T12:49:23.0Z"},"geometry":{"coordinates":[1,,-3]}}]}';
+  assert.throws(() => parseGeoJSON(shifted, 'emsc'), /JSON/, 'never read as lat -3');
   const body = '{"features":[{"id":"e1","properties":{"time":"2017-12-22T12:49:23.0Z","flynn_region":"OFFSHORE OAXACA, MEXICO"},"geometry":{"coordinates":[1,2,-3]}},,{"id":"e2","properties":{"time":"2017-12-22T12:32:36.3Z"},"geometry":{"coordinates":[1,2,-3]}}]}';
   const stats: ParseStats = { rows: 0 };
   assert.deepEqual(parseGeoJSON(body, 'emsc', stats).map((r) => r.providerEventId), ['e1', 'e2']);

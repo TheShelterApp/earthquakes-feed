@@ -537,7 +537,10 @@ export function sealPeriods(ctx: Ctx): void {
     const nb = newerNeighbour(ctx.cfg, ctx.idx, p);
     if (nb.kind === 'wait') continue;
     if (Date.now() > ctx.deadline) {
-      ctx.report.budget.push(`sealing ${p.key} on`);
+      // A run calls this before, during and after its fetches (runWalk): the month the budget stopped at is listed once
+      // (R24-FOLLOWUPS (5)).
+      const entry = `sealing ${p.key} on`;
+      if (!ctx.report.budget.includes(entry)) ctx.report.budget.push(entry);
       break;
     }
     const context = nb.kind === 'boundary' ? boundaryContext(ctx, nb.day) : nb.kind === 'edition' ? editionContext(ctx, nb.edition, nb.day) : null;

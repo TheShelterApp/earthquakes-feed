@@ -17,10 +17,14 @@ Options (the layouts measured for APIs.md "Repository size"):
   --partition-hold H:A   a day partition events/YYYY/MM/DD.ndjson of a day at least A days before the commit's day is
                          written at most once every H hours, then with its newest content (a layout NOT adopted: an
                          owner decision, APIs.md "Repository size").
+  --frozen-only F        storage option 4 phase 2: a day partition is in the tree only once its day is frozen at the
+                         commit's time (F = FROZEN_AFTER_DAYS, 10: days before the commit's day minus F, never the
+                         commit's day), written with its newest content by the first derive commit after it freezes;
+                         the base tree holds no unfrozen day either (as if phase 2 ran before the range).
 """
 import re, subprocess, sys
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 args = sys.argv[1:]
 src, branch, base, out, outbranch = args[:5]
@@ -30,6 +34,8 @@ status_pad = opt('--status-pad')
 em_hours = int(opt('--event-map-hours') or 0)
 hold = opt('--partition-hold')
 hold_s, hold_age = (int(hold.split(':')[0]) * 3600, int(hold.split(':')[1])) if hold else (0, 0)
+frozen_only = opt('--frozen-only')
+frozen_days = int(frozen_only) if frozen_only is not None else None
 
 def git(*a):
     return subprocess.run(['git', '-C', src, *a], capture_output=True, check=True).stdout
@@ -61,6 +67,16 @@ pad = b''
 em_buckets = {}                  # day -> {bucket -> bytes}
 part_written = {}                # partition path -> commit time of its last write
 part_pending = {}                # partition path -> (mode, sha) not yet written
+unfrozen_pending = {}            # --frozen-only: partition path -> (mode, sha) of a day not frozen yet
+
+def day_of(pm):
+    return datetime(int(pm.group(1)), int(pm.group(2)), int(pm.group(3))).date()
+
+def is_unfrozen(pm, ct):
+    """partitions.ts isFrozenDay, negated: not before day(ct - F days), or the commit's own day."""
+    d = day_of(pm)
+    now = datetime.fromtimestamp(ct, timezone.utc)
+    return d >= (now - timedelta(days=frozen_days)).date() or d == now.date()
 
 def em_split(day, data):
     b = defaultdict(list)
@@ -91,7 +107,7 @@ def header(c):
     return int(ct)
 
 # Base: the whole tree, transformed.
-header(base)
+base_ct = header(base)
 w(b'deleteall\n')
 if status_pad:
     pad = blob(git('rev-parse', status_pad).decode().strip())
@@ -106,6 +122,10 @@ for line in git('ls-tree', '-r', '--full-tree', base).decode().splitlines():
     em = EM_RE.match(path)
     if em and em_hours:
         em_write(em.group(1), em_split(em.group(1), blob(sha)))
+        continue
+    pm = PART_RE.match(path)
+    if pm and frozen_days is not None and is_unfrozen(pm, base_ct):
+        unfrozen_pending[path] = (mode, sha)
         continue
     w(f'M {mode} {sha} {path}\n'.encode())
 w(b'\n')
@@ -146,6 +166,15 @@ for c in commits:
             day = em.group(1)
             em_write(day, {} if st == 'D' else em_split(day, blob(ns)))
             continue
+        if pm and frozen_days is not None and is_unfrozen(pm, ct):
+            # Kept out of the commit (src/stage-data.ts); written when it freezes, below.
+            if st == 'D':
+                unfrozen_pending.pop(path, None)
+            else:
+                unfrozen_pending[path] = (nm, ns)
+            continue
+        if pm and frozen_days is not None:
+            unfrozen_pending.pop(path, None)
         if pm and hold_s and st != 'D':
             age = (today - datetime(int(pm.group(1)), int(pm.group(2)), int(pm.group(3))).date()).days
             if age >= hold_age and ct - part_written.get(path, 0) < hold_s:
@@ -157,6 +186,12 @@ for c in commits:
             w(f'D {path}\n'.encode())
         else:
             w(f'M {nm} {ns} {path}\n'.encode())
+    # --frozen-only: a day that froze since the previous derive commit is committed now, with its newest content.
+    if frozen_days is not None and git('log', '-1', '--format=%s', c).startswith(b'derive'):
+        for path in sorted(unfrozen_pending):
+            if not is_unfrozen(PART_RE.match(path), ct):
+                nm, ns = unfrozen_pending.pop(path)
+                w(f'M {nm} {ns} {path}\n'.encode())
     # A held partition whose hold is over is written by the next derive run, changed in this run or not.
     if hold_s and git('log', '-1', '--format=%s', c).startswith(b'derive'):
         for path, (nm, ns) in list(part_pending.items()):
@@ -168,4 +203,4 @@ for c in commits:
 w(b'done\n')
 fi.stdin.close()
 fi.wait()
-print(len(commits), 'commits replayed into', out, outbranch, 'pending at the end:', len(part_pending))
+print(len(commits), 'commits replayed into', out, outbranch, 'pending at the end:', len(part_pending) + len(unfrozen_pending))

@@ -1,8 +1,10 @@
 /**
- * Replay of derive's silent-change check (PRB-2) over real `data` commits: the round-25 baseline (the snapshot of the
- * event map the run checked out, verified against the record of the previous derive; src/live-baseline.ts) against the
- * check before it (the partitions the previous derive committed; live-sync.ts detectSilentChanges), and both against
- * what production found (the entries the derive commit added to knowledge/index/live_silent.json).
+ * Replay of derive's silent-change check (PRB-2) over real `data` commits: the baseline of storage option 4 phase 2 (the
+ * snapshot of the event map the run checked out, with the previous derive's Pages copy for a day it did not publish
+ * from that map, each verified against the record of the previous derive; src/live-baseline.ts) against the check of
+ * round 24 (the partitions the previous derive committed; live-sync.ts detectSilentChanges, the reference while the
+ * commits hold them, i.e. before phase 2), and both against what production found (the entries the derive commit added
+ * to knowledge/index/live_silent.json).
  *
  * For each derive commit D after the first in the range, with A = the aggregate commit it was built on (its parent) and
  * B = the commit that aggregate started from (A's parent): the snapshot is rebuilt from B's event map, the record from
@@ -11,7 +13,8 @@
  *
  * --failed-derive replays every run as if the derive before it had failed after its aggregate commit: the run checks out
  * that aggregate's event map with the partitions, manifest and record of the derive before (D two back), so the days the
- * failed run's aggregate changed must fall back to the committed partitions (production is not compared then).
+ * failed run's aggregate changed come from that derive's Pages copy (here: its committed partitions, the same bytes);
+ * --no-pages replays them without it (no baseline for those days). Production is not compared then.
  *
  * Usage (a detached worktree of `data` the script may check out at will; never pushed):
  *   git worktree add --detach /tmp/data-replay origin/data
@@ -22,7 +25,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadEventMap } from '../src/bitemporal.js';
 import { EVENT_MAP_HORIZON_DAYS } from '../src/config.js';
-import { baselineDays, baselineRecord, partitionTexts, previousWindowLines, type BaselineSnapshot } from '../src/live-baseline.js';
+import { baselineDays, baselineRecord, partitionTexts, previousWindowLines, recoverFromPages, type BaselineSnapshot } from '../src/live-baseline.js';
 import { detectSilentChanges, liveWindowDays, silentChangesAgainst } from '../src/live-sync.js';
 import { dayPartitionFile, partitionPath } from '../src/partitions.js';
 
@@ -40,6 +43,7 @@ if (!dir || !from) {
 }
 
 const failedDerive = args.includes('--failed-derive');
+const noPages = args.includes('--no-pages');
 const git = (...a: string[]): string => execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8', maxBuffer: 1 << 26 }).trim();
 const checkout = (c: string): void => {
   git('checkout', '-q', '-f', '--detach', c);
@@ -60,7 +64,7 @@ const log = git('log', '--first-parent', '--reverse', '--format=%H %P|%s', `${fr
 const subjectOf = new Map(log.map((c) => [c.sha, c.subject]));
 const derives = log.filter((c) => c.subject.startsWith('derive: views'));
 
-const totals = { runs: 0, skipped: 0, equal: 0, differ: 0, matchesProduction: 0, productionDiffers: 0, silent: 0, daysSnapshot: 0, daysPartitions: 0, partitionDiffers: 0 };
+const totals = { runs: 0, skipped: 0, equal: 0, differ: 0, matchesProduction: 0, productionDiffers: 0, silent: 0, daysSnapshot: 0, daysFromPages: 0, daysMissing: 0 };
 const notes: string[] = [];
 const started = Date.now();
 
@@ -86,12 +90,19 @@ for (let i = failedDerive ? 2 : 1; i < derives.length; i++) {
   }
   const record = baselineRecord(prevManifest.generated, prevManifest.head_seq, written);
 
-  // The snapshot step: the event map of the commit the aggregate started from, a minute before the aggregate commit.
+  // The snapshot step: the event map of the commit the aggregate started from, a minute before the aggregate commit;
+  // a day that differs from the record, from the previous derive's Pages copy (its committed partition: the same bytes).
   checkout(b);
   const t0 = Number(git('log', '-1', '--format=%ct', a)) * 1000 - 60_000;
   const covered = baselineDays(t0);
   const texts = partitionTexts(loadEventMap(dir, { sinceDays: EVENT_MAP_HORIZON_DAYS, nowMs: t0 }).values(), covered);
-  const snapshot: BaselineSnapshot = { covered: new Set(covered), text: (day) => texts.get(day) ?? null };
+  const pages = (async (url: string | URL | Request) => {
+    const rel = String(url).replace('https://pages.replay/', '');
+    const blob = git('ls-tree', prevD.sha, rel) ? execFileSync('git', ['-C', dir, 'show', `${prevD.sha}:${rel}`], { encoding: 'utf8', maxBuffer: 1 << 26 }) : null;
+    return blob == null ? new Response('', { status: 404 }) : new Response(blob, { status: 200 });
+  }) as typeof fetch;
+  const recovered = noPages ? [] : (await recoverFromPages({ days: covered, texts, record, base: 'https://pages.replay/', fetchImpl: pages })).recovered;
+  const snapshot: BaselineSnapshot = { covered: new Set(covered), fromPages: new Set(recovered), text: (day) => texts.get(day) ?? null };
 
   // derive on the aggregate commit, at the derive run's clock.
   checkout(d.sha);
@@ -113,15 +124,15 @@ for (let i = failedDerive ? 2 : 1; i < derives.length; i++) {
   }
   const prev = readJson<{ generated: number; head_seq: number }>('manifest.json')!;
   const nodes = [...loadEventMap(dir, { sinceDays: EVENT_MAP_HORIZON_DAYS, nowMs }).values()];
-  const previous = previousWindowLines({ root: dir, days: window, record, prev, snapshot, compare: true });
+  const previous = previousWindowLines({ days: window, record, prev, snapshot });
   const fromBaseline = silentChangesAgainst(previous.lines, nodes, window, prev.head_seq);
   const fromPartitions = detectSilentChanges(dir, nodes, window, prev.head_seq);
 
   totals.runs++;
   totals.silent += fromBaseline.length;
   totals.daysSnapshot += previous.fromSnapshot.length;
-  totals.daysPartitions += previous.fromPartitions.length;
-  totals.partitionDiffers += previous.partitionDiffers.length;
+  totals.daysFromPages += previous.fromSnapshot.filter((day) => snapshot.fromPages.has(day)).length;
+  totals.daysMissing += previous.missing.length;
   const same = JSON.stringify(fromBaseline) === JSON.stringify(fromPartitions);
   if (same) totals.equal++;
   else {
@@ -135,10 +146,10 @@ for (let i = failedDerive ? 2 : 1; i < derives.length; i++) {
     totals.productionDiffers++;
     notes.push(`${d.sha.slice(0, 10)} ${new Date(nowMs).toISOString()}: production [${production.join(',')}] replayed partitions [${fromPartitions.join(',')}]`);
   }
-  if (previous.fromPartitions.length || previous.partitionDiffers.length || previous.recordUnused) {
+  if (previous.missing.length || recovered.length || previous.recordUnused) {
     notes.push(
-      `${d.sha.slice(0, 10)} ${new Date(nowMs).toISOString()}: ${previous.fromPartitions.length} day(s) from the partitions [${previous.fromPartitions.join(',')}]` +
-        `${previous.partitionDiffers.length ? `, snapshot != partition on ${previous.partitionDiffers.join(',')}` : ''}${previous.recordUnused ? ` (${previous.recordUnused})` : ''}`,
+      `${d.sha.slice(0, 10)} ${new Date(nowMs).toISOString()}: ${recovered.length} day(s) from Pages [${recovered.join(',')}], ${previous.missing.length} without a baseline [${previous.missing.join(',')}]` +
+        `${previous.recordUnused ? ` (${previous.recordUnused})` : ''}`,
     );
   }
   if (fromBaseline.length) console.log(`${new Date(nowMs).toISOString()} ${d.sha.slice(0, 10)}: silent ${fromBaseline.length} [${fromBaseline.slice(0, 4).join(', ')}${fromBaseline.length > 4 ? ', ...' : ''}]`);

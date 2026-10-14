@@ -5,6 +5,7 @@ import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { DATA_DIR, DOMAIN, MAX_PUBLISHED_BYTES, PUBLIC_DIR, SCHEMA_DIR, dataPaths } from './config.js';
 import { deltaBoundViolations, readSilentLog } from './live-sync.js';
+import { hasPagesPartition } from './partitions.js';
 
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 addFormats(ajv);
@@ -131,9 +132,10 @@ for (const file of walk(p.eventsDir, (f) => f.endsWith('.ndjson'))) {
   }
 }
 
-// 3b. The Pages copies of the unfrozen day partitions (round 25, storage option 4 phase 1; partitions.ts
-//     writePagesPartition): byte for byte the partition derive wrote to the data checkout (sign-manifest.ts hashes that
-//     one for the v2 sha256), and every manifest `url` on Pages names one of them, of an unfrozen day, with its `bytes`.
+// 3b. The Pages copies of the day partitions (round 25, storage option 4; partitions.ts writePagesPartition): byte for
+//     byte the partition derive wrote to the data checkout (sign-manifest.ts hashes that one for the v2 sha256; from
+//     phase 2 the unfrozen ones are not committed), and every manifest `url` on Pages names one of them, of an unfrozen
+//     day or one within its grace day after freezing (hasPagesPartition), with its `bytes`.
 const pagesEventsDir = join(PUBLIC_DIR, 'events');
 const pagesNdjson = walk(pagesEventsDir, (f) => f.endsWith('.ndjson'));
 for (const file of pagesNdjson) {
@@ -144,6 +146,7 @@ for (const file of pagesNdjson) {
 }
 try {
   const m = JSON.parse(readFileSync(join(publicV1, 'manifest.json'), 'utf8')) as {
+    generated?: number;
     partitions?: { date: string; path: string; url?: string; bytes?: number; frozen?: boolean }[];
   };
   let onPages = 0;
@@ -151,7 +154,9 @@ try {
     if (!part.url?.startsWith(`https://${DOMAIN}/`)) continue;
     onPages++;
     if (part.url !== `https://${DOMAIN}/${part.path}`) fail(`manifest: partition ${part.date} url ${part.url} is not the Pages copy of ${part.path}`);
-    if (part.frozen) fail(`manifest: frozen partition ${part.date} has a Pages url (frozen days stay on jsDelivr @data_commit)`);
+    if (part.frozen && !hasPagesPartition(part.date, m.generated ?? nowMs)) {
+      fail(`manifest: frozen partition ${part.date} has a Pages url past its grace day (frozen days stay on jsDelivr @data_commit)`);
+    }
     const f = join(PUBLIC_DIR, part.path);
     if (!existsSync(f)) fail(`manifest: partition ${part.date} url ${part.url} names no deployed file`);
     else if (part.bytes != null && statSync(f).size !== part.bytes) fail(`manifest: partition ${part.date} bytes ${part.bytes} != ${statSync(f).size} on Pages`);

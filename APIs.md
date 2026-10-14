@@ -12,7 +12,7 @@ archival, redaction).
 | Surface | Base | Use | Cache |
 |---|---|---|---|
 | Cloudflare Pages | `https://earthquakes-feed.theshelter.app/v1/` | live feed, recent day files, manifest, live index, per-hour detail | summaries + manifest + live index and deltas `max-age=30` + SWR; day files `max-age=300` (today, yesterday) / `3600` (older); live index day files `max-age=0, must-revalidate`; detail hours `max-age=300` |
-| Cloudflare Pages | `https://earthquakes-feed.theshelter.app/events/` | the unfrozen day partitions (NDJSON, the last 11 days), byte for byte the `data` branch files (since 2026-10); served as `text/plain; charset=utf-8`, brotli or gzip when the request accepts it (since 2026-10-14; the manifest's `sha256` and `bytes` name the decoded bytes) | `max-age=0, must-revalidate` |
+| Cloudflare Pages | `https://earthquakes-feed.theshelter.app/events/` | the unfrozen day partitions (NDJSON, the last 11 days), byte for byte the files derive writes (since 2026-10; from 2026-11-04 their only copy until they freeze), and for one day after it freezes the day that froze last (from 2026-11-04); served as `text/plain; charset=utf-8`, brotli or gzip when the request accepts it (since 2026-10-14; the manifest's `sha256` and `bytes` name the decoded bytes) | `max-age=0, must-revalidate` |
 | jsDelivr (branch) | `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/` | full-history partitions; **from 2026-11-04 frozen days only** (*Historical day partitions*) | ~12 h |
 | jsDelivr (`@sha`) | `…@<data_commit>/` | immutable frozen partitions | 1 year, immutable |
 | GitHub Releases | `archive-YYYY-MM` assets | very old months (bulk) | immutable, no CORS |
@@ -34,7 +34,7 @@ The catalog. Fields:
 | `freshness.stale_after_seconds` | treat the feed as degraded past this age (default 1800) |
 | `data_commit` | git SHA for building immutable partition URLs |
 | `summaries` | map of `{name: {path, url, count}}` for the 20 rolling feeds (`count` = live events in that file) |
-| `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}`; `url` is the NDJSON: the Pages copy for an unfrozen day, jsDelivr `@data` for a frozen one (*Historical day partitions*). `count` is every feature of the file (all states); since round 26 (2026-10-14) `min_mag` / `max_mag` are the day's **live** events' range, recorded while the day is unfrozen and kept when it freezes (a retired event keeps its last solution: a phantom M8.2 folded into the Panama M7.7 of 2026-10-09 had kept that day at 8.2); days frozen before then keep the range over every feature |
+| `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}`; `url` is the NDJSON: the Pages copy for an unfrozen day (from 2026-11-04 also for the day that froze last, for a day), jsDelivr `@data` for a frozen one (*Historical day partitions*). `count` is every feature of the file (all states); since round 26 (2026-10-14) `min_mag` / `max_mag` are the day's **live** events' range, recorded while the day is unfrozen and kept when it freezes (a retired event keeps its last solution: a phantom M8.2 folded into the Panama M7.7 of 2026-10-09 had kept that day at 8.2); days frozen before then keep the range over every feature |
 | `archives[]` | rolled-up cold months: `{period, tag, asset, url, bytes, sha256, count, days[]}` |
 | `live` | the live index: `{path, url, head_seq, window_days}` (see *Live index* below; since 2026-10) |
 | `event_detail` | the per-hour detail files: `{path_template, url_template, first_hour, last_hour}` (see *Event detail* below; since 2026-10) |
@@ -61,7 +61,7 @@ forward with the same names, plus:
 | `expires` | `generated + freshness.stale_after_seconds·1000` — past this, show "data may be delayed" |
 | `freshness.offline_after_seconds` | past this since the last successful fetch, treat the client as offline (default 2× stale) |
 | `data_commit` | always set (the data-branch commit every URL below is pinned to) |
-| `origins[]` | `{id, base, max_object_bytes?, mutable_only?}` — prefixes a `path` is appended to: `pages`, `jsdelivr-sha`, `raw-sha`, `raw-data` (head only), `release`. For a partition, `pages` serves the unfrozen days only (a frozen one is a 404 there: take `jsdelivr-sha`); from 2026-11-04 `jsdelivr-sha`, `raw-sha` and `raw-data` serve a partition only once it is frozen (*Historical day partitions*) |
+| `origins[]` | `{id, base, max_object_bytes?, mutable_only?, frozen_only?}` — prefixes a `path` is appended to: `pages`, `jsdelivr-sha`, `raw-sha`, `raw-data` (head only), `release`. For a partition, `pages` serves the unfrozen days (and from 2026-11-04, for a day, the day that froze last; an older frozen one is a 404 there: take `jsdelivr-sha`); from 2026-11-04 `jsdelivr-sha`, `raw-sha` and `raw-data` serve a partition only once it is frozen and say so with `frozen_only: true` (*Historical day partitions*); an unfrozen partition is a 404 there: take `pages` |
 | `status_url` | where `/v1/status.json` lives |
 | `summaries` | v1 entries plus `bytes` and `sha256` of the file |
 | `partitions[]` | v1 entries plus `sha256`; `frozen: true` means the bytes never change again (a day is frozen once it is older than the 10 days the 5-minute run can still revise, delete or add to — see *Late publications*) |
@@ -154,9 +154,13 @@ Why a delta is exact: `from_seq` for a window W is the largest `ingest_seq` amon
 ago; sequence numbers grow with ingest time, so everything changed later is above it, and the delta is by definition
 every window event above it. One kind of change moves no seq: a revision of a provider row that does not represent its
 event can still change the event's compact feature through the fill-only fields (`updated`, `author`, `magAuthor`,
-`tsunami`, ...). derive compares each window event's line with the one the previous run committed and keeps such an
+`tsunami`, ...). derive compares each window event's line with the one the previous run wrote and keeps such an
 event for a day in `knowledge/index/live_silent.json` with the previous run's head (`head_before`); every delta whose
-`from_seq` is at most `head_before` carries it. Events that leave the window and retired markers that stop being
+`from_seq` is at most `head_before` carries it. The previous run's lines are its day partitions rebuilt from the event
+map it read, or, for a day a failed run changed, the previous run's Pages copy, each only when its sha256 is the one
+that run recorded (*Repository size*, phase 2). A day without either (a failed derive whose Pages deploy also failed;
+the run logs a warning) has no comparison for that run: its silent changes reach the day files (step 3) but not that
+run's deltas. Events that leave the window and retired markers that stop being
 published after 48 h are not changes: the first is your time filter, the second repeats a removal you already applied.
 Replayed over the 566 real derive commits of 2026-10-04 03:04 → 10-06 02:57 UTC (246 such changes detected), a client
 polling every 15 minutes, every hour or every 8 hours held exactly the day files of each run it polled, moving after its
@@ -211,11 +215,16 @@ still change) is also on Pages at `/events/YYYY/MM/DD.ndjson`, the bytes of the 
 unchanged). A frozen day's `url` stays jsDelivr `@data`, and its immutable copy `@<data_commit>`. `pages_url`, the
 GeoJSON day file, is unchanged.
 
-**From 2026-11-04, `@data/events/...` holds a day only once it is frozen.** The 5-minute run will stop committing
-the unfrozen days to the `data` branch (*Repository size*): a day is committed once, when it freezes (and again only
-on a rare remediation or re-roll). For an unfrozen day use the manifest: `url` / `pages_url`, or the v2 `pages`
-origin; a jsDelivr `@data` / `@<sha>` or raw.githubusercontent URL of an unfrozen day built by hand will then answer
-404 (or an old copy from jsDelivr's cache). Frozen days, `data_commit` and every other path stay as they are.
+**From 2026-11-04, `@data/events/...` holds a day only once it is frozen.** The 5-minute run stops committing
+the unfrozen days to the `data` branch (*Repository size*, phase 2): a day is committed once, by the first run after it
+freezes (and again only on a rare heal, remediation or re-roll), and the first such run deletes the unfrozen days the
+branch held (history is not rewritten). For an unfrozen day use the manifest: `url` / `pages_url`, or the v2 `pages`
+origin; a jsDelivr `@data` / `@<sha>` or raw.githubusercontent URL of an unfrozen day built by hand answers 404 (or an
+old copy from jsDelivr's cache). The v2 origins that read the branch carry `frozen_only: true`. jsDelivr `@data`
+resolves the branch to a commit it caches for up to about 12 hours, so for that long after a day freezes `@data` may
+not have it yet: the day keeps its Pages copy, and its `url` stays on it, for one day after it freezes
+(`frozen: true` from midnight; `@<data_commit>` has it from the first commit after midnight). Frozen days,
+`data_commit` and every other path stay as they are.
 
 ### `GET /v1/status.json`
 

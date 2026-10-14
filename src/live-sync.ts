@@ -40,8 +40,9 @@ import { isoFromMs } from './util.js';
  * represents nothing in its event replaces the stored row and leaves the event's `lastSeq` as it was (PF-5h (2)), yet
  * it can change the compact feature through the fill-only fields (`updated`, `author`, `magAuthor`, `tsunami`, ...).
  * Replaying a client over the real derive commits of 2026-10-05 14:00..10-06 02:45 found 20 such features. So derive
- * also compares each window event's partition line with the one the previous run wrote (detectSilentChanges; since
- * round 25 rebuilt from the event map the run checked out, live-baseline.ts, not read from the committed partitions):
+ * also compares each window event's partition line with the one the previous run wrote (silentChangesAgainst; since
+ * round 25 rebuilt from the event map the run checked out, live-baseline.ts, and from storage option 4 phase 2 never
+ * read from the committed partitions, which no longer hold the unfrozen days):
  * one that differs while its `lastSeq` is not above the previous run's head is a silent change, kept for a day in
  * `knowledge/index/live_silent.json` with that previous head (`head_before`), and every delta whose `from_seq` is at
  * most `head_before` carries it. A client at a cursor c >= from_seq that has not seen the change synced at or before
@@ -139,9 +140,10 @@ const ID_IN_LINE = /^\{"type":"Feature","id":"([^"]+)"/;
 /**
  * The window events whose partition line differs from the line the previous run committed while their `lastSeq` is
  * not above that run's head `prevHead`. Reads the day partitions as they are on disk, so it must run before derive
- * rewrites them. The line is compared whole (full-fat): a superset of the compact feature's changes. Since round 25
- * derive reads the previous lines from the event map instead (live-baseline.ts previousWindowLines) and runs this one
- * beside it as a check until the unfrozen partitions leave the `data` branch (storage option 4 phase 2).
+ * rewrites them. The line is compared whole (full-fat): a superset of the compact feature's changes. derive no longer
+ * calls it: since round 25 it reads the previous lines from the event map (live-baseline.ts previousWindowLines), and
+ * from storage option 4 phase 2 the unfrozen partitions are not on the `data` branch. It stays as the reference of
+ * scripts/live-baseline-replay.ts over the `data` commits that still hold them (before phase 2).
  */
 export function detectSilentChanges(root: string, nodes: Iterable<EventNode>, days: Iterable<string>, prevHead: number): string[] {
   const window = [...new Set(days)];

@@ -71,6 +71,55 @@ test('push-data: a concurrent writer\'s commit is fetched and rebased onto, then
   assert.equal(readFileSync(join(s.a, 'changes.ndjson'), 'utf8'), '{"derive":1}\n');
 });
 
+/** Storage option 4 phase 2 (src/stage-data.ts): the branch still tracks two unfrozen day partitions (the commits
+ *  before the first phase-2 run); a side-index job pushes onto it; then derive's commit deletes them from the branch
+ *  while they stay on disk, untracked, for sign-manifest and publish-r2. */
+function phase2Transition(s: ReturnType<typeof setup>): { days: string[] } {
+  const days = ['events/2026/11/03.ndjson', 'events/2026/11/04.ndjson'];
+  mkdirSync(join(s.b, 'events', '2026', '11'), { recursive: true });
+  for (const d of days) writeFileSync(join(s.b, d), `${d} phase 1\n`);
+  commit(s, s.b, 'manifest.json', '{"phase":1}\n', 'derive: views (phase 1)');
+  s.git(s.b, 'push', '-q', 'origin', 'HEAD:data');
+  s.git(s.a, 'pull', '-q', 'origin', 'data');
+  // The side-index job (history) pushes first, from the branch that still holds the unfrozen days.
+  commit(s, s.b, 'history.json', '{"n":1}\n', 'history: walk');
+  s.git(s.b, 'push', '-q', 'origin', 'HEAD:data');
+  // The first phase-2 derive: new bytes on disk, out of the index (git rm --cached), the manifest committed.
+  for (const d of days) writeFileSync(join(s.a, d), `${d} phase 2\n`);
+  writeFileSync(join(s.a, 'manifest.json'), '{"phase":2}\n');
+  s.git(s.a, 'add', '-A');
+  s.git(s.a, 'rm', '--cached', '-q', '--', ...days);
+  s.git(s.a, 'commit', '-q', '-m', 'derive: views (phase 2)');
+  return { days };
+}
+
+test('push-data: the first phase-2 run rebases onto a side-index commit of the branch that still tracks the unfrozen days', () => {
+  const s = setup();
+  const { days } = phase2Transition(s);
+  const r = push(s, s.a);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(s.git(s.a, 'log', '--format=%s', 'origin/data').trim().split('\n'), ['derive: views (phase 2)', 'history: walk', 'derive: views (phase 1)', 'seed']);
+  assert.deepEqual(s.git(s.a, 'ls-tree', '-r', '--name-only', 'origin/data').trim().split('\n').sort(), ['history.json', 'manifest.json', 'status.json']);
+  for (const d of days) assert.equal(readFileSync(join(s.a, d), 'utf8'), `${d} phase 2\n`, `${d}: derive's bytes are back on disk for the steps after the push`);
+  assert.equal(s.git(s.a, 'stash', 'list'), '', 'no stash left behind');
+  assert.equal(s.git(s.a, 'status', '--porcelain', '--untracked-files=no'), '', 'nothing tracked is left modified');
+});
+
+test('push-data: a conflict in the phase-2 transition still fails loudly and puts the untracked day partitions back', () => {
+  const s = setup();
+  const { days } = phase2Transition(s);
+  // A concurrent writer changed a file this run changed too.
+  commit(s, s.b, 'manifest.json', '{"phase":"b"}\n', 'writer b');
+  s.git(s.b, 'push', '-q', 'origin', 'HEAD:data');
+  const mine = s.git(s.a, 'rev-parse', 'HEAD');
+  const r = push(s, s.a);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /::error::rebase conflict pushing to data: manifest\.json/);
+  assert.equal(s.git(s.a, 'rev-parse', 'HEAD'), mine, 'the local commit is intact');
+  for (const d of days) assert.equal(readFileSync(join(s.a, d), 'utf8'), `${d} phase 2\n`);
+  assert.equal(s.git(s.a, 'stash', 'list'), '');
+});
+
 test('push-data: a conflict aborts the rebase, keeps both sides and fails with an annotation', () => {
   const s = setup();
   commit(s, s.b, 'status.json', '{"seq":"b"}\n', 'writer b');

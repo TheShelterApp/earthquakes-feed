@@ -3,11 +3,16 @@
 
 export interface Thresholds {
   maxAgeSec: number;
-  /** a 60 s provider's (USGS, the feed) failure streak that fails the run; a 15 s provider's (EMSC, GFZ) warning, and its
-   *  red line while another direct provider is down too. */
-  providerFailures: number;
-  /** a 15 s provider's (EMSC, GFZ) failure streak that fails the run on its own. */
-  fastProviderFailures: number;
+  /** seconds a provider polled every 60 s (USGS, the feed, an unknown id) may fail before the run fails (300). */
+  providerDownSec: number;
+  /** seconds a provider polled every 15 s tick (EMSC, GFZ) may fail before the run fails (180). */
+  fastProviderDownSec: number;
+  /** seconds two of the three direct providers (USGS, EMSC, GFZ) may fail together before the run fails (120). */
+  twoDirectDownSec: number;
+  /** seconds all three direct providers may fail together before the run fails (60). */
+  allDirectDownSec: number;
+  /** seconds from which a failing provider below its limit is a warning rather than a log note (60). */
+  providerWarnSec: number;
   minHeadroomPct: number;
   usageFailPct: number;
   maxFeedManifestAgeSec: number;
@@ -51,13 +56,20 @@ export function pollIntervalMs(id: string): number;
 export function isFastProvider(id: string): boolean;
 /** About how long a streak of `failures` polls in a row has lasted (s), first failed poll to the latest. */
 export function streakSpanSec(id: string, failures: number): number;
-/** The warning and red streaks for a failing provider; `together` = another direct provider is down too. */
-export function providerLimit(id: string, thresholds: Thresholds, together?: boolean): { warn: number; red: number };
-/** The failing deletions query of a provider entry (round-16 gateways); null when it carries no positive streak. */
-export function deletionsFailure(provider: unknown): { failures: number; why: string } | null;
+/** How long a failing provider entry has failed (s) as of `refMs`: from its failingSinceMs (round-25 gateways) when
+ *  usable (`measured`), else estimated from consecutiveFailures; null when it carries neither. */
+export function streakDuration(
+  provider: unknown,
+  refMs: number,
+): { sec: number; measured: boolean; since?: number; failures: number | null } | null;
+/** The red line (s) for one failing provider on its own: fastProviderDownSec for EMSC/GFZ, providerDownSec otherwise. */
+export function providerDownSec(id: string, thresholds: Thresholds): number;
+/** The failing deletions query of a provider entry (round-16 gateways); null when it carries no positive streak.
+ *  `lasted` is " over N min" from deletionsFailingSinceMs (round 25) as of `refMs`, else ''. */
+export function deletionsFailure(provider: unknown, refMs?: number): { failures: number; why: string; lasted: string } | null;
 /** The failing primary live query of a provider entry (2026-10-13 gateways); null when it carries no positive streak.
- *  `fallback` is true while the provider is ok on its summary-feed fallback. */
-export function primaryFailure(provider: unknown): { failures: number; why: string; fallback: boolean } | null;
+ *  `fallback` is true while the provider is ok on its summary-feed fallback; `lasted` as for deletionsFailure. */
+export function primaryFailure(provider: unknown, refMs?: number): { failures: number; why: string; fallback: boolean; lasted: string } | null;
 
 export type FetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
 export type FetchResult =

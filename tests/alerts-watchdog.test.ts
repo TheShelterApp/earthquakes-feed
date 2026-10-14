@@ -24,9 +24,10 @@ import {
   primaryFailure,
   PROVIDER_BACKOFF_STEPS,
   PROVIDER_MIN_INTERVAL_MS,
-  providerLimit,
+  providerDownSec,
   SELFTEST_MIN_HEADROOM_PCT,
   STATUS_URL,
+  streakDuration,
   streakSpanSec,
   usageWindow,
   type FetchImpl,
@@ -87,27 +88,51 @@ test('freshness boundary: 300 s passes, 301 s fails', () => {
   assert.equal(evaluateStatus(HEALTHY, { nowMs: HEALTHY.generatedAtMs + 301_000 }).problems.length, 1);
 });
 
-test('provider-down fixture: ok:false with >= 3 consecutive failures fails; a single failure is only a note', () => {
+test('provider-down fixture: USGS failing for 6.5 min (failingSinceMs) fails; EMSC failing for 5 s is only a note', () => {
   const v = evaluateStatus(statusFixture('provider-down'), { nowMs: NOW });
-  assert.equal(v.problems.length, 1);
-  assert.match(v.problems[0]!, /provider usgs is down: ok:false with 4 consecutive failures \(about 3 min at 60 s polls; limit 3\), last HTTP 503/);
-  assert.equal(v.notes.length, 1);
-  assert.match(v.notes[0]!, /provider emsc is ok:false with 1 consecutive failures/);
-  assert.match(v.summary, /usgs:FAIL\(4\).*emsc:FAIL\(1\)/);
+  assert.deepEqual(v.problems, ['provider usgs is down: ok:false for 6.5 min (since 19:40:35 UTC), limit 5 min for a provider polled every 60 s, 7 consecutive failures, last HTTP 503']);
+  assert.deepEqual(v.warnings, []);
+  assert.deepEqual(v.notes, ['provider emsc is ok:false for 5 s (since 19:47:00 UTC), below the warning at 60 s, down at 3 min, 1 consecutive failure, last HTTP 502']);
+  assert.match(v.summary, /usgs:FAIL\(7\).*emsc:FAIL\(1\)/);
 });
 
-test('provider streak boundary: 2 failures pass, 3 fail', () => {
+test('provider boundary by time: the feed at 299 s warns, at 300 s fails; measured to the document, not to now', () => {
   const doc = structuredClone(HEALTHY);
-  Object.assign(doc.detector.providers[1], { ok: false, consecutiveFailures: 2 });
-  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).problems, []);
-  doc.detector.providers[1].consecutiveFailures = 3;
-  assert.match(evaluateStatus(doc, { nowMs: NOW }).problems[0]!, /provider feed is down/);
+  Object.assign(doc.detector.providers[1], { ok: false, consecutiveFailures: 5, failingSinceMs: HEALTHY.generatedAtMs - 299_000 });
+  let v = evaluateStatus(doc, { nowMs: NOW });
+  assert.deepEqual(v.problems, []);
+  assert.match(v.warnings[0]!, /^provider feed is failing: ok:false for 4\.5 min \(since .*\), a warning from 60 s, down at 5 min, 5 consecutive failures/);
+  // The watchdog reading the same document a minute later sees the same streak: the duration is as of generatedAtMs.
+  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW + 60_000 }).problems, []);
+  doc.detector.providers[1].failingSinceMs = HEALTHY.generatedAtMs - 300_000;
+  v = evaluateStatus(doc, { nowMs: NOW });
+  assert.match(v.problems[0]!, /^provider feed is down: ok:false for 5 min \(since .*\), limit 5 min for a provider polled every 60 s/);
 });
 
-test('a failing provider without lastError / consecutiveTimeouts (an older gateway) keeps the message it had', () => {
-  const v = evaluateStatus(statusFixture('provider-down'), { nowMs: NOW });
-  assert.equal(v.problems[0], 'provider usgs is down: ok:false with 4 consecutive failures (about 3 min at 60 s polls; limit 3), last HTTP 503');
-  assert.equal(v.notes[0], 'provider emsc is ok:false with 1 consecutive failures (below the warning at 3, down at 6), last HTTP 502');
+test('an older gateway (no failingSinceMs): the duration comes from the count at the gateway\'s polling, never earlier', () => {
+  // 5 USGS failures span 4 min (60 s apart): a warning; 6 span 5 min: down. The old count rule was red at 3.
+  const doc = structuredClone(HEALTHY);
+  Object.assign(doc.detector.providers[0], { ok: false, httpStatus: 503, consecutiveFailures: 5 });
+  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).problems, []);
+  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).warnings, [
+    'provider usgs is failing: ok:false for about 4 min (5 consecutive failures at 60 s polls; the gateway publishes no failingSinceMs for it), a warning from 60 s, down at 5 min, last HTTP 503: the other providers still deliver, so alerts still go out (a quake only usgs reports may come later)',
+  ]);
+  doc.detector.providers[0].consecutiveFailures = 6;
+  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).problems, [
+    'provider usgs is down: ok:false for about 5 min (6 consecutive failures at 60 s polls; the gateway publishes no failingSinceMs for it), limit 5 min for a provider polled every 60 s, last HTTP 503',
+  ]);
+  // Two USGS failures (60 s) are a warning, one is a note; a damaged or future start falls back to the count too.
+  doc.detector.providers[0].consecutiveFailures = 1;
+  assert.match(evaluateStatus(doc, { nowMs: NOW }).notes[0]!, /^provider usgs is ok:false for about 0 s \(1 consecutive failure at 60 s polls/);
+  for (const bad of ['1790365235218', -1, 0, null, Number.NaN, HEALTHY.generatedAtMs + 3_600_000]) {
+    Object.assign(doc.detector.providers[0], { consecutiveFailures: 6, failingSinceMs: bad });
+    assert.match(evaluateStatus(doc, { nowMs: NOW }).problems[0]!, /^provider usgs is down: ok:false for about 5 min \(6 consecutive failures/, String(bad));
+  }
+  // Neither a start nor a count: a note, never a failure.
+  Object.assign(doc.detector.providers[0], { consecutiveFailures: undefined, failingSinceMs: undefined });
+  const none = evaluateStatus(doc, { nowMs: NOW });
+  assert.deepEqual([none.problems, none.warnings], [[], []]);
+  assert.match(none.notes[0]!, /^provider usgs is ok:false with no failure streak published/);
 });
 
 test('round-14 gateway: the failure message names lastError and consecutiveTimeouts (the 2026-10-04 USGS timeouts)', () => {
@@ -118,7 +143,7 @@ test('round-14 gateway: the failure message names lastError and consecutiveTimeo
   assert.equal(v.problems.length, 1);
   assert.equal(
     v.problems[0],
-    "provider usgs is down: ok:false with 387 consecutive failures (about 31.6 h at 60 s polls; limit 3), last HTTP 0, last error timeout (slower than the gateway's fetch timeout), 387 timeouts in a row",
+    "provider usgs is down: ok:false for about 31.6 h (387 consecutive failures at 60 s polls; the gateway publishes no failingSinceMs for it), limit 5 min for a provider polled every 60 s, last HTTP 0, last error timeout (slower than the gateway's fetch timeout), 387 timeouts in a row",
   );
   assert.match(v.summary, /usgs:FAIL\(387\)/); // the summary tag is unchanged
 });
@@ -128,10 +153,10 @@ test('round-14 gateway: an HTTP, network or invalid failure is named; zero timeo
   Object.assign(doc.detector.providers[2], { ok: false, httpStatus: 503, consecutiveFailures: 5, lastError: 'http', consecutiveTimeouts: 0 });
   Object.assign(doc.detector.providers[3], { ok: false, httpStatus: 200, consecutiveFailures: 1, lastError: 'invalid', consecutiveTimeouts: 0 });
   const v = evaluateStatus(doc, { nowMs: NOW });
-  // EMSC at 5 is a warning since round 24 (15 s polls: down at 6); the reason is named there too.
+  // EMSC's 5 failures span 2.5 min at 15 s polls: a warning (down at 3 min); the reason is named there too.
   assert.deepEqual(v.problems, []);
-  assert.deepEqual(v.warnings, ['provider emsc is failing: ok:false with 5 consecutive failures (about 2.5 min at 15 s polls; a warning from 3, down at 6), last HTTP 503, last error http (an HTTP error status): the other providers still deliver, so alerts still go out (a quake only emsc reports may come later)']);
-  assert.deepEqual(v.notes, ['provider gfz is ok:false with 1 consecutive failures (below the warning at 3, down at 6), last HTTP 200, last error invalid (a body that does not parse or verify)']);
+  assert.deepEqual(v.warnings, ['provider emsc is failing: ok:false for about 2.5 min (5 consecutive failures at 15 s polls; the gateway publishes no failingSinceMs for it), a warning from 60 s, down at 3 min, last HTTP 503, last error http (an HTTP error status): the other providers still deliver, so alerts still go out (a quake only emsc reports may come later)']);
+  assert.deepEqual(v.notes, ['provider gfz is ok:false for about 0 s (1 consecutive failure at 15 s polls; the gateway publishes no failingSinceMs for it), below the warning at 60 s, down at 3 min, last HTTP 200, last error invalid (a body that does not parse or verify)']);
   // A streak that ended in a network error after two timeouts.
   assert.equal(failureReason({ lastError: 'network', consecutiveTimeouts: 0 }), ', last error network (a network failure before the timeout)');
   assert.equal(failureReason({ lastError: 'timeout', consecutiveTimeouts: 1 }), ", last error timeout (slower than the gateway's fetch timeout), 1 timeout in a row");
@@ -147,8 +172,8 @@ test('lastError / consecutiveTimeouts: missing, malformed or unknown values neve
   assert.equal(failureReason({ lastError: 'tls', consecutiveTimeouts: 2 }), ', last error tls, 2 timeouts in a row');
   assert.equal(failureReason({ lastError: 'x'.repeat(100) }), `, last error ${'x'.repeat(32)}`);
   const doc = structuredClone(HEALTHY);
-  Object.assign(doc.detector.providers[0], { ok: false, consecutiveFailures: 3, lastError: { nested: true }, consecutiveTimeouts: null });
-  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).problems, ['provider usgs is down: ok:false with 3 consecutive failures (about 2 min at 60 s polls; limit 3), last HTTP 200']);
+  Object.assign(doc.detector.providers[0], { ok: false, consecutiveFailures: 6, lastError: { nested: true }, consecutiveTimeouts: null });
+  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).problems, ['provider usgs is down: ok:false for about 5 min (6 consecutive failures at 60 s polls; the gateway publishes no failingSinceMs for it), limit 5 min for a provider polled every 60 s, last HTTP 200']);
 });
 
 test('policy-fallback fixture: policy.fallback == true fails with the reason', () => {
@@ -598,6 +623,7 @@ test('freshness: the limits can be set on the command line', () => {
 
 /** What a round-16 gateway publishes while USGS's `includedeleted=only` query fails: the provider stays ok, the two
  *  deletions fields appear, and the watermark (the deletions cursor) stops moving. */
+const GEN_DEL = HEALTHY.generatedAtMs as number;
 function deletionsFailing(failures: unknown, lastError: unknown = 'timeout', watermarkAgoMs = 2 * 3_600_000): Record<string, any> {
   const doc = structuredClone(HEALTHY);
   Object.assign(doc.detector.providers[0], { ok: true, consecutiveFailures: 0, watermarkMs: NOW - watermarkAgoMs, deletionsConsecutiveFailures: failures, deletionsLastError: lastError });
@@ -639,9 +665,9 @@ test('deletions: missing, malformed or unknown values never break the check', ()
   assert.equal(deletionsFailure(null), null);
   assert.equal(deletionsFailure('usgs'), null);
   // An unknown or odd lastError: shown as is (cut to 32 characters) or left out; a missing or odd watermark drops the age.
-  assert.deepEqual(deletionsFailure({ deletionsConsecutiveFailures: 4, deletionsLastError: 'tls' }), { failures: 4, why: ', last error tls' });
-  assert.deepEqual(deletionsFailure({ deletionsConsecutiveFailures: 4, deletionsLastError: 'y'.repeat(80) }), { failures: 4, why: `, last error ${'y'.repeat(32)}` });
-  assert.deepEqual(deletionsFailure({ deletionsConsecutiveFailures: 4, deletionsLastError: { code: 1 } }), { failures: 4, why: '' });
+  assert.deepEqual(deletionsFailure({ deletionsConsecutiveFailures: 4, deletionsLastError: 'tls' }), { failures: 4, why: ', last error tls', lasted: '' });
+  assert.deepEqual(deletionsFailure({ deletionsConsecutiveFailures: 4, deletionsLastError: 'y'.repeat(80) }), { failures: 4, why: `, last error ${'y'.repeat(32)}`, lasted: '' });
+  assert.deepEqual(deletionsFailure({ deletionsConsecutiveFailures: 4, deletionsLastError: { code: 1 } }), { failures: 4, why: '', lasted: '' });
   const doc = deletionsFailing(4, 'network');
   delete doc.detector.providers[0].watermarkMs;
   assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).warnings, [
@@ -663,10 +689,22 @@ test('deletions: judged whatever ok says; a provider that is also down fails for
   Object.assign(doc.detector.providers[0], { ok: false, httpStatus: 0, consecutiveFailures: 12, lastError: 'timeout', consecutiveTimeouts: 12 });
   const v = evaluateStatus(doc, { nowMs: NOW });
   assert.equal(v.problems.length, 1);
-  assert.match(v.problems[0]!, /^provider usgs is down: ok:false with 12 consecutive failures/);
+  assert.match(v.problems[0]!, /^provider usgs is down: ok:false for about 19 min \(12 consecutive failures at 60 s polls/);
   assert.equal(v.warnings.length, 1);
   assert.match(v.warnings[0]!, /deletions query has failed 12 times in a row/);
   assert.match(v.summary, /usgs:FAIL\(12\)\/deletions-FAIL\(12\)/);
+});
+
+test('deletions and primary: a round-25 gateway\'s start adds how long the streak has lasted; a bad start adds nothing', () => {
+  const doc = deletionsFailing(9, 'timeout');
+  doc.detector.providers[0].deletionsFailingSinceMs = GEN_DEL - 45 * 60_000;
+  assert.match(evaluateStatus(doc, { nowMs: NOW }).warnings[0]!, /^provider usgs's deletions query has failed 9 times in a row over 45 min, last error timeout/);
+  for (const bad of [-1, 0, '1', null, GEN_DEL + 3_600_000]) {
+    doc.detector.providers[0].deletionsFailingSinceMs = bad;
+    assert.match(evaluateStatus(doc, { nowMs: NOW }).warnings[0]!, /^provider usgs's deletions query has failed 9 times in a row, last error timeout/, String(bad));
+  }
+  assert.equal(primaryFailure({ primaryConsecutiveFailures: 3, primaryFailingSinceMs: GEN_DEL - 90_000 }, GEN_DEL)!.lasted, ' over 90 s');
+  assert.equal(primaryFailure({ primaryConsecutiveFailures: 3, primaryFailingSinceMs: GEN_DEL - 90_000 })!.lasted, ''); // no reference time
 });
 
 test('deletions: the threshold can be set on the command line', () => {
@@ -710,13 +748,13 @@ test('primary: a streak of 3 on the summary fallback warns with the reason; the 
 });
 
 test('primary: with the provider failing too, the provider line fails the run and no fallback warning is added', () => {
-  const doc = onSummary(4, 'http', { ok: false, consecutiveFailures: 4, lastError: 'http', consecutiveTimeouts: 0, httpStatus: 503 });
+  const doc = onSummary(8, 'http', { ok: false, consecutiveFailures: 6, lastError: 'http', consecutiveTimeouts: 0, httpStatus: 503 });
   delete doc.detector.providers[0].fallback;
   const v = evaluateStatus(doc, { nowMs: NOW });
   assert.equal(v.problems.length, 1);
-  assert.match(v.problems[0]!, /^provider usgs is down: ok:false with 4 consecutive failures/);
+  assert.match(v.problems[0]!, /^provider usgs is down: ok:false for about 5 min \(6 consecutive failures/);
   assert.deepEqual(v.warnings, []);
-  assert.match(v.summary, /usgs:FAIL\(4\)\/primary-FAIL\(4\),/);
+  assert.match(v.summary, /usgs:FAIL\(6\)\/primary-FAIL\(8\),/);
 });
 
 test('primary: missing or malformed values never break the check', () => {
@@ -727,19 +765,28 @@ test('primary: missing or malformed values never break the check', () => {
   }
   assert.equal(primaryFailure(HEALTHY.detector.providers[0]), null);
   assert.equal(primaryFailure(null), null);
-  assert.deepEqual(primaryFailure({ primaryConsecutiveFailures: 3, primaryLastError: { x: 1 } }), { failures: 3, why: '', fallback: false });
+  assert.deepEqual(primaryFailure({ primaryConsecutiveFailures: 3, primaryLastError: { x: 1 } }), { failures: 3, why: '', fallback: false, lasted: '' });
 });
 
-// --- round 24: provider limits by polling cadence (EMSC and GFZ are polled every 15 s tick, USGS and the feed every 60 s) ---
+// --- round 25: provider outages judged by time and coverage (round 24 judged a count per polling cadence) ---
 
-/** The healthy capture with some providers failing: { id: [consecutiveFailures, extra fields] }. */
-function failing(spec: Record<string, number | [number, Record<string, unknown>]>): Record<string, any> {
+const GEN = HEALTHY.generatedAtMs as number;
+
+/** The healthy capture with some providers failing: { id: [seconds failing, extra fields] } — the round-25 gateway's
+ *  failingSinceMs, with a plausible count at the gateway's polling. A provider given `null` seconds publishes no start
+ *  (an older gateway); then `count` must come in the extra fields. */
+function failingFor(spec: Record<string, number | null | [number | null, Record<string, unknown>]>): Record<string, any> {
   const doc = structuredClone(HEALTHY);
   for (const p of doc.detector.providers) {
     const v = spec[p.id];
     if (v === undefined) continue;
-    const [n, extra] = Array.isArray(v) ? v : [v, {}];
-    Object.assign(p, { ok: false, consecutiveFailures: n, httpStatus: 0, lastError: 'timeout', consecutiveTimeouts: n, ...extra });
+    const [sec, extra] = Array.isArray(v) ? v : [v, {}];
+    // The count the gateway would have reached: the most failures whose span at its polling fits in `sec`.
+    let n = 1;
+    while (sec !== null && streakSpanSec(p.id, n + 1) <= sec) n++;
+    Object.assign(p, { ok: false, consecutiveFailures: n, httpStatus: 0, lastError: 'timeout', consecutiveTimeouts: n });
+    if (sec !== null) p.failingSinceMs = GEN - sec * 1000;
+    Object.assign(p, extra);
   }
   return doc;
 }
@@ -751,19 +798,30 @@ test('cadence: the gateway polls EMSC and GFZ every 15 s tick, USGS and the feed
   assert.deepEqual(['emsc', 'gfz', 'usgs', 'feed', 'newsource'].map(pollIntervalMs), [15_000, 15_000, 60_000, 60_000, 60_000]);
   assert.deepEqual(['emsc', 'gfz', 'usgs', 'feed', 'newsource'].map(isFastProvider), [true, true, false, false, false]);
   assert.deepEqual([...DIRECT_PROVIDERS], ['usgs', 'emsc', 'gfz']);
-  // A streak's span: 3 EMSC failures are 30 s (one GEOFON blip of ~40 s on 2026-10-09), 6 are 3.5 min; 3 USGS failures 2 min.
+  // A streak's span by its count (the fallback for a gateway without failingSinceMs): 3 EMSC failures are 30 s, 6 are
+  // 3.5 min; 3 USGS failures 2 min.
   assert.deepEqual([1, 2, 3, 4, 5, 6, 10, 11].map((n) => streakSpanSec('gfz', n)), [0, 15, 30, 90, 150, 210, 450, 750]);
   assert.deepEqual([1, 2, 3, 4, 10, 11].map((n) => streakSpanSec('usgs', n)), [0, 60, 120, 180, 540, 840]);
   assert.equal(streakSpanSec('usgs', 387), 113_640); // the 2026-10-04..06 USGS outage: about 31.6 h
-  // The limits: USGS and the feed red at 3; EMSC and GFZ a warning from 3, red at 6, or at 3 together with another.
+});
+
+test('the time limits: 3 min for EMSC/GFZ, 5 min for USGS, the feed and new ids; 2 min for two direct at once, 1 min for all three', () => {
   const t = { ...DEFAULT_THRESHOLDS };
-  assert.equal(t.providerFailures, 3);
-  assert.equal(t.fastProviderFailures, 6);
-  assert.deepEqual(providerLimit('usgs', t), { warn: 3, red: 3 });
-  assert.deepEqual(providerLimit('feed', t, true), { warn: 3, red: 3 });
-  assert.deepEqual(providerLimit('emsc', t), { warn: 3, red: 6 });
-  assert.deepEqual(providerLimit('gfz', t, true), { warn: 3, red: 3 });
-  assert.deepEqual(providerLimit('gfz', { ...t, fastProviderFailures: 2 }), { warn: 3, red: 3 }); // never below the base
+  assert.deepEqual(
+    [t.fastProviderDownSec, t.providerDownSec, t.twoDirectDownSec, t.allDirectDownSec, t.providerWarnSec],
+    [180, 300, 120, 60, 60],
+  );
+  assert.deepEqual(['emsc', 'gfz', 'usgs', 'feed', 'newsource'].map((id) => providerDownSec(id, t)), [180, 180, 300, 300, 300]);
+  // The count rules are gone: no threshold is a count of provider failures any more.
+  assert.equal('providerFailures' in t, false);
+  assert.equal('fastProviderFailures' in t, false);
+  assert.throws(() => parseArgs(['--provider-failures', '3']), /unknown argument/);
+  // Without a start the duration is the count's span at the gateway's polling (a lower bound of the time it lasted).
+  for (const n of [1, 3, 6, 11]) assert.equal(streakDuration({ id: 'emsc', ok: false, consecutiveFailures: n }, GEN)!.sec, streakSpanSec('emsc', n));
+  assert.deepEqual(streakDuration({ id: 'usgs', ok: false, consecutiveFailures: 3, failingSinceMs: GEN - 150_000 }, GEN), { sec: 150, measured: true, since: GEN - 150_000, failures: 3 });
+  assert.deepEqual(streakDuration({ id: 'gfz', ok: false, consecutiveFailures: 4 }, GEN), { sec: 90, measured: false, failures: 4 });
+  assert.equal(streakDuration({ id: 'gfz', ok: false }, GEN), null);
+  assert.equal(streakDuration(null, GEN), null);
 });
 
 // The constants above mirror the gateway's source. When a platform checkout is at hand (SHELTER_PLATFORM_DIR, or the
@@ -788,96 +846,140 @@ test('cadence: the mirrored constants match the alerts-gateway source', { skip: 
   assert.match(sources, /ALL_SOURCES[^=]*= \[USGS_SOURCE, EMSC_SOURCE, GFZ_SOURCE\]/);
 });
 
-test('fast providers: a GFZ streak of 3 (the 2026-10-09 GEOFON blip) is a warning, not a red run', () => {
-  const v = evaluateStatus(failing({ gfz: 3 }), { nowMs: NOW });
-  assert.deepEqual(v.problems, []);
-  assert.deepEqual(v.warnings, [
-    "provider gfz is failing: ok:false with 3 consecutive failures (about 30 s at 15 s polls; a warning from 3, down at 6), last HTTP 0, last error timeout (slower than the gateway's fetch timeout), 3 timeouts in a row: the other providers still deliver, so alerts still go out (a quake only gfz reports may come later)",
-  ]);
-  assert.match(v.summary, /gfz:FAIL\(3\)/);
-  assert.match(evaluateStatus(failing({ gfz: 2 }), { nowMs: NOW }).notes[0]!, /^provider gfz is ok:false with 2 consecutive failures \(below the warning at 3, down at 6\)/);
-});
-
-test('fast providers: EMSC at 5 warns, at 6 (about 3.5 min) fails', () => {
-  const five = evaluateStatus(failing({ emsc: 5 }), { nowMs: NOW });
-  assert.deepEqual(five.problems, []);
-  assert.equal(five.warnings.length, 1);
-  assert.match(five.warnings[0]!, /^provider emsc is failing: ok:false with 5 consecutive failures \(about 2\.5 min at 15 s polls; a warning from 3, down at 6\)/);
-  const six = evaluateStatus(failing({ emsc: 6 }), { nowMs: NOW });
-  assert.deepEqual(six.warnings, []);
-  assert.deepEqual(six.problems, [
-    "provider emsc is down: ok:false with 6 consecutive failures (about 3.5 min at 15 s polls; limit 6), last HTTP 0, last error timeout (slower than the gateway's fetch timeout), 6 timeouts in a row",
-  ]);
-});
-
-test('slow providers: USGS and the feed still fail at 3 (2 min of failures); 2 is a note', () => {
-  for (const id of ['usgs', 'feed']) {
-    const v = evaluateStatus(failing({ [id]: 3 }), { nowMs: NOW });
-    assert.equal(v.problems.length, 1, id);
-    assert.match(v.problems[0]!, new RegExp(`^provider ${id} is down: ok:false with 3 consecutive failures \\(about 2 min at 60 s polls; limit 3\\)`));
-    assert.deepEqual(v.warnings, [], id);
-    const two = evaluateStatus(failing({ [id]: 2 }), { nowMs: NOW });
-    assert.deepEqual([two.problems, two.warnings], [[], []], id);
-    assert.match(two.notes[0]!, /\(below the limit of 3\)/);
+test('one provider: the 2026-10-09 GEOFON blip (about 40 s, at most 110 s as published) is a warning; GFZ at 3 min fails', () => {
+  // A 40 s outage: 3 failures 15 s apart, then the 60 s backoff before the poll that clears it, so the streak can read up
+  // to 90 s (110 s with slow ticks). Round 24 turned it red whenever USGS was down too; now it is a warning on its own.
+  assert.match(evaluateStatus(failingFor({ gfz: 40 }), { nowMs: NOW }).notes[0]!, /^provider gfz is ok:false for 40 s/);
+  for (const sec of [60, 90, 110, 179]) {
+    const v = evaluateStatus(failingFor({ gfz: sec }), { nowMs: NOW });
+    assert.deepEqual(v.problems, [], String(sec));
+    assert.equal(v.warnings.length, 1, String(sec));
+    assert.match(v.warnings[0]!, /^provider gfz is failing: ok:false for .* \(since .*\), a warning from 60 s, down at 3 min, \d+ consecutive failures, last HTTP 0, last error timeout .*: the other providers still deliver, so alerts still go out \(a quake only gfz reports may come later\)$/);
   }
+  assert.match(evaluateStatus(failingFor({ gfz: 59 }), { nowMs: NOW }).notes[0]!, /^provider gfz is ok:false for 59 s \(since .*\), below the warning at 60 s, down at 3 min/);
+  const down = evaluateStatus(failingFor({ gfz: 180 }), { nowMs: NOW });
+  assert.equal(down.problems.length, 1);
+  assert.match(down.problems[0]!, /^provider gfz is down: ok:false for 3 min \(since .*\), limit 3 min for a provider polled every 15 s, 5 consecutive failures/);
 });
 
-test('two direct providers down at once: EMSC and GFZ fail at 3 (only USGS and the feed backstop are left)', () => {
-  const v = evaluateStatus(failing({ emsc: 3, gfz: 4 }), { nowMs: NOW });
-  assert.deepEqual(v.warnings, []);
-  assert.equal(v.problems.length, 2);
-  assert.match(v.problems[0]!, /^provider emsc is down: ok:false with 3 consecutive failures \(about 30 s at 15 s polls; limit 3 while gfz is down too, 6 alone\)/);
-  assert.match(v.problems[1]!, /^provider gfz is down: ok:false with 4 consecutive failures \(about 90 s at 15 s polls; limit 3 while emsc is down too, 6 alone\)/);
-  // USGS down with EMSC: both fail; USGS by its own limit.
-  const u = evaluateStatus(failing({ usgs: 3, emsc: 3 }), { nowMs: NOW });
-  assert.equal(u.problems.length, 2);
-  assert.match(u.problems[0]!, /^provider usgs is down: .*\(about 2 min at 60 s polls; limit 3\)/);
-  assert.match(u.problems[1]!, /^provider emsc is down: .*limit 3 while usgs is down too, 6 alone\)/);
-  // All three direct providers: each names the other two.
-  const all = evaluateStatus(failing({ usgs: 4, emsc: 3, gfz: 3 }), { nowMs: NOW });
-  assert.equal(all.problems.length, 3);
-  assert.match(all.problems[1]!, /limit 3 while usgs and gfz are down too, 6 alone\)/);
+test('one provider: USGS and the feed fail at 5 min, warn from 1 min; a new id is judged like them', () => {
+  for (const id of ['usgs', 'feed']) {
+    assert.deepEqual(evaluateStatus(failingFor({ [id]: 299 }), { nowMs: NOW }).problems, [], id);
+    assert.match(evaluateStatus(failingFor({ [id]: 299 }), { nowMs: NOW }).warnings[0]!, new RegExp(`^provider ${id} is failing: ok:false for 4\\.5 min`), id);
+    const v = evaluateStatus(failingFor({ [id]: 300 }), { nowMs: NOW });
+    assert.equal(v.problems.length, 1, id);
+    assert.match(v.problems[0]!, new RegExp(`^provider ${id} is down: ok:false for 5 min \\(since .*\\), limit 5 min for a provider polled every 60 s`), id);
+    // A USGS streak of 3 (2 min) was red before; now it is a warning: USGS ok:false already means FDSN and the summary feed fail.
+    assert.deepEqual(evaluateStatus(failingFor({ [id]: 120 }), { nowMs: NOW }).problems, [], id);
+  }
+  const doc = structuredClone(HEALTHY);
+  doc.detector.providers.push({ id: 'newsource', ok: false, consecutiveFailures: 4, failingSinceMs: GEN - 200_000 });
+  assert.match(evaluateStatus(doc, { nowMs: NOW }).warnings[0]!, /^provider newsource is failing: .*down at 5 min/);
 });
 
-test('two at once counts direct providers only, each at 3 or more: the feed, a short streak or the USGS summary fallback do not', () => {
-  // The feed backstop is not a direct provider: it fails by its own limit and leaves EMSC's warning a warning.
-  const feed = evaluateStatus(failing({ feed: 5, emsc: 4 }), { nowMs: NOW });
-  assert.equal(feed.problems.length, 1);
-  assert.match(feed.problems[0]!, /^provider feed is down/);
-  assert.equal(feed.warnings.length, 1);
-  assert.match(feed.warnings[0]!, /^provider emsc is failing: ok:false with 4 consecutive failures/);
-  // A second fast provider below 3 is not down.
-  const short = evaluateStatus(failing({ emsc: 2, gfz: 4 }), { nowMs: NOW });
+test('coverage: two of the three direct providers failing together for 2 min fail the run, whichever two', () => {
+  for (const [a, b, c] of [['usgs', 'emsc', 'gfz'], ['usgs', 'gfz', 'emsc'], ['emsc', 'gfz', 'usgs']] as const) {
+    const v = evaluateStatus(failingFor({ [a]: 150, [b]: 125 }), { nowMs: NOW });
+    assert.deepEqual(v.problems, [`two of the three direct providers (${a} and ${b}) have been failing together for 2 min (limit 2 min): one direct source is left (${c}), with the feed backstop`], `${a}+${b}`);
+    // Each provider's own line stays a warning (below its own limit) and points at the problem.
+    assert.equal(v.warnings.length, 2);
+    for (const w of v.warnings) assert.match(w, /: see the direct-provider problem above$/);
+    // 119 s together is not yet: a warning per provider, no problem.
+    const short = evaluateStatus(failingFor({ [a]: 600, [b]: 119 }), { nowMs: NOW });
+    assert.equal(short.problems.length, 1); // only `a`, past its own limit
+    assert.match(short.problems[0]!, new RegExp(`^provider ${a} is down`));
+    assert.doesNotMatch(short.problems.join(' | '), /two of the three/);
+  }
+  // The round-24 rule failed EMSC and GFZ at 3 failures each when both blip at once (30 s); a blip of both, even
+  // stretched to 90 s by the backoff, is two warnings now.
+  const blips = evaluateStatus(failingFor({ emsc: 90, gfz: 90 }), { nowMs: NOW });
+  assert.deepEqual(blips.problems, []);
+  assert.equal(blips.warnings.length, 2);
+  // The pair is the two longest streaks; the third one, failing for less, is named as failing too.
+  const three = evaluateStatus(failingFor({ usgs: 30, emsc: 170, gfz: 130 }), { nowMs: NOW });
+  assert.deepEqual(three.problems, ['two of the three direct providers (emsc and gfz) have been failing together for 2 min (limit 2 min): one direct source is left (usgs, failing too for 30 s), with the feed backstop']);
+});
+
+test('coverage: all three direct providers failing together for 1 min fail the run once (not also as a pair)', () => {
+  const v = evaluateStatus(failingFor({ usgs: 65, emsc: 95, gfz: 80 }), { nowMs: NOW });
+  assert.deepEqual(v.problems, [
+    "all three direct providers (usgs, emsc, gfz) have been failing together for 65 s (limit 60 s): the gateway sees new quakes only through the feed backstop, minutes late; three agencies failing at once points at the gateway's side (its egress, DNS, the Workers runtime or a deploy)",
+  ]);
+  assert.equal(v.warnings.length, 3);
+  // 59 s together: below every rule (each a warning or a note).
+  const short = evaluateStatus(failingFor({ usgs: 59, emsc: 100, gfz: 100 }), { nowMs: NOW });
   assert.deepEqual(short.problems, []);
-  assert.equal(short.warnings.length, 1);
-  assert.match(short.warnings[0]!, /^provider gfz is failing/);
-  // USGS on its summary fallback (#95: ok, primary-FAIL) is not down: EMSC at 4 stays a warning, beside the fallback one.
-  const doc = failing({ emsc: 4 });
-  Object.assign(doc.detector.providers[0], { ok: true, consecutiveFailures: 0, fallback: 'summary', primaryConsecutiveFailures: 17, primaryLastError: 'timeout' });
+  // All three for 3 min: the all-three line plus EMSC's and GFZ's own limits.
+  const long = evaluateStatus(failingFor({ usgs: 200, emsc: 200, gfz: 200 }), { nowMs: NOW });
+  assert.equal(long.problems.length, 3);
+  assert.match(long.problems[0]!, /^all three direct providers/);
+  assert.match(long.problems[1]!, /^provider emsc is down/);
+  assert.match(long.problems[2]!, /^provider gfz is down/);
+});
+
+test('coverage counts direct providers only: the feed backstop, a USGS on its summary fallback and an unknown streak do not', () => {
+  // The feed is not a direct provider: EMSC and the feed failing for 2.5 min are two warnings, no coverage problem.
+  const feed = evaluateStatus(failingFor({ feed: 150, emsc: 150 }), { nowMs: NOW });
+  assert.deepEqual(feed.problems, []);
+  assert.equal(feed.warnings.length, 2);
+  // USGS ok on its summary fallback (#95) is not failing: EMSC failing beside it stays a warning.
+  const doc = failingFor({ emsc: 150 });
+  Object.assign(doc.detector.providers[0], { ok: true, consecutiveFailures: 0, fallback: 'summary', primaryConsecutiveFailures: 17, primaryLastError: 'timeout', primaryFailingSinceMs: GEN - 1_320_000 });
   const fb = evaluateStatus(doc, { nowMs: NOW });
   assert.deepEqual(fb.problems, []);
   assert.equal(fb.warnings.length, 2);
-  assert.match(fb.warnings[0]!, /^provider usgs's primary live query has failed 17 times in a row/);
+  assert.equal(fb.warnings[0], "provider usgs's primary live query has failed 17 times in a row over 22 min, last error timeout (slower than the gateway's fetch timeout): its live events come from the summary feed (fallback: summary), up to about two minutes later (warning at 3)");
   assert.match(fb.warnings[1]!, /^provider emsc is failing/);
-  assert.match(fb.summary, /providers=usgs:ok\/primary-FAIL\(17\)\+summary,feed:ok,emsc:FAIL\(4\),gfz:ok/);
+  assert.match(fb.summary, /providers=usgs:ok\/primary-FAIL\(17\)\+summary,feed:ok,emsc:FAIL\(\d+\),gfz:ok/);
+  // A direct provider ok:false with neither a start nor a count is left out of the coverage rules.
+  const unknown = failingFor({ emsc: 300, gfz: 300 });
+  Object.assign(unknown.detector.providers[0], { ok: false, consecutiveFailures: undefined });
+  const u = evaluateStatus(unknown, { nowMs: NOW });
+  assert.match(u.problems[0]!, /^two of the three direct providers \(emsc and gfz\)/);
 });
 
-test('fast providers: the limits can be set on the command line', () => {
-  assert.equal(parseArgs([]).thresholds.fastProviderFailures, 6);
-  const t = parseArgs(['--fast-provider-failures', '4', '--provider-failures', '2']).thresholds;
-  assert.deepEqual([t.fastProviderFailures, t.providerFailures], [4, 2]);
-  assert.match(evaluateStatus(failing({ emsc: 4 }), { nowMs: NOW, thresholds: t }).problems[0]!, /limit 4\)/);
-  assert.match(evaluateStatus(failing({ emsc: 2 }), { nowMs: NOW, thresholds: t }).warnings[0]!, /a warning from 2, down at 4/);
-  assert.throws(() => parseArgs(['--fast-provider-failures', '-1']), /non-negative number/);
+test('an older gateway during the deploy: coverage by count is never earlier than round 24 judged', () => {
+  // Round 24 failed EMSC and GFZ at 3 each "together" (30 s); by count they now span 30 s: warnings at most.
+  const blip = failingFor({ emsc: [null, { consecutiveFailures: 3 }], gfz: [null, { consecutiveFailures: 3 }], usgs: [null, { consecutiveFailures: 2 }] });
+  assert.deepEqual(evaluateStatus(blip, { nowMs: NOW }).problems, []);
+  // 5 EMSC and 5 GFZ failures (2.5 min each by count): the pair rule, named as judged by count.
+  const pair = evaluateStatus(failingFor({ emsc: [null, { consecutiveFailures: 5 }], gfz: [null, { consecutiveFailures: 5 }] }), { nowMs: NOW });
+  assert.deepEqual(pair.problems, ['two of the three direct providers (emsc and gfz) have been failing together for 2.5 min (limit 2 min) (emsc and gfz judged by their failure counts: no failingSinceMs): one direct source is left (usgs), with the feed backstop']);
+  // A mixed document (one streak older than the field): each judged by what it has.
+  const mixed = evaluateStatus(failingFor({ usgs: [null, { consecutiveFailures: 3 }], emsc: 140 }), { nowMs: NOW });
+  assert.deepEqual(mixed.problems, ['two of the three direct providers (emsc and usgs) have been failing together for 2 min (limit 2 min) (usgs judged by its failure count: no failingSinceMs): one direct source is left (gfz), with the feed backstop']);
+  // Exhaustively for small counts: whenever the count rule is red now, round 24's rule was red too.
+  const round24Red = (n: Record<string, number>): boolean => {
+    const down = (id: string) => (n[id] ?? 0) >= 3;
+    const together = DIRECT_PROVIDERS.filter(down).length >= 2;
+    return Object.entries(n).some(([id, c]) => c >= (isFastProvider(id) ? (together && down(id) ? 3 : 6) : 3));
+  };
+  for (let u = 0; u <= 7; u++) for (let e = 0; e <= 7; e++) for (let g = 0; g <= 7; g++) {
+    const spec: Record<string, [null, Record<string, unknown>]> = {};
+    if (u) spec.usgs = [null, { consecutiveFailures: u }];
+    if (e) spec.emsc = [null, { consecutiveFailures: e }];
+    if (g) spec.gfz = [null, { consecutiveFailures: g }];
+    const red = evaluateStatus(failingFor(spec), { nowMs: NOW }).problems.length > 0;
+    if (red) assert.ok(round24Red({ usgs: u, emsc: e, gfz: g }), `usgs ${u} emsc ${e} gfz ${g}`);
+  }
 });
 
-test('main: a GFZ blip of 3 keeps exit 0 with a warning annotation; EMSC and GFZ down together exit 1', async () => {
-  const blip = await run({ routes: { [STATUS_URL]: [jsonResponse(failing({ gfz: 3 }))] } });
+test('provider limits can be set on the command line', () => {
+  const t = parseArgs(['--fast-provider-down-sec', '240', '--provider-down-sec', '600', '--two-direct-down-sec', '90', '--all-direct-down-sec', '30', '--provider-warn-sec', '120']).thresholds;
+  assert.deepEqual([t.fastProviderDownSec, t.providerDownSec, t.twoDirectDownSec, t.allDirectDownSec, t.providerWarnSec], [240, 600, 90, 30, 120]);
+  assert.deepEqual(evaluateStatus(failingFor({ emsc: 200 }), { nowMs: NOW, thresholds: t }).problems, []);
+  assert.match(evaluateStatus(failingFor({ emsc: 240 }), { nowMs: NOW, thresholds: t }).problems[0]!, /limit 4 min/);
+  assert.match(evaluateStatus(failingFor({ emsc: 100 }), { nowMs: NOW, thresholds: t }).notes[0]!, /below the warning at 2 min, down at 4 min/);
+  assert.throws(() => parseArgs(['--provider-down-sec', '-1']), /non-negative number/);
+});
+
+test('main: a GFZ blip keeps exit 0 with a warning annotation; EMSC and GFZ down together for 2 min exit 1', async () => {
+  const blip = await run({ routes: { [STATUS_URL]: [jsonResponse(failingFor({ gfz: 90 }))] } });
   assert.equal(blip.code, 0);
   assert.doesNotMatch(blip.out, /::error/);
-  assert.match(blip.out, /::warning title=Alert pipeline::provider gfz is failing: ok%3Afalse|::warning title=Alert pipeline::provider gfz is failing: ok:false/);
+  assert.match(blip.out, /::warning title=Alert pipeline::provider gfz is failing: ok:false for 90 s/);
   assert.match(blip.out, /alert pipeline healthy/);
-  const both = await run({ routes: { [STATUS_URL]: [jsonResponse(failing({ emsc: 3, gfz: 3 }))] } });
+  const both = await run({ routes: { [STATUS_URL]: [jsonResponse(failingFor({ emsc: 130, gfz: 125 }))] } });
   assert.equal(both.code, 1);
-  assert.equal(both.lines.filter((l) => l.startsWith('::error title=Alert pipeline unhealthy::provider ')).length, 2);
+  assert.equal(both.lines.filter((l) => l.startsWith('::error title=Alert pipeline unhealthy::two of the three direct providers (emsc and gfz)')).length, 1);
 });

@@ -258,6 +258,56 @@ test('first sight: OVSICORI’s report joins the partner it is the mutual best o
   assert.equal(merges[0]!.survivor.chosenProvider, 'usgs');
 });
 
+test('a window-joined OVSICORI solution never represents the event, so the quake’s later reports still join it', () => {
+  // OVSICORI's rows carry a status, EMSC's and GFZ's none and ComCat's "automatic" until its review: by status alone
+  // OVSICORI's solution, 45–110 km off and up to 0.7 higher, moved the event there.
+  const comcatAuto = obs('usgs', 'us6000u1wn', { status: 'automatic', mag: 6.1, magType: 'mww', fields: { nst: 50, gap: 30, dmin: 1, rms: 1 } });
+  const partners: [string, RawObs][] = [
+    ['EMSC', obs('emsc', '20261012_0000999', { status: null, mag: 6.1, magType: 'mb', fields: { auth: 'EMSC' } })],
+    ['GFZ', obs('geofon', 'gfz2026uxyz', { status: null, mag: 6.1, magType: 'mb' })],
+    ['ComCat automatic', comcatAuto],
+  ];
+  const ovsicori: RawObs[] = [
+    obs(OVSICORI_PROVIDER, '1450632', { status: 'reviewed', mag: 6.8, magType: null, lat: south(45), eventTimeMs: T0 - 7000 }),
+    obs(OVSICORI_PROVIDER, '1450633', { status: 'automatic', mag: 6.6, magType: null, lat: south(100), eventTimeMs: T0 + 10_000 }),
+  ];
+  for (const [label, partner] of partners) {
+    for (const o of ovsicori) {
+      const map = new Map<string, EventNode>();
+      const r = new Resolver(map, prio, cfg, NOW);
+      r.ingest(partner, AT);
+      r.ingest(o, AT);
+      assert.equal(live(map).length, 1, `${label} + ${o.status}`);
+      const [node] = live(map);
+      assert.equal(node!.chosenProvider, partner.provider, `${label} + ${o.status}`);
+      assert.equal(node!.mag, 6.1, `${label} + ${o.status}`);
+      assert.equal(node!.lat, LAT, `${label} + ${o.status}`);
+    }
+  }
+  // EMSC first, OVSICORI's automatic solution 100 km south joins it; GFZ's and ComCat's reports of the quake, a run
+  // later, join the same event instead of minting a second one beside a moved event.
+  const map = new Map<string, EventNode>();
+  let r = new Resolver(map, prio, cfg, NOW);
+  r.ingest(partners[0]![1], AT);
+  r.ingest(ovsicori[1]!, AT);
+  r.heal(AT);
+  r = new Resolver(map, prio, cfg, NOW + 1_800_000);
+  r.ingest(obs('geofon', 'gfz2026uxyz', { status: null, mag: 6.2, magType: 'mb', lat: LAT + 0.03 }), AT);
+  r.ingest({ ...comcatAuto, lat: LAT + 0.01 }, AT);
+  r.heal(AT);
+  assert.equal(live(map).length, 1);
+  assert.deepEqual(live(map)[0]!.provenance.map((x) => x.provider).sort(), ['emsc', 'geofon', 'ovsicori', 'usgs']);
+  assert.equal(live(map)[0]!.chosenProvider, 'usgs');
+  // Without a partner's own row (OVSICORI's solution and EMSC's copy of it) OVSICORI's reviewed row still represents.
+  const m2 = new Map<string, EventNode>();
+  const r2 = new Resolver(m2, prio, cfg, NOW);
+  const own = obs(OVSICORI_PROVIDER, '1450700', { status: 'reviewed', mag: 4.6, magType: null, lat: 11.9, lon: -86.6 });
+  r2.ingest(own, AT);
+  r2.ingest(obs('emsc', '20261012_0000998', { status: null, mag: 4.6, magType: 'm', lat: 11.9, lon: -86.6, fields: { auth: 'UNA' } }), AT);
+  assert.equal(live(m2).length, 1);
+  assert.equal(live(m2)[0]!.chosenProvider, OVSICORI_PROVIDER);
+});
+
 // --- the hold ---
 
 function heldRun(reports: RawObs[], nowMs = NOW): { map: Map<string, EventNode>; held: string[] } {

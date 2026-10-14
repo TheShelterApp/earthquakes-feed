@@ -496,7 +496,9 @@ within 90 s and 400 km). Each stood as an event of its own: OVSICORI-led events 
   quake when the origins are ≤ 30 s apart, |ΔM| ≤ 2.0 and the distance is within `50 + 100·(M − 5.5)` km of the partner's
   magnitude, capped at 200 km (M5.5 → 50, M6.0 → 100, M6.5 → 150, M7.0 and above → 200). Best match only, ranked after
   the windows above; a dense cell does not block it (the M6.1's aftershock cell held 87 events). The partner's solution
-  represents the quake.
+  represents the quake: in an event that holds a USGS, EMSC or GFZ solution of its own, an OVSICORI row outside its
+  region never represents it, whatever its status (OVSICORI's rows say "reviewed" or "automatic", EMSC's and GFZ's say
+  nothing and ComCat's "automatic" until its review).
 - **Held solutions.** OVSICORI's automatic solutions of M ≥ 4.0 outside its region and NOA's solutions without a
   magnitude outside Greece (NOA's automatic teleseismic locations) are kept out of the live set unless an event takes
   them: such an event is withdrawn at the end of the run that made it (`state: "tombstoned"`, an `op:tombstone` line

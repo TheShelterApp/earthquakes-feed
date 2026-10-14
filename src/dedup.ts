@@ -541,8 +541,7 @@ export class Resolver {
       const w = provider != null ? REGION_RULES.get(provider)?.window : undefined;
       if (!w || !own.every((r) => r.provider === provider && Resolver.outsideRegion(r))) continue;
       if (partnerMag < w.minPartnerMag - REID_MAG_TOLERANCE || partner.some((r) => r.provider === provider)) continue;
-      const copy = (r: SourcedSolution): boolean => r.provider === EMSC_PROVIDER && EMSC_AUTHORED_COPIES.get(String(r.fields['auth'])) === provider;
-      if (!partner.some((r) => w.partners.has(r.provider) && !copy(r))) continue;
+      if (!partner.some((r) => w.partners.has(r.provider) && !Resolver.copyOfProvider(r, provider))) continue;
       const km = clamp(w.baseKm + w.kmPerMag * (partnerMag - w.minPartnerMag), w.baseKm, w.maxKm);
       return { provider, km, ms: w.maxDtMs, maxDelta: w.maxDeltaMag, providerIsA };
     }
@@ -994,14 +993,18 @@ export class Resolver {
     };
   }
 
-  /** reviewed > provisional > automatic, then richer solution, then newer, then priority, then id (total order).
+  /** A partner's own solution ahead of an out-of-region row (outrankedRows, round 26 review), then reviewed >
+   *  provisional > automatic, then richer solution, then newer, then priority, then id (total order).
    *  Two rows of a NEW_ID_PER_REVISION_PROVIDERS provider in one event are two versions of its solution, and the
    *  higher id is the newer one (NRCan: 20260720.0647002, Mw' 4.73, revises 20260720.0647001, Mw' 4.84, and only the
    *  newer stays listed), so the higher id wins there; it decides only when everything before it ties, and priorities
    *  are unique, so the order stays total (PF-5h review). */
   private preferred(rows: ProvenanceRow[]): ProvenanceRow {
     const rank = (p: string): number => this.priority.get(p) ?? 9999;
+    const outranked = Resolver.outrankedRows(rows);
     return [...rows].sort((a, b) => {
+      const ob = (outranked.has(a) ? 1 : 0) - (outranked.has(b) ? 1 : 0);
+      if (ob) return ob;
       const sr = statusRank(b.status) - statusRank(a.status);
       if (sr) return sr;
       const ri = richness(b) - richness(a);
@@ -1013,6 +1016,29 @@ export class Resolver {
       const id = a.nativeId < b.nativeId ? -1 : a.nativeId > b.nativeId ? 1 : 0;
       return a.provider === b.provider && NEW_ID_PER_REVISION_PROVIDERS.has(a.provider) ? -id : id;
     })[0]!;
+  }
+
+  /** The rows of an event that never represent it while it holds a partner's own solution (round 26 review): a
+   *  REGION_RULES provider's rows outside its region, when the rule has an out-of-region window and the event holds a
+   *  row of one of the window's partners that is not EMSC's copy of the provider's (copyOfProvider). OVSICORI's rows
+   *  carry a status ("reviewed" / "automatic") where EMSC's and GFZ's carry none and ComCat's reads "automatic" until
+   *  its review, so by status alone a window-joined OVSICORI solution (45–200 km off, magnitude up to 2.0 higher)
+   *  represented the event: an EMSC-only M6.1 that OVSICORI's automatic M6.6 100 km south joined moved there, and
+   *  ComCat's and GFZ's reports of the quake, 100 km from it, then minted a second event. Outside its network
+   *  OVSICORI's solution is the worse one (its reviewed M8.2 for the M7.7, 135 km off). Without such a partner row (an
+   *  event of OVSICORI's rows and EMSC's copies of them, or with another regional agency's) the order is as before. */
+  private static outrankedRows(rows: readonly ProvenanceRow[]): Set<ProvenanceRow> {
+    const out = new Set<ProvenanceRow>();
+    for (const r of rows) {
+      const w = Resolver.outsideRegion(r)?.window;
+      if (w && rows.some((o) => o.provider !== r.provider && w.partners.has(o.provider) && !Resolver.copyOfProvider(o, r.provider))) out.add(r);
+    }
+    return out;
+  }
+
+  /** `r` is EMSC's copy of `provider`'s own solution (its `auth` code maps to the provider, EMSC_AUTHORED_COPIES). */
+  private static copyOfProvider(r: SourcedSolution, provider: string): boolean {
+    return r.provider === EMSC_PROVIDER && EMSC_AUTHORED_COPIES.get(String(r.fields['auth'])) === provider;
   }
 
   private applyRepr(node: EventNode): void {

@@ -1,7 +1,7 @@
 name = "earthquakes-feed-heartbeat"
 # Deploy ONLY from main, with `bash heartbeat/deploy.sh` (it refuses any other commit and tags the version with the main
 # commit). Never `wrangler deploy` from a branch: every scheduled workflow of the repository depends on this Worker.
-main = "src/worker.js"
+main = "src/index.js"
 compatibility_date = "2024-11-01"
 # Cron-only Worker: no workers.dev route and no preview URLs (see src/worker.js fetch). Keep both false so a
 # redeploy can never re-open the public URL the dashboard toggle closed on 2026-09-25.
@@ -20,3 +20,14 @@ preview_urls = false
 #   cd heartbeat && wrangler secret put GH_PAT
 [triggers]
 crons = ["* * * * *"]
+
+# The dispatch ledger (src/ledger.js): one SQLite-backed Durable Object that lets exactly one cron activation dispatch
+# each (workflow, minute) — Cron Triggers fired twice a minute during the 2026-10-14 Cloudflare incident. SQLite-backed
+# (the only kind on the Workers Free plan); about 912 rows written and 456 requests a day.
+[[durable_objects.bindings]]
+name = "DISPATCH_LEDGER"
+class_name = "DispatchLedger"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DispatchLedger"]

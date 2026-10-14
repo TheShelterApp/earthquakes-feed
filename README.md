@@ -242,6 +242,12 @@ DATA_DIR=.data PUBLIC_DIR=public npm run validate
 A cron-only Cloudflare Worker that dispatches `aggregate` (every 5 min), `health` (every 15 min),
 `backfill`, `first-solutions` and `history` (hourly) through the Actions API with a fine-grained
 `GH_PAT` (Actions: write). It has no HTTP surface (`workers_dev = false`, `preview_urls = false`).
+Cron Triggers are not exactly-once (on 2026-10-14 the one `* * * * *` trigger fired twice a minute, 30 s apart, and every
+workflow was dispatched twice), so each activation first claims its (workflow, intended UTC minute) in a dispatch
+ledger, one SQLite-backed Durable Object (`heartbeat/src/ledger.js`): exactly one activation per minute dispatches, a
+failed dispatch releases its claim so a later activation of the minute may retry, an activation over an hour late is
+skipped as stale, and an unreachable ledger never stops a dispatch. Each activation logs `dispatch …` or
+`skip …: duplicate|stale` (`wrangler tail`).
 **Deploy it only from `main`:** `bash heartbeat/deploy.sh` refuses unless the checkout is exactly
 `origin/main` with no local change under `heartbeat/`, and tags the version with the main commit
 (`wrangler deployments list` lists oldest first; the active version is the last entry). A change

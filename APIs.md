@@ -12,7 +12,7 @@ archival, redaction).
 | Surface | Base | Use | Cache |
 |---|---|---|---|
 | Cloudflare Pages | `https://earthquakes-feed.theshelter.app/v1/` | live feed, recent day files, manifest, live index, per-hour detail | summaries + manifest + live index and deltas `max-age=30` + SWR; day files `max-age=300` (today, yesterday) / `3600` (older); live index day files `max-age=0, must-revalidate`; detail hours `max-age=300` |
-| Cloudflare Pages | `https://earthquakes-feed.theshelter.app/events/` | the unfrozen day partitions (NDJSON, the last 11 days), byte for byte the `data` branch files (since 2026-10) | `max-age=0, must-revalidate` |
+| Cloudflare Pages | `https://earthquakes-feed.theshelter.app/events/` | the unfrozen day partitions (NDJSON, the last 11 days), byte for byte the `data` branch files (since 2026-10); served as `text/plain; charset=utf-8`, brotli or gzip when the request accepts it (since 2026-10-14; the manifest's `sha256` and `bytes` name the decoded bytes) | `max-age=0, must-revalidate` |
 | jsDelivr (branch) | `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/` | full-history partitions; **from 2026-11-04 frozen days only** (*Historical day partitions*) | ~12 h |
 | jsDelivr (`@sha`) | `…@<data_commit>/` | immutable frozen partitions | 1 year, immutable |
 | GitHub Releases | `archive-YYYY-MM` assets | very old months (bulk) | immutable, no CORS |
@@ -635,7 +635,8 @@ a deliberate one-off, like a heal, not an automatic step.
 
 Two logs record the runs themselves, beside the observation log: the status history (every aggregate run's
 `status.json`, one line per run) and `changes/YYYY-MM-DD.ndjson` (derive's change log of each day; the current day's
-file is also served as `/v1/changes/<day>.ndjson`). The status history is written to `status/history/YYYY-MM-DD.ndjson`,
+file is also served as `/v1/changes/<day>.ndjson`, compressed like the day partitions on Pages, always whole: a Range
+request gets the full body). The status history is written to `status/history/YYYY-MM-DD.ndjson`,
 one file per UTC day of the run's ingest time, since round 17 (2026-10-06); until then it was one file per month,
 `status/history/YYYY-MM.ndjson`, and `status/history/2026-10.ndjson` keeps October's lines from before the switch. Read
 a month's lines in write order: the month file first (where there is one), then the day files by date

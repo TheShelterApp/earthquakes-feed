@@ -237,6 +237,9 @@ async function main(): Promise<void> {
   }
   if (zeroedOut.withdrawn) console.log(`aggregate: withdrew ${zeroedOut.withdrawn} rows whose provider zeroed a known id: ${JSON.stringify(zeroedOut.byProvider)}`);
   if (feedSide.retracted) console.log(`aggregate: retracted ${feedSide.retracted} coordinate-less rows: ${JSON.stringify(feedSide.retractedByProvider)}`);
+  // A regional agency's solutions outside its own region that no event takes (config REGION_RULES, round 26): status
+  // `held_retracted`.
+  if (feedSide.held) console.log(`aggregate: held ${feedSide.held} solutions outside their agency's region: ${JSON.stringify(feedSide.heldByProvider)}`);
 
   const seq = log.seq;
   const newObs = log.lines;
@@ -319,6 +322,7 @@ async function main(): Promise<void> {
     coordinateless_dropped: tally.coordinateless,
     coordinateless_withdrawn: zeroedOut.withdrawn,
     coordinateless_retracted: feedSide.retracted,
+    ...(feedSide.held ? { held_retracted: feedSide.held } : {}),
     new_observations: newObs.length,
     revisions,
     late_minted: lateMinted,
@@ -377,6 +381,7 @@ async function main(): Promise<void> {
       (tally.coordinateless ? ` coordinateless_dropped=${tally.coordinateless}` : '') +
       (zeroedOut.withdrawn ? ` coordinateless_withdrawn=${zeroedOut.withdrawn}` : '') +
       (feedSide.retracted ? ` coordinateless_retracted=${feedSide.retracted}` : '') +
+      (feedSide.held ? ` held_retracted=${feedSide.held}` : '') +
       (heal ? ` heal_epoch=${heal.epoch} heal_merged=${heal.merged}` : '') +
       (correction ? ` correction_epoch=${correction.epoch} from_epoch=${correction.from_epoch}` : '') +
       (correction?.afad ? ` afad_retimed=${correction.afad.retimed} afad_moved_out=${correction.afad.moved_out} afad_merged=${correction.afad.merged}` : '') +

@@ -36,7 +36,11 @@ import {
   SWARM_CELL_ABSOLUTE,
   TEMPORAL_MS,
   REGIONAL_WINDOWS,
+  REGION_RULES,
+  SOURCE_NETWORK_COPIES,
+  type RegionalLargeKm,
   type RegionalLowMag,
+  type RegionRule,
 } from './config.js';
 import { qualityCount } from './canonical.js';
 import { gatherCellKeys, gridKey, haversineKm } from './geo.js';
@@ -56,11 +60,31 @@ const HEAL_MAX_PASSES = 4;
  *  every pair the base and large-event windows accept (score < 2) ranks ahead of it: the tier only adds folds. */
 const MODERATE_SCORE_OFFSET = 2;
 /** A regional window (config REGIONAL_WINDOWS) a pair gets: its provider, its distance, whether the pair's first side
- *  (`a` of regionalWindow and of every call that passes the window on) is the one holding the provider's rows, and the
- *  provider's magnitude allowance against a large partner (USP, round 22), if any. */
-type RegionalWindow = { provider: string; km: number; providerIsA: boolean; lowMag: RegionalLowMag | null };
-/** The widest regional window: part of the candidate gather radius (maxWindowKm). */
-const REGIONAL_WINDOW_MAX_KM = Math.max(0, ...[...REGIONAL_WINDOWS.values()].map((w) => w.km));
+ *  (`a` of regionalWindow and of every call that passes the window on) is the one holding the provider's rows, the
+ *  provider's magnitude allowance against a large partner (USP, round 22) and its distance against one (USP, round 26),
+ *  if any. */
+type RegionalWindow = { provider: string; km: number; providerIsA: boolean; lowMag: RegionalLowMag | null; largeKm: RegionalLargeKm | null };
+/** The widest regional window, and the widest against a large partner (`largeKm`): part of the candidate gather radius
+ *  (maxWindowKm). A pair gets a regional window wider than `km` only when its partner side reaches `largeKm.fromMag`, and
+ *  the provider's side is then within the window's |ΔM| of it (at most the `lowMag` allowance), so only a node from
+ *  REGIONAL_LARGE_GATHER_MAG on gathers that far. */
+const REGIONAL_WINDOW_BASE_KM = Math.max(0, ...[...REGIONAL_WINDOWS.values()].map((w) => w.km));
+const REGIONAL_WINDOW_MAX_KM = Math.max(REGIONAL_WINDOW_BASE_KM, ...[...REGIONAL_WINDOWS.values()].map((w) => w.largeKm?.maxKm ?? 0));
+const REGIONAL_LARGE_GATHER_MAG = Math.min(
+  Infinity,
+  ...[...REGIONAL_WINDOWS.values()].flatMap((w) => (w.largeKm ? [w.largeKm.fromMag - Math.max(MODERATE_EVENT_MAX_DELTA, w.lowMag?.maxDelta ?? 0)] : [])),
+);
+/** An out-of-region window (config REGION_RULES `window`, round 26) a pair gets: its provider, its distance (set by the
+ *  partner side's magnitude), its time and magnitude limits, and whether the pair's first side holds the provider's
+ *  rows. */
+type FarWindow = { provider: string; km: number; ms: number; maxDelta: number; providerIsA: boolean };
+const FAR_WINDOWS = [...REGION_RULES.values()].flatMap((r) => (r.window ? [r.window] : []));
+/** The widest out-of-region window and the smallest partner magnitude any of them takes: the gather radius of a node
+ *  that may be either side of one (Resolver.farCandidates). */
+const FAR_WINDOW_MAX_KM = Math.max(0, ...FAR_WINDOWS.map((w) => w.maxKm));
+const FAR_MIN_PARTNER_MAG = Math.min(Infinity, ...FAR_WINDOWS.map((w) => w.minPartnerMag));
+/** The reason of the op:tombstone line that keeps a held solution out of the live set (Resolver.retractHeld). */
+export const HELD_REASON = "held: a regional agency's solution outside its own region that no other agency's event takes (automatic, or without a magnitude)";
 const clamp = (n: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, n));
 /** |a − b| > limit for two magnitudes, with REID_MAG_TOLERANCE of floating-point slack: a difference of exactly the
  *  limit in published steps passes whatever its float error (5.4 − 4.6 = 0.8000000000000007, 8.3 − 7.3 =
@@ -232,7 +256,8 @@ export class Resolver {
 
   /** Id-level linkage ONLY (design §8.4): in a dense cell the sole trustworthy evidence
    *  that two reports are one event is a shared identifier — never bare provider equality. An
-   *  authored copy (authoredCopy: EMSC re-publishing an agency's own solution) counts as one. */
+   *  authored copy (authoredCopy: EMSC re-publishing an agency's own solution, or since round 26 SCEDC re-publishing
+   *  NEIC's) counts as one. */
   private sharesIdentity(raw: RawObs, node: EventNode): boolean {
     return raw.knownAliasIds.some((a) => node.aliases.includes(a)) || node.provenance.some((r) => Resolver.authoredCopy(raw, r) || Resolver.authoredCopy(r, raw));
   }
@@ -251,13 +276,22 @@ export class Resolver {
    *  (config EMSC_COMCAT_NETWORK_COPIES, FEED-4), with the same solution (sameSolution). EMSC re-publishes the authoring
    *  agency's origin, so the two rows are one agency's one solution, as good as a shared id (PF-5e, PF-5f). */
   private static authoredCopy(copy: SourcedSolution, original: SourcedSolution): boolean {
-    if (copy.provider !== EMSC_PROVIDER) return false;
+    if (copy.provider !== EMSC_PROVIDER) return Resolver.sourceCopy(copy, original);
     const auth = copy.fields['auth'];
     if (typeof auth !== 'string') return false;
     const author = EMSC_AUTHORED_COPIES.get(auth);
     const network = EMSC_COMCAT_NETWORK_COPIES.get(auth);
     const authors = author != null ? Resolver.authorsRow(author, original) : network != null && Resolver.networkRow(network, original);
     return authors && Resolver.sameSolution(copy, original);
+  }
+
+  /** `copy` is another source's copy of ComCat's row `original` of a network (config SOURCE_NETWORK_COPIES, round 26):
+   *  the source names the network as the row's author (SCEDC's `Author` "US" on a distant quake: NEIC's solution), and
+   *  the two rows are the same solution. */
+  private static sourceCopy(copy: SourcedSolution, original: SourcedSolution): boolean {
+    const c = SOURCE_NETWORK_COPIES.get(copy.provider);
+    const network = c?.networks.get(String(copy.fields[c.field]));
+    return network != null && Resolver.networkRow(network, original) && Resolver.sameSolution(copy, original);
   }
 
   /** `row` is ComCat's row of the network with ComCat id prefix `network` (`hv75048812` for `hv`). */
@@ -397,7 +431,8 @@ export class Resolver {
   /** The widest spatial window `s` can get against any neighbour — the candidate gather radius. */
   private static maxWindowKm(s: Solution): number {
     if (s.mag == null) return SPATIAL_KM;
-    const moderate = s.mag >= MODERATE_EVENT_MAG ? Math.max(Resolver.moderateEventKm(s.mag), REGIONAL_WINDOW_MAX_KM) : 0;
+    const regional = s.mag >= REGIONAL_LARGE_GATHER_MAG - REID_MAG_TOLERANCE ? REGIONAL_WINDOW_MAX_KM : REGIONAL_WINDOW_BASE_KM;
+    const moderate = s.mag >= MODERATE_EVENT_MAG ? Math.max(Resolver.moderateEventKm(s.mag), regional) : 0;
     return Math.max(s.mag < LARGE_EVENT_MAG ? SPATIAL_KM : Resolver.largeEventKm(s.mag), moderate);
   }
 
@@ -414,7 +449,17 @@ export class Resolver {
     const dM = Math.abs(a.mag - b.mag);
     if (dM > Resolver.moderateMaxDelta(a.mag, b.mag, regional) + REID_MAG_TOLERANCE) return null;
     const km = Math.min(a.mag, b.mag) >= MODERATE_EVENT_FULL_KM_MAG ? LARGE_EVENT_MAX_KM : Resolver.moderateEventKm(Math.min(a.mag, b.mag)) * clamp(1 - 0.3 * dM, 0.3, 1);
-    return { km: regional ? Math.max(km, regional.km) : km, ms: MODERATE_EVENT_MAX_DT_MS };
+    return { km: regional ? Math.max(km, Resolver.regionalKm(regional, a.mag, b.mag)) : km, ms: MODERATE_EVENT_MAX_DT_MS };
+  }
+
+  /** A regional window's distance for two magnitudes (`a` on its first side): its `km`, or, with a distance against a
+   *  large partner (config REGIONAL_WINDOWS `largeKm`: USP's, round 26), that distance grown with the partner side's
+   *  magnitude from `fromMag` on, up to `maxKm`. */
+  private static regionalKm(regional: RegionalWindow, a: number, b: number): number {
+    const large = regional.largeKm;
+    if (!large) return regional.km;
+    const partner = regional.providerIsA ? b : a;
+    return clamp(regional.km + large.kmPerMag * (partner - large.fromMag), regional.km, Math.max(regional.km, large.maxKm));
   }
 
   /** The |ΔM| the moderate-event window allows two magnitudes (`a` on the regional window's first side):
@@ -435,8 +480,9 @@ export class Resolver {
       const only = (s: readonly string[]): boolean => s.length > 0 && s.every((p) => p === provider);
       const partner = (s: readonly string[]): boolean => !s.includes(provider) && s.some((p) => w.partners.has(p));
       const lowMag = w.lowMag ?? null;
-      if (only(a) && partner(b)) return { provider, km: w.km, providerIsA: true, lowMag };
-      if (only(b) && partner(a)) return { provider, km: w.km, providerIsA: false, lowMag };
+      const largeKm = w.largeKm ?? null;
+      if (only(a) && partner(b)) return { provider, km: w.km, providerIsA: true, lowMag, largeKm };
+      if (only(b) && partner(a)) return { provider, km: w.km, providerIsA: false, lowMag, largeKm };
     }
     return null;
   }
@@ -445,20 +491,113 @@ export class Resolver {
     return [...new Set(n.provenance.map((r) => r.provider))];
   }
 
-  /** regionalWindow for this Resolver: a magnitude allowance (`lowMag`, USP's large quakes, round 22) only while the
-   *  merge pass is on. Without it (the backfill and the deep-history build, merge: false) a USP event minted before
+  /** regionalWindow for this Resolver: a magnitude allowance (`lowMag`, USP's large quakes, round 22) and a distance
+   *  against a large partner (`largeKm`, round 26) only while the merge pass is on. Without it (the backfill and the
+   *  deep-history build, merge: false) a USP event minted before
    *  its partner's reports arrived is a mergeable neighbour that nothing folds, and the first-sight mutual-best check
    *  (findNearModerate) then keeps the partner's other reports out of the partner event: rebuilt with the allowance,
    *  the 53 sealed deep months 2019-02..2023-06 joined 217 groups (each one quake by ComCat) but split 62 groups off
    *  other events, so 13 quakes were shown once more. */
   private regional(a: readonly string[], b: readonly string[]): RegionalWindow | null {
     const w = Resolver.regionalWindow(a, b);
-    return w && w.lowMag && !this.mergePass ? { ...w, lowMag: null } : w;
+    return w && (w.lowMag || w.largeKm) && !this.mergePass ? { ...w, lowMag: null, largeKm: null } : w;
   }
 
   /** regional of two nodes. */
   private regionalNodes(a: EventNode, b: EventNode): RegionalWindow | null {
     return this.regional(Resolver.providersOf(a), Resolver.providersOf(b));
+  }
+
+  /** The REGION_RULES rule of a row's provider when the row lies outside that provider's region, else null. */
+  private static outsideRegion(r: { provider: string; lat: number; lon: number }): RegionRule | null {
+    const rule = REGION_RULES.get(r.provider);
+    if (!rule) return null;
+    return rule.boxes.some(([latMin, latMax, lonMin, lonMax]) => r.lat >= latMin && r.lat <= latMax && r.lon >= lonMin && r.lon <= lonMax) ? null : rule;
+  }
+
+  /** A solution a REGION_RULES hold keeps out of the live set unless an event takes it (round 26): outside its
+   *  provider's region, and automatic from the rule's `automaticFromMag`, or without a magnitude when the rule says
+   *  `magless`. */
+  static heldSolution(r: { provider: string; lat: number; lon: number; mag: number | null; status: string | null }): boolean {
+    const rule = Resolver.outsideRegion(r);
+    if (!rule) return false;
+    const { automaticFromMag, magless } = rule.hold;
+    if (r.mag == null) return magless === true;
+    return automaticFromMag != null && r.status === 'automatic' && r.mag >= automaticFromMag - REID_MAG_TOLERANCE;
+  }
+
+  /** The out-of-region window two sides get (config REGION_RULES `window`, round 26), or null: one side's rows are all
+   *  one REGION_RULES provider's, every one outside its region; the other side holds no row of that provider and a row of
+   *  one of its partners that is the partner's own solution (not EMSC's copy of the provider's, EMSC_AUTHORED_COPIES),
+   *  and its magnitude (`bMag` for side `b`) reaches the window's minPartnerMag, which sets the distance. Only with the
+   *  merge pass: the backfill and the deep-history build stay as they are. */
+  private farWindow(aRows: readonly SourcedSolution[], aMag: number | null, bRows: readonly SourcedSolution[], bMag: number | null): FarWindow | null {
+    if (!this.mergePass || aMag == null || bMag == null) return null;
+    for (const [own, partner, partnerMag, providerIsA] of [
+      [aRows, bRows, bMag, true],
+      [bRows, aRows, aMag, false],
+    ] as const) {
+      const provider = own[0]?.provider;
+      const w = provider != null ? REGION_RULES.get(provider)?.window : undefined;
+      if (!w || !own.every((r) => r.provider === provider && Resolver.outsideRegion(r))) continue;
+      if (partnerMag < w.minPartnerMag - REID_MAG_TOLERANCE || partner.some((r) => r.provider === provider)) continue;
+      if (!partner.some((r) => w.partners.has(r.provider) && !Resolver.copyOfProvider(r, provider))) continue;
+      const km = clamp(w.baseKm + w.kmPerMag * (partnerMag - w.minPartnerMag), w.baseKm, w.maxKm);
+      return { provider, km, ms: w.maxDtMs, maxDelta: w.maxDeltaMag, providerIsA };
+    }
+    return null;
+  }
+
+  /** null when two solutions are within an out-of-region window, else why not. */
+  private static rejectFar(a: Solution, b: Solution, d: number, w: FarWindow): string | null {
+    const label = `${w.provider} out-of-region`;
+    const dt = Math.abs(a.eventTimeMs - b.eventTimeMs);
+    if (dt > w.ms) return `${label}: dt ${(dt / 1000).toFixed(1)} s > ${(w.ms / 1000).toFixed(1)} s`;
+    if (d > w.km) return `${label}: d ${d.toFixed(1)} km > ${w.km.toFixed(1)} km`;
+    if (magsApart(a.mag!, b.mag!, w.maxDelta)) return `${label}: dM ${Math.abs(a.mag! - b.mag!).toFixed(2)} > ${w.maxDelta}`;
+    return null;
+  }
+
+  /** The out-of-region window of two nodes when it joins them (farWindow, rejectFar, no AEC location-join veto, no
+   *  provider under two ids), else null. Dense cells do not count here. */
+  private farJoin(a: EventNode, b: EventNode): FarWindow | null {
+    const w = this.farWindow(a.provenance, a.mag, b.provenance, b.mag);
+    if (!w) return null;
+    if (Resolver.rejectFar(a, b, haversineKm(a.lat, a.lon, b.lat, b.lon), w)) return null;
+    if (Resolver.lifecycleLocationBlocks(a.provenance, a, b.provenance, b)) return null;
+    if (Resolver.nodesDistinct(a, b)) return null;
+    return w;
+  }
+
+  /** Live feed ids within the widest out-of-region window of `node` that may be the other side of one with it (merge
+   *  pass only): for a node that may be a window's provider side (farOwnSide), the nodes of a magnitude a partner side
+   *  may have; for a node of such a magnitude, the nodes that may be a provider side. farWindow decides; this only keeps
+   *  the gather small (the 200 km radius around each of OVSICORI's hundreds of events inside its region had tripled the
+   *  feed-side steps of a run). */
+  private farCandidates(node: EventNode): Set<string> {
+    const out = new Set<string>();
+    if (!this.mergePass || !FAR_WINDOW_MAX_KM || node.mag == null) return out;
+    const own = Resolver.farOwnSide(node);
+    const partner = node.mag >= FAR_MIN_PARTNER_MAG - REID_MAG_TOLERANCE;
+    if (!own && !partner) return out;
+    for (const cell of gatherCellKeys(node.lat, node.lon, FAR_WINDOW_MAX_KM, GRID_CELL_DEG)) {
+      for (const fid of this.geo.get(cell) ?? []) {
+        const other = this.eventMap.get(fid);
+        if (!other || other.mag == null) continue;
+        if ((own && other.mag >= FAR_MIN_PARTNER_MAG - REID_MAG_TOLERANCE) || (partner && Resolver.farOwnSide(other))) out.add(fid);
+      }
+    }
+    return out;
+  }
+
+  /** A node that may be the provider side of an out-of-region window (farWindow): its rows all one REGION_RULES
+   *  provider's with a window, every one outside the provider's region, and a magnitude within the window's |ΔM| of its
+   *  smallest partner magnitude. */
+  private static farOwnSide(node: EventNode): boolean {
+    const p = node.provenance[0]?.provider;
+    const w = p != null ? REGION_RULES.get(p)?.window : undefined;
+    if (!w || node.mag == null || node.mag < w.minPartnerMag - w.maxDeltaMag - 2 * REID_MAG_TOLERANCE) return false;
+    return node.provenance.every((r) => r.provider === p && Resolver.outsideRegion(r) != null);
   }
 
   /** Whether two sides (their providers) may use the moderate-event window: no provider on both, none excluded. */
@@ -624,7 +763,7 @@ export class Resolver {
 
   /** The spatial half of findExisting (hot window only): the nearest event within the base / large-event windows,
    *  else an event holding the report's own solution under another provider (findTwinRow), else the moderate-event
-   *  window's mutual best (findNearModerate, FEED-1). */
+   *  window's mutual best (findNearModerate, FEED-1), else the out-of-region window's (findNearFar, round 26). */
   private findNear(raw: RawObs): string | null {
     const key = `${raw.provider}:${raw.providerEventId}`;
     if (raw.eventTimeMs >= this.hotFloor) {
@@ -649,7 +788,7 @@ export class Resolver {
           best = fid;
         }
       }
-      if (!best) best = this.findTwinRow(raw) ?? this.findNearModerate(raw);
+      if (!best) best = this.findTwinRow(raw) ?? this.findNearModerate(raw) ?? this.findNearFar(raw);
       if (best) {
         this.alias.set(key, best);
         return best;
@@ -753,6 +892,38 @@ export class Resolver {
     return best.feedId;
   }
 
+  /** The out-of-region half of findNear (round 26), asked only when nothing else placed the report: for a report of a
+   *  REGION_RULES provider with an out-of-region window, from outside its region, the live event the window joins it
+   *  to (farWindow, rejectFar; another provider's id, no AEC location-join veto; dense cells do not count), best score
+   *  first; and only when the report is that event's own best match too, as in findNearModerate. */
+  private findNearFar(raw: RawObs): string | null {
+    const w0 = Resolver.outsideRegion(raw)?.window;
+    if (!w0 || !this.mergePass || raw.mag == null) return null;
+    let best: EventNode | null = null;
+    let bestScore = Infinity;
+    for (const cell of gatherCellKeys(raw.lat, raw.lon, w0.maxKm, GRID_CELL_DEG)) {
+      for (const fid of this.geo.get(cell) ?? []) {
+        const node = this.eventMap.get(fid);
+        if (!node || node.state !== 'live') continue;
+        const w = this.farWindow([raw], raw.mag, node.provenance, node.mag);
+        if (!w || !w.providerIsA) continue;
+        const d = haversineKm(raw.lat, raw.lon, node.lat, node.lon);
+        if (Resolver.rejectFar(raw, node, d, w)) continue;
+        if (this.sameProviderDistinct(raw, node)) continue;
+        if (Resolver.lifecycleLocationBlocks([raw], raw, node.provenance, node)) continue;
+        const score = d / w.km + Math.abs(raw.eventTimeMs - node.eventTimeMs) / w.ms;
+        if (score < bestScore || (score === bestScore && best && node.feedId < best.feedId)) {
+          best = node;
+          bestScore = score;
+        }
+      }
+    }
+    if (!best) return null;
+    const rival = this.mergeableNeighbours(best)[0];
+    if (rival && rival.score < MODERATE_SCORE_OFFSET + bestScore) return null;
+    return best.feedId;
+  }
+
   /** The ComCat index (comcatIndex), built from every live node on first use. */
   private comcat(): Map<string, string> {
     if (!this.comcatIndex) {
@@ -841,14 +1012,18 @@ export class Resolver {
     };
   }
 
-  /** reviewed > provisional > automatic, then richer solution, then newer, then priority, then id (total order).
+  /** A partner's own solution ahead of an out-of-region row (outrankedRows, round 26 review), then reviewed >
+   *  provisional > automatic, then richer solution, then newer, then priority, then id (total order).
    *  Two rows of a NEW_ID_PER_REVISION_PROVIDERS provider in one event are two versions of its solution, and the
    *  higher id is the newer one (NRCan: 20260720.0647002, Mw' 4.73, revises 20260720.0647001, Mw' 4.84, and only the
    *  newer stays listed), so the higher id wins there; it decides only when everything before it ties, and priorities
    *  are unique, so the order stays total (PF-5h review). */
   private preferred(rows: ProvenanceRow[]): ProvenanceRow {
     const rank = (p: string): number => this.priority.get(p) ?? 9999;
+    const outranked = Resolver.outrankedRows(rows);
     return [...rows].sort((a, b) => {
+      const ob = (outranked.has(a) ? 1 : 0) - (outranked.has(b) ? 1 : 0);
+      if (ob) return ob;
       const sr = statusRank(b.status) - statusRank(a.status);
       if (sr) return sr;
       const ri = richness(b) - richness(a);
@@ -860,6 +1035,29 @@ export class Resolver {
       const id = a.nativeId < b.nativeId ? -1 : a.nativeId > b.nativeId ? 1 : 0;
       return a.provider === b.provider && NEW_ID_PER_REVISION_PROVIDERS.has(a.provider) ? -id : id;
     })[0]!;
+  }
+
+  /** The rows of an event that never represent it while it holds a partner's own solution (round 26 review): a
+   *  REGION_RULES provider's rows outside its region, when the rule has an out-of-region window and the event holds a
+   *  row of one of the window's partners that is not EMSC's copy of the provider's (copyOfProvider). OVSICORI's rows
+   *  carry a status ("reviewed" / "automatic") where EMSC's and GFZ's carry none and ComCat's reads "automatic" until
+   *  its review, so by status alone a window-joined OVSICORI solution (45–200 km off, magnitude up to 2.0 higher)
+   *  represented the event: an EMSC-only M6.1 that OVSICORI's automatic M6.6 100 km south joined moved there, and
+   *  ComCat's and GFZ's reports of the quake, 100 km from it, then minted a second event. Outside its network
+   *  OVSICORI's solution is the worse one (its reviewed M8.2 for the M7.7, 135 km off). Without such a partner row (an
+   *  event of OVSICORI's rows and EMSC's copies of them, or with another regional agency's) the order is as before. */
+  private static outrankedRows(rows: readonly ProvenanceRow[]): Set<ProvenanceRow> {
+    const out = new Set<ProvenanceRow>();
+    for (const r of rows) {
+      const w = Resolver.outsideRegion(r)?.window;
+      if (w && rows.some((o) => o.provider !== r.provider && w.partners.has(o.provider) && !Resolver.copyOfProvider(o, r.provider))) out.add(r);
+    }
+    return out;
+  }
+
+  /** `r` is EMSC's copy of `provider`'s own solution (its `auth` code maps to the provider, EMSC_AUTHORED_COPIES). */
+  private static copyOfProvider(r: SourcedSolution, provider: string): boolean {
+    return r.provider === EMSC_PROVIDER && EMSC_AUTHORED_COPIES.get(String(r.fields['auth'])) === provider;
   }
 
   private applyRepr(node: EventNode): void {
@@ -922,7 +1120,19 @@ export class Resolver {
       const twin = this.lateTwin(raw);
       if (twin) return { node: twin.near, changed: false, revision: twin.near.revision, merges: [], withheld: { km: twin.km, dtMs: twin.dtMs } };
     }
+    // A held solution (round 26) whose event retractHeld tombstoned: while it is still held it changes nothing (the
+    // provider keeps listing it); once it is not (reviewed, or given a magnitude) it brings its event back.
+    const held = this.retiredHeldNode(raw);
+    if (held) return Resolver.heldSolution(raw) ? { node: held, changed: false, revision: held.revision, merges: [] } : this.applyIngest(held.feedId, raw, ingestTime);
     return this.applyIngest(this.mintId(raw), raw, ingestTime);
+  }
+
+  /** The tombstoned event retractHeld left behind for this report's id (a REGION_RULES provider's, its node with no row
+   *  left), or undefined. */
+  private retiredHeldNode(raw: RawObs): EventNode | undefined {
+    if (!REGION_RULES.has(raw.provider)) return undefined;
+    const node = this.eventMap.get(this.retired.get(`${raw.provider}:${raw.providerEventId}`) ?? '');
+    return node?.state === 'tombstoned' && node.provenance.length === 0 ? node : undefined;
   }
 
   /** Ingest an `updatedafter` observation as a revision ONLY — never mints a new event
@@ -1565,6 +1775,33 @@ export class Resolver {
     return out;
   }
 
+  /** Round 26 (config REGION_RULES `hold`), every run (heal.ts runFeedSideSteps, after the heal): each live event of the
+   *  hot window whose rows are all held solutions (heldSolution: a regional agency's solution outside its own region,
+   *  automatic or without a magnitude) and that has no neighbour the merge pass may fold it with leaves the live set:
+   *  its rows are withdrawn (one op:tombstone line each, HELD_REASON) and it is tombstoned. Such a solution then joins
+   *  an event that takes it when it is reported again (findNear), stays out while it is still held, and brings its
+   *  event back once it is not (ingest). A new held report is minted by ingest and withdrawn here in the same run, so
+   *  no derive publishes it live. Event-time order, then feed id, then the rows by provider and native id, so the lines
+   *  replay through tombstoneProvider. A no-op when nothing is held, or when merge=false. */
+  retractHeld(ingestTime: string): { raw: RawObs; result: IngestResult }[] {
+    const out: { raw: RawObs; result: IngestResult }[] = [];
+    if (!this.mergePass) return out;
+    const held = (n: EventNode): boolean => n.state === 'live' && n.provenance.length > 0 && n.provenance.every((r) => Resolver.heldSolution(r));
+    const nodes = [...this.eventMap.values()]
+      .filter((n) => n.eventTimeMs >= this.hotFloor && held(n))
+      .sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : a.feedId > b.feedId ? 1 : 0));
+    for (const node of nodes) {
+      if (!held(node) || this.mergeableNeighbours(node).length) continue;
+      const rows = [...node.provenance].sort((a, b) => (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0) || (a.nativeId < b.nativeId ? -1 : a.nativeId > b.nativeId ? 1 : 0));
+      for (const row of rows) {
+        const idx = node.provenance.indexOf(row);
+        if (idx < 0) continue;
+        out.push({ raw: rowAsReport(row), result: this.withdrawRow(node, idx, ingestTime, false) });
+      }
+    }
+    return out;
+  }
+
   /** Drop one provenance row from a live node: tombstone it when none is left, else re-derive
    *  the representative and run the merge pass (the solution may have moved; not when `fold` is false). */
   private withdrawRow(node: EventNode, idx: number, ingestTime: string, fold = true): IngestResult {
@@ -1593,6 +1830,12 @@ export class Resolver {
    *  judging from the non-dense side — an M6.8 mainshock's second id must still fold after its
    *  own aftershocks filled the cell, Kumamoto 2026-07-28). */
   whyNotMerged(a: EventNode, b: EventNode): string | null {
+    const why = this.whyNotMergedByWindows(a, b);
+    return why != null && this.farJoin(a, b) ? null : why;
+  }
+
+  /** whyNotMerged without the out-of-region window (round 26). */
+  private whyNotMergedByWindows(a: EventNode, b: EventNode): string | null {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
     const dense = this.pairDense(a, b);
     const gate = this.reject(a, b, d, dense);
@@ -1618,12 +1861,24 @@ export class Resolver {
    *  time ahead of one that is merely near. */
   private score(a: EventNode, b: EventNode): number {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
+    const far = this.farOnly(a, b);
+    if (far) return MODERATE_SCORE_OFFSET + d / far.km + Math.abs(a.eventTimeMs - b.eventTimeMs) / far.ms;
     const dense = this.pairDense(a, b);
     const revised = this.revisedOnly(a, b, d, dense);
     if (revised != null) return MODERATE_SCORE_OFFSET + revised;
     const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b, this.regionalNodes(a, b)) : null;
     const { km, ms } = moderate ?? this.windows(a, b, dense);
     return (moderate ? MODERATE_SCORE_OFFSET : 0) + d / km + Math.abs(a.eventTimeMs - b.eventTimeMs) / ms;
+  }
+
+  /** The out-of-region window of a pair the merge pass accepts only through it (round 26: whyNotMergedByWindows rejects
+   *  the pair, farJoin joins it), else null. Such a pair ranks with the moderate-event pairs. */
+  private farOnly(a: EventNode, b: EventNode): FarWindow | null {
+    if (!FAR_WINDOW_MAX_KM) return null;
+    // farJoin first: it rules out almost every pair at once (neither side an out-of-region provider side), where the
+    // windows' check would repeat whyNotMerged's work for every pair the merge pass scores.
+    const far = this.farJoin(a, b);
+    return far && this.whyNotMergedByWindows(a, b) != null ? far : null;
   }
 
   /** Every live neighbour `node` may fold with (whyNotMerged passes), best score first, ties
@@ -1633,6 +1888,7 @@ export class Resolver {
     const out: { node: EventNode; score: number }[] = [];
     const cands = this.candidates(node);
     for (const r of node.provenance) for (const fid of this.revisedCandidates(r)) cands.add(fid);
+    for (const fid of this.farCandidates(node)) cands.add(fid);
     for (const fid of cands) {
       if (fid === node.feedId) continue;
       const other = this.eventMap.get(fid);
@@ -1678,11 +1934,13 @@ export class Resolver {
       const rdt = Math.abs(ra.eventTimeMs - rb.eventTimeMs) / 1000;
       return `revised id: ${ra.provider} ${ra.nativeId} / ${rb.nativeId} d=${rd.toFixed(1)} km dt=${rdt.toFixed(1)} s (events ${d.toFixed(1)} km apart)`;
     }
+    const dt = Math.abs(a.eventTimeMs - b.eventTimeMs) / 1000;
+    const dM = a.mag != null && b.mag != null ? Math.abs(a.mag - b.mag).toFixed(2) : 'n/a';
+    const far = this.farOnly(a, b);
+    if (far) return `proximity: d=${d.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} ${far.provider.toUpperCase()} out-of-region window=${far.km.toFixed(1)} km/${(far.ms / 1000).toFixed(0)} s`;
     const regional = this.regionalNodes(a, b);
     const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b, regional) : null;
     const { km, ms } = moderate ?? this.windows(a, b, dense);
-    const dt = Math.abs(a.eventTimeMs - b.eventTimeMs) / 1000;
-    const dM = a.mag != null && b.mag != null ? Math.abs(a.mag - b.mag).toFixed(2) : 'n/a';
     // A regional window names itself only where it widened the moderate-event window (from M5.0 on both are 50 km), and
     // says so where only its magnitude allowance let the pair in (USP's large quakes, round 22).
     const base = moderate && regional ? Resolver.moderateWindow(a, b) : null;

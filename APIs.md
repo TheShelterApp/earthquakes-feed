@@ -34,7 +34,7 @@ The catalog. Fields:
 | `freshness.stale_after_seconds` | treat the feed as degraded past this age (default 1800) |
 | `data_commit` | git SHA for building immutable partition URLs |
 | `summaries` | map of `{name: {path, url, count}}` for the 20 rolling feeds (`count` = live events in that file) |
-| `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}`; `url` is the NDJSON: the Pages copy for an unfrozen day, jsDelivr `@data` for a frozen one (*Historical day partitions*) |
+| `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}`; `url` is the NDJSON: the Pages copy for an unfrozen day, jsDelivr `@data` for a frozen one (*Historical day partitions*). `count` is every feature of the file (all states); since round 26 (2026-10-14) `min_mag` / `max_mag` are the day's **live** events' range, recorded while the day is unfrozen and kept when it freezes (a retired event keeps its last solution: a phantom M8.2 folded into the Panama M7.7 of 2026-10-09 had kept that day at 8.2); days frozen before then keep the range over every feature |
 | `archives[]` | rolled-up cold months: `{period, tag, asset, url, bytes, sha256, count, days[]}` |
 | `live` | the live index: `{path, url, head_seq, window_days}` (see *Live index* below; since 2026-10) |
 | `event_detail` | the per-hour detail files: `{path_template, url_template, first_hour, last_hour}` (see *Event detail* below; since 2026-10) |
@@ -223,7 +223,8 @@ Last run's per-provider health, counts, timings, `degraded[]` (a provider's `via
 source's fallback host, see *Greece (NOA)*). Counts include `merged`
 (`op:merge` lines), `bad_coords_dropped`, `coordinateless_dropped` (coordinate-less reports
 refused at ingest), `coordinateless_withdrawn` (those among them that withdrew a known id, see
-below), `coordinateless_retracted`, `late_minted` and `late_withheld` (see *Late publications*);
+below), `coordinateless_retracted`, `late_minted` and `late_withheld` (see *Late publications*), `held_retracted` when a run
+withdrew held solutions (since round 26, see *Regional agencies outside their own region*);
 the heal run also carries `heal`, and the one-time correction run `correction` (see *Turkey (AFAD)*,
 *California (NCEDC, SCEDC)* and *Canada (NRCan)*). `sweeps.updated` / `sweeps.deleted` hold the outcome (`ok`,
 `http_status`, `latency_ms`, `events_returned`, `error`) of each source's `updatedafter` revision
@@ -441,7 +442,9 @@ deep-history build, which run without it, do not use it. Rebuilt with it, the 53
 joined 217 groups, each one quake by ComCat, but with no merge pass to fold a USP event minted before its partner's
 reports, such an event kept other agencies' reports out of the partner event (62 groups, 151 rows, split off): 13
 quakes were shown once more. Without the allowance there, they rebuild byte-identical to the code before. Both days of
-the replayed folds are frozen, so the published feed changes only for new quakes.
+the replayed folds are frozen, so the published feed changes only for new quakes. Since round 26 the window's distance
+also grows with a large partner's magnitude, from M6.0 by 50 km a unit up to 100 km (see *Regional agencies outside
+their own region*).
 
 USP's event ids share GEOFON's suffix (`usp2026toln`, `gfz2026toln`), and that is no identity link: the four letters
 number a time slot of about 70 s (26⁴ a year) of the first origin each SeisComP system made. One quake's two ids
@@ -477,12 +480,77 @@ one today (the Kumamoto M6.8 of 2026-07-28 and PTWC's `pt26209004`, 44.5 s later
 15.6 and 79.3 km between AEC's and NEIC's solutions; the Nevada one). Older days keep both events: drop a live
 `usgs`-only feature whose id another live feature's `usgs` row lists in `fields.ids`.
 
+## Regional agencies outside their own region
+
+Since round 26 (2026-10-14) the feed treats some solutions of a regional agency outside its own region (the box the
+alerts gateway gives it: OVSICORI 8–11.5 N, 86–82.5 W; NOA 34–42 N, 19–30 E) differently. The Panama sequence of
+2026-10-09 (ComCat `us6000u18k`, M7.7) showed why: OVSICORI (Costa Rica) located it from outside its network. Its
+reviewed solutions lay 45–135 km and up to 17 s from ComCat's, with magnitudes 0.5–0.8 higher (1450322 M8.2 for the
+M7.7, 1450349 M7.1 for the M6.6, 1450632 M6.8 for the M6.1), and its automatic ones were hundreds of km off, many with no
+quake behind them at all (1450556, M6.7 automatic, 2026-10-11 21:18:30 at 4.78 N 78.93 W: ComCat and EMSC list nothing
+within 90 s and 400 km). Each stood as an event of its own: OVSICORI-led events were 16 of the 27 live features of
+`significant_week`, and the day's `max_mag` read 8.2.
+
+- **OVSICORI's window.** An event that holds OVSICORI's rows only, all outside its region, and an event holding a USGS,
+  EMSC or GFZ row (the agency's own solution, not EMSC's copy of OVSICORI's) and no OVSICORI row, of M ≥ 5.5, are one
+  quake when the origins are ≤ 30 s apart, |ΔM| ≤ 2.0 and the distance is within `50 + 100·(M − 5.5)` km of the partner's
+  magnitude, capped at 200 km (M5.5 → 50, M6.0 → 100, M6.5 → 150, M7.0 and above → 200). Best match only, ranked after
+  the windows above; a dense cell does not block it (the M6.1's aftershock cell held 87 events). The partner's solution
+  represents the quake: in an event that holds a USGS, EMSC or GFZ solution of its own, an OVSICORI row outside its
+  region never represents it, whatever its status (OVSICORI's rows say "reviewed" or "automatic", EMSC's and GFZ's say
+  nothing and ComCat's "automatic" until its review).
+- **Held solutions.** OVSICORI's automatic solutions of M ≥ 4.0 outside its region and NOA's solutions without a
+  magnitude outside Greece (NOA's automatic teleseismic locations) are kept out of the live set unless an event takes
+  them: such an event is withdrawn at the end of the run that made it (`state: "tombstoned"`, an `op:tombstone` line
+  with `reason` "held: …", status `held_retracted`), so no derive publishes it live, and a report of it changes nothing
+  while it is still held. A held solution that a window joins to another agency's event joins it; one that OVSICORI
+  reviews later, or NOA gives a magnitude, comes back as its own event (same feed id). OVSICORI's reviewed solutions and
+  its solutions inside its region are never held.
+- **USP against a large quake.** USP's window (see *Realtime + client dedup*) grows from a partner of M6.0 by 50 km a
+  magnitude unit up to 100 km (M6.5 → 75 km, M7.0 → 100): USP's solution of the M7.7 (`usp2026tutw`, M7.67, 1 s) lay
+  75 km from ComCat's.
+- **SCEDC's copies of NEIC.** SCEDC lists distant large quakes with NEIC's solution (`Author` "US"); such a row and
+  ComCat's `us…` row of the same solution are one solution, as good as a shared id, also in a dense cell (SCEDC 10256694
+  is ComCat's `us6000u1wn`). A place made of placeholders (SCEDC's "###.# km ( ###.# mi) …") is no place: `place` is
+  null, `fields.EventLocationName` keeps it.
+
+Replaying the whole observation log (2026-07-05…10-14, 232,188 lines; a fresh Resolver per hour of ingest time over
+the production load, then the feed-side steps with the regular heal) against the rules before: 6 groups fold (7 fewer
+events per connected group of ids, 0 more; rows in two live events 0). Five are OVSICORI's solutions of the Panama
+sequence joining ComCat's event: 1450322 (M8.2, 135 km, 17 s) the M7.7, 1450349 (M7.1, 55 km) the M6.6, 1450632 (M6.8,
+45 km) the M6.1, 1450473 (M6.6, 46 km) the M5.8 of 18:37 and 1450399 (automatic M6.3, 62 km) the M6.0 of 10-10; the
+M6.1 also takes SCEDC's NEIC copy, the M7.7 USP's solution, and USP's solution of the Chiapas M7.3 of 2026-07-17
+(73 km) joins ComCat's event of it, where SSN's solution, which had joined USP's event before, now stands alone (one
+regrouping). Every joined row's nearest ComCat quake is the survivor's, with no second ComCat quake within 30 s and
+200 km. 161 solutions are held (131 OVSICORI automatic, 30 NOA without a magnitude): for 85 another live event shows a
+quake within 60 s and 300 km (NOA's teleseismic rows 11–58 km from the quake's event); for the other 76 ComCat lists no
+quake within 90 s and 300 km (69 none within 400 km), and EMSC, asked about those 69, none within 170 km (57 none within
+400 km; the others are quakes 175–388 km and 28–73 s away that OVSICORI's automatic system mislocated). On the event map of 2026-10-14 the first run folds 7 events into 5 and
+holds 76 (72 OVSICORI, 4 NOA): `significant_week` goes from 27 live events (16 OVSICORI-led) to 11 (2), and the
+`max_mag` of 2026-10-09 / 10-11 / 10-12 from 8.2 / 6.7 / 6.8 to 7.7 / 6.2 / 6.5 (ComCat: 7.7 / 6.2 / 6.1; the 6.5 is
+OVSICORI's 1450630, below).
+
+The rules run in the aggregate run only (the regular heal and the held withdrawal reach the 7-day hot window), so the
+days already frozen keep what they hold. OVSICORI's automatic 1450630 (M6.5 for the M6.1, 159 km and 20 s off) lies
+inside its region and stays an event of its own, as do OVSICORI's reviewed solutions of aftershocks no other agency
+listed. No other agency was given these rules. In the replayed state the lone live events of M ≥ 4.5 that other regional
+agencies place outside their own boxes are another pattern: GeoNet 124 (Tonga, Kermadec, Vanuatu), SSN 34, GA 18,
+INGV 14, NCS 11 and fewer for the rest, almost none automatic (IG-EPN and IMO one each, against OVSICORI's 99); 17 of
+them (INGV 6, GeoNet 5, GA 2, CENC 2, JMA 1, SSN 1) lie within such a window of a USGS, EMSC or GFZ event of M ≥ 5.5,
+with |ΔM| ≤ 0.6: 10 of distant quakes 46–82 km from the partner's place, 6 in the Flores swarm of 2026-08-14…20 (4–24 km,
+held apart by its dense cells) and one JMA row 30 s off. Those are splits of real large quakes the windows themselves
+leave, not OVSICORI's mislocations and phantoms; after the change OVSICORI places no automatic solution of M ≥ 4.5
+outside its region as an event of its own, and 22 reviewed ones remain (14 with no other agency's event within 60 s
+and 300 km).
+
 ## Retired events
 
 An event can leave the live set in two ways: an upstream delete (`state: "tombstoned"`,
 `tombstone: true`) or a fold into another event once revised solutions converge
 (`state: "superseded"`, `superseded_by: <feed_id>`, an `op:merge` line in the observation
-log). Either way the event stays published in the rolling summaries and the Pages day file
+log). The feed's own withdrawals take the delete's path: the coordinate-less retraction below, and since round 26 a
+held solution (`state: "tombstoned"`, an `op:tombstone` line with `reason` "held: …", see *Regional agencies outside
+their own region*). Either way the event stays published in the rolling summaries and the Pages day file
 for **48 h after it retired** (the fold or the delete) — **compact and non-live** — so a
 poller that treats absence as "still there" sees the removal once; after that it lives only
 in the day partitions (full-fat, every state). Tombstoned events joined that 48 h
@@ -1210,7 +1278,10 @@ keep both events: the day partitions 2026-06-01…09-19 hold 3,899 NCEDC and 997
 ComCat's event of the same id (drop a live `ncedc` / `scedc`-only feature whose `nc` / `ci` id another
 live feature lists in `feed.aliases` as `usgs:<id>`); the monthly Release archives before June were
 built by the same rules and were not re-checked. NCEDC and SCEDC withdraw an event themselves by re-publishing its id without a
-location (see *Retired events*); a ComCat delete of the id does not withdraw their row.
+location (see *Retired events*); a ComCat delete of the id does not withdraw their row. SCEDC also lists distant large
+quakes with NEIC's solution (`Author` "US", `GT` "t"): since round 26 such a row and ComCat's `us…` row of the same
+solution count as one solution even in a dense cell, and SCEDC's placeholder place for them ("###.# km ( ###.# mi) …")
+is read as no place (see *Regional agencies outside their own region*).
 
 ## Turkey (AFAD)
 
@@ -1332,6 +1403,10 @@ source's event and 331 new events (the largest M2.8), each in the day partition 
 `feed.first_ingest_time` days after `feed.event_time`. A second run over the same answer changed nothing. NOA events
 with an origin more than 7 days before that run stay missing (from 2026-09-24 11:47 UTC on): older rows are dropped
 at ingest, and frozen days are never rewritten.
+
+NOA's automatic system also locates large quakes far from Greece (`Author` `scautoloc@sc3-prime`), without a magnitude.
+Since round 26 such a solution outside Greece is held: it joins the quake's event when a window takes it, and is
+otherwise kept out of the live set (see *Regional agencies outside their own region*).
 
 ## France (RéNaSS, RESIF)
 

@@ -169,12 +169,120 @@ export interface RegionalLowMag {
   fromMag: number;
   maxDelta: number;
 }
+/** USP's distance against a large partner (round 26, FIND-3 (a)): from a partner side of USP_LARGE_KM_FROM the window
+ *  grows by USP_LARGE_KM_PER_MAG a magnitude unit, up to USP_LARGE_MAX_KM (M6.0 → 50 km, M6.5 → 75, M7.0 and above →
+ *  100). USP's solution of the 2026-10-09 Panama M7.7 (usp2026tutw, M7.67, 1 s from ComCat's us6000u18k) lies 75 km from
+ *  it and stood as a second M7.7 for days. Only with the merge pass, like `lowMag` (Resolver.regional), so the backfill
+ *  and the deep-history build stay as they are. */
+export const USP_LARGE_KM_FROM = 6.0;
+export const USP_LARGE_KM_PER_MAG = 50;
+export const USP_LARGE_MAX_KM = 100;
+/** A regional window's distance against a large partner: from a partner side of `fromMag`, `km` grows by `kmPerMag` a
+ *  magnitude unit up to `maxKm`. */
+export interface RegionalLargeKm {
+  fromMag: number;
+  kmPerMag: number;
+  maxKm: number;
+}
 /** The regional windows (Resolver.regionalWindow): a pair whose one side holds the provider's rows only and whose other
  *  side holds a row of one of its partners and none of the provider's gets the moderate-event window with its distance
- *  raised to `km`. TMD (round 14) and USP (round 21); USP's also with `lowMag` (round 22), no other provider's. */
-export const REGIONAL_WINDOWS: ReadonlyMap<string, { partners: ReadonlySet<string>; km: number; lowMag?: RegionalLowMag }> = new Map([
+ *  raised to `km`. TMD (round 14) and USP (round 21); USP's also with `lowMag` (round 22) and `largeKm` (round 26), no
+ *  other provider's. */
+export const REGIONAL_WINDOWS: ReadonlyMap<string, { partners: ReadonlySet<string>; km: number; lowMag?: RegionalLowMag; largeKm?: RegionalLargeKm }> = new Map([
   [TMD_PROVIDER, { partners: TMD_WINDOW_PARTNERS, km: TMD_WINDOW_KM }],
-  [USP_PROVIDER, { partners: USP_WINDOW_PARTNERS, km: USP_WINDOW_KM, lowMag: { fromMag: USP_LOW_MAG_FROM, maxDelta: USP_LOW_MAG_MAX_DELTA } }],
+  [
+    USP_PROVIDER,
+    {
+      partners: USP_WINDOW_PARTNERS,
+      km: USP_WINDOW_KM,
+      lowMag: { fromMag: USP_LOW_MAG_FROM, maxDelta: USP_LOW_MAG_MAX_DELTA },
+      largeKm: { fromMag: USP_LARGE_KM_FROM, kmPerMag: USP_LARGE_KM_PER_MAG, maxKm: USP_LARGE_MAX_KM },
+    },
+  ],
+]);
+/** [latMin, latMax, lonMin, lonMax] in degrees, lonMin ≤ lonMax: the alerts gateway's `Box` (platform
+ *  services/alerts-gateway/src/detect/regional.ts AUTHORITY_REGIONS). */
+export type RegionBox = readonly [number, number, number, number];
+/** The out-of-region window of a REGION_RULES provider (round 26, FIND-1): a pair whose one side holds the provider's
+ *  rows only, every one outside its region, and whose other side holds a row of one of `partners` and none of the
+ *  provider's, with a magnitude of at least `minPartnerMag`, is one quake when the origins are at most `maxDtMs` apart,
+ *  the magnitudes at most `maxDeltaMag`, and the places at most
+ *  clamp(`baseKm` + `kmPerMag` · (partner M − `minPartnerMag`), `baseKm`, `maxKm`) — the partner's magnitude, not the
+ *  provider's, sets the distance. Mutual best, ranked with the moderate-event pairs; dense cells do not block it (the
+ *  partner side's magnitude does: a large quake is no swarm member); only with the merge pass. */
+export interface OutOfRegionWindow {
+  partners: ReadonlySet<string>;
+  minPartnerMag: number;
+  baseKm: number;
+  kmPerMag: number;
+  maxKm: number;
+  maxDtMs: number;
+  maxDeltaMag: number;
+}
+/** What the feed does with a regional agency's solutions outside its own region (Resolver, round 26): `boxes` is the
+ *  region; `window` the out-of-region window, if any; `hold` the solutions outside it that no event takes and that are
+ *  kept out of the live set (Resolver.retractHeld): automatic ones from `automaticFromMag`, and ones without a
+ *  magnitude when `magless`. */
+export interface RegionRule {
+  boxes: readonly RegionBox[];
+  window?: OutOfRegionWindow;
+  hold: { automaticFromMag?: number; magless?: boolean };
+}
+export const OVSICORI_PROVIDER = 'ovsicori';
+export const NOA_PROVIDER = 'noa';
+/** OVSICORI-UNA's region, Costa Rica: the alerts gateway's AUTHORITY_REGIONS box (latitude 8–11.5, longitude -86–-82.5). */
+export const OVSICORI_REGION: readonly RegionBox[] = [[8, 11.5, -86, -82.5]];
+/** NOA's region, Greece: the alerts gateway's AUTHORITY_REGIONS box. */
+export const NOA_REGION: readonly RegionBox[] = [[34, 42, 19, 30]];
+export const OVSICORI_WINDOW: OutOfRegionWindow = {
+  partners: new Set(['usgs', 'emsc', 'geofon']),
+  minPartnerMag: LARGE_EVENT_MAG,
+  baseKm: LARGE_EVENT_MAX_KM,
+  kmPerMag: 100,
+  maxKm: 200,
+  maxDtMs: 30_000,
+  maxDeltaMag: 2.0,
+};
+/** From this magnitude an OVSICORI automatic solution outside its region that no event takes is held. In the day
+ *  partitions of 2026-07-05..10-08, before the Panama sequence, 83 of the 85 OVSICORI automatic solutions of M ≥ 4.0
+ *  outside its region stood as events of their own, 72 of them with no other agency's event within 60 s and 150 km and
+ *  75 of them 150–500 km from the box (El Salvador's and Nicaragua's coasts, the open Pacific; some a distant
+ *  large quake's coda, the M7.4 of 2026-07-17 among them); a real M4+ quake there is listed by EMSC or ComCat. Below
+ *  M4.0 they lie mostly within 150 km of the box, where EMSC copies many of them (auth UNA): kept as before. */
+export const OVSICORI_HOLD_FROM_MAG = 4.0;
+/** The regional agencies whose solutions outside their own region the Resolver treats apart (round 26, FIND-1 / FIND-3):
+ *  - OVSICORI: its out-of-region window (OVSICORI_WINDOW) and the hold of its automatic solutions from
+ *    OVSICORI_HOLD_FROM_MAG. The 2026-10-09 Panama sequence (ComCat us6000u18k, M7.7, 17:56:06 UTC) was located by
+ *    OVSICORI from outside its network: its reviewed solutions 45–135 km and up to 17 s from ComCat's, 0.5–0.8 higher
+ *    (1450322 M8.2 for the M7.7, 1450349 M7.1 for the M6.6 us6000u19w, 1450632 M6.8 for the M6.1 us6000u1wn), its
+ *    automatic ones 100–400 km off, many with no quake behind them (1450556, M6.7, 2026-10-11 21:18:30, 4.78 N 78.93 W:
+ *    nothing in ComCat or EMSC within 90 s and 400 km). Nothing joined them (the widest window is LARGE_EVENT_MAX_KM),
+ *    so 86 OVSICORI-only events of M ≥ 4.5 stood live from 10-09 to 10-14, 63 of them automatic, 16 of the 27 live
+ *    events of significant_week, and the day's max_mag read 8.2.
+ *  - NOA: the hold of its solutions without a magnitude outside Greece (FIND-3 (c)): NOA's automatic teleseismic
+ *    locations (`scautoloc`), which stood beside the Panama M6.6 (11.6 km) and M6.1 (31 km) and beside large quakes
+ *    from Kamchatka to Peru (28 such events in the replayed log below, 25 more rows joined to the quake's event).
+ *  Measured by replaying the whole observation log (2026-07-05..10-14, 232,188 lines; a fresh Resolver per hour of
+ *  ingest time over the production load, then the feed-side steps with the regular heal) against the rules before:
+ *  - 6 groups fold (per connected group of ids 7 fewer events, 0 more; rows in two live events 0): OVSICORI's 1450322,
+ *    1450349, 1450632, 1450473 (M6.6, 46.5 km and 5.1 s from us6000u18x M5.8) and 1450399 (automatic M6.3, 61.9 km and
+ *    3.2 s from us6000u1cf M6.0) into ComCat's events, with SCEDC's NEIC copy of the M6.1 (SOURCE_NETWORK_COPIES) and
+ *    USP's solutions of the M7.7 (74.7 km) and of the Chiapas M7.3 of 2026-07-17 (73 km, USP_LARGE_KM_FROM), where SSN's
+ *    solution, which had joined USP's event, now stands alone (one regrouping). Each joined row's nearest ComCat quake is
+ *    the survivor's, with no second ComCat quake within 30 s and 200 km. No OVSICORI row outside the Panama sequence
+ *    meets the window.
+ *  - 161 solutions held (131 OVSICORI, 30 NOA): 85 beside another live event within 60 s and 300 km; for the other 76
+ *    ComCat lists no quake within 90 s and 300 km and EMSC (asked about the 69 ComCat lists nothing for within 400 km)
+ *    none within 170 km.
+ *  - On the event map of origin/data 4549baf6e8 (2026-10-14 11:22) the first run folds 7 events into 5 and holds 76
+ *    (72 OVSICORI, 4 NOA); a second run changes nothing. OVSICORI's 1450630 (automatic M6.5, 159 km and 20 s from the
+ *    M6.1) lies inside its region and stays, as do its reviewed solutions of aftershocks ComCat did not list.
+ *  - The other regional agencies' lone events of M ≥ 4.5 outside their gateway boxes in the replayed state are almost
+ *    never automatic (IG-EPN and IMO one each); 17 lie within such a window of a large partner (INGV 6, GeoNet 5, GA 2,
+ *    CENC 2, JMA 1, SSN 1), splits of real quakes 4–82 km apart that the windows themselves leave: not given these rules. */
+export const REGION_RULES: ReadonlyMap<string, RegionRule> = new Map<string, RegionRule>([
+  [OVSICORI_PROVIDER, { boxes: OVSICORI_REGION, window: OVSICORI_WINDOW, hold: { automaticFromMag: OVSICORI_HOLD_FROM_MAG } }],
+  [NOA_PROVIDER, { boxes: NOA_REGION, hold: { magless: true } }],
 ]);
 /** A provider re-publishing ONE solution under a second native id (INGV 46714321 / 47246702,
  *  2026-09-25) is a re-id, not a distinct event: rows this close fold instead of minting. */
@@ -485,6 +593,19 @@ export const EMSC_AUTHORED_COPIES: ReadonlyMap<string, string> = new Map([
   ['SCSN', 'scedc'],
   ['UNA', 'ovsicori'],
   ['UNM', 'mexico'],
+]);
+/** Another source's copies of a ComCat network's solution (round 26, FIND-3 (b)): a row of the source whose `field` names
+ *  one of `networks` (the code, mapped to that network's ComCat id prefix) and that is the same solution
+ *  (Resolver.sameSolution) as ComCat's row of the network is that row's copy, an authored copy (Resolver.authoredCopy):
+ *  one solution, as good as a shared id, also in a dense cell. SCEDC lists distant large quakes (`GT` "t") with NEIC's
+ *  solution and `Author` / `MagAuthor` "US": SCEDC 10256694 is ComCat's us6000u1wn (the 2026-10-12 Panama M6.1) to the
+ *  second, the km and the tenth, yet stood as a second M6.1 for days in the aftershocks' dense cell, where only a shared
+ *  id joins. Checked over the observation log (2026-07-05..10-14): 49 SCEDC ids carry `Author` "US"; 48 equal a version of
+ *  a ComCat `us…` row (2 s, 2 km, 0.1), none another network's row or two `us` ids; the other (10248406, Hawaii M5.3 of
+ *  2026-08-12) matches no ComCat version the log holds. No other source names an author network this way (NCEDC's rows
+ *  all name NC). */
+export const SOURCE_NETWORK_COPIES: ReadonlyMap<string, { field: string; networks: ReadonlyMap<string, string> }> = new Map([
+  ['scedc', { field: 'Author', networks: new Map([['US', 'us']]) }],
 ]);
 /** EMSC `auth` codes of the US networks the feed reads only through ComCat (FEED-4), each with that network's ComCat id
  *  prefix: an EMSC row with one of these codes and the same solution (Resolver.sameSolution) as ComCat's row whose own

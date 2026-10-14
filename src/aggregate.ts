@@ -240,6 +240,9 @@ async function main(): Promise<void> {
   // A regional agency's solutions outside its own region that no event takes (config REGION_RULES, round 26): status
   // `held_retracted`.
   if (feedSide.held) console.log(`aggregate: held ${feedSide.held} solutions outside their agency's region: ${JSON.stringify(feedSide.heldByProvider)}`);
+  // Events whose stored representative the current rules outrank, re-derived (Resolver.rederiveOutranked, round 27):
+  // status `rederived`.
+  if (feedSide.rederived) console.log(`aggregate: re-derived the representative of ${feedSide.rederived} events`);
 
   const seq = log.seq;
   const newObs = log.lines;
@@ -323,6 +326,7 @@ async function main(): Promise<void> {
     coordinateless_withdrawn: zeroedOut.withdrawn,
     coordinateless_retracted: feedSide.retracted,
     ...(feedSide.held ? { held_retracted: feedSide.held } : {}),
+    ...(feedSide.rederived ? { rederived: feedSide.rederived } : {}),
     new_observations: newObs.length,
     revisions,
     late_minted: lateMinted,
@@ -382,6 +386,7 @@ async function main(): Promise<void> {
       (zeroedOut.withdrawn ? ` coordinateless_withdrawn=${zeroedOut.withdrawn}` : '') +
       (feedSide.retracted ? ` coordinateless_retracted=${feedSide.retracted}` : '') +
       (feedSide.held ? ` held_retracted=${feedSide.held}` : '') +
+      (feedSide.rederived ? ` rederived=${feedSide.rederived}` : '') +
       (heal ? ` heal_epoch=${heal.epoch} heal_merged=${heal.merged}` : '') +
       (correction ? ` correction_epoch=${correction.epoch} from_epoch=${correction.from_epoch}` : '') +
       (correction?.afad ? ` afad_retimed=${correction.afad.retimed} afad_moved_out=${correction.afad.moved_out} afad_merged=${correction.afad.merged}` : '') +

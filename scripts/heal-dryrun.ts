@@ -25,7 +25,7 @@ import addFormats from 'ajv-formats';
 import { loadState } from '../src/bitemporal.js';
 import { EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HEAL_MAX_FOLDS_PER_RUN, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS } from '../src/config.js';
 import { HELD_REASON, REHOMED_REASON_PREFIX, Resolver } from '../src/dedup.js';
-import { runFeedSideSteps } from '../src/heal.js';
+import { REDERIVED_REASON, runFeedSideSteps } from '../src/heal.js';
 import { haversineKm } from '../src/geo.js';
 import { LogBuffer } from '../src/oplog.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
@@ -76,7 +76,17 @@ const retractions = log.lines
 const merges = log.lines
   .filter((l) => l.op === 'merge')
   .map((l) => ({ loser: state.eventMap.get(l.feed_id)!, survivor: state.eventMap.get(l.superseded_by!)!, reason: l.reason ?? '' }));
-if ((regular ? side.regularHeal?.merged : side.heal?.merged) !== merges.length || side.retracted !== retractions.length || side.rehomed + side.stranded !== rehomes.length || side.held !== heldLines.length) throw new Error('dry run: the logged lines disagree with the step result');
+// Round 27: an event whose stored representative the current rules outrank, re-derived (Resolver.rederiveOutranked).
+const rederivedLines = log.lines.filter((l) => l.op === 'correction' && l.reason === REDERIVED_REASON);
+if (
+  (regular ? side.regularHeal?.merged : side.heal?.merged) !== merges.length ||
+  side.retracted !== retractions.length ||
+  side.rehomed + side.stranded !== rehomes.length ||
+  side.held !== heldLines.length ||
+  side.rederived !== rederivedLines.length
+) {
+  throw new Error('dry run: the logged lines disagree with the step result');
+}
 
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 addFormats(ajv);
@@ -133,6 +143,21 @@ md.push('A regional agency\'s solution outside its own region that no event take
 md.push('');
 for (const l of heldLines) md.push(`- ${l.provider}:${l.provider_event_id} ${l.event_time} M${l.mag ?? '?'} ${l.status ?? ''} ${fmt(l.lat, 2)}, ${fmt(l.lon, 2)} ${l.place ?? ''} (${l.feed_id}${state.eventMap.get(l.feed_id)?.state === 'tombstoned' ? ', tombstoned' : ''})`);
 if (!heldLines.length) md.push('None.');
+md.push('');
+
+// --- re-derived representatives (round 27) ---
+md.push(`## Representatives re-derived (${rederivedLines.length})`);
+md.push('');
+md.push('An event whose stored representative is a row the current rules rank behind another of its rows (Resolver.rederiveOutranked): before → after.');
+md.push('');
+for (const l of rederivedLines) {
+  const b = before.get(l.feed_id);
+  const was = b?.provenance.find((r) => r.chosen);
+  md.push(
+    `- ${l.feed_id} [${b ? providersOf(b).join(',') : '?'}]: ${b?.chosenProvider ?? '?'}:${was?.nativeId ?? '?'} M${b?.mag ?? '?'} ${b?.status ?? ''} ${b ? `${fmt(b.lat, 2)}, ${fmt(b.lon, 2)}` : ''} → ${l.provider}:${l.provider_event_id} M${l.mag ?? '?'} ${l.status ?? ''} ${fmt(l.lat, 2)}, ${fmt(l.lon, 2)} (${l.event_time})`,
+  );
+}
+if (!rederivedLines.length) md.push('None.');
 md.push('');
 
 // --- heal groups ---

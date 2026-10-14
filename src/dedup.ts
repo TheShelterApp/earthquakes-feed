@@ -32,6 +32,7 @@ import {
   REID_MAG_DELTA,
   REID_MAG_TOLERANCE,
   REVISED_ID_WINDOWS,
+  REVIEWED_ID_WINDOWS,
   SPATIAL_KM,
   SWARM_CELL_ABSOLUTE,
   TEMPORAL_MS,
@@ -40,6 +41,8 @@ import {
   SOURCE_NETWORK_COPIES,
   type RegionalLargeKm,
   type RegionalLowMag,
+  type OutOfRegionWindow,
+  type RegionBox,
   type RegionRule,
 } from './config.js';
 import { qualityCount } from './canonical.js';
@@ -77,12 +80,14 @@ const REGIONAL_LARGE_GATHER_MAG = Math.min(
 /** An out-of-region window (config REGION_RULES `window`, round 26) a pair gets: its provider, its distance (set by the
  *  partner side's magnitude), its time and magnitude limits, and whether the pair's first side holds the provider's
  *  rows. */
-type FarWindow = { provider: string; km: number; ms: number; maxDelta: number; providerIsA: boolean };
+type FarWindow = { provider: string; km: number; ms: number; maxDelta: number; providerIsA: boolean; speed: { fromKm: number; min: number; max: number; slackMs: number } | null };
 const FAR_WINDOWS = [...REGION_RULES.values()].flatMap((r) => (r.window ? [r.window] : []));
+/** The smallest partner magnitude an out-of-region window takes (its `low` partner floor, round 27, else minPartnerMag). */
+const farMinPartnerMag = (w: OutOfRegionWindow): number => Math.min(w.minPartnerMag, w.low?.fromMag ?? Infinity);
 /** The widest out-of-region window and the smallest partner magnitude any of them takes: the gather radius of a node
  *  that may be either side of one (Resolver.farCandidates). */
-const FAR_WINDOW_MAX_KM = Math.max(0, ...FAR_WINDOWS.map((w) => w.maxKm));
-const FAR_MIN_PARTNER_MAG = Math.min(Infinity, ...FAR_WINDOWS.map((w) => w.minPartnerMag));
+const FAR_WINDOW_MAX_KM = Math.max(0, ...FAR_WINDOWS.map((w) => Math.max(w.maxKm, w.low?.km ?? 0)));
+const FAR_MIN_PARTNER_MAG = Math.min(Infinity, ...FAR_WINDOWS.map(farMinPartnerMag));
 /** The reason of the op:tombstone line that keeps a held solution out of the live set (Resolver.retractHeld). */
 export const HELD_REASON = "held: a regional agency's solution outside its own region that no other agency's event takes (automatic, or without a magnitude)";
 const clamp = (n: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, n));
@@ -150,6 +155,33 @@ interface SourcedSolution extends Solution {
 }
 
 const nativeIdOf = (r: SourcedSolution): string => r.nativeId ?? r.providerEventId ?? '';
+const rowKey = (r: SourcedSolution): string => `${r.provider}:${nativeIdOf(r)}`;
+const inBoxes = (boxes: readonly RegionBox[], lat: number, lon: number): boolean =>
+  boxes.some(([latMin, latMax, lonMin, lonMax]) => lat >= latMin && lat <= latMax && lon >= lonMin && lon <= lonMax);
+/** The first index of the ascending `xs` whose value is at least `x`. */
+function lowerBound(xs: readonly number[], x: number): number {
+  let lo = 0;
+  let hi = xs.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (xs[mid]! < x) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+/** The widest time window of any REVIEWED_ID_WINDOWS provider: how far apart in time two twins can be. */
+const REVIEWED_MAX_DT_MS = Math.max(0, ...[...REVIEWED_ID_WINDOWS.values()].map((w) => Math.max(w.near.dtMs, w.far.dtMs)));
+
+/** The live rows of the REVIEWED_ID_WINDOWS providers (by event time, then key) and their mutual-best twins, both ways
+ *  (Resolver.reviewedTwinIndex). `memo` caches a report's twin (Resolver.reportTwinKey) while the index holds. */
+interface ReviewedTwinIndex {
+  rows: ProvenanceRow[];
+  times: number[];
+  twins: Map<string, string>;
+  /** The feed id of the live node that held each row when the index was built (a fold since then is followed). */
+  holder: Map<string, string>;
+  memo: WeakMap<RawObs, string | null>;
+}
 
 /** One op:merge — `loser` folded into `survivor` because of `reason`. */
 export interface MergeRecord {
@@ -205,6 +237,9 @@ export class Resolver {
   readonly rehomedCopies: string[] = [];
   /** Round 14 (rehomeStranded), in order: the EMSC rows this resolver moved after EMSC re-pointed their id. */
   readonly rehomedStranded: string[] = [];
+  /** REVIEWED_ID_WINDOWS (round 27), built on first use (reviewedTwinIndex) and cleared whenever a row of such a provider
+   *  is stored or withdrawn (makeRow, withdrawRow). */
+  private reviewedIndex: ReviewedTwinIndex | null = null;
 
   constructor(
     readonly eventMap: Map<string, EventNode>,
@@ -336,25 +371,157 @@ export class Resolver {
     return a.mag != null && b.mag != null && Math.abs(a.mag - b.mag) <= w.maxDeltaMag + REID_MAG_TOLERANCE;
   }
 
-  /** The best-scored revisedIdPair between the two nodes' rows (d/km + |dt|/dtMs of the twin rows), or null. */
-  private static revisedScore(a: EventNode, b: EventNode): number | null {
+  /** The best-scored revised-id pair between the two nodes' rows, or null: a revisedIdPair (d/km + |dt|/dtMs of the twin
+   *  rows) when neither cell is dense, or a REVIEWED_ID_WINDOWS twin pair (reviewedTwin, its reviewedPairScore) in any
+   *  cell: the provider's own two ids of one quake, which the dense-cell rule counts as a shared id. */
+  private revisedScore(a: EventNode, b: EventNode): number | null {
     let best: number | null = null;
+    let dense: boolean | null = null;
     for (const ra of a.provenance) {
       const w = REVISED_ID_WINDOWS.get(ra.provider);
-      if (!w) continue;
+      const reviewed = REVIEWED_ID_WINDOWS.has(ra.provider);
+      if (!w && !reviewed) continue;
       for (const rb of b.provenance) {
-        if (!Resolver.revisedIdPair(ra, rb)) continue;
-        const s = haversineKm(ra.lat, ra.lon, rb.lat, rb.lon) / w.km + Math.abs(ra.eventTimeMs - rb.eventTimeMs) / w.dtMs;
-        if (best == null || s < best) best = s;
+        let s: number | null = null;
+        if (w && Resolver.revisedIdPair(ra, rb) && !(dense ??= this.isDense(a.lat, a.lon) || this.isDense(b.lat, b.lon))) {
+          s = haversineKm(ra.lat, ra.lon, rb.lat, rb.lon) / w.km + Math.abs(ra.eventTimeMs - rb.eventTimeMs) / w.dtMs;
+        } else if (reviewed && this.reviewedTwin(ra, rb)) s = Resolver.reviewedPairScore(ra, rb);
+        if (s != null && (best == null || s < best)) best = s;
       }
     }
     return best;
   }
 
-  /** Whether the merge pass may fold two nodes through a revisedIdPair of their rows: neither cell dense. */
+  /** Whether the merge pass may fold two nodes through a revised-id pair of their rows (revisedScore). */
   private revisedPair(a: EventNode, b: EventNode): boolean {
-    if (this.isDense(a.lat, a.lon) || this.isDense(b.lat, b.lon)) return false;
-    return Resolver.revisedScore(a, b) != null;
+    return this.revisedScore(a, b) != null;
+  }
+
+  /** Two rows of a REVIEWED_ID_WINDOWS provider that may be one quake its analyst re-published under a new id (round
+   *  27): one automatic, the other reviewed under a higher numeric id, within the provider's `near` window (score
+   *  d/km + |dt|/dtMs), or its `far` window when the reviewed one lies outside the provider's region and the automatic
+   *  one's origin time is the later (the same plus MODERATE_SCORE_OFFSET, so a `near` pair always ranks first); else
+   *  null. Whether they are one quake is mutual best (mutualReviewedTwins). */
+  private static reviewedPairScore(a: SourcedSolution, b: SourcedSolution): number | null {
+    if (a.provider !== b.provider) return null;
+    const w = REVIEWED_ID_WINDOWS.get(a.provider);
+    if (!w) return null;
+    const auto = a.status === 'automatic' ? a : b.status === 'automatic' ? b : null;
+    const rev = auto === a ? b : a;
+    if (!auto || rev.status !== 'reviewed' || auto.mag == null || rev.mag == null) return null;
+    const ia = Number(nativeIdOf(auto));
+    const ir = Number(nativeIdOf(rev));
+    if (!Number.isSafeInteger(ia) || !Number.isSafeInteger(ir) || ir <= ia) return null;
+    const dt = Math.abs(auto.eventTimeMs - rev.eventTimeMs);
+    const d = haversineKm(auto.lat, auto.lon, rev.lat, rev.lon);
+    const { near, far } = w;
+    if (dt <= near.dtMs && d <= near.km && !magsApart(auto.mag, rev.mag, near.maxDeltaMag)) return d / near.km + dt / near.dtMs;
+    if (inBoxes(w.boxes, rev.lat, rev.lon) || dt > far.dtMs || d > far.km || magsApart(auto.mag, rev.mag, far.maxDeltaMag)) return null;
+    // The automatic locator moved the quake toward the provider's stations: its origin time is the later one.
+    if (auto.eventTimeMs <= rev.eventTimeMs) return null;
+    const kmPerS = dt > 0 ? d / (dt / 1000) : Infinity;
+    if (kmPerS < far.minKmPerS || kmPerS > far.maxKmPerS) return null;
+    return MODERATE_SCORE_OFFSET + d / far.km + dt / far.dtMs;
+  }
+
+  /** The mutual-best pairs among `rows` (reviewedPairScore, lowest first, ties by key), both ways, keyed `provider:id`.
+   *  Each key once: the first row of a key counts. */
+  private static mutualReviewedTwins(rows: readonly SourcedSolution[]): Map<string, string> {
+    const byKey = new Map<string, SourcedSolution>();
+    for (const r of rows) if (!byKey.has(rowKey(r))) byKey.set(rowKey(r), r);
+    const sorted = [...byKey.values()].sort((x, y) => x.eventTimeMs - y.eventTimeMs || (rowKey(x) < rowKey(y) ? -1 : rowKey(x) > rowKey(y) ? 1 : 0));
+    const best = new Map<string, { key: string; score: number }>();
+    for (let i = 0; i < sorted.length; i++) {
+      const a = sorted[i]!;
+      for (let j = i + 1; j < sorted.length && sorted[j]!.eventTimeMs - a.eventTimeMs <= REVIEWED_MAX_DT_MS; j++) {
+        const b = sorted[j]!;
+        const s = Resolver.reviewedPairScore(a, b);
+        if (s == null) continue;
+        for (const [x, y] of [
+          [a, b],
+          [b, a],
+        ] as const) {
+          const cur = best.get(rowKey(x));
+          if (!cur || s < cur.score || (s === cur.score && rowKey(y) < cur.key)) best.set(rowKey(x), { key: rowKey(y), score: s });
+        }
+      }
+    }
+    const out = new Map<string, string>();
+    for (const [k, v] of best) if (best.get(v.key)?.key === k) out.set(k, v.key);
+    return out;
+  }
+
+  /** REVIEWED_ID_WINDOWS (round 27): the live rows of such providers and their mutual-best twins. Empty without the
+   *  merge pass (the backfill and the deep-history build stay as they are). */
+  private reviewedTwinIndex(): ReviewedTwinIndex {
+    if (this.reviewedIndex) return this.reviewedIndex;
+    const rows = new Map<string, ProvenanceRow>();
+    const holder = new Map<string, string>();
+    if (this.mergePass && REVIEWED_ID_WINDOWS.size) {
+      for (const n of this.eventMap.values()) {
+        if (n.state !== 'live') continue;
+        for (const r of n.provenance) {
+          if (!REVIEWED_ID_WINDOWS.has(r.provider) || rows.has(rowKey(r))) continue;
+          rows.set(rowKey(r), r);
+          holder.set(rowKey(r), n.feedId);
+        }
+      }
+    }
+    const list = [...rows.values()].sort((x, y) => x.eventTimeMs - y.eventTimeMs || (rowKey(x) < rowKey(y) ? -1 : rowKey(x) > rowKey(y) ? 1 : 0));
+    this.reviewedIndex = { rows: list, times: list.map((r) => r.eventTimeMs), twins: Resolver.mutualReviewedTwins(list), holder, memo: new WeakMap() };
+    return this.reviewedIndex;
+  }
+
+  /** Whether two stored rows are REVIEWED_ID_WINDOWS twins: one quake its provider published twice, automatic and
+   *  reviewed (reviewedPairScore, mutual best among the live rows). */
+  private reviewedTwin(a: SourcedSolution, b: SourcedSolution): boolean {
+    if (a.provider !== b.provider || !REVIEWED_ID_WINDOWS.has(a.provider)) return false;
+    return this.reviewedTwinIndex().twins.get(rowKey(a)) === rowKey(b);
+  }
+
+  /** Whether one node holds a REVIEWED_ID_WINDOWS twin of a row of the other. */
+  private reviewedTwinNodes(a: EventNode, b: EventNode): boolean {
+    return a.provenance.some((ra) => REVIEWED_ID_WINDOWS.has(ra.provider) && b.provenance.some((rb) => this.reviewedTwin(ra, rb)));
+  }
+
+  /** The key of the live row a report of a REVIEWED_ID_WINDOWS provider is the twin of, counting the report in place of
+   *  its own stored row (a revision), or null. Every row that can be the report's twin, or a rival of that twin, lies
+   *  within twice the widest window of the report. */
+  private reportTwinKey(raw: RawObs): string | null {
+    if (!REVIEWED_ID_WINDOWS.has(raw.provider) || !this.mergePass) return null;
+    const index = this.reviewedTwinIndex();
+    const memo = index.memo.get(raw);
+    if (memo !== undefined) return memo;
+    const key = rowKey(raw);
+    const lo = lowerBound(index.times, raw.eventTimeMs - 2 * REVIEWED_MAX_DT_MS);
+    const hi = lowerBound(index.times, raw.eventTimeMs + 2 * REVIEWED_MAX_DT_MS + 1);
+    const near = index.rows.slice(lo, hi).filter((r) => r.provider === raw.provider && rowKey(r) !== key);
+    const twin = near.length ? (Resolver.mutualReviewedTwins([raw, ...near]).get(key) ?? null) : null;
+    index.memo.set(raw, twin);
+    return twin;
+  }
+
+  /** The live node holding the stored row `key` of a REVIEWED_ID_WINDOWS provider (its alias, else the node that held it
+   *  when reviewedTwinIndex was built, followed through any fold since), or undefined. */
+  private liveNodeOfRow(key: string): EventNode | undefined {
+    const holds = (n: EventNode | undefined): n is EventNode => n?.state === 'live' && n.provenance.some((r) => rowKey(r) === key);
+    for (const fid of [this.alias.get(key), this.reviewedTwinIndex().holder.get(key)]) {
+      const node = fid ? this.resolveLive(fid) : undefined;
+      if (holds(node)) return node;
+    }
+    return undefined;
+  }
+
+  /** The live nodes holding a REVIEWED_ID_WINDOWS twin of a row of `node` (mergeableNeighbours' candidates). */
+  private reviewedTwinNodesOf(node: EventNode): EventNode[] {
+    const out: EventNode[] = [];
+    for (const r of node.provenance) {
+      if (!REVIEWED_ID_WINDOWS.has(r.provider)) continue;
+      const twin = this.reviewedTwinIndex().twins.get(rowKey(r));
+      const other = twin ? this.liveNodeOfRow(twin) : undefined;
+      if (other && other !== node && !out.includes(other)) out.push(other);
+    }
+    return out;
   }
 
   /** A provider re-reporting the SAME event resolves via alias; the same provider using a
@@ -376,7 +543,8 @@ export class Resolver {
         !raw.knownAliasIds.includes(`${r.provider}:${r.nativeId}`) &&
         !knownAliasIdsOf(r.provider, r.nativeId, r.fields).includes(key) &&
         !Resolver.sameSolution(r, raw) &&
-        !Resolver.revisedIdPair(r, raw),
+        !Resolver.revisedIdPair(r, raw) &&
+        !(r.provider === raw.provider && raw.status === 'reviewed' && this.reportTwinKey(raw) === rowKey(r)),
     );
   }
 
@@ -387,7 +555,7 @@ export class Resolver {
    *  listed by Nevada's nn00925220, are one quake although neither lists the other. A provider is its catalogue here too
    *  (config CATALOGUE_MIRRORS): RESIF's row in one node and RéNaSS's row of another id in the other block the fold, and
    *  AusPass's `smi:local/<id>` against GA's `<id>` is one id (util.ts sameCatalogueEvent, round 20). */
-  private static nodesDistinct(a: EventNode, b: EventNode): boolean {
+  private nodesDistinct(a: EventNode, b: EventNode): boolean {
     const comcatNamed = (n: EventNode): Set<string> => new Set(n.provenance.flatMap((r) => comcatIdsNamed(r.provider, r.nativeId, r.fields)));
     let namedA: Set<string> | null = null;
     let namedB: Set<string> | null = null;
@@ -398,7 +566,7 @@ export class Resolver {
         if (linked.includes(`${rb.provider}:${rb.nativeId}`)) continue;
         if (ra.provider === COMCAT_PROVIDER && ((namedA ??= comcatNamed(a)).has(rb.nativeId) || (namedB ??= comcatNamed(b)).has(ra.nativeId))) continue;
         if (knownAliasIdsOf(rb.provider, rb.nativeId, rb.fields).includes(`${ra.provider}:${ra.nativeId}`)) continue;
-        if (Resolver.sameSolution(ra, rb) || Resolver.revisedIdPair(ra, rb)) continue;
+        if (Resolver.sameSolution(ra, rb) || Resolver.revisedIdPair(ra, rb) || this.reviewedTwin(ra, rb)) continue;
         return true;
       }
     }
@@ -527,10 +695,11 @@ export class Resolver {
   }
 
   /** The out-of-region window two sides get (config REGION_RULES `window`, round 26), or null: one side's rows are all
-   *  one REGION_RULES provider's, every one outside its region; the other side holds no row of that provider and a row of
+   *  one REGION_RULES provider's, every one outside its region (outsideRegionSide); the other side holds no row of that provider and a row of
    *  one of its partners that is the partner's own solution (not EMSC's copy of the provider's, EMSC_AUTHORED_COPIES),
-   *  and its magnitude (`bMag` for side `b`) reaches the window's minPartnerMag, which sets the distance. Only with the
-   *  merge pass: the backfill and the deep-history build stay as they are. */
+   *  and its magnitude (`bMag` for side `b`) reaches the window's minPartnerMag, which sets the distance, or, for the
+   *  provider's reviewed solutions, its `low` floor (round 27: up to `low.km`, beyond `baseKm` at the `low` speeds). Only
+   *  with the merge pass: the backfill and the deep-history build stay as they are. */
   private farWindow(aRows: readonly SourcedSolution[], aMag: number | null, bRows: readonly SourcedSolution[], bMag: number | null): FarWindow | null {
     if (!this.mergePass || aMag == null || bMag == null) return null;
     for (const [own, partner, partnerMag, providerIsA] of [
@@ -539,13 +708,29 @@ export class Resolver {
     ] as const) {
       const provider = own[0]?.provider;
       const w = provider != null ? REGION_RULES.get(provider)?.window : undefined;
-      if (!w || !own.every((r) => r.provider === provider && Resolver.outsideRegion(r))) continue;
-      if (partnerMag < w.minPartnerMag - REID_MAG_TOLERANCE || partner.some((r) => r.provider === provider)) continue;
+      if (!w || !this.outsideRegionSide(own, provider!)) continue;
+      if (partnerMag < farMinPartnerMag(w) - REID_MAG_TOLERANCE || partner.some((r) => r.provider === provider)) continue;
       if (!partner.some((r) => w.partners.has(r.provider) && !Resolver.copyOfProvider(r, provider))) continue;
-      const km = clamp(w.baseKm + w.kmPerMag * (partnerMag - w.minPartnerMag), w.baseKm, w.maxKm);
-      return { provider, km, ms: w.maxDtMs, maxDelta: w.maxDeltaMag, providerIsA };
+      if (partnerMag >= w.minPartnerMag - REID_MAG_TOLERANCE) {
+        const km = clamp(w.baseKm + w.kmPerMag * (partnerMag - w.minPartnerMag), w.baseKm, w.maxKm);
+        return { provider, km, ms: w.maxDtMs, maxDelta: w.maxDeltaMag, providerIsA, speed: null };
+      }
+      // A partner below minPartnerMag (`low`, round 27): only for the provider's reviewed solutions.
+      const superseded = this.supersededAutomaticRows(own);
+      if (!w.low || !own.every((r) => superseded.includes(r) || r.status === 'reviewed')) continue;
+      return { provider, km: w.low.km, ms: w.maxDtMs, maxDelta: w.maxDeltaMag, providerIsA, speed: { fromKm: w.baseKm, min: w.low.minKmPerS, max: w.low.maxKmPerS, slackMs: w.low.slackMs } };
     }
     return null;
+  }
+
+  /** Whether `rows` are all `provider`'s and outside its region, an automatic row beside its reviewed twin aside
+   *  (supersededAutomaticRows, round 27: OVSICORI's automatic solution inside its box of a quake its analyst placed
+   *  outside it represents nothing and places nothing). At least one row outside. */
+  private outsideRegionSide(rows: readonly SourcedSolution[], provider: string): boolean {
+    if (!rows.every((r) => r.provider === provider)) return false;
+    const superseded = this.supersededAutomaticRows(rows);
+    const own = rows.filter((r) => !superseded.includes(r));
+    return own.length > 0 && own.every((r) => Resolver.outsideRegion(r) != null);
   }
 
   /** null when two solutions are within an out-of-region window, else why not. */
@@ -555,6 +740,13 @@ export class Resolver {
     if (dt > w.ms) return `${label}: dt ${(dt / 1000).toFixed(1)} s > ${(w.ms / 1000).toFixed(1)} s`;
     if (d > w.km) return `${label}: d ${d.toFixed(1)} km > ${w.km.toFixed(1)} km`;
     if (magsApart(a.mag!, b.mag!, w.maxDelta)) return `${label}: dM ${Math.abs(a.mag! - b.mag!).toFixed(2)} > ${w.maxDelta}`;
+    if (w.speed && d > w.speed.fromKm) {
+      const kmPerS = dt > 0 ? d / (dt / 1000) : Infinity;
+      if (kmPerS < w.speed.min || kmPerS > w.speed.max) return `${label}: d ${d.toFixed(1)} km over dt ${(dt / 1000).toFixed(1)} s is ${kmPerS.toFixed(1)} km/s, outside ${w.speed.min}–${w.speed.max} km/s`;
+    } else if (w.speed && dt > (d / w.speed.min) * 1000 + w.speed.slackMs) {
+      // Within `fromKm` the time difference is at most what the distance explains at the slowest speed (round 27 review).
+      return `${label}: dt ${(dt / 1000).toFixed(1)} s > ${d.toFixed(1)} km at ${w.speed.min} km/s + ${(w.speed.slackMs / 1000).toFixed(0)} s`;
+    }
     return null;
   }
 
@@ -565,7 +757,7 @@ export class Resolver {
     if (!w) return null;
     if (Resolver.rejectFar(a, b, haversineKm(a.lat, a.lon, b.lat, b.lon), w)) return null;
     if (Resolver.lifecycleLocationBlocks(a.provenance, a, b.provenance, b)) return null;
-    if (Resolver.nodesDistinct(a, b)) return null;
+    if (this.nodesDistinct(a, b)) return null;
     return w;
   }
 
@@ -577,27 +769,27 @@ export class Resolver {
   private farCandidates(node: EventNode): Set<string> {
     const out = new Set<string>();
     if (!this.mergePass || !FAR_WINDOW_MAX_KM || node.mag == null) return out;
-    const own = Resolver.farOwnSide(node);
+    const own = this.farOwnSide(node);
     const partner = node.mag >= FAR_MIN_PARTNER_MAG - REID_MAG_TOLERANCE;
     if (!own && !partner) return out;
     for (const cell of gatherCellKeys(node.lat, node.lon, FAR_WINDOW_MAX_KM, GRID_CELL_DEG)) {
       for (const fid of this.geo.get(cell) ?? []) {
         const other = this.eventMap.get(fid);
         if (!other || other.mag == null) continue;
-        if ((own && other.mag >= FAR_MIN_PARTNER_MAG - REID_MAG_TOLERANCE) || (partner && Resolver.farOwnSide(other))) out.add(fid);
+        if ((own && other.mag >= FAR_MIN_PARTNER_MAG - REID_MAG_TOLERANCE) || (partner && this.farOwnSide(other))) out.add(fid);
       }
     }
     return out;
   }
 
   /** A node that may be the provider side of an out-of-region window (farWindow): its rows all one REGION_RULES
-   *  provider's with a window, every one outside the provider's region, and a magnitude within the window's |ΔM| of its
-   *  smallest partner magnitude. */
-  private static farOwnSide(node: EventNode): boolean {
+   *  provider's with a window, every one outside the provider's region (outsideRegionSide), and a magnitude within the
+   *  window's |ΔM| of its smallest partner magnitude. */
+  private farOwnSide(node: EventNode): boolean {
     const p = node.provenance[0]?.provider;
     const w = p != null ? REGION_RULES.get(p)?.window : undefined;
-    if (!w || node.mag == null || node.mag < w.minPartnerMag - w.maxDeltaMag - 2 * REID_MAG_TOLERANCE) return false;
-    return node.provenance.every((r) => r.provider === p && Resolver.outsideRegion(r) != null);
+    if (!w || node.mag == null || node.mag < farMinPartnerMag(w) - w.maxDeltaMag - 2 * REID_MAG_TOLERANCE) return false;
+    return this.outsideRegionSide(node.provenance, p!);
   }
 
   /** Whether two sides (their providers) may use the moderate-event window: no provider on both, none excluded. */
@@ -839,6 +1031,7 @@ export class Resolver {
    *  Identity before proximity: the old id's event may sit beyond the windows (its representative is another agency's
    *  solution), and a nearer event of another quake must not take the report. */
   private findRevisedTwin(raw: RawObs): string | null {
+    if (REVIEWED_ID_WINDOWS.has(raw.provider)) return this.findReviewedTwin(raw);
     if (!REVISED_ID_WINDOWS.has(raw.provider) || this.isDense(raw.lat, raw.lon)) return null;
     let best: EventNode | null = null;
     let bestKm = Infinity;
@@ -856,6 +1049,22 @@ export class Resolver {
       }
     }
     return best?.feedId ?? null;
+  }
+
+  /** findRevisedTwin for a REVIEWED_ID_WINDOWS provider (round 27): for a reviewed report, the live event holding the
+   *  automatic row the report is the twin of (reportTwinKey: mutual best, counting the report), in any cell, unless that
+   *  event holds another id of the provider the report is not one quake with (sameProviderDistinct) or an AEC row the
+   *  location-join limits keep apart. The provider publishes the automatic solution first and the review hours later,
+   *  so the reviewed report sees every automatic candidate; an automatic report that comes after its reviewed twin (two
+   *  new ids in one run) does not join at first sight, and the merge pass folds the pair that is mutual best once both
+   *  are stored (sameProviderDistinct exempts a reviewed report only, for the same reason). */
+  private findReviewedTwin(raw: RawObs): string | null {
+    if (raw.status !== 'reviewed') return null;
+    const twin = this.reportTwinKey(raw);
+    const node = twin ? this.liveNodeOfRow(twin) : undefined;
+    if (!node || this.sameProviderDistinct(raw, node)) return null;
+    if (Resolver.lifecycleLocationBlocks([raw], raw, node.provenance, node)) return null;
+    return node.feedId;
   }
 
   /** The moderate-event half of findNear (FEED-1), asked only when no event is within the base windows: the live
@@ -901,7 +1110,7 @@ export class Resolver {
     if (!w0 || !this.mergePass || raw.mag == null) return null;
     let best: EventNode | null = null;
     let bestScore = Infinity;
-    for (const cell of gatherCellKeys(raw.lat, raw.lon, w0.maxKm, GRID_CELL_DEG)) {
+    for (const cell of gatherCellKeys(raw.lat, raw.lon, Math.max(w0.maxKm, w0.low?.km ?? 0), GRID_CELL_DEG)) {
       for (const fid of this.geo.get(cell) ?? []) {
         const node = this.eventMap.get(fid);
         if (!node || node.state !== 'live') continue;
@@ -991,6 +1200,7 @@ export class Resolver {
   }
 
   private makeRow(raw: RawObs): ProvenanceRow {
+    if (REVIEWED_ID_WINDOWS.has(raw.provider)) this.reviewedIndex = null;
     const c = this.cfg.get(raw.provider);
     return {
       provider: raw.provider,
@@ -1021,6 +1231,7 @@ export class Resolver {
   private preferred(rows: ProvenanceRow[]): ProvenanceRow {
     const rank = (p: string): number => this.priority.get(p) ?? 9999;
     const outranked = Resolver.outrankedRows(rows);
+    for (const r of this.supersededAutomaticRows(rows)) outranked.add(r);
     return [...rows].sort((a, b) => {
       const ob = (outranked.has(a) ? 1 : 0) - (outranked.has(b) ? 1 : 0);
       if (ob) return ob;
@@ -1051,6 +1262,20 @@ export class Resolver {
     for (const r of rows) {
       const w = Resolver.outsideRegion(r)?.window;
       if (w && rows.some((o) => o.provider !== r.provider && w.partners.has(o.provider) && !Resolver.copyOfProvider(o, r.provider))) out.add(r);
+    }
+    return out;
+  }
+
+  /** The automatic rows of a REVIEWED_ID_WINDOWS provider whose reviewed twin (reviewedTwin) is among `rows` (round 27):
+   *  the provider's analyst replaced that solution, so it never represents the event, whatever the other rows are (an
+   *  automatic solution inside OVSICORI's box of a quake outside it lies hundreds of km off). Asked only when `rows` hold
+   *  two rows of such a provider. */
+  private supersededAutomaticRows<T extends SourcedSolution>(rows: readonly T[]): T[] {
+    const out: T[] = [];
+    for (const r of rows) {
+      if (r.status !== 'automatic' || !REVIEWED_ID_WINDOWS.has(r.provider)) continue;
+      if (rows.filter((o) => o.provider === r.provider).length < 2) continue;
+      if (rows.some((o) => o !== r && this.reviewedTwin(r, o))) out.push(r);
     }
     return out;
   }
@@ -1556,13 +1781,13 @@ export class Resolver {
         const fid = native ? this.alias.get(`${p}:${native}`) : undefined;
         const other = fid ? this.resolveLive(fid) : undefined;
         if (!other || other === node || other.state !== 'live') continue;
-        if (other.provenance.some((r) => r.provider === p && r.nativeId === native) && !Resolver.nodesDistinct(node, other)) return true;
+        if (other.provenance.some((r) => r.provider === p && r.nativeId === native) && !this.nodesDistinct(node, other)) return true;
       }
       if (raw.provider === COMCAT_PROVIDER && id !== raw.providerEventId) {
         const other = this.comcatSibling(node, id);
         // Judged with the report in place of its stored row: its `ids` are what changed.
         const after = { ...node, provenance: node.provenance.map((r) => (r.provider === raw.provider && r.nativeId === raw.providerEventId ? this.makeRow(raw) : r)) };
-        if (other && !Resolver.nodesDistinct(after, other)) return true;
+        if (other && !this.nodesDistinct(after, other)) return true;
       }
     }
     return false;
@@ -1619,7 +1844,7 @@ export class Resolver {
       if (hotOnly && other.eventTimeMs < this.hotFloor) return null;
       seen.add(other.feedId);
       const link = Resolver.comcatLink(node, other, id) ?? Resolver.comcatLink(other, node, id);
-      if (!link || Resolver.nodesDistinct(node, other)) return null;
+      if (!link || this.nodesDistinct(node, other)) return null;
       return { node: other, reason: `exact id: ComCat ${link} names ${id}, the id of the ${Resolver.comcatHolder(node, other, id)} report` };
     };
     for (const r of node.provenance) {
@@ -1636,7 +1861,7 @@ export class Resolver {
         }
         if (r.provider === COMCAT_PROVIDER && id !== r.nativeId) {
           const other = this.comcatSibling(node, id);
-          if (other && !Resolver.nodesDistinct(node, other)) {
+          if (other && !this.nodesDistinct(node, other)) {
             return { node: other, reason: `exact id: ComCat ${r.nativeId} lists ${id}, ComCat's own row of the other event` };
           }
         }
@@ -1802,10 +2027,39 @@ export class Resolver {
     return out;
   }
 
+  /** The live events of the hot window whose stored representative is a row the current rules never let represent
+   *  them while they hold another (outrankedRows: an out-of-region row of a REGION_RULES provider beside a partner's
+   *  own solution, round 26 review; supersededAutomaticRows: an automatic row beside its reviewed twin, round 27). An
+   *  event keeps its representative until one of its rows changes, so such an event, positioned before the rule, kept
+   *  it (efd_01M4W5P9F0ZAGGCN86AH8ZGDTR, 2026-10-14 03:00: OVSICORI's automatic M4.2 174 km from EMSC's own M4.7).
+   *  Each is re-derived (preferred) and moves a revision; event-time order, then feed id. Run before the heal (heal.ts
+   *  runFeedSideSteps), so the merge pass sees the representative the rules give. A no-op once nothing is left, and
+   *  when merge=false. Every other event keeps its stored representative (a priority or richness change is not
+   *  re-applied here). */
+  rederiveOutranked(ingestTime: string): EventNode[] {
+    const out: EventNode[] = [];
+    if (!this.mergePass) return out;
+    const nodes = [...this.eventMap.values()]
+      .filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor && n.provenance.length > 1)
+      .sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : a.feedId > b.feedId ? 1 : 0));
+    for (const node of nodes) {
+      const chosen = node.provenance.find((r) => r.chosen);
+      if (!chosen) continue;
+      if (!Resolver.outrankedRows(node.provenance).has(chosen) && !this.supersededAutomaticRows(node.provenance).includes(chosen)) continue;
+      if (this.preferred(node.provenance) === chosen) continue;
+      this.reposition(node);
+      node.revision += 1;
+      node.lastIngestTime = ingestTime;
+      out.push(node);
+    }
+    return out;
+  }
+
   /** Drop one provenance row from a live node: tombstone it when none is left, else re-derive
    *  the representative and run the merge pass (the solution may have moved; not when `fold` is false). */
   private withdrawRow(node: EventNode, idx: number, ingestTime: string, fold = true): IngestResult {
-    node.provenance.splice(idx, 1);
+    const [gone] = node.provenance.splice(idx, 1);
+    if (gone && REVIEWED_ID_WINDOWS.has(gone.provider)) this.reviewedIndex = null;
     node.revision += 1;
     node.lastIngestTime = ingestTime;
     if (node.provenance.length === 0) {
@@ -1847,8 +2101,8 @@ export class Resolver {
     if (Resolver.lifecycleLocationBlocks(a.provenance, a, b.provenance, b)) {
       return `AEC solution beyond ±${LOCATION_JOIN_DT_MS / 1000} s or |dM| ${LOCATION_JOIN_MAX_DM} of a location join`;
     }
-    if (Resolver.nodesDistinct(a, b)) return 'same provider under distinct native ids';
-    if (dense && !Resolver.nodesShareIdentity(a, b)) return 'dense cell without a shared id';
+    if (this.nodesDistinct(a, b)) return 'same provider under distinct native ids';
+    if (dense && !Resolver.nodesShareIdentity(a, b) && !this.reviewedTwinNodes(a, b)) return 'dense cell without a shared id';
     return null;
   }
 
@@ -1889,6 +2143,7 @@ export class Resolver {
     const cands = this.candidates(node);
     for (const r of node.provenance) for (const fid of this.revisedCandidates(r)) cands.add(fid);
     for (const fid of this.farCandidates(node)) cands.add(fid);
+    for (const other of this.reviewedTwinNodesOf(node)) cands.add(other.feedId);
     for (const fid of cands) {
       if (fid === node.feedId) continue;
       const other = this.eventMap.get(fid);
@@ -1921,23 +2176,30 @@ export class Resolver {
   private revisedOnly(a: EventNode, b: EventNode, d: number, dense: boolean): number | null {
     if (!this.reject(a, b, d, dense) || !this.revisedPair(a, b)) return null;
     if (this.moderatePair(a, b) && !this.rejectModerate(a, b, d, this.regionalNodes(a, b))) return null;
-    return Resolver.revisedScore(a, b);
+    return this.revisedScore(a, b);
   }
 
   private foldReason(a: EventNode, b: EventNode): string {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
     const dense = this.pairDense(a, b);
     if (this.revisedOnly(a, b, d, dense) != null) {
-      const pair = a.provenance.flatMap((ra) => b.provenance.filter((rb) => Resolver.revisedIdPair(ra, rb)).map((rb) => [ra, rb] as const))[0]!;
-      const [ra, rb] = pair;
+      const pairs = a.provenance.flatMap((ra) => b.provenance.filter((rb) => Resolver.revisedIdPair(ra, rb) || this.reviewedTwin(ra, rb)).map((rb) => [ra, rb] as const));
+      const [ra, rb] = pairs.find(([x, y]) => Resolver.revisedIdPair(x, y)) ?? pairs[0]!;
       const rd = haversineKm(ra.lat, ra.lon, rb.lat, rb.lon);
       const rdt = Math.abs(ra.eventTimeMs - rb.eventTimeMs) / 1000;
+      if (!Resolver.revisedIdPair(ra, rb)) {
+        const [auto, rev] = ra.status === 'automatic' ? [ra, rb] : [rb, ra];
+        return `reviewed id: ${ra.provider} ${auto.nativeId} automatic / ${rev.nativeId} reviewed d=${rd.toFixed(1)} km dt=${rdt.toFixed(1)} s (events ${d.toFixed(1)} km apart)`;
+      }
       return `revised id: ${ra.provider} ${ra.nativeId} / ${rb.nativeId} d=${rd.toFixed(1)} km dt=${rdt.toFixed(1)} s (events ${d.toFixed(1)} km apart)`;
     }
     const dt = Math.abs(a.eventTimeMs - b.eventTimeMs) / 1000;
     const dM = a.mag != null && b.mag != null ? Math.abs(a.mag - b.mag).toFixed(2) : 'n/a';
     const far = this.farOnly(a, b);
-    if (far) return `proximity: d=${d.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} ${far.provider.toUpperCase()} out-of-region window=${far.km.toFixed(1)} km/${(far.ms / 1000).toFixed(0)} s`;
+    if (far) {
+      const speed = far.speed ? ` (beyond ${far.speed.fromKm} km at ${far.speed.min}–${far.speed.max} km/s)` : '';
+      return `proximity: d=${d.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} ${far.provider.toUpperCase()} out-of-region window=${far.km.toFixed(1)} km/${(far.ms / 1000).toFixed(0)} s${speed}`;
+    }
     const regional = this.regionalNodes(a, b);
     const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b, regional) : null;
     const { km, ms } = moderate ?? this.windows(a, b, dense);

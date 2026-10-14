@@ -153,6 +153,16 @@ export class LogBuffer {
     return false;
   }
 
+  /** Feed-side revisions with no fold and no report behind them (Resolver.rederiveOutranked): one op:correction line per
+   *  node, in order, with `reason`. */
+  recordCorrections(nodes: readonly EventNode[], reason: string): void {
+    for (const node of nodes) {
+      this.seq += 1;
+      node.lastSeq = this.seq;
+      this.lines.push(correctionLine(node, this.seq, this.ingestTime, reason));
+    }
+  }
+
   /** The heal (Resolver.heal): one op:merge line per fold, in fold order, then one
    *  op:correction line per live survivor — the line that carries its new revision. */
   recordHeal(merges: MergeRecord[], survivors: EventNode[], epoch: number): void {

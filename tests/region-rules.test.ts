@@ -113,9 +113,10 @@ test('Panama replay: OVSICORI joins ComCat’s events, USP the M7.7, SCEDC’s t
     assert.equal(holding(map, k).length, 0, k);
     assert.ok(side.some((l) => l.op === 'tombstone' && `${l.provider}:${l.provider_event_id}` === k && l.reason === HELD_REASON), k);
   }
-  // OVSICORI's automatic 1450630 lies inside its region (8.66 N 82.54 W): no rule here touches it.
-  assert.equal(holding(map, 'ovsicori:1450630').length, 1);
-  assert.equal(holding(map, 'ovsicori:1450630')[0]!.provenance.length, 1);
+  // OVSICORI's automatic 1450630 lies inside its region (8.66 N 82.54 W); since round 27 it is its reviewed 1450632's
+  // twin (REVIEWED_ID_WINDOWS) and joins the M6.1 with it, never representing it.
+  assert.deepEqual(holding(map, 'ovsicori:1450630'), m61);
+  assert.equal(m61[0]!.chosenProvider, 'usgs');
   // No row in two live events; nothing above M7.7.
   const keys = live(map).flatMap((n) => n.provenance.map((r) => `${r.provider}:${r.nativeId}`));
   assert.equal(new Set(keys).size, keys.length);
@@ -149,7 +150,8 @@ test('Panama replay in a dense cell: OVSICORI’s M6.8 and SCEDC’s exact twin 
   const { map } = replay(seed);
   const m61 = holding(map, 'usgs:us6000u1wn');
   assert.equal(m61.length, 1);
-  for (const k of ['ovsicori:1450632', 'scedc:10256694']) assert.deepEqual(holding(map, k), m61, k);
+  for (const k of ['ovsicori:1450632', 'scedc:10256694', 'ovsicori:1450630']) assert.deepEqual(holding(map, k), m61, k);
+  assert.equal(m61[0]!.chosenProvider, 'usgs');
 });
 
 // --- the out-of-region window, unit by unit ---

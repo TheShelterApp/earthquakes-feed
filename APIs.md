@@ -538,17 +538,24 @@ one. Because a late event (like a revision or an upstream delete) can still chan
 **Recovered reports.** Some sources publish only a rolling list: TMD's file holds its last 20 events (about 2.5 days).
 When the feed cannot read such a list for longer than that, events leave it unread. TMD keeps a page per event
 (`https://eq.tmd.go.th/EQ<id>`, the `path` its file names), so an aggregate run dispatched by hand with the input
-`recover` (`tmd:17182-17198`: ids and ranges, at most 50; `src/recover.ts`) reads those pages, one request every 1.2 s
-or slower, after the run's live fetches, and ingests them in that run exactly like the source's live rows (the same
-parser, dedup windows and day partitions). Their `op:observe` lines carry a `reason` ("recovered from the provider's
-event page …, N d after origin"), and that run's `status.json` has `recovered` (`asked`, `rows` (the ids ingested),
-`empty`, `held_as`, `outside_window`, `failed`, `unasked`). Only reports inside the 7-day matching window are ingested,
-so frozen days never change; a report the feed already holds changes nothing, so the run can be repeated, for example
-for the ids listed as `failed` or `unasked`. A report TMD named by origin second while its ids were empty (`t2026…`,
-2026-08-18 → 10-13) is not taken again under its number (`held_as`). The alerts gateway reads only today's partition
-and origins of the last 7 hours, so a recovered event is never alerted. On 2026-10-14 this recovered TMD's 17182–17198
-(2026-10-09 11:32 → 10-10 15:02 UTC), the events its file listed while the feed could not read it (2026-10-09 02:00 →
-10-13 18:26: a renewed certificate under another intermediate, then a moved file).
+`recover` (`tmd:17182-17198`: ids of at most 9 digits and ranges, at most 50 ids; `src/recover.ts`) reads those pages,
+one request every 1.2 s or slower, after the run's live fetches, and ingests them in that run exactly like the
+source's live rows (the same parser, dedup windows and day partitions). Their `op:observe` lines carry a `reason`
+("recovered from the provider's event page …, N d after origin"), and that run's `status.json` has `recovered`
+(`asked`, `rows` (the ids ingested), `empty`, `held_as`, `outside_window`, `failed`, `unasked`). Only reports inside
+the 7-day matching window are ingested, so frozen days never change; a report the feed already holds changes nothing,
+so the run can be repeated, for example for the ids listed as `failed` or `unasked`. A report TMD named by origin
+second while its ids were empty (`t2026…`, 2026-08-18 → 10-13) is not taken again under its number (`held_as`). A
+recovered report reaches the alerts gateway like any late report: it alerts only on origins of the last 6 hours (it
+reads today's partition and origins of the last 7 hours), so a report recovered later than that is never alerted,
+while one recovered sooner (a burst of aftershocks can push events out of a 20-row file within hours) can be. On
+2026-10-14 this recovered TMD's 17182–17198 (2026-10-09 11:32 → 10-10 15:02 UTC, 3.6–4.7 days old), the events its
+file listed while the feed could not read it (2026-10-09 02:00 → 10-13 18:26: a renewed certificate under another
+intermediate, then a moved file): 10 new events and 7 joined (6 to EMSC's copies of TMD's own solutions, 0 km and 0 s
+apart; the M4.5 of 10-10 01:23 to the event of CENC's solution and EMSC's copy of it, 26 km and 3 s apart). A second
+run with the same input, made on a copy of the data branch after it, appended nothing. TMD's events of 2026-08-18
+04:34 → 09-30 02:37 UTC (its 16978–17148, 171 events, while its file had empty ids and the feed dropped every row) lie
+in frozen days and are not in the feed.
 
 ## History and backfill
 

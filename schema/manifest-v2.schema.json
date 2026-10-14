@@ -95,6 +95,10 @@
           },
           "mutable_only": {
             "type": "boolean"
+          },
+          "frozen_only": {
+            "type": "boolean",
+            "description": "Serves a day partition only once it is frozen (storage option 4 phase 2): the git origins of the data branch, which gains a day only when it freezes."
           }
         }
       }

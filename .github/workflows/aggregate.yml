@@ -70,11 +70,13 @@ jobs:
       - run: npm ci
       - name: Snapshot the silent-change baseline
         # Before anything writes the data checkout: the day partitions of the live window rebuilt from the event map the
-        # previous derive read (src/live-baseline.ts), into the runner's temp directory, outside .data. derive's
-        # silent-change check verifies them against the sha256 that run recorded; without a snapshot it reads the
-        # committed partitions, so this step never stops the aggregate.
+        # previous derive read (src/live-baseline.ts), into the runner's temp directory, outside .data; a day that differs
+        # from what that derive recorded (it failed after its aggregate commit) is taken from its Pages copy when that
+        # matches. derive's silent-change check verifies every day against the recorded sha256; without a snapshot it
+        # has no baseline for that run (a warning), so this step never stops the aggregate.
         continue-on-error: true
-        # About half a second (the event map of the window); a hang must not eat the job budget the deploy counts on.
+        # About half a second (the event map of the window), plus at most 45 s of Pages requests after a failed derive;
+        # a hang must not eat the job budget the deploy counts on.
         timeout-minutes: 2
         env:
           DATA_DIR: .data

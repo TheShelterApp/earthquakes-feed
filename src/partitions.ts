@@ -43,10 +43,26 @@ export const frozenBefore = (nowMs: number): string => dayFromMs(nowMs - FROZEN_
 export const isFrozenDay = (dayKey: string, nowMs: number): boolean => dayKey < frozenBefore(nowMs) && dayKey !== dayFromMs(nowMs);
 
 /**
- * Pages copy of an unfrozen day partition (round 25, storage option 4 phase 1): the same bytes as the `data` branch file,
- * at the path the v2 manifest's `pages` origin builds (`https://<domain>/` + `partition.path`). The manifest's `url`
- * names it for each unfrozen day it was written for (manifestPartitions). A frozen day is never published here: its
- * immutable copy is jsDelivr `@<data_commit>`.
+ * How long a day keeps its Pages copy, and its manifest `url` on it, after it freezes (storage option 4 phase 2). From
+ * phase 2 the `data` branch gains a day only when it freezes (stage-data.ts), and jsDelivr `@data` resolves the branch
+ * to a commit it caches for up to about 12 hours: for that long `@data/events/<day>` can answer 404 for a day that has
+ * just frozen. A manifest fetched just before midnight also names the Pages copy of the day that freezes at midnight.
+ * For one day after freezing the Pages copy stays deployed and `url` names it (the bytes are the frozen file's); then
+ * `url` is jsDelivr `@data`.
+ */
+export const PAGES_PARTITION_GRACE_DAYS = 1;
+
+/** A day whose partition derive copies to Pages at `nowMs`: every unfrozen day, and for PAGES_PARTITION_GRACE_DAYS the
+ *  days frozen since. */
+export const hasPagesPartition = (dayKey: string, nowMs: number): boolean =>
+  !isFrozenDay(dayKey, nowMs - PAGES_PARTITION_GRACE_DAYS * 86_400_000);
+
+/**
+ * Pages copy of an unfrozen day partition (round 25, storage option 4 phase 1): the same bytes as the file derive writes
+ * to the data checkout, at the path the v2 manifest's `pages` origin builds (`https://<domain>/` + `partition.path`).
+ * The manifest's `url` names it for each day it was written for (manifestPartitions). From phase 2 the unfrozen days are
+ * not committed, so this copy is their only published one; a day keeps it for PAGES_PARTITION_GRACE_DAYS after it
+ * freezes (hasPagesPartition), then its copy is jsDelivr `@data` / `@<data_commit>` only.
  */
 export const pagesPartitionUrl = (dayKey: string): string => `${DOMAIN}/${partitionPath(dayKey)}`;
 
@@ -104,9 +120,10 @@ export function readDayPartitionNodes(root: string, dayKey: string): EventNode[]
 }
 
 /**
- * Write one UTC day's partition: plain NDJSON in the tree (the byte-compare leaves an unchanged
- * day alone; a changed one costs the repository about one compressed copy per GitHub roll-up,
- * APIs.md Repository size) plus, for recent days, a ready-to-render GeoJSON on Pages.
+ * Write one UTC day's partition: plain NDJSON in the data checkout (the byte-compare leaves an unchanged
+ * day alone; a changed one cost the repository about one compressed copy per GitHub roll-up while the
+ * unfrozen days were committed, APIs.md Repository size; from phase 2 only a frozen day's file is
+ * committed, stage-data.ts) plus, for recent days, a ready-to-render GeoJSON on Pages.
  * Includes ALL node states (live/tombstoned/superseded) so the round-trip is lossless.
  * The Pages day file carries the live events full-fat plus, in compact form, the recently
  * retired ones (superseded or tombstoned) flagged non-live (publishesRetired) — the summaries
@@ -206,10 +223,10 @@ export interface ManifestPartition {
  *  advertised while only the ~45-day event-map load existed on Pages: 104/121 were 404s).
  *  Older days resolve through `url` (jsDelivr NDJSON, full-fat).
  *
- *  `pagesNdjsonDays` = the unfrozen days whose NDJSON partition this run copied to Pages (writePagesPartition): their
- *  `url` is that copy, always the current bytes, instead of jsDelivr `@data` (cached up to 12 h). A frozen day keeps
- *  `@data` whatever the set says; so does an unfrozen day missing from it (`url` only ever names a file that exists).
- *  `path`, `pages_url` and the v2 `sha256` (the same bytes) do not change. */
+ *  `pagesNdjsonDays` = the days whose NDJSON partition this run copied to Pages (writePagesPartition; derive copies the
+ *  days of hasPagesPartition): their `url` is that copy, always the current bytes, instead of jsDelivr `@data` (cached
+ *  up to 12 h; from phase 2 it holds a day only once the day is frozen). A day missing from the set keeps `@data` (`url`
+ *  only ever names a file that exists). `path`, `pages_url` and the v2 `sha256` (the same bytes) do not change. */
 export function manifestPartitions(
   inv: Inventory,
   nowMs: number,
@@ -227,7 +244,7 @@ export function manifestPartitions(
       return {
         date,
         path,
-        url: !frozen && pagesNdjsonDays?.has(date) ? pagesPartitionUrl(date) : `${JSDELIVR_BASE}@data/${path}`,
+        url: pagesNdjsonDays?.has(date) ? pagesPartitionUrl(date) : `${JSDELIVR_BASE}@data/${path}`,
         ...(onPages && date >= pagesFloor ? { pages_url: `${DOMAIN}/v1/events/${date}.geojson` } : {}),
         count: s.count,
         bytes: s.bytes,

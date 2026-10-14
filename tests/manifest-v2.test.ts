@@ -72,6 +72,27 @@ test('advertises the R2 cdn origin first when r2PublicBase is set', () => {
   assert.equal(build().origins[0]!.id, 'pages', 'no r2PublicBase → no cdn origin');
 });
 
+test('storage option 4 phase 2: the git origins of the data branch are frozen_only, Pages, R2 and Releases are not', () => {
+  const m = build({ r2PublicBase: 'https://data-staging.theshelter.app' });
+  assert.deepEqual(
+    m.origins.map((o) => [o.id, o.frozen_only === true]),
+    [
+      ['cdn', false],
+      ['pages', false],
+      ['jsdelivr-sha', true],
+      ['raw-sha', true],
+      ['raw-data', true],
+      ['release', false],
+    ],
+  );
+  // An older reader ignores the new key: the other fields are what they were.
+  assert.equal(m.origins.find((o) => o.id === 'raw-data')!.mutable_only, true);
+  assert.equal(m.origins.find((o) => o.id === 'jsdelivr-sha')!.max_object_bytes, 20_000_000);
+  // The schema names it, and keeps accepting origins without it.
+  const schema = JSON.parse(readFileSync('schema/manifest-v2.schema.json', 'utf8')) as { properties: { origins: { items: { properties: Record<string, { type: string }> } } } };
+  assert.equal(schema.properties.origins.items.properties['frozen_only']!.type, 'boolean');
+});
+
 test('payload bytes are reproducible across runs and independent of input key order', () => {
   const a = manifestV2Bytes(build());
   const b = manifestV2Bytes(build());

@@ -35,7 +35,7 @@ import {
 import { gh, ghRetry, ghRetryNet, sleepMs } from './gh.js';
 import { GitHubStore } from './history-store.js';
 import { partitionTexts } from './live-baseline.js';
-import { FROZEN_AFTER_DAYS, dayPartitionFile, frozenBefore } from './partitions.js';
+import { FROZEN_AFTER_DAYS, PAGES_PARTITION_GRACE_DAYS, dayPartitionFile, frozenBefore } from './partitions.js';
 import { isoFromMs } from './util.js';
 
 /**
@@ -236,17 +236,21 @@ export function reopenChangedDeepMonths(provider: string, cur: SourceCursor, dee
   return reopened;
 }
 
-/** An unfrozen day's partition rebuilt from the event map: `from` is the first unfrozen day (partitions.ts
- *  frozenBefore), `text` the day's partition (dayPartitionText; '' for a day without events). */
+/** A recent day's partition rebuilt from the event map: `from` is the first day read so (partitions.ts frozenBefore,
+ *  a grace day earlier), `text` the day's partition (dayPartitionText; '' for a day without events). */
 export interface UnfrozenDays {
   from: string;
   text(day: string): string;
 }
 
-/** UnfrozenDays from the data checkout's event map, loaded once, on the first unfrozen day asked for. */
+/** UnfrozenDays from the data checkout's event map, loaded once, on the first such day asked for. Besides the unfrozen
+ *  days, the days frozen within PAGES_PARTITION_GRACE_DAYS: from storage option 4 phase 2 a day reaches the `data`
+ *  branch with the first derive commit after it freezes, so a checkout taken between midnight and that commit (or
+ *  after a failed derive) does not hold the day that froze at midnight. The event map holds it (45-day horizon), and the
+ *  partition derive commits is the same pure function of it. */
 export function unfrozenFromEventMap(root: string, nowMs: number): UnfrozenDays {
   let byDay: Map<string, string> | null = null;
-  const from = frozenBefore(nowMs);
+  const from = frozenBefore(nowMs - PAGES_PARTITION_GRACE_DAYS * DAY);
   return {
     from,
     text(day) {
@@ -277,9 +281,10 @@ export class PartitionReader {
     archives: ArchiveEntry[],
     private readonly download: (e: { tag: string; asset: string }, intoDir: string) => void = downloadArchive,
     private readonly deep: DeepHistory = { boundary: null, current: new Map(), start: null },
-    /** Days the 5-minute run can still change: read from the event map, never from the tree, which holds such a day
-     *  only until storage option 4 phase 2 (APIs.md Repository size). The walk stops at the last frozen day; only a
-     *  one-off FIRST_SOLUTIONS_DAYS slice reaches these. */
+    /** Days the 5-minute run can still change, and the day that froze last: read from the event map, never from the
+     *  tree, which from storage option 4 phase 2 holds a day only from the first derive commit after it froze (APIs.md
+     *  Repository size). The walk stops at the last frozen day; only a one-off FIRST_SOLUTIONS_DAYS slice reaches the
+     *  unfrozen ones. */
     private readonly unfrozen: UnfrozenDays | null = null,
   ) {
     for (const a of archives) for (const d of a.days ?? []) this.archivedDay.set(d, a);

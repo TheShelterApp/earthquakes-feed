@@ -46,6 +46,12 @@ export interface OriginTemplate {
   max_object_bytes?: number;
   /** Serves only the moving head (raw@data) — never used for sha-pinned immutables. */
   mutable_only?: boolean;
+  /**
+   * Serves a day partition only once it is frozen (storage option 4 phase 2): the git origins (`jsdelivr-sha`,
+   * `raw-sha`, `raw-data`) read the `data` branch, which gains a day only when it freezes, so an unfrozen partition
+   * answers 404 there; take `pages` (or `cdn`) for it. Summaries were never on these origins (Pages only).
+   */
+  frozen_only?: boolean;
 }
 
 export interface ChangesRef {
@@ -118,14 +124,16 @@ function changesRef(c: { path: string; bytes: Uint8Array }): ChangesRef {
 }
 
 /** Origin templates for a given data commit. When `r2Base` is set (SD-E2) the R2 custom domain is
- *  the preferred `cdn` origin, ahead of Pages and the GitHub mirrors. */
+ *  the preferred `cdn` origin, ahead of Pages and the GitHub mirrors. The GitHub origins of the `data`
+ *  branch are `frozen_only` (storage option 4 phase 2): Pages holds every unfrozen day partition and,
+ *  for a day after freezing, the day that froze (partitions.ts hasPagesPartition). */
 export function originsFor(dataCommit: string, r2Base?: string): OriginTemplate[] {
   return [
     ...(r2Base ? [{ id: 'cdn', base: r2Base.endsWith('/') ? r2Base : `${r2Base}/` }] : []),
     { id: 'pages', base: PAGES_BASE },
-    { id: 'jsdelivr-sha', base: `${JSDELIVR_BASE}@${dataCommit}/`, max_object_bytes: 20_000_000 },
-    { id: 'raw-sha', base: `https://raw.githubusercontent.com/${REPO}/${dataCommit}/` },
-    { id: 'raw-data', base: `https://raw.githubusercontent.com/${REPO}/data/`, mutable_only: true },
+    { id: 'jsdelivr-sha', base: `${JSDELIVR_BASE}@${dataCommit}/`, max_object_bytes: 20_000_000, frozen_only: true },
+    { id: 'raw-sha', base: `https://raw.githubusercontent.com/${REPO}/${dataCommit}/`, frozen_only: true },
+    { id: 'raw-data', base: `https://raw.githubusercontent.com/${REPO}/data/`, mutable_only: true, frozen_only: true },
     { id: 'release', base: `https://github.com/${REPO}/releases/download/` },
   ];
 }

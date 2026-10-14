@@ -74,7 +74,9 @@ jobs:
         run: |
           git config user.name  "earthquakes-feed-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add events knowledge
+          # Storage option 4 phase 2: never an unfrozen day partition (src/stage-data.ts). Backfill writes only days
+          # before the event map's horizon, so none is expected; the staging guarantees it.
+          ( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/stage-data.ts events knowledge )
           git commit -m "backfill: @ $(date -u +%FT%TZ)" || { echo 'no changes'; exit 0; }
           # Fail-loud push loop (H3; tests/push-data.test.ts): a concurrent writer's commit is rebased onto, a conflict
           # aborts the rebase and fails.

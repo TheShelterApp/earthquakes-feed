@@ -9,24 +9,31 @@ import { eventDayKey, loadEventMap, saveEventMap } from '../src/bitemporal.js';
 import {
   LIVE_BASELINE_FILE,
   LIVE_BASELINE_SNAPSHOT_META,
+  PAGES_RECOVERY_BUDGET_MS,
   baselineDays,
   baselineRecord,
   partitionTexts,
   previousWindowLines,
   readBaselineRecord,
   readBaselineSnapshot,
+  recoverFromPages,
+  sha256Hex,
+  whyRecordUnused,
   writeBaselineRecord,
   writeBaselineSnapshot,
 } from '../src/live-baseline.js';
 import { detectSilentChanges, liveWindowDays, silentChangesAgainst } from '../src/live-sync.js';
-import { dayPartitionFile, dayPartitionText, writeDayPartition } from '../src/partitions.js';
+import { dayPartitionFile, dayPartitionText, partitionPath, writeDayPartition } from '../src/partitions.js';
 import { LogBuffer } from '../src/oplog.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import type { EventNode, RawObs } from '../src/types.js';
 
-// Round 25, storage option 4 phase 1: derive's silent-change check (PRB-2) takes the previous run's lines from the event
-// map the job checked out (a snapshot, verified against the sha256 that run recorded), not from the day partitions it
-// committed, so phase 2 can stop committing the unfrozen days. These tests hold the two sources to the same answer.
+// Round 25, storage option 4: derive's silent-change check (PRB-2) takes the previous run's lines from the event map the
+// job checked out (a snapshot, verified against the sha256 that run recorded), not from the day partitions it committed.
+// Phase 2 stops committing the unfrozen days: a day the previous derive did not publish from the checked-out event map
+// (it failed after its aggregate commit) comes from that derive's Pages copy, verified the same way, or has no baseline.
+// These tests hold the snapshot to the answer of the committed partitions (live-sync.ts detectSilentChanges, the
+// reference) while they exist, and show it without them.
 
 const here = (rel: string): string => fileURLToPath(new URL(rel, import.meta.url));
 const registry = loadRegistry(here('../providers/registry.json'));
@@ -109,19 +116,38 @@ function deriveRun(root: string, nowMs: number, headSeq: number): void {
   writeFileSync(join(root, 'manifest.json'), JSON.stringify({ generated: nowMs, head_seq: headSeq }));
 }
 
-/** The snapshot step on the checkout `root` at `nowMs` (src/live-baseline.ts main). */
-function snapshot(root: string, dir: string, nowMs: number): void {
+/** The snapshot step on the checkout `root` at `nowMs` (src/live-baseline.ts main), with the Pages fallback when a
+ *  `pages` fetch is given (the previous derive's deployed copies). */
+async function snapshot(root: string, dir: string, nowMs: number, pages?: typeof fetch): Promise<string[]> {
   const map = loadEventMap(root, { nowMs });
   const days = baselineDays(nowMs);
-  writeBaselineSnapshot(dir, days, partitionTexts(map.values(), days), { taken_at: nowMs, head_seq: 0 });
+  const texts = partitionTexts(map.values(), days);
+  const record = readBaselineRecord(root);
+  const prev = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8')) as { generated: number; head_seq: number };
+  const recovered =
+    pages && record && whyRecordUnused(record, prev, 'n/a') == null
+      ? (await recoverFromPages({ days, texts, record, base: 'https://pages.test/', fetchImpl: pages })).recovered
+      : [];
+  writeBaselineSnapshot(dir, days, texts, { taken_at: nowMs, head_seq: 0, from_pages: recovered });
+  return recovered;
 }
 
-/** derive's check at `nowMs`: the new baseline, and the committed partitions' check beside it. */
+/** A Pages origin serving the day partitions in `files` (path -> text); anything else is a 404. */
+function pagesServing(files: Map<string, string>, asked: string[] = []): typeof fetch {
+  return (async (url: string | URL | Request) => {
+    const path = String(url).replace('https://pages.test/', '');
+    asked.push(path);
+    const body = files.get(path);
+    return body == null ? new Response('not found', { status: 404 }) : new Response(body, { status: 200 });
+  }) as typeof fetch;
+}
+
+/** derive's check at `nowMs`: the baseline, and the committed partitions' check (the reference) beside it. */
 function check(root: string, snapDir: string | undefined, nowMs: number) {
   const prev = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8')) as { generated: number; head_seq: number };
   const nodes = [...loadEventMap(root, { nowMs }).values()];
   const days = liveWindowDays(nowMs);
-  const previous = previousWindowLines({ root, days, record: readBaselineRecord(root), prev, snapshot: readBaselineSnapshot(snapDir), compare: true });
+  const previous = previousWindowLines({ days, record: readBaselineRecord(root), prev, snapshot: readBaselineSnapshot(snapDir) });
   return {
     previous,
     fromBaseline: silentChangesAgainst(previous.lines, nodes, days, prev.head_seq),
@@ -149,12 +175,15 @@ test('baselineDays covers the live window of any derive run within a day after t
   }
 });
 
-test('the snapshot of the checked-out event map is byte for byte the partitions the previous derive committed', () => {
+test('the snapshot of the checked-out event map is byte for byte the partitions the previous derive wrote', async () => {
   const { w, root, snap, cleanup } = setup();
   try {
     saveEventMap(root, w.map);
     deriveRun(root, T0, w.seq);
-    snapshot(root, snap, T0 + 2 * 60_000);
+    // A Pages fallback is never asked when every day matches the record.
+    const asked: string[] = [];
+    assert.deepEqual(await snapshot(root, snap, T0 + 2 * 60_000, pagesServing(new Map(), asked)), []);
+    assert.deepEqual(asked, []);
     const s = readBaselineSnapshot(snap)!;
     let days = 0;
     for (const day of baselineDays(T0 + 2 * 60_000)) {
@@ -171,25 +200,24 @@ test('the snapshot of the checked-out event map is byte for byte the partitions 
   }
 });
 
-test('a silent change is found from the snapshot alone, with or without the committed partitions', () => {
+test('a silent change is found from the snapshot alone, with or without the committed partitions', async () => {
   const { w, root, snap, target, cleanup } = setup();
   try {
     saveEventMap(root, w.map);
     deriveRun(root, T0, w.seq);
     // The next job: the snapshot step, then an aggregate run that revises the GEOFON row (no new seq), then derive.
-    snapshot(root, snap, T0 + 2 * 60_000);
+    await snapshot(root, snap, T0 + 2 * 60_000);
     silentRevision(w, T0 + 3 * 60_000, target, 'GFZ-rev');
     saveEventMap(root, w.map);
     const nowMs = T0 + 4 * 60_000;
     const a = check(root, snap, nowMs);
     assert.equal(a.previous.recordUnused, null);
     assert.deepEqual(a.previous.fromSnapshot, liveWindowDays(nowMs), 'every window day from the snapshot');
-    assert.deepEqual(a.previous.fromPartitions, []);
-    assert.deepEqual(a.previous.partitionDiffers, []);
+    assert.deepEqual(a.previous.missing, []);
     assert.deepEqual(a.fromBaseline, [target.feedId]);
-    assert.deepEqual(a.fromPartitions, a.fromBaseline, 'the committed partitions give the same');
+    assert.deepEqual(a.fromPartitions, a.fromBaseline, 'the committed partitions (the reference) give the same');
 
-    // Phase 2: the unfrozen partitions are not on `data` any more; the snapshot still finds it.
+    // Phase 2: the unfrozen partitions are not on `data` (a fresh checkout has none); the snapshot still finds it.
     for (const day of liveWindowDays(nowMs)) if (existsSync(dayPartitionFile(root, day))) unlinkSync(dayPartitionFile(root, day));
     const b = check(root, snap, nowMs);
     assert.deepEqual(b.fromBaseline, [target.feedId]);
@@ -199,24 +227,47 @@ test('a silent change is found from the snapshot alone, with or without the comm
   }
 });
 
-test('after a derive that failed, the changed days fall back to the committed partitions, and nothing is lost', () => {
+test("after a derive that failed, the changed day comes from that run's Pages copy, verified by the record", async () => {
   const { w, root, snap, target, cleanup } = setup();
   try {
     saveEventMap(root, w.map);
-    deriveRun(root, T0, w.seq); // run N-2: committed
-    // Run N-1: the aggregate commits a silent revision, its derive fails (nothing of it is committed).
+    deriveRun(root, T0, w.seq); // run N-2: committed and deployed
+    const day = eventDayKey(target.eventTimeMs);
+    // What N-2 deployed to Pages: its partitions of the unfrozen days (partitions.ts writePagesPartition).
+    const deployed = new Map<string, string>();
+    for (const d of baselineDays(T0)) if (existsSync(dayPartitionFile(root, d))) deployed.set(partitionPath(d), readFileSync(dayPartitionFile(root, d), 'utf8'));
+    // Run N-1: the aggregate commits a silent revision, its derive fails (nothing of it is committed or deployed).
     silentRevision(w, T0 + 3 * 60_000, target, 'GFZ-rev');
     saveEventMap(root, w.map);
-    // Run N checks out N-1's event map with N-2's partitions, record and manifest.
-    snapshot(root, snap, T0 + 6 * 60_000);
+    // Run N checks out N-1's event map with N-2's record and manifest, and no unfrozen partition (phase 2).
+    for (const d of baselineDays(T0)) if (existsSync(dayPartitionFile(root, d))) unlinkSync(dayPartitionFile(root, d));
     const nowMs = T0 + 8 * 60_000;
+
+    // Without the Pages fallback the revised day has no baseline, and the change is not found: the phase-2 loss.
+    await snapshot(root, snap, T0 + 6 * 60_000);
+    const bare = check(root, snap, nowMs);
+    assert.deepEqual(bare.previous.missing, [day], "the revised day's snapshot is not what N-2 wrote");
+    assert.equal(bare.previous.fromSnapshot.length, liveWindowDays(nowMs).length - 1);
+    assert.deepEqual(bare.fromBaseline, []);
+
+    // With it: only the mismatched day is fetched, its sha256 is the record's, and the change is found.
+    const asked: string[] = [];
+    assert.deepEqual(await snapshot(root, snap, T0 + 6 * 60_000, pagesServing(deployed, asked)), [day]);
+    assert.deepEqual(asked, [partitionPath(day)]);
+    assert.deepEqual([...readBaselineSnapshot(snap)!.fromPages], [day]);
     const a = check(root, snap, nowMs);
-    const day = eventDayKey(target.eventTimeMs);
-    assert.deepEqual(a.previous.fromPartitions, [day], "the revised day's snapshot is not what N-2 wrote");
-    assert.equal(a.previous.fromSnapshot.length, liveWindowDays(nowMs).length - 1);
+    assert.deepEqual(a.previous.missing, []);
+    assert.deepEqual(a.previous.fromSnapshot, liveWindowDays(nowMs));
     assert.deepEqual(a.fromBaseline, [target.feedId], 'the change N-1 never published is still found');
-    assert.deepEqual(a.fromPartitions, a.fromBaseline);
+
+    // Pages one run older than the record (N-2 committed, its deploy failed): not used, the day has no baseline.
+    const older = new Map(deployed);
+    older.set(partitionPath(day), deployed.get(partitionPath(day))!.replace('"GFZ"', '"GFZ-older"'));
+    assert.deepEqual(await snapshot(root, snap, T0 + 6 * 60_000, pagesServing(older)), []);
+    assert.deepEqual(check(root, snap, nowMs).previous.missing, [day]);
+
     // Without the record's check the snapshot would have taken N-1's line as the previous one and missed it.
+    await snapshot(root, snap, T0 + 6 * 60_000);
     const naive = new Map<string, string>();
     for (const line of readFileSync(join(snap, 'events', ...day.split('-')) + '.ndjson', 'utf8').split('\n')) if (line) naive.set((JSON.parse(line) as { id: string }).id, line);
     assert.deepEqual(silentChangesAgainst(naive, [target], liveWindowDays(nowMs), w.seq), []);
@@ -225,33 +276,40 @@ test('after a derive that failed, the changed days fall back to the committed pa
   }
 });
 
-test('the record is used only with the manifest of its own run, and only with a snapshot', () => {
+test('the record is used only with the manifest of its own run, and only with a snapshot', async () => {
   const { w, root, snap, target, cleanup } = setup();
   try {
     saveEventMap(root, w.map);
     deriveRun(root, T0, w.seq);
-    snapshot(root, snap, T0 + 2 * 60_000);
+    await snapshot(root, snap, T0 + 2 * 60_000);
     silentRevision(w, T0 + 3 * 60_000, target, 'GFZ-rev');
     saveEventMap(root, w.map);
     const nowMs = T0 + 4 * 60_000;
+    const window = liveWindowDays(nowMs);
 
-    // A manifest of another run (a record left from an older derive): every day from the partitions.
+    // A manifest of another run (a record left from an older derive): no day has a baseline.
     writeFileSync(join(root, 'manifest.json'), JSON.stringify({ generated: T0 + 1, head_seq: w.seq }));
     const other = check(root, snap, nowMs);
     assert.match(other.previous.recordUnused ?? '', /live_baseline\.json is from the run of/);
     assert.deepEqual(other.previous.fromSnapshot, []);
-    assert.deepEqual(other.fromBaseline, [target.feedId]);
+    assert.deepEqual(other.previous.missing, window);
+    assert.deepEqual(other.fromBaseline, []);
+    // ...and the snapshot step does not ask Pages for a record of another run.
+    const asked: string[] = [];
+    await snapshot(root, snap, T0 + 2 * 60_000, pagesServing(new Map(), asked));
+    assert.deepEqual(asked, []);
     writeFileSync(join(root, 'manifest.json'), JSON.stringify({ generated: T0, head_seq: w.seq }));
+    await snapshot(root, snap, T0 + 2 * 60_000);
 
-    // No snapshot (the step failed): the partitions.
+    // No snapshot (the step failed): no baseline.
     const none = check(root, undefined, nowMs);
     assert.equal(none.previous.recordUnused, 'no snapshot');
-    assert.deepEqual(none.fromBaseline, [target.feedId]);
+    assert.deepEqual(none.previous.missing, window);
     // A snapshot cut short (no metadata file) reads as none.
     rmSync(join(snap, LIVE_BASELINE_SNAPSHOT_META));
     assert.equal(readBaselineSnapshot(snap), null);
 
-    // No record (the first run with this code): the partitions.
+    // No record: no baseline.
     rmSync(join(root, LIVE_BASELINE_FILE));
     assert.equal(readBaselineRecord(root), null);
     assert.equal(check(root, snap, nowMs).previous.recordUnused, `no ${LIVE_BASELINE_FILE}`);
@@ -260,20 +318,68 @@ test('the record is used only with the manifest of its own run, and only with a 
   }
 });
 
-test('a committed partition that differs from the verified snapshot is named (phase 1 check)', () => {
-  const { w, root, snap, cleanup } = setup();
-  try {
-    saveEventMap(root, w.map);
-    deriveRun(root, T0, w.seq);
-    snapshot(root, snap, T0 + 2 * 60_000);
-    const day = eventDayKey(T0 - DAY);
-    writeFileSync(dayPartitionFile(root, day), readFileSync(dayPartitionFile(root, day), 'utf8').replace('"mag":', '"mag": '));
-    const a = check(root, snap, T0 + 4 * 60_000);
-    assert.deepEqual(a.previous.partitionDiffers, [day]);
-    assert.ok(a.previous.fromSnapshot.includes(day), 'the snapshot, verified by the record, is still used');
-  } finally {
-    cleanup();
-  }
+test('recoverFromPages: only days that differ from a recorded partition, verified, bounded, never throwing', async () => {
+  const days = ['2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04', '2026-10-05'];
+  const good = 'a\n';
+  const record = {
+    generated: T0,
+    head_seq: 1,
+    days: { '2026-10-01': sha256Hex(good), '2026-10-02': null, '2026-10-03': sha256Hex(good), '2026-10-04': sha256Hex(good), '2026-10-05': sha256Hex(good) },
+  };
+  // 10-01 matches already; 10-02 had no partition; 10-03 is on Pages; 10-04 is on Pages with other bytes; 10-05 fails.
+  const texts = new Map([
+    ['2026-10-01', good],
+    ['2026-10-02', 'new\n'],
+    ['2026-10-03', 'changed\n'],
+    ['2026-10-04', 'changed\n'],
+    ['2026-10-05', 'changed\n'],
+  ]);
+  const asked: string[] = [];
+  const fetchImpl = (async (url: string | URL | Request) => {
+    const path = String(url).replace('https://pages.test/', '');
+    asked.push(path);
+    if (path === partitionPath('2026-10-03')) return new Response(good, { status: 200 });
+    if (path === partitionPath('2026-10-04')) return new Response('other\n', { status: 200 });
+    throw new Error('connection reset');
+  }) as typeof fetch;
+  const r = await recoverFromPages({ days, texts, record, base: 'https://pages.test/', fetchImpl });
+  assert.deepEqual(asked, ['2026-10-03', '2026-10-04', '2026-10-05'].map(partitionPath));
+  assert.deepEqual(r.recovered, ['2026-10-03']);
+  assert.deepEqual(r.failed, ['2026-10-04 (the Pages copy is not the recorded partition)', '2026-10-05 (connection reset)']);
+  assert.equal(texts.get('2026-10-03'), good);
+  assert.equal(texts.get('2026-10-04'), 'changed\n', 'an unverified copy never replaces the rebuild');
+  assert.equal(texts.get('2026-10-02'), 'new\n', 'a day recorded without a partition is not fetched');
+
+  // An HTTP error, and the time budget: once spent, no more requests.
+  let t = 0;
+  const slow = (async () => {
+    t += PAGES_RECOVERY_BUDGET_MS;
+    return new Response('gone', { status: 404 });
+  }) as typeof fetch;
+  const texts2 = new Map(days.map((d) => [d, 'changed\n']));
+  const r2 = await recoverFromPages({ days, texts: texts2, record, base: 'https://pages.test/', fetchImpl: slow, nowMs: () => t });
+  assert.deepEqual(r2.recovered, []);
+  assert.deepEqual(r2.failed, ['2026-10-01 (HTTP 404)', '2026-10-03 (no time left)', '2026-10-04 (no time left)', '2026-10-05 (no time left)']);
+});
+
+test('a day the previous derive wrote no partition of has a verified, empty baseline, whatever the snapshot holds', () => {
+  // Replayed 10-12 00:12 UTC as if the 00:07 derive had failed: the 00:02 derive saw no event of 10-12 yet (record
+  // null), the failed run's aggregate added the day's first ones, so the snapshot holds a partition the record never
+  // named. That is no missing baseline: the previous run had no line of that day.
+  const line = (id: string): string => `{"type":"Feature","id":"${id}","properties":{}}\n`;
+  const texts = new Map([
+    ['2026-10-11', line('efd_a')],
+    ['2026-10-12', line('efd_new')],
+  ]);
+  const snapshot = { covered: new Set(texts.keys()), fromPages: new Set<string>(), text: (d: string) => texts.get(d) ?? null };
+  const record = { generated: T0, head_seq: 7, days: { '2026-10-11': sha256Hex(line('efd_a')), '2026-10-12': null } };
+  const p = previousWindowLines({ days: ['2026-10-11', '2026-10-12'], record, prev: { generated: T0, head_seq: 7 }, snapshot });
+  assert.deepEqual(p.missing, []);
+  assert.deepEqual(p.fromSnapshot, ['2026-10-11', '2026-10-12']);
+  assert.deepEqual([...p.lines.keys()], ['efd_a'], 'no line of a day the previous run had no partition of');
+  // A day the record does not name at all is still missing.
+  const other = previousWindowLines({ days: ['2026-10-13'], record, prev: { generated: T0, head_seq: 7 }, snapshot });
+  assert.deepEqual(other.missing, ['2026-10-13']);
 });
 
 test('the record: the days around the window, null for a day without a partition, about a kilobyte', () => {

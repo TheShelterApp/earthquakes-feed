@@ -10,9 +10,11 @@ import { PartitionReader, unfrozenFromEventMap } from '../src/first-solutions-co
 import { PAGES_BASE } from '../src/manifest-v2.js';
 import {
   FROZEN_AFTER_DAYS,
+  PAGES_PARTITION_GRACE_DAYS,
   dayPartitionFile,
   dayPartitionText,
   frozenBefore,
+  hasPagesPartition,
   isFrozenDay,
   manifestPartitions,
   partitionPath,
@@ -25,10 +27,11 @@ import {
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import type { EventNode, RawObs } from '../src/types.js';
 
-// Round 25, storage option 4 phase 1: every unfrozen day partition is also on Pages, byte for byte, at the path the v2
+// Round 25, storage option 4: every unfrozen day partition is also on Pages, byte for byte, at the path the v2
 // manifest's `pages` origin builds, and the manifest's `url` names that copy; frozen days keep jsDelivr. No consumer
 // reads `url` for these days today (iOS 437-587 and the gateway take `pages_url`); the copy lets phase 2 stop
-// committing them.
+// committing them. Phase 2: the day that froze last keeps its Pages copy and `url` for a grace day (the `data` branch
+// gains it only at its freezing, and jsDelivr `@data` resolves the branch to a commit up to about 12 h old).
 
 const here = (rel: string): string => fileURLToPath(new URL(rel, import.meta.url));
 const registry = loadRegistry(here('../providers/registry.json'));
@@ -78,18 +81,38 @@ test('frozen days: the boundary is FROZEN_AFTER_DAYS back, and today is never fr
   assert.equal(isFrozenDay(dayOf(NOW + DAY), NOW), false);
 });
 
-test("the manifest's url: the Pages copy for the unfrozen days published this run, jsDelivr @data otherwise", () => {
+test('phase 2: the days with a Pages copy are the unfrozen ones and, for a grace day, the day that froze last', () => {
+  assert.equal(PAGES_PARTITION_GRACE_DAYS, 1);
+  const lastFrozen = dayOf(NOW - (FROZEN_AFTER_DAYS + 1) * DAY);
+  assert.equal(isFrozenDay(lastFrozen, NOW), true);
+  assert.equal(hasPagesPartition(lastFrozen, NOW), true, 'frozen at midnight: still on Pages today');
+  assert.equal(hasPagesPartition(dayOf(NOW - (FROZEN_AFTER_DAYS + 2) * DAY), NOW), false);
+  for (let d = 0; d <= FROZEN_AFTER_DAYS; d++) assert.equal(hasPagesPartition(dayOf(NOW - d * DAY), NOW), true);
+  assert.equal(hasPagesPartition(dayOf(NOW + DAY), NOW), true, 'tomorrow (the future leeway)');
+  // At 23:59 and 00:01: the day that freezes at midnight keeps its copy across it; the one before loses it at midnight.
+  const before = Date.parse('2026-10-14T23:59:00Z');
+  const after = Date.parse('2026-10-15T00:01:00Z');
+  assert.equal(isFrozenDay('2026-10-04', before), false);
+  assert.equal(isFrozenDay('2026-10-04', after), true);
+  assert.equal(hasPagesPartition('2026-10-04', after), true);
+  assert.equal(hasPagesPartition('2026-10-03', before), true);
+  assert.equal(hasPagesPartition('2026-10-03', after), false);
+});
+
+test("the manifest's url: the Pages copy for the days published this run, jsDelivr @data otherwise", () => {
   const inv: Inventory = {};
   for (let d = 0; d <= 14; d++) inv[dayOf(NOW - d * DAY)] = { count: 2, bytes: 100, min_mag: 3, max_mag: 4 };
   inv['2024-01-02'] = { count: 1, bytes: 10, min_mag: 2, max_mag: 2 };
   const unfrozen = Object.keys(inv).filter((d) => !isFrozenDay(d, NOW));
   assert.equal(unfrozen.length, FROZEN_AFTER_DAYS + 1, 'today and the 10 days before it');
-  // derive puts every unfrozen day it wrote in the set; a frozen day in it (it never is) still gets jsDelivr.
-  const published = new Set([...unfrozen.filter((d) => d !== dayOf(NOW - 3 * DAY)), dayOf(NOW - 12 * DAY)]);
+  // derive puts every day it copied in the set: the unfrozen ones and the grace day (here one unfrozen day is missing).
+  const graceDay = dayOf(NOW - (FROZEN_AFTER_DAYS + 1) * DAY);
+  const published = new Set([...unfrozen.filter((d) => d !== dayOf(NOW - 3 * DAY)), graceDay]);
   const parts = manifestPartitions(inv, NOW, new Set(Object.keys(inv)), published);
+  assert.equal(parts.find((p) => p.date === graceDay)!.frozen, true, 'the grace day is frozen and on Pages');
   for (const p of parts) {
     assert.equal(p.path, partitionPath(p.date));
-    const onPages = !p.frozen && published.has(p.date);
+    const onPages = published.has(p.date);
     if (onPages) {
       assert.equal(p.url, `https://earthquakes-feed.theshelter.app/${p.path}`);
       assert.equal(p.url, PAGES_BASE + p.path, "the v2 manifest's `pages` origin builds the same URL");
@@ -98,7 +121,7 @@ test("the manifest's url: the Pages copy for the unfrozen days published this ru
       assert.equal(p.url, `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/${p.path}`, p.date);
     }
   }
-  assert.equal(parts.filter((p) => p.url.startsWith(PAGES_BASE)).length, FROZEN_AFTER_DAYS, 'one unfrozen day was not published');
+  assert.equal(parts.filter((p) => p.url.startsWith(PAGES_BASE)).length, FROZEN_AFTER_DAYS + 1, 'one unfrozen day was not published, the grace day was');
   // Nothing else in an entry moves: without the set the catalog is what it was before round 25.
   const before = manifestPartitions(inv, NOW, new Set(Object.keys(inv)));
   assert.ok(before.every((p) => p.url.startsWith('https://cdn.jsdelivr.net/')));
@@ -152,6 +175,14 @@ test('first-solutions reads an unfrozen day from the event map, a frozen one fro
     assert.match(expected, /us2x0/);
     assert.equal(await reader.dayText(unfrozenDay), expected);
     assert.equal(await reader.dayText(frozenDay), 'stale\n', 'frozen days keep the tree (or the archives)');
+    // Phase 2: the day that froze last may not be committed yet (the first derive after midnight commits it): it is
+    // read from the event map too.
+    const lastFrozen = dayOf(NOW - (FROZEN_AFTER_DAYS + 1) * DAY);
+    assert.equal(
+      await reader.dayText(lastFrozen),
+      dayPartitionText([...map.values()].filter((n) => eventDayKey(n.eventTimeMs) === lastFrozen)),
+    );
+    assert.match(await reader.dayText(lastFrozen), /us11x0/);
     assert.equal(await reader.dayText(dayOf(NOW + 3 * DAY)), '', 'an unfrozen day without events');
     // Without the event-map reader (the class's default) the tree is read, as before.
     assert.equal(await new PartitionReader(root, []).dayText(unfrozenDay), 'stale\n');

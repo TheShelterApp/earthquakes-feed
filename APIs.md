@@ -845,25 +845,64 @@ about 79 % of the bytes GitHub keeps. The fix (storage option 4) takes them out 
   (*Historical day partitions*); derive's silent-change check reads the previous run's lines from the event map instead
   of the committed partitions (`src/live-baseline.ts`, beside the old check until phase 2). The commits still hold the
   partitions as before, plus the 1 KB `knowledge/index/live_baseline.json`.
-- Phase 2 (from 2026-11-04, announced above): derive stops committing the unfrozen days; a day is committed once, when
-  it freezes. The files stay on disk in the job but out of the commit (`sign-manifest.ts` hashes them for the v2
-  `sha256` and throws on a missing one; `validate.ts` and `publish-r2.ts` read them), so derive-publish's `git add -A`
-  and backfill's and archive's `git add events` must not stage them (they leave the index; history is never
-  rewritten), and the old silent-change check goes. The v2 origins `jsdelivr-sha`, `raw-sha` and `raw-data` then serve
-  frozen partitions only. Expected: about 75–85 % less growth, which the `health` log measures over a week. After that
-  a full repack by GitHub would bring the repository to about 0.8 GB; it is an owner request, and on the Free plan
-  GitHub Support may decline it.
+- Phase 2 (from 2026-11-04, announced above): derive stops committing the unfrozen days. Every writer that stages day
+  partitions (derive-publish, backfill, archive) stages through `src/stage-data.ts`: `git add -A` of its paths, then
+  every `events/YYYY/MM/DD.ndjson` of a day not frozen at that moment leaves the index (`git rm --cached`). The files
+  stay on disk in the job for `sign-manifest.ts` (it hashes them for the v2 `sha256` and throws on a missing one),
+  `validate.ts` and `publish-r2.ts`; the first phase-2 run deletes the 11 unfrozen days from the branch (history is
+  never rewritten). A day is committed once, by the first run after it freezes: derive writes every day of the event
+  map's 45-day horizon into a checkout that lacks it, and the staging reads the clock after derive, so a day that froze
+  between the two is committed by that run. remediate commits only its index, as before. The old silent-change check
+  goes: the previous run's lines come from the event-map snapshot or, for a day a failed derive changed, from that
+  derive's Pages copy, each only when its sha256 is the one `knowledge/index/live_baseline.json` records; a day with
+  neither has no baseline for that run (a warning). The day that froze last keeps its Pages copy and its `url` for one
+  day (`PAGES_PARTITION_GRACE_DAYS`, `src/partitions.ts`), since jsDelivr `@data` may not have it for about 12 hours,
+  and first-solutions reads it from the event map. The v2 origins `jsdelivr-sha`, `raw-sha` and `raw-data` carry
+  `frozen_only: true`. Rollback: a revert; its first run commits the unfrozen days again.
 
-Readers of the committed unfrozen partitions, and what phase 1 did with them: derive's silent-change check (switched to
-the event map, above); the first-solutions one-off slice (`FIRST_SOLUTIONS_DAYS` naming an unfrozen day: switched to
-the event map; the walk itself stops at the last frozen day); `writeDayPartition`'s byte compare (only avoids a
-rewrite); `validate.ts`, `sign-manifest.ts`, `publish-r2.ts` (they read the files derive just wrote: kept on disk);
-`scripts/first-observations.ts` (reads `events/` only for an event the observation log no longer holds, a frozen
-one). They never read an unfrozen day: backfill (days before the earliest event_map shard), archive (months over 120
-days old), onboard and heal (they write the event map), remediate (frozen days, from the Release archives), the deep
-history and the heartbeat Worker. The in-house consumers read Pages: iOS builds 437–587 take `pages_url` for every day
-that has one (all unfrozen days do), `@<data_commit>` for an older frozen day and `url` only for an unfrozen day
-without `pages_url`; the alerts gateway takes `pages_url` and falls back to `url`, checked against the signed `sha256`.
+  Rehearsed before the merge (round 27, 2026-10-14) on local copies of `data`, never pushed (`scripts/phase2/dryrun.sh`,
+  a clock of choice from `scripts/phase2/fake-clock.mjs`, a throwaway signing key), replaying production's aggregate
+  commits of 18:27–18:57 UTC as if they ran at 23:54–00:26: the first run left the 11 unfrozen days out (they left the
+  branch in its commit, 18 paths and 0.6 MB of new blobs); a day froze between derive (23:59:59) and the staging
+  (00:00:01) and was committed by that run, once; with the staging before midnight the first run after it committed
+  the day; later runs committed 6–8 paths and about 0.1 MB of new blobs each, against 4.8–7.6 MB for production's
+  derive commits of the same aggregates. validate and sign-manifest passed every run, every partition on disk was byte
+  for byte production's (136 of 136), and the silent changes equalled production's. A derive that failed: without the
+  Pages copies the next run lost a silent change of the two days the failed run changed; with them it found it.
+  `scripts/live-baseline-replay.ts` over the 115 derive commits of 10-14 10:00–18:48 UTC: 114 of 114 runs equal to the
+  committed partitions' check and to production, every window day from the snapshot; as if every previous derive had
+  failed, 113 of 113 equal, 223 of 904 window days from the Pages copies, none without a baseline (without the Pages
+  copies those 223 days had no baseline and 44 of the 113 runs missed silent changes: 13 found instead of 83).
+
+  Growth, replayed with `scripts/repo-growth/replay.sh` (a roll-up every 12 pushes) over three 24-hour windows ending
+  18:48 UTC, in today's layout and in phase 2's (`relayout.py --frozen-only 10`):
+
+  | Window | Pushes | Today | Phase 2 | Less | Day partitions after an all-into-one repack |
+  |---|---|---|---|---|---|
+  | to 10-12 | 630 | 23.9 MB | 8.9 MB | 63 % | 14.1 → 0.34 MB |
+  | to 10-13 | 616 | 27.3 MB | 10.5 MB | 61 % | 18.5 → 0.33 MB |
+  | to 10-14 (doubled dispatches 04:40–10:05) | 749 | 35.5 MB | 10.0 MB | 72 % | 23.8 → 0.30 MB |
+
+  The day partitions drop to the one day written at its freeze; what remains is mostly the event_map hour shards
+  (5.2–6.1 MB a day in both layouts, about 60 % of phase 2's growth), then the manifest, inventory and status files.
+  Applied to GitHub's rate (55–60 MB a day before the doubled dispatches; 6,098,544 KB at 07:17 and 6,150,505 KB at
+  19:17 UTC on 10-14, about 100 MB a day over hours that include them), phase 2 grows the repository by about 15–30 MB
+  a day: the target of 15 MB a day or less holds only at the low end. The `health` log measures it over the first week;
+  the event_map shards are the next lever if it is needed. After that a full repack by GitHub would bring the
+  repository to about 0.8 GB; it is an owner request, and on the Free plan GitHub Support may decline it.
+
+Readers of the committed unfrozen partitions, and what phases 1 and 2 did with them: derive's silent-change check
+(switched to the event map in phase 1, with the previous derive's Pages copy after a failed derive in phase 2); the
+first-solutions one-off slice (`FIRST_SOLUTIONS_DAYS` naming an unfrozen day: switched to the event map; the walk
+itself stops at the last frozen day, which from phase 2 it also reads from the event map until a grace day has
+passed); `writeDayPartition`'s byte compare (only avoids a rewrite); `validate.ts`, `sign-manifest.ts`,
+`publish-r2.ts` (they read the files derive just wrote: kept on disk); `scripts/first-observations.ts` (reads
+`events/` only for an event the observation log no longer holds, a frozen one). They never read an unfrozen day:
+backfill (days before the earliest event_map shard), archive (months over 120 days old), onboard and heal (they write
+the event map), remediate (frozen days, from the Release archives), the deep history and the heartbeat Worker. The
+in-house consumers read Pages: iOS builds 437–587 take `pages_url` for every day that has one (all unfrozen days do),
+`@<data_commit>` for an older frozen day and `url` only for an unfrozen day without `pages_url`; the alerts gateway
+takes `pages_url` and falls back to `url`, checked against the signed `sha256`.
 
 ## Deep history (before 2023-07-06)
 

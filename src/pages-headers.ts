@@ -22,7 +22,8 @@ export const CACHE_CONTROL = {
   hotDay: 'public, max-age=300, stale-while-revalidate=600',
   /** Older day files: they change only on a revision, a merge or a retraction. */
   coldDay: 'public, max-age=3600',
-  /** The change-log: tailed with Range from the last byte offset; short edge cache. */
+  /** Today's change-log, which grows every run: a short edge cache. A reader fetches it whole: Pages answers a Range
+   *  request on it with the whole body (200), and it is served compressed (NDJSON_CONTENT_TYPE). */
   changes: 'public, max-age=0, s-maxage=60, stale-while-revalidate=300, stale-if-error=86400',
   /** The v2 manifest (signed envelope, ~KBs): clients revalidate with ETag, the edge absorbs it. */
   v2: 'public, max-age=0, s-maxage=60, stale-while-revalidate=120, stale-if-error=86400',

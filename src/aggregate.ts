@@ -15,6 +15,7 @@ import { vanishedIds } from './absence.js';
 import { frozenProviders, loadActivity, saveActivity, silentProviders, soonestLeaf, tlsErrorStatus, tlsLeafStatus, updateActivity } from './activity.js';
 import { isPinnedCertError, pinnedLeaf } from './custom.js';
 import { fetchRunInputs, loadSweepCursors, nextCursors, saveSweepCursors, sweepOriginFloorMs, sweepSpecs } from './sweep-cursor.js';
+import { recoverReports, recoverStatus, recoverSummary, recoveredReason } from './recover.js';
 import type { ProviderStatus, RawObs } from './types.js';
 import { isoFromMs } from './util.js';
 
@@ -96,10 +97,21 @@ async function main(): Promise<void> {
         (r.complete ? `complete, cursor -> ${st.through}` : `UNFINISHED (${st.error}), cursor stays ${st.through ?? 'unset'}`),
     );
   }
-  const fetched = outcomes.flatMap((o) => o.obs);
   // Live path handles the hot window only; older rows (e.g. CENC's rolling year file)
   // would bypass dedup outside it (C2) — drop them; backfill owns history.
   const hotFloor = nowMs - HOT_WINDOW_DAYS * 86_400_000;
+  // A hand-dispatched run's `recover` input (src/recover.ts): events a rolling source listed while the feed could not
+  // read it, read back from the pages the source keeps per event, after the live fetches (one request at a time to
+  // that host). Their reports take the live path below with the fetched rows.
+  const recoverSpec = process.env.FEED_RECOVER?.trim() ?? '';
+  const recovery = recoverSpec ? await recoverReports(recoverSpec, active, state.eventMap, hotFloor) : null;
+  if (recovery) {
+    const line = recoverSummary(recovery);
+    if (recovery.error || recovery.failed.length || recovery.unasked.length) console.warn(`::warning title=Recovery::${line}`);
+    else console.log(line);
+  }
+  const recovered = new Set<RawObs>(recovery?.rows ?? []);
+  const fetched = [...outcomes.flatMap((o) => o.obs), ...recovered];
   const futureCeil = nowMs + FUTURE_LEEWAY_MS;
   const inWindow = fetched.filter((r) => r.eventTimeMs >= hotFloor && r.eventTimeMs <= futureCeil);
   const staleDropped = fetched.length - inWindow.length;
@@ -128,7 +140,14 @@ async function main(): Promise<void> {
       state.watermarks[raw.provider] = Math.max(state.watermarks[raw.provider] ?? 0, raw.providerUpdatedMs);
     }
     // A change, or a revision of a row that represents nothing (its own line since round 15, status `rows_revised`).
-    log.recordIngest(raw, r);
+    const page = recovery?.pages.get(raw);
+    log.recordIngest(raw, r, 'observe', page ? recoveredReason(page, (Date.parse(ingestTime) - raw.eventTimeMs) / 86_400_000) : undefined);
+    if (recovered.has(raw)) {
+      const where = r.changed && r.revision === 1 && r.node.provenance.length === 1 ? 'new event' : r.changed ? 'joined' : 'unchanged';
+      console.log(
+        `  recovered ${raw.provider}:${raw.providerEventId} M${raw.mag ?? '?'} ${isoFromMs(raw.eventTimeMs)}: ${where} ${r.node.feedId} [${[...new Set(r.node.provenance.map((p) => p.provider))].sort().join(',')}]`,
+      );
+    }
     if (r.withheld) {
       twinWithheld.push(
         `${raw.provider}:${raw.providerEventId} M${raw.mag ?? '?'} ${raw.status ?? ''} beside ${r.node.feedId} [${[...new Set(r.node.provenance.map((p) => p.provider))].sort().join(',')}] ${r.withheld.km.toFixed(1)} km ${(r.withheld.dtMs / 1000).toFixed(1)} s`,
@@ -309,6 +328,7 @@ async function main(): Promise<void> {
     twin_withheld: twinWithheld.length,
     preliminary_superseded: preliminarySuperseded.length,
     preliminary_skipped: preliminarySkipped.length,
+    ...(recovery ? { recovered: recoverStatus(recovery) } : {}),
     absent,
     merged: log.merged,
     copies_rehomed: resolver.rehomedCopies.length,

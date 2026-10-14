@@ -36,12 +36,16 @@ export const CACHE_CONTROL = {
 const DAY_MS = 86_400_000;
 const dayOf = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
-/** The NDJSON files' type (R25-FOLLOWUPS (4)). Wrangler names no type for `.ndjson`, so until 2026-10-14 Pages served
- *  the change-log and the day partitions as `application/octet-stream`, uncompressed (about 1–2.5 MB a day partition)
- *  while the GeoJSON files went out as brotli. A `_headers` value replaces the type Pages sends. The bytes do not change:
- *  a client decodes any Content-Encoding first, so the v2 manifest's sha256 still names them. Pages already answered a
- *  Range request on these files with the whole body (200, measured 2026-10-14), so no reader loses a byte range. */
-export const NDJSON_CONTENT_TYPE = 'application/x-ndjson; charset=utf-8';
+/** The type the NDJSON files are served with (R25-FOLLOWUPS (4)). Wrangler names no type for `.ndjson`, so until
+ *  2026-10-14 Pages served the change-log and the day partitions as `application/octet-stream`, uncompressed (about
+ *  1–2.5 MB a day partition), while the GeoJSON files went out as brotli. Cloudflare compresses only the types on its
+ *  list (developers.cloudflare.com/speed/optimization/content/compression/), and `application/x-ndjson` is not on it:
+ *  served with that type from 11:47 UTC on 2026-10-14 (#115), the files still went out whole. `text/plain` is on the
+ *  list. A `_headers` value replaces the type Pages sends. The bytes do not change: a client decodes any
+ *  Content-Encoding first, so the v2 manifest's sha256 still names them (checked on production for both types). Pages
+ *  already answered a Range request on these files with the whole body (200, measured 2026-10-14), so no reader loses a
+ *  byte range. No consumer reads the type (the app, the gateway). */
+export const NDJSON_CONTENT_TYPE = 'text/plain; charset=utf-8';
 
 function rule(path: string, cacheControl: string, contentType?: string): string[] {
   return [path, `  Cache-Control: ${cacheControl}`, '  Access-Control-Allow-Origin: *', ...(contentType ? [`  Content-Type: ${contentType}`] : [])];

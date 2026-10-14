@@ -85,8 +85,9 @@ test('lifetimes: top-level 30 s, today and yesterday 300 s, older days 3600 s, c
   assert.equal(served(pagesHeaders(NOW, [...DAYS, '2026-09-29']), '/v1/events/2026-09-29.geojson').get('Cache-Control'), CACHE_CONTROL.hotDay);
 });
 
-test('the NDJSON files get one Content-Type that names the format; every other file keeps the type Pages gives it', () => {
-  // R25-FOLLOWUPS (4): without it Pages sent `.ndjson` as application/octet-stream, uncompressed.
+test('the NDJSON files get one Content-Type that Cloudflare compresses; every other file keeps the type Pages gives it', () => {
+  // R25-FOLLOWUPS (4): without it Pages sent `.ndjson` as application/octet-stream, and with application/x-ndjson
+  // (not on Cloudflare's compression list) still uncompressed.
   for (const body of [pagesHeaders(NOW, DAYS), pagesHeaders(NOW, Array.from({ length: 150 }, (_, i) => new Date(NOW - i * 86_400_000).toISOString().slice(0, 10)))]) {
     for (const p of ['/events/2026/09/28.ndjson', '/events/2026/09/18.ndjson', '/v1/changes/2026-09-28.ndjson']) {
       assert.equal(served(body, p).get('Content-Type'), NDJSON_CONTENT_TYPE, `${p}: exactly one Content-Type`);
@@ -95,7 +96,7 @@ test('the NDJSON files get one Content-Type that names the format; every other f
       assert.equal(served(body, p).get('Content-Type'), undefined, `${p}: Pages' own type`);
     }
   }
-  assert.equal(NDJSON_CONTENT_TYPE, 'application/x-ndjson; charset=utf-8');
+  assert.equal(NDJSON_CONTENT_TYPE, 'text/plain; charset=utf-8');
 });
 
 test('the pre-fix rules overlapped: the same check fails on the old file', () => {

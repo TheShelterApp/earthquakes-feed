@@ -569,16 +569,35 @@ export class Resolver {
     return w;
   }
 
-  /** Live feed ids within the widest out-of-region window of `node`, when it may be either side of one (merge pass
-   *  only): a node of a magnitude a window's partner side may have, or one whose rows are all a window provider's. */
+  /** Live feed ids within the widest out-of-region window of `node` that may be the other side of one with it (merge
+   *  pass only): for a node that may be a window's provider side (farOwnSide), the nodes of a magnitude a partner side
+   *  may have; for a node of such a magnitude, the nodes that may be a provider side. farWindow decides; this only keeps
+   *  the gather small (the 200 km radius around each of OVSICORI's hundreds of events inside its region had tripled the
+   *  feed-side steps of a run). */
   private farCandidates(node: EventNode): Set<string> {
     const out = new Set<string>();
     if (!this.mergePass || !FAR_WINDOW_MAX_KM || node.mag == null) return out;
-    const p = node.provenance[0]?.provider;
-    const own = p != null && REGION_RULES.get(p)?.window != null && node.provenance.every((r) => r.provider === p);
-    if (!own && node.mag < FAR_MIN_PARTNER_MAG - REID_MAG_TOLERANCE) return out;
-    for (const cell of gatherCellKeys(node.lat, node.lon, FAR_WINDOW_MAX_KM, GRID_CELL_DEG)) for (const fid of this.geo.get(cell) ?? []) out.add(fid);
+    const own = Resolver.farOwnSide(node);
+    const partner = node.mag >= FAR_MIN_PARTNER_MAG - REID_MAG_TOLERANCE;
+    if (!own && !partner) return out;
+    for (const cell of gatherCellKeys(node.lat, node.lon, FAR_WINDOW_MAX_KM, GRID_CELL_DEG)) {
+      for (const fid of this.geo.get(cell) ?? []) {
+        const other = this.eventMap.get(fid);
+        if (!other || other.mag == null) continue;
+        if ((own && other.mag >= FAR_MIN_PARTNER_MAG - REID_MAG_TOLERANCE) || (partner && Resolver.farOwnSide(other))) out.add(fid);
+      }
+    }
     return out;
+  }
+
+  /** A node that may be the provider side of an out-of-region window (farWindow): its rows all one REGION_RULES
+   *  provider's with a window, every one outside the provider's region, and a magnitude within the window's |ΔM| of its
+   *  smallest partner magnitude. */
+  private static farOwnSide(node: EventNode): boolean {
+    const p = node.provenance[0]?.provider;
+    const w = p != null ? REGION_RULES.get(p)?.window : undefined;
+    if (!w || node.mag == null || node.mag < w.minPartnerMag - w.maxDeltaMag - 2 * REID_MAG_TOLERANCE) return false;
+    return node.provenance.every((r) => r.provider === p && Resolver.outsideRegion(r) != null);
   }
 
   /** Whether two sides (their providers) may use the moderate-event window: no provider on both, none excluded. */
@@ -1855,8 +1874,11 @@ export class Resolver {
   /** The out-of-region window of a pair the merge pass accepts only through it (round 26: whyNotMergedByWindows rejects
    *  the pair, farJoin joins it), else null. Such a pair ranks with the moderate-event pairs. */
   private farOnly(a: EventNode, b: EventNode): FarWindow | null {
-    if (!FAR_WINDOW_MAX_KM || this.whyNotMergedByWindows(a, b) == null) return null;
-    return this.farJoin(a, b);
+    if (!FAR_WINDOW_MAX_KM) return null;
+    // farJoin first: it rules out almost every pair at once (neither side an out-of-region provider side), where the
+    // windows' check would repeat whyNotMerged's work for every pair the merge pass scores.
+    const far = this.farJoin(a, b);
+    return far && this.whyNotMergedByWindows(a, b) != null ? far : null;
   }
 
   /** Every live neighbour `node` may fold with (whyNotMerged passes), best score first, ties

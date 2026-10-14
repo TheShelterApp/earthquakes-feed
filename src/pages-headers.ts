@@ -36,8 +36,15 @@ export const CACHE_CONTROL = {
 const DAY_MS = 86_400_000;
 const dayOf = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
-function rule(path: string, cacheControl: string): string[] {
-  return [path, `  Cache-Control: ${cacheControl}`, '  Access-Control-Allow-Origin: *'];
+/** The NDJSON files' type (R25-FOLLOWUPS (4)). Wrangler names no type for `.ndjson`, so until 2026-10-14 Pages served
+ *  the change-log and the day partitions as `application/octet-stream`, uncompressed (about 1–2.5 MB a day partition)
+ *  while the GeoJSON files went out as brotli. A `_headers` value replaces the type Pages sends. The bytes do not change:
+ *  a client decodes any Content-Encoding first, so the v2 manifest's sha256 still names them. Pages already answered a
+ *  Range request on these files with the whole body (200, measured 2026-10-14), so no reader loses a byte range. */
+export const NDJSON_CONTENT_TYPE = 'application/x-ndjson; charset=utf-8';
+
+function rule(path: string, cacheControl: string, contentType?: string): string[] {
+  return [path, `  Cache-Control: ${cacheControl}`, '  Access-Control-Allow-Origin: *', ...(contentType ? [`  Content-Type: ${contentType}`] : [])];
 }
 
 /** The `_headers` body for a deploy at `nowMs` that publishes the day files `dayKeys`
@@ -49,7 +56,8 @@ export function pagesHeaders(nowMs: number, dayKeys: Iterable<string>): string {
   const days = [...new Set(dayKeys)].sort();
   const fixed = [
     rule('/v1/:file', CACHE_CONTROL.top),
-    rule('/v1/changes/:file', CACHE_CONTROL.changes),
+    // Only the day's change-log (`<day>.ndjson`) is published here.
+    rule('/v1/changes/:file', CACHE_CONTROL.changes, NDJSON_CONTENT_TYPE),
     rule('/v2/*', CACHE_CONTROL.v2),
     // The live index (index.json + the deltas, rewritten every run) and its day files (live-sync.ts).
     rule('/v1/live/:file', CACHE_CONTROL.top),
@@ -58,7 +66,7 @@ export function pagesHeaders(nowMs: number, dayKeys: Iterable<string>): string {
     rule('/v1/detail/:file', CACHE_CONTROL.hotDay),
     // The unfrozen day partitions (NDJSON, partitions.ts writePagesPartition): the manifest's `url` and the v2 `pages`
     // origin. Outside /v1/, so no other rule matches them.
-    rule('/events/*', CACHE_CONTROL.liveDay),
+    rule('/events/*', CACHE_CONTROL.liveDay, NDJSON_CONTENT_TYPE),
   ];
   const perDay = fixed.length + days.length <= PAGES_HEADER_RULE_LIMIT;
   const dayRules = perDay

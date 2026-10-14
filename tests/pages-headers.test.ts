@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CACHE_CONTROL, PAGES_HEADER_RULE_LIMIT, pagesHeaders } from '../src/pages-headers.js';
+import { CACHE_CONTROL, NDJSON_CONTENT_TYPE, PAGES_HEADER_RULE_LIMIT, pagesHeaders } from '../src/pages-headers.js';
 
 /** Cloudflare Pages `_headers` semantics (developers.cloudflare.com/pages/configuration/headers):
  *  a rule is a path pattern followed by indented `Name: value` lines; `*` is a splat matching
@@ -83,6 +83,19 @@ test('lifetimes: top-level 30 s, today and yesterday 300 s, older days 3600 s, c
   assert.equal(served(body, '/events/2026/09/19.ndjson').get('Cache-Control'), CACHE_CONTROL.liveDay);
   // A future-dated day file (an event minutes past midnight) is hot too.
   assert.equal(served(pagesHeaders(NOW, [...DAYS, '2026-09-29']), '/v1/events/2026-09-29.geojson').get('Cache-Control'), CACHE_CONTROL.hotDay);
+});
+
+test('the NDJSON files get one Content-Type that names the format; every other file keeps the type Pages gives it', () => {
+  // R25-FOLLOWUPS (4): without it Pages sent `.ndjson` as application/octet-stream, uncompressed.
+  for (const body of [pagesHeaders(NOW, DAYS), pagesHeaders(NOW, Array.from({ length: 150 }, (_, i) => new Date(NOW - i * 86_400_000).toISOString().slice(0, 10)))]) {
+    for (const p of ['/events/2026/09/28.ndjson', '/events/2026/09/18.ndjson', '/v1/changes/2026-09-28.ndjson']) {
+      assert.equal(served(body, p).get('Content-Type'), NDJSON_CONTENT_TYPE, `${p}: exactly one Content-Type`);
+    }
+    for (const p of ['/v1/manifest.json', '/v1/all_week.geojson', '/v2/manifest.json', '/v1/live/index.json', '/v1/live/days/2026-09-28.geojson', '/v1/detail/2026-09-28T13.geojson', '/v1/events/2026-09-28.geojson']) {
+      assert.equal(served(body, p).get('Content-Type'), undefined, `${p}: Pages' own type`);
+    }
+  }
+  assert.equal(NDJSON_CONTENT_TYPE, 'application/x-ndjson; charset=utf-8');
 });
 
 test('the pre-fix rules overlapped: the same check fails on the old file', () => {

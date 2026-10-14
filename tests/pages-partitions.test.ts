@@ -125,6 +125,7 @@ test('the Pages copy is byte for byte the partition written to the data checkout
     writePagesPartition(join(root, 'public'), '2026-09-01', 'old\n');
     writeFileSync(join(root, 'public', 'events', 'README'), 'x');
     assert.deepEqual(removeStalePagesPartitions(join(root, 'public'), new Set([day])), ['2026-09-01']);
+    assert.ok(!existsSync(join(root, 'public', partitionPath('2026-09-01'))), 'the stale copy is gone from the deploy');
     assert.ok(existsSync(join(root, 'public', partitionPath(day))));
     assert.ok(existsSync(join(root, 'public', 'events', 'README')));
     assert.ok(existsSync(join(root, 'public', 'v1', 'events', `${day}.geojson`)), 'the GeoJSON day file stays');

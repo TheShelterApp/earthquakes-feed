@@ -294,3 +294,31 @@ test('the record: the days around the window, null for a day without a partition
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('wiring: the snapshot step runs before anything writes the checkout, and derive reads the directory it wrote', () => {
+  const yml = (rel: string): string => readFileSync(here(rel), 'utf8');
+  const dir = 'LIVE_BASELINE_DIR: ${{ runner.temp }}/live-baseline';
+  /** The step named `name` in a workflow or action file: its text up to the next step. */
+  const step = (body: string, name: string): string => {
+    const at = body.indexOf(`- name: ${name}\n`);
+    assert.ok(at >= 0, `no step "${name}"`);
+    const next = body.indexOf('\n      - ', at + 1);
+    return body.slice(at, next < 0 ? undefined : next);
+  };
+  for (const [file, before] of [
+    ['../.github/workflows/aggregate.yml', '- name: Aggregate\n'],
+    ['../.github/workflows/derive.yml', 'uses: ./.github/actions/derive-publish'],
+  ] as const) {
+    const body = yml(file);
+    const snap = step(body, 'Snapshot the silent-change baseline');
+    assert.ok(body.indexOf(snap) < body.indexOf(before), `${file}: the snapshot comes before "${before.trim()}"`);
+    assert.ok(body.indexOf(snap) > body.indexOf('ref: data'), `${file}: the snapshot comes after the data checkout`);
+    assert.match(snap, /continue-on-error: true/, `${file}: a failed snapshot never stops the run`);
+    assert.match(snap, /timeout-minutes: \d+/, `${file}: bounded`);
+    assert.ok(snap.includes(dir), `${file}: ${dir}`);
+    assert.match(snap, /run: npx --no-install tsx src\/live-baseline\.ts/);
+  }
+  const action = yml('../.github/actions/derive-publish/action.yml');
+  const derive = action.slice(action.indexOf('- name: Derive views'), action.indexOf('- name: Validate output'));
+  assert.ok(derive.includes(dir), 'derive reads the snapshot the workflow wrote');
+});

@@ -46,6 +46,8 @@ jobs:
         # As in aggregate.yml (src/live-baseline.ts): nothing writes the checkout before derive here, so the snapshot is
         # the event map derive reads.
         continue-on-error: true
+        # About half a second (the event map of the window); a hang must not eat the job budget the deploy counts on.
+        timeout-minutes: 2
         env:
           DATA_DIR: .data
           LIVE_BASELINE_DIR: ${{ runner.temp }}/live-baseline

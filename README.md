@@ -33,6 +33,9 @@ curl -s https://earthquakes-feed.theshelter.app/v1/events/2026-07-04.geojson
 # head_seq deltas (APIs.md, Live index):
 curl -s https://earthquakes-feed.theshelter.app/v1/live/index.json
 
+# The month under the week (M >= 2.5, days through today - 6) the same way, without deltas (APIs.md, Month index):
+curl -s https://earthquakes-feed.theshelter.app/v1/live/month.json
+
 # One event's full detail: the live events of its UTC hour, full-fat (APIs.md, Event detail):
 curl -s https://earthquakes-feed.theshelter.app/v1/detail/2026-10-05T09.geojson
 
@@ -225,7 +228,7 @@ npm run typecheck
 
 # Run the pipeline against a scratch dir (hits live public APIs, read-only):
 DATA_DIR=.data npm run aggregate                 # fetch → dedup → append log
-DATA_DIR=.data PUBLIC_DIR=public npm run derive  # summaries + day files + partitions + live index + detail hours + manifest
+DATA_DIR=.data PUBLIC_DIR=public npm run derive  # summaries + day files + partitions + live and month index + detail hours + manifest
 DATA_DIR=.data PUBLIC_DIR=public npm run validate
 ```
 

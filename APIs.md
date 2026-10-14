@@ -224,7 +224,8 @@ source's fallback host, see *Greece (NOA)*). Counts include `merged`
 (`op:merge` lines), `bad_coords_dropped`, `coordinateless_dropped` (coordinate-less reports
 refused at ingest), `coordinateless_withdrawn` (those among them that withdrew a known id, see
 below), `coordinateless_retracted`, `late_minted` and `late_withheld` (see *Late publications*), `held_retracted` when a run
-withdrew held solutions (since round 26, see *Regional agencies outside their own region*);
+withdrew held solutions (since round 26, see *Regional agencies outside their own region*), `rederived` when a run
+re-derived an event's representative (since round 27, same section);
 the heal run also carries `heal`, and the one-time correction run `correction` (see *Turkey (AFAD)*,
 *California (NCEDC, SCEDC)* and *Canada (NRCan)*). `sweeps.updated` / `sweeps.deleted` hold the outcome (`ok`,
 `http_status`, `latency_ms`, `events_returned`, `error`) of each source's `updatedafter` revision
@@ -467,6 +468,10 @@ list only one id of 14 (all inside these limits) and both of 10; 3 of those 10 a
 lists twice (EMSC shows one event for each, and no agency a second quake) and fold too; the other
 7 stay apart. The older row stays in the event's provenance.
 
+OVSICORI (Costa Rica) is another: its analyst's review of a quake comes hours later under a new id while the automatic
+solution stays listed. Since round 27 (2026-10-14) such an automatic / reviewed pair is one quake (see *Regional
+agencies outside their own region*).
+
 ComCat's own ids are another exception. ComCat publishes a quake under several ids when several networks locate it
 and later associates them into one event, whose `ids` then list every id (`,uu80158431,us6000tzcn,nn00925220,`). A
 report naming such an id joined the event at first sight already, but an id the feed had published as an event of its
@@ -506,6 +511,16 @@ within 90 s and 400 km). Each stood as an event of its own: OVSICORI-led events 
   while it is still held. A held solution that a window joins to another agency's event joins it; one that OVSICORI
   reviews later, or NOA gives a magnitude, comes back as its own event (same feed id). OVSICORI's reviewed solutions and
   its solutions inside its region are never held.
+- **OVSICORI's review under a new id** (round 27). OVSICORI's automatic solution (`status` "automatic", `Autor`
+  "olDbg…") and its analyst's review (`status` "reviewed", "UNA:…"), published hours later under a higher id while
+  the automatic one stays listed, are one quake when the two are each other's best such pair among the live rows and
+  lie within 4 s, 45 km and |ΔM| 0.5; or, when the reviewed solution lies outside OVSICORI's box, within 40 s, 300 km
+  and |ΔM| 2.0 with the distance over the time difference between 6 and 9 km/s (outside its network OVSICORI's
+  automatic locator moves a quake toward its stations and its origin time later by about the P-wave travel time). The
+  reviewed report joins the automatic one's event, dense cells included, and the merge pass folds two events holding
+  such a pair. The reviewed solution represents the event, or the agency whose event it joined; the automatic one never
+  does. 1450630, OVSICORI's automatic M6.5 of 2026-10-12 23:20:56 inside its box, is the M6.1 its review 1450632 placed
+  195 km away and 27 s earlier: it joins ComCat's `us6000u1wn` event, and 10-12's `max_mag` reads 6.1.
 - **USP against a large quake.** USP's window (see *Realtime + client dedup*) grows from a partner of M6.0 by 50 km a
   magnitude unit up to 100 km (M6.5 → 75 km, M7.0 → 100): USP's solution of the M7.7 (`usp2026tutw`, M7.67, 1 s) lay
   75 km from ComCat's.
@@ -531,9 +546,25 @@ holds 76 (72 OVSICORI, 4 NOA): `significant_week` goes from 27 live events (16 O
 OVSICORI's 1450630, below).
 
 The rules run in the aggregate run only (the regular heal and the held withdrawal reach the 7-day hot window), so the
-days already frozen keep what they hold. OVSICORI's automatic 1450630 (M6.5 for the M6.1, 159 km and 20 s off) lies
-inside its region and stays an event of its own, as do OVSICORI's reviewed solutions of aftershocks no other agency
-listed. No other agency was given these rules. In the replayed state the lone live events of M ≥ 4.5 that other regional
+days already frozen keep what they hold. OVSICORI's automatic 1450630 (M6.5 for the M6.1, 159 km and 20 s off) lay
+inside its region and stayed an event of its own until round 27 (above); OVSICORI's reviewed solutions of aftershocks
+no other agency listed stay events of their own.
+
+An event's representative is re-derived from its rows whenever one of them changes. Since round 27 every run also
+re-derives, in the hot window, an event whose stored representative is a row these rules rank behind another of its rows
+(an OVSICORI row outside its region beside another agency's own solution, or an automatic row beside its review), so an
+event positioned before a rule does not keep that row until one of its rows happens to change: an `op:correction` line
+with `reason` "representative re-derived: …", status `rederived` when it is not zero (on 2026-10-14, 13 events of the
+Panama sequence, e.g. `efd_01M4W5P9F0ZAGGCN86AH8ZGDTR`, OVSICORI's automatic M4.2 174 km from EMSC's own M4.7, which
+then also takes GFZ's event of the quake).
+
+Round 27 was measured the same way, over the log of 2026-07-05…10-14 (233,118 lines): the review pairs fold 62 groups
+(63 fewer events per connected group of ids); 0 more events anywhere, one regrouping with the same count (two reviews of
+one quake), rows in two live events 0, the held solutions unchanged. In 20 of the 62 groups every row's nearest
+ComCat or EMSC quake is one and the same, with no second quake within 30 s; ComCat and EMSC list nothing near the other
+42 (Costa Rica's M1–3 quakes, and OVSICORI's reviews of aftershocks nobody else listed). Left apart: an automatic
+solution EMSC copied (author UNA) whose review joined another agency's event that holds EMSC's own event of the quake
+(EMSC's two ids keep them apart: 1450622 beside ComCat's M4.5 `us6000u1w6`), and two reviews of one quake under two ids. No other agency was given these rules. In the replayed state the lone live events of M ≥ 4.5 that other regional
 agencies place outside their own boxes are another pattern: GeoNet 124 (Tonga, Kermadec, Vanuatu), SSN 34, GA 18,
 INGV 14, NCS 11 and fewer for the rest, almost none automatic (IG-EPN and IMO one each, against OVSICORI's 99); 17 of
 them (INGV 6, GeoNet 5, GA 2, CENC 2, JMA 1, SSN 1) lie within such a window of a USGS, EMSC or GFZ event of M ≥ 5.5,

@@ -276,7 +276,8 @@ export const OVSICORI_HOLD_FROM_MAG = 4.0;
  *    none within 170 km.
  *  - On the event map of origin/data 4549baf6e8 (2026-10-14 11:22) the first run folds 7 events into 5 and holds 76
  *    (72 OVSICORI, 4 NOA); a second run changes nothing. OVSICORI's 1450630 (automatic M6.5, 159 km and 20 s from the
- *    M6.1) lies inside its region and stays, as do its reviewed solutions of aftershocks ComCat did not list.
+ *    M6.1) lies inside its region and stays, as do its reviewed solutions of aftershocks ComCat did not list (since round
+ *    27 1450630 joins the M6.1 as 1450632's automatic twin, REVIEWED_ID_WINDOWS).
  *  - The other regional agencies' lone events of M ≥ 4.5 outside their gateway boxes in the replayed state are almost
  *    never automatic (IG-EPN and IMO one each); 17 lie within such a window of a large partner (INGV 6, GeoNet 5, GA 2,
  *    CENC 2, JMA 1, SSN 1), splits of real quakes 4–82 km apart that the windows themselves leave: not given these rules. */
@@ -332,6 +333,62 @@ export const NEW_ID_PER_REVISION_PROVIDERS: ReadonlySet<string> = new Set(['nrca
  *  events 0. */
 export const REVISED_ID_WINDOWS: ReadonlyMap<string, { dtMs: number; km: number; maxDeltaMag: number; maxIdGap: number }> = new Map([
   ['csn', { dtMs: 3_000, km: 45, maxDeltaMag: 0.5, maxIdGap: 2 }],
+]);
+/** A REVIEWED_ID_WINDOWS provider's two windows (round 27, Resolver.reviewedPairScore). `near`: origin times, places and
+ *  magnitudes at most this far apart. `far`, only when the reviewed solution lies outside the provider's region
+ *  (`boxes`): origin times and places at most this far apart, magnitudes at most `maxDeltaMag`, and the distance over
+ *  the time difference between `minKmPerS` and `maxKmPerS`. */
+export interface ReviewedIdWindow {
+  boxes: readonly RegionBox[];
+  near: { dtMs: number; km: number; maxDeltaMag: number };
+  far: { dtMs: number; km: number; maxDeltaMag: number; minKmPerS: number; maxKmPerS: number };
+}
+/** Providers that publish their analyst's review of a quake under a new id and keep listing the automatic solution
+ *  (round 27): an automatic row and a reviewed row of such a provider under a higher numeric id are one quake when
+ *  they are within the provider's window (Resolver.reviewedPairScore) and each is the other's best such row among the
+ *  live rows (mutual best, `near` pairs ranked first). Such a pair is not "the same provider under distinct native ids"
+ *  (sameProviderDistinct, nodesDistinct): the reviewed report joins the live event holding its automatic twin ahead of
+ *  any proximity match, in a dense cell too (findReviewedTwin), and the merge pass folds two events holding such a pair
+ *  whatever their representatives' distance, ranked behind every pair the base and large-event windows accept. The
+ *  automatic row never represents an event that holds its reviewed twin (Resolver.preferred), and places nothing for
+ *  the out-of-region window (Resolver.outsideRegionSide). Only with the merge pass.
+ *
+ *  OVSICORI (Costa Rica): its automatic locator's solutions carry `Autor` "olDbg…" and `Revisado` "-", its analysts'
+ *  "UNA:<analyst>…" and "y". The review comes hours later under a new id, and both ids stay on OVSICORI's page (read
+ *  2026-10-14 18:51 UTC: 536 ids since 09-30, 408 automatic and 128 reviewed, both ids of every pair below listed). The
+ *  moderate-event window keeps one provider's two ids apart, so each such quake stood as two live events, the automatic
+ *  one beside its EMSC copy (author UNA) when EMSC had copied it. Measured over the observation log (2026-07-05..10-14,
+ *  233,118 lines; the latest version of each of 2,380 OVSICORI ids), mutual best, against every quake ComCat and EMSC
+ *  list in 3–15 N, 92–76 W since 07-01 (M ≥ 2; EMSC's copies of OVSICORI left out):
+ *  - `near` (4 s, 45 km, |ΔM| 0.5): 61 pairs, 55 of them within 2 s and 21 km. For 15 ComCat or EMSC (IGC, INET, UCR,
+ *    NEIC) lists a quake within 20 s and 60 km, every time one quake near both solutions. No two automatic solutions lie
+ *    within 4 s and 45 km of each other anywhere in the log. Beyond 4 s two solutions at one place are two quakes
+ *    (1449447 and 1449465, 33 s apart: UCR lists the first; 1448720 and 1448729, 30 s); |ΔM| above 0.5 leaves 3 pairs of
+ *    frozen days apart (an automatic M5.7 for IGC's M4.0 on 2026-08-15 among them).
+ *  - `far`: outside its network OVSICORI's automatic locator moves a quake toward its stations, and the origin time
+ *    moves later by about the P-wave travel time over that distance. 11 pairs, the reviewed solution outside the box,
+ *    63–293 km and 8–38 s apart, 6.8–8.4 km/s, |ΔM| 0.1–1.8; neither ComCat nor EMSC lists another quake within 40 s and
+ *    120 km of any of those automatic solutions. Six of them lie inside the box: 1450630 (automatic M6.5, 2026-10-12
+ *    23:20:56) for 1450632 (reviewed M6.8, 195 km, 27 s; ComCat's M6.1 us6000u1wn), 1450622 and 1450624 (M3.9, for
+ *    ComCat's M4.5 us6000u1w6 and us6000u1w7), 1450340 (M3.5, for ComCat's M5.0 us6000u197) and two of July and August
+ *    (INET's quakes). With the reviewed solution inside the box (the quake inside the network) 13 mutual-best pairs lie
+ *    46–282 km and 11–54 s apart, at 1.9–12.7 km/s and |ΔM| up to 2.6, unlike the far pairs: not folded.
+ *  Replaying the whole log (a fresh Resolver per hour of ingest time over the production load, then the feed-side steps
+ *  with the regular heal) against the rules before: 62 groups fold (63 fewer events per connected group of ids, 0 more;
+ *  rows in two live events 0; the held solutions unchanged), and one regroups with the same count (2026-09-20 12:37:36,
+ *  two reviewed solutions of one quake, 1450004 and 1450012, beside the automatic 1449989: two events either way). In 20
+ *  of the 62 every row's nearest ComCat or EMSC quake is one and the same, with no second quake within 30 s; ComCat and
+ *  EMSC list nothing near the other 42 (in-network M1–3 quakes, and OVSICORI's reviewed solutions of aftershocks no other
+ *  agency listed). */
+export const REVIEWED_ID_WINDOWS: ReadonlyMap<string, ReviewedIdWindow> = new Map([
+  [
+    OVSICORI_PROVIDER,
+    {
+      boxes: OVSICORI_REGION,
+      near: { dtMs: 4_000, km: 45, maxDeltaMag: 0.5 },
+      far: { dtMs: 40_000, km: 300, maxDeltaMag: 2.0, minKmPerS: 6, maxKmPerS: 9 },
+    },
+  ],
 ]);
 /** Bound on the post-revision merge chain one ingest may trigger (each round retires a node). */
 export const MERGE_MAX_ROUNDS = 8;

@@ -39,6 +39,10 @@ export function writeHealMarker(root: string, marker: HealMarker): void {
 
 export const RETRACTION_REASON = 'coordinate-less: lat 0, lon 0 and magnitude 0 or none (not located)';
 
+/** The reason of the op:correction line of an event whose representative the current rules re-derived
+ *  (Resolver.rederiveOutranked). */
+export const REDERIVED_REASON = 'representative re-derived: the stored one is a row the current rules rank behind another row of the event';
+
 /** The op:tombstone reason when a provider zeroes an id the feed holds (Resolver.withdrawZeroed). */
 export const ZEROED_REASON = 'withdrawn by the provider: re-published without a location (lat 0, lon 0, magnitude 0 or none)';
 
@@ -82,15 +86,18 @@ export interface FeedSideResult {
   regularHeal: { merged: number; survivors: number; capped: boolean } | null;
   /** Held solutions withdrawn from the live set (Resolver.retractHeld, round 26; one op:tombstone line each). */
   held: number;
+  /** Events whose representative was re-derived (Resolver.rederiveOutranked, round 27; one op:correction line each). */
+  rederived: number;
   heldByProvider: Record<string, number>;
 }
 
 /** aggregate's feed-side steps, after the provider paths of the run: the coordinate-less
  *  retraction (every run; a no-op once nothing is left), the copy re-home pass (every run, FEED-2) and, when
  *  `healDue`, the one-time heal (Resolver.heal) and its marker, else the regular heal (FEED-6), then the held
- *  solutions' withdrawal (Resolver.retractHeld, round 26). Every change is logged through `log` like the normal path:
- *  op:tombstone per withdrawn row (with a reason), op:merge per fold, op:correction per heal
- *  survivor. */
+ *  solutions' withdrawal (Resolver.retractHeld, round 26). Before the heal, the events whose stored representative
+ *  the current rules outrank are re-derived (Resolver.rederiveOutranked, round 27). Every change is logged through
+ *  `log` like the normal path: op:tombstone per withdrawn row (with a reason), op:merge per fold, op:correction per heal
+ *  survivor and per re-derived event. */
 export function runFeedSideSteps(
   root: string,
   resolver: Resolver,
@@ -113,6 +120,10 @@ export function runFeedSideSteps(
   // same lines as a re-homed copy. A no-op once nothing is stranded.
   const stranded = resolver.rehomeStrandedRows(opts.ingestTime);
   for (const { raw, result } of stranded) log.record(raw, result);
+  // Events whose stored representative the current rules outrank (Resolver.rederiveOutranked, round 27): one
+  // op:correction line each, before the heal so the merge pass sees where the rules place them. A no-op once none is left.
+  const rederived = resolver.rederiveOutranked(opts.ingestTime);
+  log.recordCorrections(rederived, REDERIVED_REASON);
   let heal: HealMarker | null = null;
   if (opts.healDue) {
     const { merges, survivors } = resolver.heal(opts.ingestTime);
@@ -148,5 +159,15 @@ export function runFeedSideSteps(
     log.record(raw, result, 'tombstone', HELD_REASON);
     heldByProvider[raw.provider] = (heldByProvider[raw.provider] ?? 0) + 1;
   }
-  return { retracted: retractions.length, retractedByProvider, heal, rehomed: rehomed.length, stranded: stranded.length, regularHeal, held: held.length, heldByProvider };
+  return {
+    retracted: retractions.length,
+    retractedByProvider,
+    heal,
+    rehomed: rehomed.length,
+    stranded: stranded.length,
+    regularHeal,
+    held: held.length,
+    heldByProvider,
+    rederived: rederived.length,
+  };
 }

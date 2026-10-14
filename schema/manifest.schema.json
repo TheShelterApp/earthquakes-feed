@@ -63,6 +63,18 @@
         "window_days": { "type": "integer" }
       }
     },
+    "live_month": {
+      "type": "object",
+      "description": "The month index (APIs.md, Month index): the month's M >= 2.5 days through today - 6 as compact per-day files with sha256 fingerprints, for an incremental refresh of the month under the live week. Additive (2026-10).",
+      "required": ["path", "url", "head_seq", "min_mag", "window_days"],
+      "properties": {
+        "path": { "type": "string" },
+        "url": { "type": "string" },
+        "head_seq": { "type": "integer" },
+        "min_mag": { "type": "number" },
+        "window_days": { "type": "integer" }
+      }
+    },
     "event_detail": {
       "type": "object",
       "description": "Per-hour full-fat detail files (APIs.md, Event detail): put a UTC hour key YYYY-MM-DDTHH into url_template; every hour from first_hour to last_hour has a file. Additive (2026-10).",

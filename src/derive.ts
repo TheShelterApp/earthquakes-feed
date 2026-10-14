@@ -24,6 +24,7 @@ import { pagesHeaders } from './pages-headers.js';
 import { detectSilentChanges, liveWindowDays, nextSilentLog, readSilentLog, silentChangesAgainst, writeLiveIndex, writeSilentLog } from './live-sync.js';
 import { baselineDays, baselineRecord, previousWindowLines, readBaselineRecord, readBaselineSnapshot, writeBaselineRecord } from './live-baseline.js';
 import { writeDetailHours } from './event-detail.js';
+import { writeLiveMonth } from './live-month.js';
 
 function main(): void {
   const nowMs = Date.now();
@@ -114,6 +115,9 @@ function main(): void {
   // Keep only what a delta can still need (head_before at or above the 24-hour delta's from_seq).
   const oldestFrom = Math.min(...live.index.deltas.map((d) => d.from_seq));
   writeSilentLog(DATA_DIR, nextSilentLog(silentWith, [], prevHead ?? 0, nowMs, oldestFrom));
+  // PRB-2 (round 27): the month under the live week (all_month's M >= 2.5 days through today - 6) as per-day files with
+  // fingerprints, so the app's month carpet re-reads only the days that changed (live-month.ts).
+  const month = writeLiveMonth(feats, { publicV1, nowMs, headSeq: state.head.seq });
   // EVT-5: per-hour full-fat files for the event detail, over the same days as the Pages day files.
   const detail = writeDetailHours(allNodes, pagesDays, { publicV1, nowMs });
 
@@ -136,6 +140,8 @@ function main(): void {
       // Additive (round 15): the live index (APIs.md, Live index) and the per-hour detail files (APIs.md, Event detail).
       live: live.pointer,
       ...(detail ? { event_detail: detail.pointer } : {}),
+      // Additive (round 27): the month index (APIs.md, Month index).
+      live_month: month.pointer,
     },
     null,
     2,
@@ -201,6 +207,8 @@ function main(): void {
     `derive: live index head=${live.index.head_seq} days=${live.index.days.length} (${live.index.days.reduce((s, d) => s + d.bytes, 0)} B)` +
       ` deltas=${live.index.deltas.map((d) => `${d.name}:${d.count}/${d.bytes}B@${d.from_seq}`).join(',')}` +
       ` silent=${silentNow.length} (kept ${silentWith.length})` +
+      `; month days=${month.index.days.length} ${month.index.days[0]?.date ?? '-'}..${month.index.days.at(-1)?.date ?? '-'}` +
+      ` (${month.index.days.reduce((s, d) => s + d.bytes, 0)} B, ${month.index.count} live)` +
       (detail ? `; detail hours=${detail.files} (${detail.bytes} B, largest ${detail.maxBytes} B)` : ''),
   );
 }

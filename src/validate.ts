@@ -16,6 +16,7 @@ const vObs = compile('observation.schema.json');
 const vFeat = compile('feature.schema.json');
 const vManifest = compile('manifest.schema.json');
 const vLiveIndex = compile('live-index.schema.json');
+const vLiveMonth = compile('live-month.schema.json');
 
 /** Cloudflare Pages, Free plan: files per site (deploy) and bytes per file. */
 const PAGES_MAX_FILES = 20_000;
@@ -207,6 +208,49 @@ if (existsSync(liveIndexFile)) {
     }
     if ((fc.features ?? []).length !== d.count) fail(`live index: delta ${d.name} count ${d.count} != ${(fc.features ?? []).length} features`);
   }
+}
+
+// 4b. The month index (PRB-2, round 27, live-month.ts): every day file it lists exists with the listed bytes and
+//     sha256, the days are consecutive, end at the run's day minus newest_offset_days, and hold no feature below the floor.
+const liveMonthFile = join(publicV1, 'live', 'month.json');
+if (existsSync(liveMonthFile)) {
+  const idx = JSON.parse(readFileSync(liveMonthFile, 'utf8')) as {
+    generated?: number;
+    min_mag?: number;
+    newest_offset_days?: number;
+    count?: number;
+    days?: { date: string; path: string; bytes: number; sha256: string; count: number }[];
+  };
+  if (!vLiveMonth(idx)) fail(`month index: ${ajv.errorsText(vLiveMonth.errors)}`);
+  const days = idx.days ?? [];
+  const newest = typeof idx.generated === 'number' && typeof idx.newest_offset_days === 'number'
+    ? new Date(idx.generated - idx.newest_offset_days * 86_400_000).toISOString().slice(0, 10)
+    : null;
+  if (newest && days.at(-1)?.date !== newest) fail(`month index: the newest day is ${days.at(-1)?.date}, not ${newest}`);
+  let live = 0;
+  for (const [i, d] of days.entries()) {
+    if (i > 0 && Date.parse(`${d.date}T00:00:00Z`) - Date.parse(`${days[i - 1]!.date}T00:00:00Z`) !== 86_400_000) {
+      fail(`month index: days not consecutive at ${d.date}`);
+    }
+    const f = join(PUBLIC_DIR, d.path);
+    if (!existsSync(f)) {
+      fail(`month index: day ${d.path} is missing`);
+      continue;
+    }
+    const body = readFileSync(f, 'utf8');
+    if (Buffer.byteLength(body) !== d.bytes) fail(`month index: day ${d.path} has ${Buffer.byteLength(body)} bytes, the index says ${d.bytes}`);
+    if (createHash('sha256').update(body).digest('hex') !== d.sha256) fail(`month index: day ${d.path} sha256 differs from the index`);
+    const fc = JSON.parse(body) as { features?: { properties?: { mag?: number | null; time?: number; feed?: { state?: string } } }[] };
+    const feats = fc.features ?? [];
+    const below = feats.filter((x) => !(typeof x.properties?.mag === 'number' && x.properties.mag >= (idx.min_mag ?? 0))).length;
+    if (below) fail(`month index: day ${d.path} holds ${below} feature(s) below M ${idx.min_mag}`);
+    const off = feats.filter((x) => typeof x.properties?.time !== 'number' || new Date(x.properties.time).toISOString().slice(0, 10) !== d.date).length;
+    if (off) fail(`month index: day ${d.path} holds ${off} feature(s) of another day`);
+    const dayLive = feats.filter((x) => x.properties?.feed?.state === 'live').length;
+    if (dayLive !== d.count) fail(`month index: day ${d.path} count ${d.count} != ${dayLive} live features`);
+    live += dayLive;
+  }
+  if (idx.count !== live) fail(`month index: count ${idx.count} != ${live} live features over its days`);
 }
 
 // 5. Manifest (canonical Pages copy).

@@ -499,7 +499,9 @@ within 90 s and 400 km). Each stood as an event of its own: OVSICORI-led events 
 - **OVSICORI's window.** An event that holds OVSICORI's rows only, all outside its region, and an event holding a USGS,
   EMSC or GFZ row (the agency's own solution, not EMSC's copy of OVSICORI's) and no OVSICORI row, of M ≥ 5.5, are one
   quake when the origins are ≤ 30 s apart, |ΔM| ≤ 2.0 and the distance is within `50 + 100·(M − 5.5)` km of the partner's
-  magnitude, capped at 200 km (M5.5 → 50, M6.0 → 100, M6.5 → 150, M7.0 and above → 200). Best match only, ranked after
+  magnitude, capped at 200 km (M5.5 → 50, M6.0 → 100, M6.5 → 150, M7.0 and above → 200). Since round 27 a reviewed
+  OVSICORI solution also takes a partner of M4.5–5.5: within 50 km, or up to 120 km when the distance over the time
+  difference is 6–10 km/s (1450391, reviewed M6.0, joins ComCat's M5.0 `us6000u1ax` 63.5 km and 7.9 s away). Best match only, ranked after
   the windows above; a dense cell does not block it (the M6.1's aftershock cell held 87 events). The partner's solution
   represents the quake: in an event that holds a USGS, EMSC or GFZ solution of its own, an OVSICORI row outside its
   region never represents it, whatever its status (OVSICORI's rows say "reviewed" or "automatic", EMSC's and GFZ's say
@@ -559,8 +561,9 @@ Panama sequence, e.g. `efd_01M4W5P9F0ZAGGCN86AH8ZGDTR`, OVSICORI's automatic M4.
 then also takes GFZ's event of the quake).
 
 Round 27 was measured the same way, over the log of 2026-07-05…10-14 (233,118 lines): the review pairs fold 62 groups
-(63 fewer events per connected group of ids); 0 more events anywhere, one regrouping with the same count (two reviews of
-one quake), rows in two live events 0, the held solutions unchanged. In 20 of the 62 groups every row's nearest
+(63 fewer events per connected group of ids), and with the lower partner floor 66 groups fold (68 fewer); 0 more events
+anywhere, one regrouping with the same count (two reviews of one quake), rows in two live events 0, the held solutions
+unchanged. In 24 of the 66 groups every row's nearest
 ComCat or EMSC quake is one and the same, with no second quake within 30 s; ComCat and EMSC list nothing near the other
 42 (Costa Rica's M1–3 quakes, and OVSICORI's reviews of aftershocks nobody else listed). Left apart: an automatic
 solution EMSC copied (author UNA) whose review joined another agency's event that holds EMSC's own event of the quake

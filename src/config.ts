@@ -218,6 +218,10 @@ export interface OutOfRegionWindow {
   maxKm: number;
   maxDtMs: number;
   maxDeltaMag: number;
+  /** A partner below `minPartnerMag` (round 27): from `fromMag`, when the provider's side is reviewed, the pair is one
+   *  quake within `baseKm` (and the limits above), or up to `km` when the distance over the time difference is between
+   *  `minKmPerS` and `maxKmPerS`. */
+  low?: { fromMag: number; km: number; minKmPerS: number; maxKmPerS: number };
 }
 /** What the feed does with a regional agency's solutions outside its own region (Resolver, round 26): `boxes` is the
  *  region; `window` the out-of-region window, if any; `hold` the solutions outside it that no event takes and that are
@@ -234,6 +238,21 @@ export const NOA_PROVIDER = 'noa';
 export const OVSICORI_REGION: readonly RegionBox[] = [[8, 11.5, -86, -82.5]];
 /** NOA's region, Greece: the alerts gateway's AUTHORITY_REGIONS box. */
 export const NOA_REGION: readonly RegionBox[] = [[34, 42, 19, 30]];
+/** OVSICORI's out-of-region window (REGION_RULES). `low` (round 27): OVSICORI's reviewed solutions outside its box lie
+ *  35–135 km from where ComCat places the quake, and beyond 50 km the time difference matches the distance at the P-wave
+ *  speed (7.3–9.6 km/s: OVSICORI fits its stations' arrivals with a place too near or too far, and the origin time moves
+ *  with it), whatever the quake's size. Below M5.5 the window stopped at the partner floor, so of the Panama sequence's
+ *  aftershocks 1450391 (reviewed M6.0, ComCat's M5.0 us6000u1ax 63.5 km and 7.9 s away), 1450323 (M5.2, us6000u194,
+ *  81 km, 9.9 s), 1450348 (M4.9, us6000u1a5, 74 km, 7.7 s), 1450633 (M5.1, us6000u1w7 M4.5, 105 km, 13.5 s),
+ *  1450636 (M5.1, us6000u1x2 M4.6, 35 km, 4.5 s) and 1450629 (M4.8, us6000u1w6 M4.5, 39 km, 5.3 s) stood as events of
+ *  their own beside ComCat's. Each partner is the only quake ComCat or EMSC lists within 30 s and 300 km of OVSICORI's
+ *  solution. Of OVSICORI's 38 reviewed solutions of M ≥ 4.0 outside its box from 2026-10-09 17:00 on, 20 have no quake
+ *  in ComCat or EMSC within 60 s and 300 km (aftershocks no other agency listed, or none): no global event is within
+ *  reach of them, so none is folded into another quake's event. Replaying the whole log, the floor adds 5 folds (those
+ *  above; 1450629 joined its automatic twin 1450622 first, whose EMSC copy keeps that event apart), 0 splits and 0
+ *  regroupings. Only for reviewed solutions: OVSICORI's automatic ones outside its box are often phantoms or hundreds of
+ *  km off (the hold). After the M7.7 ComCat listed 24 quakes of M ≥ 4.5 in 3–15 N, 92–76 W in 7 h; at 100 km the speed
+ *  band leaves 10–17 s of the 30 s, so another aftershock rarely meets it, and mutual best decides between two. */
 export const OVSICORI_WINDOW: OutOfRegionWindow = {
   partners: new Set(['usgs', 'emsc', 'geofon']),
   minPartnerMag: LARGE_EVENT_MAG,
@@ -242,6 +261,7 @@ export const OVSICORI_WINDOW: OutOfRegionWindow = {
   maxKm: 200,
   maxDtMs: 30_000,
   maxDeltaMag: 2.0,
+  low: { fromMag: 4.5, km: 120, minKmPerS: 6, maxKmPerS: 10 },
 };
 /** From this magnitude an OVSICORI automatic solution outside its region that no event takes is held. In the day
  *  partitions of 2026-07-05..10-08, before the Panama sequence, 83 of the 85 OVSICORI automatic solutions of M ≥ 4.0

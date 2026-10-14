@@ -41,6 +41,7 @@ import {
   SOURCE_NETWORK_COPIES,
   type RegionalLargeKm,
   type RegionalLowMag,
+  type OutOfRegionWindow,
   type RegionBox,
   type RegionRule,
 } from './config.js';
@@ -79,12 +80,14 @@ const REGIONAL_LARGE_GATHER_MAG = Math.min(
 /** An out-of-region window (config REGION_RULES `window`, round 26) a pair gets: its provider, its distance (set by the
  *  partner side's magnitude), its time and magnitude limits, and whether the pair's first side holds the provider's
  *  rows. */
-type FarWindow = { provider: string; km: number; ms: number; maxDelta: number; providerIsA: boolean };
+type FarWindow = { provider: string; km: number; ms: number; maxDelta: number; providerIsA: boolean; speed: { fromKm: number; min: number; max: number } | null };
 const FAR_WINDOWS = [...REGION_RULES.values()].flatMap((r) => (r.window ? [r.window] : []));
+/** The smallest partner magnitude an out-of-region window takes (its `low` partner floor, round 27, else minPartnerMag). */
+const farMinPartnerMag = (w: OutOfRegionWindow): number => Math.min(w.minPartnerMag, w.low?.fromMag ?? Infinity);
 /** The widest out-of-region window and the smallest partner magnitude any of them takes: the gather radius of a node
  *  that may be either side of one (Resolver.farCandidates). */
-const FAR_WINDOW_MAX_KM = Math.max(0, ...FAR_WINDOWS.map((w) => w.maxKm));
-const FAR_MIN_PARTNER_MAG = Math.min(Infinity, ...FAR_WINDOWS.map((w) => w.minPartnerMag));
+const FAR_WINDOW_MAX_KM = Math.max(0, ...FAR_WINDOWS.map((w) => Math.max(w.maxKm, w.low?.km ?? 0)));
+const FAR_MIN_PARTNER_MAG = Math.min(Infinity, ...FAR_WINDOWS.map(farMinPartnerMag));
 /** The reason of the op:tombstone line that keeps a held solution out of the live set (Resolver.retractHeld). */
 export const HELD_REASON = "held: a regional agency's solution outside its own region that no other agency's event takes (automatic, or without a magnitude)";
 const clamp = (n: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, n));
@@ -692,8 +695,9 @@ export class Resolver {
   /** The out-of-region window two sides get (config REGION_RULES `window`, round 26), or null: one side's rows are all
    *  one REGION_RULES provider's, every one outside its region (outsideRegionSide); the other side holds no row of that provider and a row of
    *  one of its partners that is the partner's own solution (not EMSC's copy of the provider's, EMSC_AUTHORED_COPIES),
-   *  and its magnitude (`bMag` for side `b`) reaches the window's minPartnerMag, which sets the distance. Only with the
-   *  merge pass: the backfill and the deep-history build stay as they are. */
+   *  and its magnitude (`bMag` for side `b`) reaches the window's minPartnerMag, which sets the distance, or, for the
+   *  provider's reviewed solutions, its `low` floor (round 27: up to `low.km`, beyond `baseKm` at the `low` speeds). Only
+   *  with the merge pass: the backfill and the deep-history build stay as they are. */
   private farWindow(aRows: readonly SourcedSolution[], aMag: number | null, bRows: readonly SourcedSolution[], bMag: number | null): FarWindow | null {
     if (!this.mergePass || aMag == null || bMag == null) return null;
     for (const [own, partner, partnerMag, providerIsA] of [
@@ -703,10 +707,16 @@ export class Resolver {
       const provider = own[0]?.provider;
       const w = provider != null ? REGION_RULES.get(provider)?.window : undefined;
       if (!w || !this.outsideRegionSide(own, provider!)) continue;
-      if (partnerMag < w.minPartnerMag - REID_MAG_TOLERANCE || partner.some((r) => r.provider === provider)) continue;
+      if (partnerMag < farMinPartnerMag(w) - REID_MAG_TOLERANCE || partner.some((r) => r.provider === provider)) continue;
       if (!partner.some((r) => w.partners.has(r.provider) && !Resolver.copyOfProvider(r, provider))) continue;
-      const km = clamp(w.baseKm + w.kmPerMag * (partnerMag - w.minPartnerMag), w.baseKm, w.maxKm);
-      return { provider, km, ms: w.maxDtMs, maxDelta: w.maxDeltaMag, providerIsA };
+      if (partnerMag >= w.minPartnerMag - REID_MAG_TOLERANCE) {
+        const km = clamp(w.baseKm + w.kmPerMag * (partnerMag - w.minPartnerMag), w.baseKm, w.maxKm);
+        return { provider, km, ms: w.maxDtMs, maxDelta: w.maxDeltaMag, providerIsA, speed: null };
+      }
+      // A partner below minPartnerMag (`low`, round 27): only for the provider's reviewed solutions.
+      const superseded = this.supersededAutomaticRows(own);
+      if (!w.low || !own.every((r) => superseded.includes(r) || r.status === 'reviewed')) continue;
+      return { provider, km: w.low.km, ms: w.maxDtMs, maxDelta: w.maxDeltaMag, providerIsA, speed: { fromKm: w.baseKm, min: w.low.minKmPerS, max: w.low.maxKmPerS } };
     }
     return null;
   }
@@ -728,6 +738,10 @@ export class Resolver {
     if (dt > w.ms) return `${label}: dt ${(dt / 1000).toFixed(1)} s > ${(w.ms / 1000).toFixed(1)} s`;
     if (d > w.km) return `${label}: d ${d.toFixed(1)} km > ${w.km.toFixed(1)} km`;
     if (magsApart(a.mag!, b.mag!, w.maxDelta)) return `${label}: dM ${Math.abs(a.mag! - b.mag!).toFixed(2)} > ${w.maxDelta}`;
+    if (w.speed && d > w.speed.fromKm) {
+      const kmPerS = dt > 0 ? d / (dt / 1000) : Infinity;
+      if (kmPerS < w.speed.min || kmPerS > w.speed.max) return `${label}: d ${d.toFixed(1)} km over dt ${(dt / 1000).toFixed(1)} s is ${kmPerS.toFixed(1)} km/s, outside ${w.speed.min}–${w.speed.max} km/s`;
+    }
     return null;
   }
 
@@ -769,7 +783,7 @@ export class Resolver {
   private farOwnSide(node: EventNode): boolean {
     const p = node.provenance[0]?.provider;
     const w = p != null ? REGION_RULES.get(p)?.window : undefined;
-    if (!w || node.mag == null || node.mag < w.minPartnerMag - w.maxDeltaMag - 2 * REID_MAG_TOLERANCE) return false;
+    if (!w || node.mag == null || node.mag < farMinPartnerMag(w) - w.maxDeltaMag - 2 * REID_MAG_TOLERANCE) return false;
     return this.outsideRegionSide(node.provenance, p!);
   }
 
@@ -1091,7 +1105,7 @@ export class Resolver {
     if (!w0 || !this.mergePass || raw.mag == null) return null;
     let best: EventNode | null = null;
     let bestScore = Infinity;
-    for (const cell of gatherCellKeys(raw.lat, raw.lon, w0.maxKm, GRID_CELL_DEG)) {
+    for (const cell of gatherCellKeys(raw.lat, raw.lon, Math.max(w0.maxKm, w0.low?.km ?? 0), GRID_CELL_DEG)) {
       for (const fid of this.geo.get(cell) ?? []) {
         const node = this.eventMap.get(fid);
         if (!node || node.state !== 'live') continue;
@@ -2177,7 +2191,10 @@ export class Resolver {
     const dt = Math.abs(a.eventTimeMs - b.eventTimeMs) / 1000;
     const dM = a.mag != null && b.mag != null ? Math.abs(a.mag - b.mag).toFixed(2) : 'n/a';
     const far = this.farOnly(a, b);
-    if (far) return `proximity: d=${d.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} ${far.provider.toUpperCase()} out-of-region window=${far.km.toFixed(1)} km/${(far.ms / 1000).toFixed(0)} s`;
+    if (far) {
+      const speed = far.speed ? ` (beyond ${far.speed.fromKm} km at ${far.speed.min}–${far.speed.max} km/s)` : '';
+      return `proximity: d=${d.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} ${far.provider.toUpperCase()} out-of-region window=${far.km.toFixed(1)} km/${(far.ms / 1000).toFixed(0)} s${speed}`;
+    }
     const regional = this.regionalNodes(a, b);
     const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b, regional) : null;
     const { km, ms } = moderate ?? this.windows(a, b, dense);

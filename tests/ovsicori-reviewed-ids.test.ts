@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { GRID_CELL_DEG, OVSICORI_PROVIDER, OVSICORI_REGION, REVIEWED_ID_WINDOWS, SWARM_CELL_ABSOLUTE } from '../src/config.js';
+import { GRID_CELL_DEG, OVSICORI_PROVIDER, OVSICORI_REGION, OVSICORI_WINDOW, REVIEWED_ID_WINDOWS, SWARM_CELL_ABSOLUTE } from '../src/config.js';
 import { Resolver } from '../src/dedup.js';
 import { gridKey } from '../src/geo.js';
 import { REDERIVED_REASON, runFeedSideSteps } from '../src/heal.js';
@@ -306,4 +306,52 @@ test('re-derive: a stored event led by a row the rules now rank behind another i
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+});
+
+// --- the out-of-region window's partner floor (round 27) ---
+
+// OVSICORI's reviewed 1450391 (M6.0, 2026-10-09 23:09:55, 7.0388 N 80.0793 W) and ComCat's us6000u1ax (M5.0, 23:10:02.9,
+// 7.3962 N 80.5284 W): 63.5 km and 7.9 s, 8.0 km/s.
+const Q_OVS = { lat: 7.0388, lon: -80.0793, eventTimeMs: Date.parse('2026-10-09T23:09:55Z'), mag: 6.0, status: 'reviewed' };
+const Q_US = { lat: 7.3962, lon: -80.5284, eventTimeMs: Date.parse('2026-10-09T23:10:02.875Z'), mag: 5.0, status: 'reviewed', magType: 'mb' };
+function low(ovs: Partial<RawObs> = {}, us: Partial<RawObs> = {}, ovsFirst = false): number {
+  const map = new Map<string, EventNode>();
+  const r = new Resolver(map, prio, cfg, Date.parse('2026-10-10T06:00:00Z'));
+  const a = obs('us6000u1ax', { ...Q_US, ...us }, 'usgs');
+  const b = obs('1450391', { ...Q_OVS, ...ovs });
+  for (const o of ovsFirst ? [b, a] : [a, b]) r.ingest(o, '2026-10-10T05:11:00Z');
+  r.heal('2026-10-10T05:11:00Z');
+  return live(map).length;
+}
+
+test('config: the out-of-region window takes a reviewed solution’s partner from M4.5, within 50 km or up to 120 km at 6–10 km/s', () => {
+  assert.deepEqual(OVSICORI_WINDOW.low, { fromMag: 4.5, km: 120, minKmPerS: 6, maxKmPerS: 10 });
+});
+
+test('a reviewed OVSICORI solution outside its region joins a partner of M4.5–5.5 at the P-wave speed, either order', () => {
+  for (const ovsFirst of [false, true]) {
+    assert.equal(low({}, {}, ovsFirst), 1, `1450391 and us6000u1ax, ovsFirst=${ovsFirst}`);
+    assert.equal(low({}, { mag: 4.5 }, ovsFirst), 1, `partner M4.5, ovsFirst=${ovsFirst}`);
+    assert.equal(low({ eventTimeMs: Q_US.eventTimeMs - 2000 }, {}, ovsFirst), 2, `63.5 km in 2.9 s, ovsFirst=${ovsFirst}`);
+    assert.equal(low({ eventTimeMs: Q_US.eventTimeMs - 14_000 }, {}, ovsFirst), 2, `63.5 km in 14 s, ovsFirst=${ovsFirst}`);
+    assert.equal(low({}, { mag: 4.4 }, ovsFirst), 2, `partner M4.4, ovsFirst=${ovsFirst}`);
+    assert.equal(low({ status: 'automatic', mag: 5.4 }, {}, ovsFirst), 2, `automatic, ovsFirst=${ovsFirst}`);
+  }
+  // Within 50 km the time difference is free (up to 30 s), as for a larger partner.
+  assert.equal(low({ lat: Q_US.lat - 40 / KM_PER_DEG, lon: Q_US.lon, eventTimeMs: Q_US.eventTimeMs - 1000 }), 1, '40 km, 1 s');
+  // 121 km at 8 km/s: two.
+  assert.equal(low({ lat: Q_US.lat - 121 / KM_PER_DEG, lon: Q_US.lon, eventTimeMs: Q_US.eventTimeMs - 15_125 }), 2, '121 km');
+});
+
+test('an automatic OVSICORI solution outside its region does not take a partner below M5.5', () => {
+  const map = new Map<string, EventNode>();
+  const r = new Resolver(map, prio, cfg, Date.parse('2026-10-10T06:00:00Z'));
+  r.ingest(obs('us6000u1ax', Q_US, 'usgs'), '2026-10-10T05:11:00Z');
+  r.ingest(obs('1450391', { ...Q_OVS, status: 'automatic', mag: 5.4 }), '2026-10-10T05:11:00Z');
+  r.heal('2026-10-10T05:11:00Z');
+  assert.equal(live(map).length, 2);
+  // Held: automatic, M ≥ 4.0, outside the box, and no event takes it.
+  r.retractHeld('2026-10-10T05:11:00Z');
+  assert.equal(live(map).length, 1);
+  assert.equal(holding(map, 'ovsicori:1450391').length, 0);
 });

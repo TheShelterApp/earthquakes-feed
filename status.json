@@ -1,16 +1,16 @@
 {
-  "generated": "2026-10-19T14:57:45.681Z",
-  "head_seq": 244431,
-  "events_indexed": 12324,
-  "observations_returned": 10334,
-  "stale_dropped": 5152,
+  "generated": "2026-10-19T15:02:25.388Z",
+  "head_seq": 244446,
+  "events_indexed": 12328,
+  "observations_returned": 8548,
+  "stale_dropped": 3933,
   "bad_coords_dropped": 0,
-  "coordinateless_dropped": 98,
+  "coordinateless_dropped": 97,
   "coordinateless_withdrawn": 0,
   "coordinateless_retracted": 0,
-  "new_observations": 11,
-  "revisions": 0,
-  "late_minted": 0,
+  "new_observations": 15,
+  "revisions": 1,
+  "late_minted": 1,
   "late_withheld": 0,
   "tombstoned": 0,
   "comcat_twins_withdrawn": 0,
@@ -34,10 +34,12 @@
   "merged": 0,
   "copies_rehomed": 0,
   "rows_rehomed": 0,
-  "rows_revised": 0,
+  "rows_revised": 4,
   "heal_merged": 0,
-  "duration_ms": 38618,
+  "duration_ms": 44247,
   "degraded": [
+    "usgs",
+    "cenc",
     "geosphere"
   ],
   "silent": {},
@@ -48,7 +50,7 @@
       "days_left": 174.5,
       "issuer": "GlobalSign GCC R46 AlphaSSL CA 2025",
       "subject": "*.tmd.go.th",
-      "seen_at": "2026-10-19T14:57:45.681Z"
+      "seen_at": "2026-10-19T15:02:25.388Z"
     },
     "phivolcs": {
       "not_after": "2026-11-19T05:01:03.000Z",
@@ -62,122 +64,118 @@
   "tls_errors": {},
   "providers": {
     "usgs": {
-      "ok": true,
-      "http_status": 200,
-      "latency_ms": 888,
-      "events_returned": 459,
-      "newest_origin": "2026-10-19T14:02:21.000Z"
+      "ok": false,
+      "error": "This operation was aborted"
     },
     "emsc": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 2400,
-      "events_returned": 629,
-      "newest_origin": "2026-10-19T14:49:05.000Z"
+      "latency_ms": 6975,
+      "events_returned": 630,
+      "newest_origin": "2026-10-19T14:56:32.260Z"
     },
     "geofon": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 3567,
+      "latency_ms": 1172,
       "events_returned": 21,
       "newest_origin": "2026-10-19T14:44:26.030Z"
     },
     "ingv": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 1504,
-      "events_returned": 139,
-      "newest_origin": "2026-10-19T14:42:12.010Z"
+      "latency_ms": 1051,
+      "events_returned": 140,
+      "newest_origin": "2026-10-19T14:44:28.340Z"
     },
     "geonet": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 777,
-      "events_returned": 154,
-      "newest_origin": "2026-10-19T14:45:41.000Z"
+      "latency_ms": 1378,
+      "events_returned": 155,
+      "newest_origin": "2026-10-19T14:59:37.000Z"
     },
     "resif": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 1720,
-      "events_returned": 123,
-      "newest_origin": "2026-10-19T13:26:17.359Z"
+      "latency_ms": 1758,
+      "events_returned": 122,
+      "newest_origin": "2026-10-19T13:26:17.935Z"
     },
     "noa": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 3432,
+      "latency_ms": 1432,
       "events_returned": 412,
-      "newest_origin": "2026-10-19T14:56:32.677Z"
+      "newest_origin": "2026-10-19T14:56:33.021Z"
     },
     "ethz": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 949,
+      "latency_ms": 1134,
       "events_returned": 16,
       "newest_origin": "2026-10-19T11:36:36.279Z"
     },
     "nrcan": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 767,
+      "latency_ms": 659,
       "events_returned": 41,
       "newest_origin": "2026-10-19T07:33:05.000Z"
     },
     "ncedc": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 612,
-      "events_returned": 238,
+      "latency_ms": 791,
+      "events_returned": 237,
       "newest_origin": "2026-10-19T14:05:23.640Z"
     },
     "scedc": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 392,
+      "latency_ms": 467,
       "events_returned": 76,
       "newest_origin": "2026-10-19T13:51:33.110Z"
     },
     "aec": {
       "ok": true,
-      "latency_ms": 355,
+      "latency_ms": 509,
       "events_returned": 1428,
       "newest_origin": "2026-10-19T14:00:39.094Z"
     },
     "knmi": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 639,
+      "latency_ms": 845,
       "events_returned": 4,
       "newest_origin": "2026-10-18T15:35:47.279Z"
     },
     "auspass": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 715,
+      "latency_ms": 1174,
       "events_returned": 4
     },
     "afad": {
       "ok": true,
-      "latency_ms": 1875,
-      "events_returned": 196,
+      "latency_ms": 2062,
+      "events_returned": 195,
       "newest_origin": "2026-10-19T14:30:24.000Z"
     },
     "cenc": {
-      "ok": true,
-      "latency_ms": 1197,
-      "events_returned": 935,
-      "newest_origin": "2026-10-19T10:57:08.000Z"
+      "ok": false,
+      "latency_ms": 21569,
+      "error": "fetch failed"
     },
     "ncs": {
       "ok": true,
-      "latency_ms": 2576,
+      "latency_ms": 8415,
       "events_returned": 150,
       "newest_origin": "2026-10-19T14:06:20.000Z"
     },
     "tmd": {
       "ok": true,
-      "latency_ms": 1727,
+      "latency_ms": 1847,
       "events_returned": 20,
       "newest_origin": "2026-10-19T14:05:35.000Z",
       "tls_leaf": {
@@ -185,52 +183,52 @@
         "days_left": 174.5,
         "issuer": "GlobalSign GCC R46 AlphaSSL CA 2025",
         "subject": "*.tmd.go.th",
-        "seen_at": "2026-10-19T14:57:45.681Z"
+        "seen_at": "2026-10-19T15:02:25.388Z"
       }
     },
     "kagsr": {
       "ok": true,
-      "latency_ms": 1613,
+      "latency_ms": 2521,
       "events_returned": 7,
       "newest_origin": "2026-10-18T20:30:25.000Z"
     },
     "bmkg": {
       "ok": true,
-      "latency_ms": 418,
+      "latency_ms": 819,
       "events_returned": 29,
       "newest_origin": "2026-10-19T13:46:11.000Z"
     },
     "jma": {
       "ok": true,
-      "latency_ms": 310,
+      "latency_ms": 104,
       "events_returned": 181,
       "newest_origin": "2026-10-19T13:41:00.000Z"
     },
     "renass": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 1082,
-      "events_returned": 123,
-      "newest_origin": "2026-10-19T13:26:17.359Z"
+      "latency_ms": 1274,
+      "events_returned": 122,
+      "newest_origin": "2026-10-19T13:26:17.935Z"
     },
     "ipgp": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 859,
+      "latency_ms": 2011,
       "events_returned": 42,
       "newest_origin": "2026-10-19T11:43:02.890Z"
     },
     "usp": {
       "ok": true,
       "http_status": 200,
-      "latency_ms": 2495,
-      "events_returned": 2,
+      "latency_ms": 1652,
+      "events_returned": 3,
       "newest_origin": "2026-10-19T07:33:35.499Z"
     },
     "lmu": {
       "ok": true,
       "http_status": 204,
-      "latency_ms": 1036,
+      "latency_ms": 855,
       "events_returned": 0
     },
     "isc": {
@@ -239,96 +237,95 @@
     },
     "mexico": {
       "ok": true,
-      "latency_ms": 186,
+      "latency_ms": 1303,
       "events_returned": 1,
       "newest_origin": "2026-10-19T14:47:45.000Z"
     },
     "ipma": {
       "ok": true,
-      "latency_ms": 1170,
-      "events_returned": 394,
-      "newest_origin": "2026-10-19T09:30:43.000Z"
+      "latency_ms": 43138,
+      "events_returned": 0
     },
     "igp": {
       "ok": true,
-      "latency_ms": 662,
-      "events_returned": 742,
-      "newest_origin": "2026-10-19T12:08:10.000Z"
+      "latency_ms": 943,
+      "events_returned": 743,
+      "newest_origin": "2026-10-19T14:54:44.000Z"
     },
     "egypt": {
       "ok": true,
-      "latency_ms": 1362,
+      "latency_ms": 1622,
       "events_returned": 30,
       "newest_origin": "2026-10-18T13:40:53.940Z"
     },
     "bgs": {
       "ok": true,
-      "latency_ms": 719,
+      "latency_ms": 513,
       "events_returned": 39,
       "newest_origin": "2026-10-13T17:54:10.000Z"
     },
     "ign": {
       "ok": true,
-      "latency_ms": 135,
+      "latency_ms": 310,
       "events_returned": 1142,
       "newest_origin": "2026-10-19T11:58:23.000Z"
     },
     "imo": {
       "ok": true,
-      "latency_ms": 1356,
-      "events_returned": 45,
-      "newest_origin": "2026-10-19T14:54:25.093Z"
+      "latency_ms": 1657,
+      "events_returned": 46,
+      "newest_origin": "2026-10-19T14:59:58.992Z"
     },
     "inpres": {
       "ok": true,
-      "latency_ms": 1202,
+      "latency_ms": 1318,
       "events_returned": 30,
       "newest_origin": "2026-10-19T09:14:18.000Z"
     },
     "ga": {
       "ok": true,
-      "latency_ms": 1473,
+      "latency_ms": 1841,
       "events_returned": 47,
       "newest_origin": "2026-10-19T10:57:08.257Z"
     },
     "ovsicori": {
       "ok": true,
-      "latency_ms": 1387,
+      "latency_ms": 1336,
       "events_returned": 672,
       "newest_origin": "2026-10-19T14:49:05.000Z"
     },
     "igepn": {
       "ok": true,
-      "latency_ms": 1206,
+      "latency_ms": 819,
       "events_returned": 50,
       "newest_origin": "2026-10-18T21:21:28.000Z"
     },
     "csn": {
       "ok": true,
-      "latency_ms": 210,
+      "latency_ms": 389,
       "events_returned": 51,
       "newest_origin": "2026-10-19T14:40:30.000Z"
     },
     "cwa": {
       "ok": true,
-      "latency_ms": 1273,
+      "latency_ms": 1506,
       "events_returned": 32,
       "newest_origin": "2026-10-17T03:13:19.000Z"
     },
     "geosphere": {
       "ok": false,
-      "latency_ms": 37803,
-      "error": "This operation was aborted"
+      "latency_ms": 3442,
+      "error": "HTTP 503"
     },
     "koeri": {
       "ok": true,
-      "latency_ms": 870,
+      "latency_ms": 1392,
       "events_returned": 500,
       "newest_origin": "2026-10-19T14:30:38.000Z"
     },
     "phivolcs": {
       "ok": true,
-      "latency_ms": 2790,
+      "latency_ms": 3019,
       "events_returned": 1130,
       "newest_origin": "2026-10-19T12:47:00.000Z",
       "tls_leaf": {
@@ -347,20 +344,20 @@
       "usgs": {
         "ok": true,
         "http_status": 200,
-        "latency_ms": 515,
-        "events_returned": 2,
-        "since": "2026-10-19T14:42:37.335Z",
-        "through": "2026-10-19T14:57:45.873Z",
+        "latency_ms": 3765,
+        "events_returned": 4,
+        "since": "2026-10-19T14:47:45.873Z",
+        "through": "2026-10-19T15:02:25.631Z",
         "epoch": 1,
         "pages": 1
       },
       "emsc": {
         "ok": true,
         "http_status": 200,
-        "latency_ms": 2168,
-        "events_returned": 6,
-        "since": "2026-10-19T14:42:37.370Z",
-        "through": "2026-10-19T14:57:45.898Z",
+        "latency_ms": 6731,
+        "events_returned": 9,
+        "since": "2026-10-19T14:47:45.898Z",
+        "through": "2026-10-19T15:02:25.663Z",
         "epoch": 1,
         "pages": 1
       }
@@ -369,10 +366,10 @@
       "usgs": {
         "ok": true,
         "http_status": 200,
-        "latency_ms": 273,
+        "latency_ms": 3732,
         "events_returned": 0,
-        "since": "2026-10-19T14:42:37.371Z",
-        "through": "2026-10-19T14:57:45.899Z",
+        "since": "2026-10-19T14:47:45.899Z",
+        "through": "2026-10-19T15:02:25.664Z",
         "epoch": 1,
         "pages": 1
       }

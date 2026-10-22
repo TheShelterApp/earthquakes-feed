@@ -1,17 +1,19 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   annotation,
+  BACKSTOP_PROVIDER,
+  budgetFinding,
   buildUsageRequest,
-  DEFAULT_THRESHOLDS,
+  CANARY_URL,
+  canaryFinding,
   DELETIONS_MAX_WINDOW_MS,
   deletionsFailure,
   DIRECT_PROVIDERS,
   evaluateStatus,
-  evaluateUsage,
   failureReason,
   fetchJson,
   GATEWAY_TICK_MS,
@@ -20,31 +22,97 @@ import {
   main,
   parseArgs,
   parseUsageResponse,
+  redact,
+  plainExitCode,
   pollIntervalMs,
   primaryFailure,
   PROVIDER_BACKOFF_STEPS,
   PROVIDER_MIN_INTERVAL_MS,
-  providerDownSec,
-  SELFTEST_MIN_HEADROOM_PCT,
   STATUS_URL,
   streakDuration,
   streakSpanSec,
+  unreadableFinding,
+  usageFindings,
+  usageMisconfigured,
   usageWindow,
   type FetchImpl,
+  type Verdict,
 } from '../scripts/alerts-watchdog.mjs';
+import { RULES, matchesKey, parseFindingsDocument, type Finding, type FindingsDocument } from '../scripts/lib/findings.mjs';
 
-// The alert-pipeline watchdog (scripts/alerts-watchdog.mjs, run by .github/workflows/health.yml).
-// Fixtures: tests/fixtures/alerts-status/healthy.json is a real capture of the public prod document; every
-// other status fixture is that capture with exactly one failing condition. Nothing here touches the network.
+// The alert-pipeline evaluator (scripts/alerts-watchdog.mjs, run by .github/workflows/health.yml): findings of the
+// alerting plan of 2026-10-22, section 3a. Fixtures: tests/fixtures/alerts-status/healthy.json is a real capture of the
+// public prod document; every other status fixture is that capture with one condition changed (the replay fixtures
+// gfz-timeout-2026-10-21, usgs-down-2026-10-05 and budget-projected also move the whole capture in time). Nothing here
+// touches the network.
 
 const FIXTURES = join(import.meta.dirname, 'fixtures');
 const statusFixture = (name: string): Record<string, any> => JSON.parse(readFileSync(join(FIXTURES, 'alerts-status', `${name}.json`), 'utf8'));
 const cfFixture = (name: string): unknown => JSON.parse(readFileSync(join(FIXTURES, 'cf-analytics', `${name}.json`), 'utf8'));
 
+const SEC = 1_000;
+const MIN = 60 * SEC;
+const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
+const T = (iso: string): number => Date.parse(iso);
+
 const HEALTHY = statusFixture('healthy');
+const GEN = HEALTHY.generatedAtMs as number;
 /** 15 s after the healthy capture was generated. */
-const NOW = (HEALTHY.generatedAtMs as number) + 15_000;
+const NOW = GEN + 15_000;
 const noSleep = async (): Promise<void> => {};
+
+const provider = (doc: Record<string, any>, id: string): Record<string, any> => doc.detector.providers.find((p: { id: string }) => p.id === id);
+const sev = (v: Verdict): string[] => v.findings.map((f) => `${f.key} ${f.severity}`);
+const find = (v: Verdict, key: string): Finding | undefined => v.findings.find((f) => f.key === key);
+const must = (v: Verdict, key: string): Finding => {
+  const f = find(v, key);
+  assert.ok(f, `no ${key} among ${JSON.stringify(sev(v))}`);
+  return f;
+};
+
+/** The document moved in time as a whole: every epoch-ms field (…Ms) shifted, budget.day set to the new UTC day. */
+function shifted(doc: Record<string, any>, toMs: number): Record<string, any> {
+  const delta = toMs - (doc.generatedAtMs as number);
+  const walk = (o: unknown): void => {
+    if (Array.isArray(o)) o.forEach(walk);
+    else if (o !== null && typeof o === 'object') {
+      for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
+        if (typeof v === 'number' && /Ms$/.test(k) && v > 1e12) (o as Record<string, unknown>)[k] = v + delta;
+        else walk(v);
+      }
+    }
+  };
+  const d = structuredClone(doc);
+  walk(d);
+  if (d.budget) d.budget.day = new Date(toMs).toISOString().slice(0, 10);
+  return d;
+}
+
+/** The most failures in a row whose span at the gateway's polling fits in `sec`. */
+function countFor(id: string, sec: number): number {
+  let n = 1;
+  while (streakSpanSec(id, n + 1) <= sec) n++;
+  return n;
+}
+
+/** The healthy capture with some providers failing: { id: [seconds failing, extra fields] } — the round-25 gateway's
+ *  failingSinceMs, with a plausible count at the gateway's polling. A provider given `null` seconds publishes no start
+ *  (an older gateway); then `consecutiveFailures` must come in the extra fields. */
+function failingFor(spec: Record<string, number | null | [number | null, Record<string, unknown>]>, base: Record<string, any> = HEALTHY): Record<string, any> {
+  const doc = structuredClone(base);
+  const ref = doc.generatedAtMs as number;
+  for (const p of doc.detector.providers) {
+    const v = spec[p.id];
+    if (v === undefined) continue;
+    const [sec, extra] = Array.isArray(v) ? v : [v, {}];
+    const n = sec === null ? 1 : countFor(p.id, sec);
+    Object.assign(p, { ok: false, consecutiveFailures: n, httpStatus: 0, latencyMs: 4000, lastError: 'timeout', consecutiveTimeouts: n });
+    if (sec !== null) p.failingSinceMs = ref - sec * 1000;
+    Object.assign(p, extra);
+  }
+  return doc;
+}
 
 const jsonResponse = (body: unknown, status = 200): Response =>
   new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -63,267 +131,1010 @@ function fakeFetch(routes: Record<string, Array<Response | Error>>) {
   return { impl, calls };
 }
 
-// --- evaluateStatus: one fixture per condition ---
+/** A USGS 4.5_hour summary with events of these origin times. */
+const usgsSummary = (...events: Array<{ id: string; time: number; mag?: number }>) => ({
+  type: 'FeatureCollection',
+  features: events.map((e) => ({ type: 'Feature', id: e.id, properties: { mag: e.mag ?? 4.8, time: e.time, place: 'somewhere' }, geometry: null })),
+});
 
-test('healthy fixture (live prod capture) passes every check', () => {
+// --- the document gate: unreadable, stale, fresh ---
+
+test('healthy fixture (live prod capture): no finding; the canary unread is the only unjudged key', () => {
   const v = evaluateStatus(HEALTHY, { nowMs: NOW });
-  assert.deepEqual(v.problems, []);
-  assert.deepEqual(v.warnings, []);
-  assert.match(v.summary, /age=15s/);
-  assert.match(v.summary, /providers=usgs:ok,feed:ok,emsc:ok,gfz:ok/);
-  assert.match(v.summary, /policy=signed\/v19/);
-  assert.match(v.summary, /degraded=none/);
-  assert.match(v.summary, /headroom=92%/);
-  assert.match(v.summary, /apns=configured/);
+  assert.deepEqual(v.findings, []);
+  assert.deepEqual(v.unjudged, ['alerts:canary']);
+  assert.match(v.summary, /^age=15s providers=usgs:ok,feed:ok,emsc:ok,gfz:ok policy=signed\/v19 degraded=none budget=doRowsWritten:10%\/day apns=configured fanout=n\/a$/);
+  // With a clear canary every key is judged.
+  const clear = evaluateStatus(HEALTHY, { nowMs: NOW, canary: usgsSummary() });
+  assert.deepEqual([clear.findings, clear.unjudged], [[], []]);
+  assert.deepEqual(evaluateStatus(statusFixture('healthy-r3'), { nowMs: NOW, canary: usgsSummary() }).findings, []);
 });
 
-test('stale fixture: generatedAtMs older than 300 s fails', () => {
-  const v = evaluateStatus(statusFixture('stale'), { nowMs: NOW });
-  assert.equal(v.problems.length, 1);
-  assert.match(v.problems[0]!, /615 s old \(limit 300 s\)/);
+test('stale fixture: exactly alerts:status:stale P1 since generatedAtMs, and every alerts:* key unjudged', () => {
+  const stale = statusFixture('stale');
+  const v = evaluateStatus(stale, { nowMs: NOW, canary: usgsSummary() });
+  assert.deepEqual(sev(v), ['alerts:status:stale P1']);
+  assert.deepEqual(v.unjudged, ['alerts:*']);
+  const f = v.findings[0]!;
+  assert.deepEqual([f.rule, f.board, f.class, f.check, f.shadow, f.sinceMs], ['alerts:status:stale', 'alerts', 'symptom', 'gh-detect', false, stale.generatedAtMs]);
+  assert.equal(f.text, 'status.json is 615 s old (line 300 s, generated 2026-09-25 19:37Z): the detector has stopped publishing, so alerts are not being detected');
+  // A stale document's other fields are old: nothing else is judged, however bad it looks.
+  const worse = failingFor({ usgs: 3_600, emsc: 3_600, gfz: 3_600 }, stale);
+  worse.degraded = statusFixture('degraded').degraded;
+  assert.deepEqual(sev(evaluateStatus(worse, { nowMs: NOW })), ['alerts:status:stale P1']);
+  assert.equal(plainExitCode(v.findings), 1);
 });
 
-test('freshness boundary: 300 s passes, 301 s fails', () => {
-  assert.deepEqual(evaluateStatus(HEALTHY, { nowMs: HEALTHY.generatedAtMs + 300_000 }).problems, []);
-  assert.equal(evaluateStatus(HEALTHY, { nowMs: HEALTHY.generatedAtMs + 301_000 }).problems.length, 1);
+test('freshness boundary: 300 s is fresh, 300.001 s stale; a document from the future is a note, judged fresh', () => {
+  assert.deepEqual(evaluateStatus(HEALTHY, { nowMs: GEN + 300_000 }).findings, []);
+  assert.deepEqual(sev(evaluateStatus(HEALTHY, { nowMs: GEN + 300_001 })), ['alerts:status:stale P1']);
+  const future = evaluateStatus(HEALTHY, { nowMs: GEN - 301_000 });
+  assert.deepEqual(future.findings, []);
+  assert.match(future.notes[0]!, /^generatedAtMs is 301 s in the future: clock skew/);
+  assert.deepEqual(evaluateStatus(HEALTHY, { nowMs: GEN - 299_000 }).notes, ['canary: no USGS 4.5_hour summary this run (alerts:canary not judged)']);
 });
 
-test('provider-down fixture: USGS failing for 6.5 min (failingSinceMs) fails; EMSC failing for 5 s is only a note', () => {
-  const v = evaluateStatus(statusFixture('provider-down'), { nowMs: NOW });
-  assert.deepEqual(v.problems, ['provider usgs is down: ok:false for 6.5 min (since 19:40:35 UTC), limit 5 min for a provider polled every 60 s, 7 consecutive failures, last HTTP 503']);
-  assert.deepEqual(v.warnings, []);
-  assert.deepEqual(v.notes, ['provider emsc is ok:false for 5 s (since 19:47:00 UTC), below the warning at 60 s, down at 3 min, 1 consecutive failure, last HTTP 502']);
-  assert.match(v.summary, /usgs:FAIL\(7\).*emsc:FAIL\(1\)/);
-});
-
-test('provider boundary by time: the feed at 299 s warns, at 300 s fails; measured to the document, not to now', () => {
-  const doc = structuredClone(HEALTHY);
-  Object.assign(doc.detector.providers[1], { ok: false, consecutiveFailures: 5, failingSinceMs: HEALTHY.generatedAtMs - 299_000 });
-  let v = evaluateStatus(doc, { nowMs: NOW });
-  assert.deepEqual(v.problems, []);
-  assert.match(v.warnings[0]!, /^provider feed is failing: ok:false for 4\.5 min \(since .*\), a warning from 60 s, down at 5 min, 5 consecutive failures/);
-  // The watchdog reading the same document a minute later sees the same streak: the duration is as of generatedAtMs.
-  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW + 60_000 }).problems, []);
-  doc.detector.providers[1].failingSinceMs = HEALTHY.generatedAtMs - 300_000;
-  v = evaluateStatus(doc, { nowMs: NOW });
-  assert.match(v.problems[0]!, /^provider feed is down: ok:false for 5 min \(since .*\), limit 5 min for a provider polled every 60 s/);
-});
-
-test('an older gateway (no failingSinceMs): the duration comes from the count at the gateway\'s polling, never earlier', () => {
-  // 5 USGS failures span 4 min (60 s apart): a warning; 6 span 5 min: down. The old count rule was red at 3.
-  const doc = structuredClone(HEALTHY);
-  Object.assign(doc.detector.providers[0], { ok: false, httpStatus: 503, consecutiveFailures: 5 });
-  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).problems, []);
-  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).warnings, [
-    'provider usgs is failing: ok:false for about 4 min (5 consecutive failures at 60 s polls; the gateway publishes no failingSinceMs for it), a warning from 60 s, down at 5 min, last HTTP 503: the other providers still deliver, so alerts still go out (a quake only usgs reports may come later)',
-  ]);
-  doc.detector.providers[0].consecutiveFailures = 6;
-  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).problems, [
-    'provider usgs is down: ok:false for about 5 min (6 consecutive failures at 60 s polls; the gateway publishes no failingSinceMs for it), limit 5 min for a provider polled every 60 s, last HTTP 503',
-  ]);
-  // Two USGS failures (60 s) are a warning, one is a note; a damaged or future start falls back to the count too.
-  doc.detector.providers[0].consecutiveFailures = 1;
-  assert.match(evaluateStatus(doc, { nowMs: NOW }).notes[0]!, /^provider usgs is ok:false for about 0 s \(1 consecutive failure at 60 s polls/);
-  for (const bad of ['1790365235218', -1, 0, null, Number.NaN, HEALTHY.generatedAtMs + 3_600_000]) {
-    Object.assign(doc.detector.providers[0], { consecutiveFailures: 6, failingSinceMs: bad });
-    assert.match(evaluateStatus(doc, { nowMs: NOW }).problems[0]!, /^provider usgs is down: ok:false for about 5 min \(6 consecutive failures/, String(bad));
+test('unreadable: not an object, no generatedAtMs, no providers list -> only alerts:status:unreadable P2, alerts:* unjudged', () => {
+  const noGen = structuredClone(HEALTHY);
+  delete noGen.generatedAtMs;
+  const noDetector = structuredClone(HEALTHY);
+  delete noDetector.detector;
+  const noList = structuredClone(HEALTHY);
+  noList.detector.providers = { usgs: { ok: true } };
+  const cases: Array<[unknown, RegExp]> = [
+    [[1, 2], /^status\.json is not a JSON object\. The alert pipeline state is UNKNOWN\.$/],
+    ['ok', /not a JSON object/],
+    [null, /not a JSON object/],
+    [noGen, /no numeric generatedAtMs/],
+    [noDetector, /no detector\.providers list/],
+    [noList, /no detector\.providers list/],
+  ];
+  for (const [doc, text] of cases) {
+    const v = evaluateStatus(doc, { nowMs: NOW, canary: usgsSummary() });
+    assert.deepEqual(sev(v), ['alerts:status:unreadable P2'], String(text));
+    assert.deepEqual(v.unjudged, ['alerts:*']);
+    const f = v.findings[0]!;
+    assert.deepEqual([f.rule, f.class, f.check, f.sinceMs], ['alerts:status:unreadable', 'unknown', 'gh-platform', null]);
+    assert.match(f.text, text);
+    assert.equal(plainExitCode(v.findings), 2);
   }
-  // Neither a start nor a count: a note, never a failure.
-  Object.assign(doc.detector.providers[0], { consecutiveFailures: undefined, failingSinceMs: undefined });
-  const none = evaluateStatus(doc, { nowMs: NOW });
-  assert.deepEqual([none.problems, none.warnings], [[], []]);
-  assert.match(none.notes[0]!, /^provider usgs is ok:false with no failure streak published/);
+  // The fetch-failure variant (main builds it): the same finding with the reason and the hint.
+  const f = unreadableFinding('status.json could not be read (network error): network error: fetch failed after 3 attempts.');
+  assert.deepEqual([f.key, f.severity, f.sinceMs, f.check], ['alerts:status:unreadable', 'P2', null, 'gh-platform']);
+  assert.throws(() => evaluateStatus(HEALTHY, {} as { nowMs: number }), /nowMs is required/);
 });
 
-test('round-14 gateway: the failure message names lastError and consecutiveTimeouts (the 2026-10-04 USGS timeouts)', () => {
-  const doc = structuredClone(HEALTHY);
-  // What the gateway publishes while USGS answers slower than its 4 s fetch timeout: HTTP 0, latency ≈ the timeout.
-  Object.assign(doc.detector.providers[0], { ok: false, httpStatus: 0, latencyMs: 4000, consecutiveFailures: 387, lastError: 'timeout', consecutiveTimeouts: 387 });
-  const v = evaluateStatus(doc, { nowMs: NOW });
-  assert.equal(v.problems.length, 1);
+// --- one provider on its own: P4 samples below the line, P3 at it (an external source is never red) ---
+
+const GFZ_BASE = statusFixture('gfz-timeout-2026-10-21');
+const GFZ_START = T('2026-10-21T12:50:00Z');
+/** The 2026-10-21 GEOFON outage (timeouts from 12:50Z) as the gateway published it at `iso`. */
+function geofonAt(iso: string): Record<string, any> {
+  const d = shifted(GFZ_BASE, T(iso));
+  const n = countFor('gfz', (T(iso) - GFZ_START) / 1000);
+  Object.assign(provider(d, 'gfz'), { failingSinceMs: GFZ_START, consecutiveFailures: n, consecutiveTimeouts: n });
+  return d;
+}
+
+test('2026-10-21 GEOFON replay: P4 samples at 12:52-13:37, P3 by the 60-min line from 13:52; never coverage, never red', async () => {
+  const runs: Array<[string, string]> = [
+    ['2026-10-21T12:52:00Z', 'P4'],
+    ['2026-10-21T13:07:00Z', 'P4'],
+    ['2026-10-21T13:22:00Z', 'P4'],
+    ['2026-10-21T13:37:00Z', 'P4'],
+    ['2026-10-21T13:52:00Z', 'P3'],
+    ['2026-10-21T15:22:00Z', 'P3'],
+  ];
+  for (const [iso, severity] of runs) {
+    const doc = geofonAt(iso);
+    const v = evaluateStatus(doc, { nowMs: T(iso) + 20_000, canary: usgsSummary() });
+    assert.deepEqual(sev(v), [`alerts:provider:gfz ${severity}`], iso);
+    const f = v.findings[0]!;
+    assert.deepEqual([f.rule, f.class, f.board, f.check, f.sinceMs], ['alerts:provider:fast', 'external', 'alerts', null, GFZ_START], iso);
+    assert.equal(plainExitCode(v.findings), 0, iso);
+    const r = await run({ routes: { [STATUS_URL]: [jsonResponse(doc)] }, argv: ['--no-canary'], now: T(iso) + 20_000 });
+    assert.equal(r.code, 0, iso);
+    assert.doesNotMatch(r.out, /::error/, iso);
+  }
+  // The fixture itself is the 13:52 document: past the line, named with its reason.
+  const at1352 = evaluateStatus(GFZ_BASE, { nowMs: T('2026-10-21T13:52:20Z') });
   assert.equal(
-    v.problems[0],
-    "provider usgs is down: ok:false for about 31.6 h (387 consecutive failures at 60 s polls; the gateway publishes no failingSinceMs for it), limit 5 min for a provider polled every 60 s, last HTTP 0, last error timeout (slower than the gateway's fetch timeout), 387 timeouts in a row",
+    must(at1352, 'alerts:provider:gfz').text,
+    "provider gfz is failing: ok:false for 62 min (since 12:50:00 UTC), 20 consecutive failures, last HTTP 0, last error timeout (slower than the gateway's fetch timeout), 20 timeouts in a row (past the 60 min line for timeouts, network and HTTP errors): the other direct providers still deliver, so alerts still go out (a quake only gfz reports may come later)",
   );
-  assert.match(v.summary, /usgs:FAIL\(387\)/); // the summary tag is unchanged
+  const p4 = evaluateStatus(geofonAt('2026-10-21T13:37:00Z'), { nowMs: T('2026-10-21T13:37:20Z') });
+  assert.match(must(p4, 'alerts:provider:gfz').text, /ok:false for 47 min \(since 12:50:00 UTC\).*\(below the 60 min line for timeouts, network and HTTP errors\)/);
 });
 
-test('round-14 gateway: an HTTP, network or invalid failure is named; zero timeouts add nothing; a note carries it too', () => {
-  const doc = structuredClone(HEALTHY);
-  Object.assign(doc.detector.providers[2], { ok: false, httpStatus: 503, consecutiveFailures: 5, lastError: 'http', consecutiveTimeouts: 0 });
-  Object.assign(doc.detector.providers[3], { ok: false, httpStatus: 200, consecutiveFailures: 1, lastError: 'invalid', consecutiveTimeouts: 0 });
-  const v = evaluateStatus(doc, { nowMs: NOW });
-  // EMSC's 5 failures span 2.5 min at 15 s polls: a warning (down at 3 min); the reason is named there too.
-  assert.deepEqual(v.problems, []);
-  assert.deepEqual(v.warnings, ['provider emsc is failing: ok:false for about 2.5 min (5 consecutive failures at 15 s polls; the gateway publishes no failingSinceMs for it), a warning from 60 s, down at 3 min, last HTTP 503, last error http (an HTTP error status): the other providers still deliver, so alerts still go out (a quake only emsc reports may come later)']);
-  assert.deepEqual(v.notes, ['provider gfz is ok:false for about 0 s (1 consecutive failure at 15 s polls; the gateway publishes no failingSinceMs for it), below the warning at 60 s, down at 3 min, last HTTP 200, last error invalid (a body that does not parse or verify)']);
-  // A streak that ended in a network error after two timeouts.
-  assert.equal(failureReason({ lastError: 'network', consecutiveTimeouts: 0 }), ', last error network (a network failure before the timeout)');
-  assert.equal(failureReason({ lastError: 'timeout', consecutiveTimeouts: 1 }), ", last error timeout (slower than the gateway's fetch timeout), 1 timeout in a row");
-});
-
-test('lastError / consecutiveTimeouts: missing, malformed or unknown values never break the check', () => {
-  assert.equal(failureReason({}), '');
-  assert.equal(failureReason(null), '');
-  assert.equal(failureReason({ lastError: '', consecutiveTimeouts: -1 }), '');
-  assert.equal(failureReason({ lastError: 42, consecutiveTimeouts: '3' }), '');
-  assert.equal(failureReason({ consecutiveTimeouts: Number.NaN }), '');
-  // An unknown code (a newer gateway) is shown as is, cut to 32 characters; only the timeout count is added.
-  assert.equal(failureReason({ lastError: 'tls', consecutiveTimeouts: 2 }), ', last error tls, 2 timeouts in a row');
-  assert.equal(failureReason({ lastError: 'x'.repeat(100) }), `, last error ${'x'.repeat(32)}`);
-  const doc = structuredClone(HEALTHY);
-  Object.assign(doc.detector.providers[0], { ok: false, consecutiveFailures: 6, lastError: { nested: true }, consecutiveTimeouts: null });
-  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).problems, ['provider usgs is down: ok:false for about 5 min (6 consecutive failures at 60 s polls; the gateway publishes no failingSinceMs for it), limit 5 min for a provider polled every 60 s, last HTTP 200']);
-});
-
-test('policy-fallback fixture: policy.fallback == true fails with the reason', () => {
-  const v = evaluateStatus(statusFixture('policy-fallback'), { nowMs: NOW });
-  assert.equal(v.problems.length, 1);
-  assert.match(v.problems[0]!, /compiled FALLBACK alerts policy \(v1, reason: expired\)/);
-});
-
-test('degraded fixture: degraded.active fails with the level', () => {
-  const v = evaluateStatus(statusFixture('degraded'), { nowMs: NOW });
-  assert.equal(v.problems.length, 1);
-  assert.match(v.problems[0]!, /DEGRADED \(level tier2-off, reason: budget_exhausted\)/);
-});
-
-test('low-headroom fixture: budget.headroomPct < 20 fails; 20 passes; absent is not judged', () => {
-  const v = evaluateStatus(statusFixture('low-headroom'), { nowMs: NOW });
-  assert.equal(v.problems.length, 1);
-  assert.match(v.problems[0]!, /headroom is 12 % \(limit 20 %\)/);
-  const at20 = structuredClone(HEALTHY);
-  at20.budget.headroomPct = 20;
-  assert.deepEqual(evaluateStatus(at20, { nowMs: NOW }).problems, []);
-  const absent = structuredClone(HEALTHY);
-  delete absent.budget.headroomPct;
-  const va = evaluateStatus(absent, { nowMs: NOW });
-  assert.deepEqual(va.problems, []);
-  assert.match(va.summary, /headroom=n\/a/);
-});
-
-test('apns-dry fixture: apns.configured == false fails', () => {
-  const v = evaluateStatus(statusFixture('apns-dry'), { nowMs: NOW });
-  assert.equal(v.problems.length, 1);
-  assert.match(v.problems[0]!, /APNs is NOT configured/);
-});
-
-// --- round-3 gateway: per-environment APNs keys (apns.mode/production/sandbox/problems) + the fanout block ---
-
-test('healthy-r3 fixture (legacy key, clean counters) passes with no warning and summarizes the new blocks', () => {
-  const v = evaluateStatus(statusFixture('healthy-r3'), { nowMs: NOW });
-  assert.deepEqual(v.problems, []);
-  assert.deepEqual(v.warnings, []);
-  assert.match(v.summary, /apns=configured\/legacy/);
-  assert.match(v.summary, /fanout=jobs:3,sent:41,no_key:0,dropped_budget:0/);
-});
-
-test('apns-split-no-production fixture: split keys without a production key fail (every production device is skipped)', () => {
-  const v = evaluateStatus(statusFixture('apns-split-no-production'), { nowMs: NOW });
-  assert.equal(v.problems.length, 1);
-  assert.match(v.problems[0]!, /split per-environment keys but holds NO production key/);
-  assert.match(v.problems[0]!, /App Store and TestFlight/);
-  assert.match(v.summary, /apns=configured\/split\/production=NO/);
-  // The skipped devices are also surfaced as a (non-failing) counter warning.
-  assert.equal(v.warnings.length, 1);
-  assert.match(v.warnings[0]!, /12 device push\(es\) skipped today \(UTC 2026-09-25\).*skipped_no_key/);
-});
-
-test('split mode fails unless apns.production is exactly true', () => {
-  for (const production of [false, undefined, null, 'true', 1]) {
-    const doc = statusFixture('healthy-r3');
-    doc.apns = { configured: true, mode: 'split', production, sandbox: true, problems: [] };
-    if (production === undefined) delete doc.apns.production;
-    assert.equal(evaluateStatus(doc, { nowMs: NOW }).problems.length, 1, String(production));
+test('2026-10-16 short GFZ streaks (5 and 12 min) are P4 samples only', () => {
+  for (const sec of [300, 720]) {
+    const v = evaluateStatus(failingFor({ gfz: sec }), { nowMs: NOW, canary: usgsSummary() });
+    assert.deepEqual(sev(v), ['alerts:provider:gfz P4'], String(sec));
+    assert.equal(v.findings[0]!.sinceMs, GEN - sec * 1000);
   }
-  const ok = statusFixture('healthy-r3');
-  ok.apns = { configured: true, mode: 'split', production: true, sandbox: true, problems: [] };
-  assert.deepEqual(evaluateStatus(ok, { nowMs: NOW }).problems, []);
+  // The 2026-10-09 blip (about 40 s, read as up to 110 s) too.
+  assert.deepEqual(sev(evaluateStatus(failingFor({ gfz: 40 }), { nowMs: NOW })), ['alerts:provider:gfz P4']);
 });
 
-test('apns-key-problems fixture: a non-empty apns.problems fails and names the key', () => {
-  const v = evaluateStatus(statusFixture('apns-key-problems'), { nowMs: NOW });
-  assert.equal(v.problems.length, 1);
-  assert.match(v.problems[0]!, /APNs key configuration has 1 problem\(s\): APNS_KEY_ID_SANDBOX set without APNS_P8_SANDBOX/);
-  assert.equal(v.warnings.length, 1);
-  assert.match(v.warnings[0]!, /2 device push\(es\) skipped today/);
+test('lastError invalid: GFZ at 16 min is P3 by the 15-min invalid line, at 14 min a P4; an unknown or missing error is transient', () => {
+  const invalid = (sec: number) => failingFor({ gfz: [sec, { lastError: 'invalid', httpStatus: 200, consecutiveTimeouts: 0 }] });
+  const p3 = must(evaluateStatus(invalid(16 * 60), { nowMs: NOW }), 'alerts:provider:gfz');
+  assert.deepEqual([p3.severity, p3.rule], ['P3', 'alerts:provider:fast:invalid']);
+  assert.match(p3.text, /last error invalid \(a body that does not parse or verify\) \(past the 15 min line for invalid bodies\)/);
+  const p4 = must(evaluateStatus(invalid(14 * 60), { nowMs: NOW }), 'alerts:provider:gfz');
+  assert.deepEqual([p4.severity, p4.rule], ['P4', 'alerts:provider:fast:invalid']);
+  for (const lastError of ['tls', undefined, 42, 'http', 'network']) {
+    const f = must(evaluateStatus(failingFor({ emsc: [16 * 60, { lastError }] }), { nowMs: NOW }), 'alerts:provider:emsc');
+    assert.deepEqual([f.severity, f.rule], ['P4', 'alerts:provider:fast'], String(lastError));
+  }
 });
 
-test('the reviewed outage (split, APNS_P8 gone, skipped_no_key=12) fails twice and is no longer "healthy"', () => {
+test('2026-10-04..06 USGS: 29 min a P4, 31 min P3; the round-14 count (387 failures, no start) is P3 too', () => {
+  const at = (sec: number) => must(evaluateStatus(failingFor({ usgs: sec }), { nowMs: NOW }), 'alerts:provider:usgs');
+  assert.deepEqual([at(29 * 60).severity, at(29 * 60).rule], ['P4', 'alerts:provider:usgs']);
+  const p3 = at(31 * 60);
+  assert.deepEqual([p3.severity, p3.rule, p3.class, p3.sinceMs], ['P3', 'alerts:provider:usgs', 'external', GEN - 31 * 60_000]);
+  assert.match(p3.text, /\(past the 30 min line\): ComCat FDSN and its summary feed both fail; the other direct providers still deliver/);
+
+  const fixture = statusFixture('usgs-down-2026-10-05');
+  const ref = fixture.generatedAtMs as number;
+  const v = evaluateStatus(fixture, { nowMs: ref + 30_000, canary: usgsSummary() });
+  assert.deepEqual(sev(v), ['alerts:provider:usgs P3']);
+  const f = v.findings[0]!;
+  assert.equal(f.sinceMs, ref - streakSpanSec('usgs', 387) * 1000);
+  assert.equal(
+    f.text,
+    "provider usgs is failing: ok:false for about 31.5 h (387 consecutive failures at 60 s polls; the gateway publishes no failingSinceMs for it), last HTTP 0, last error timeout (slower than the gateway's fetch timeout), 387 timeouts in a row (past the 30 min line): ComCat FDSN and its summary feed both fail; the other direct providers still deliver, so alerts still go out (a quake only usgs reports may come later)",
+  );
+  assert.equal(plainExitCode(v.findings), 0);
+});
+
+test('2026-10-04..06 USGS with EMSC failing too: coverage:two P2 at 181 s together (members usgs, emsc), a P4 at 179 s', () => {
+  const both = (emscSec: number) => evaluateStatus(failingFor({ usgs: 31 * 60, emsc: emscSec }), { nowMs: NOW, canary: usgsSummary() });
+  const v = both(181);
+  const two = must(v, 'alerts:coverage:two');
+  assert.deepEqual([two.severity, two.rule, two.class, two.check, two.members, two.sinceMs], ['P2', 'alerts:coverage:two', 'redundancy', 'gh-redundancy', ['usgs', 'emsc'], GEN - 181_000]);
+  assert.equal(two.text, 'two of the three direct providers (usgs and emsc) have been failing together for 3 min (line 3 min): one direct source is left (gfz), with the feed backstop');
+  // Two failing is below the all-three line: a P4 band sample of :all; each provider's own row points at the group.
+  assert.deepEqual(sev(v), ['alerts:coverage:all P4', 'alerts:coverage:two P2', 'alerts:provider:usgs P3', 'alerts:provider:emsc P4']);
+  assert.match(must(v, 'alerts:provider:emsc').text, /: 2 direct providers are failing: see alerts:coverage:two$/);
+  assert.equal(plainExitCode(v.findings), 1);
+  const below = both(179);
+  assert.equal(must(below, 'alerts:coverage:two').severity, 'P4');
+  assert.match(must(below, 'alerts:coverage:two').text, /are failing together for 2\.5 min: below the 3 min line$/);
+  assert.equal(plainExitCode(below.findings), 0);
+});
+
+test('coverage: all three at 61 s -> :all P1 beside :two (P4 until 180 s, then P2); all three at 30 s both P4; one failing neither', () => {
+  const v = evaluateStatus(failingFor({ usgs: 61, emsc: 95, gfz: 80 }), { nowMs: NOW });
+  const all = must(v, 'alerts:coverage:all');
+  assert.deepEqual([all.severity, all.class, all.check, all.members, all.sinceMs], ['P1', 'symptom', 'gh-detect', ['usgs', 'emsc', 'gfz'], GEN - 61_000]);
+  assert.equal(all.text, "all three direct providers (usgs, emsc, gfz) have been failing together for 61 s (line 60 s): the gateway sees new quakes only through the feed backstop, minutes late; three agencies failing at once points at the gateway's side (its egress, DNS, the Workers runtime or a deploy)");
+  // The two longest (emsc 95 s, gfz 80 s) have failed together for 80 s: below the pair's own 180 s line.
+  const two = must(v, 'alerts:coverage:two');
+  assert.deepEqual([two.severity, two.members, two.sinceMs], ['P4', ['usgs', 'emsc', 'gfz'], GEN - 80_000]);
+  assert.equal(plainExitCode(v.findings), 1);
+  // All three for 3 min: the accepted double alarm, :all P1 and :two P2.
+  const long = evaluateStatus(failingFor({ usgs: 181, emsc: 200, gfz: 190 }), { nowMs: NOW });
+  assert.deepEqual([must(long, 'alerts:coverage:all').severity, must(long, 'alerts:coverage:two').severity], ['P1', 'P2']);
+  assert.match(must(long, 'alerts:coverage:two').text, /\(emsc and gfz\) have been failing together for 3 min \(line 3 min\): one direct source is left \(usgs, failing too for 3 min\)/);
+  const short = evaluateStatus(failingFor({ usgs: 30, emsc: 30, gfz: 30 }), { nowMs: NOW });
+  assert.deepEqual([must(short, 'alerts:coverage:all').severity, must(short, 'alerts:coverage:two').severity], ['P4', 'P4']);
+  assert.match(must(short, 'alerts:coverage:all').text, /^3 of the 3 direct providers are failing \(usgs, emsc, gfz\), together for 30 s: below the all-three line \(all three for 60 s\)$/);
+  const one = evaluateStatus(failingFor({ emsc: 3_600 }), { nowMs: NOW });
+  assert.equal(find(one, 'alerts:coverage:all'), undefined);
+  assert.equal(find(one, 'alerts:coverage:two'), undefined);
+});
+
+test('coverage: whichever two; the backstop and the summary fallback are no direct providers; a streakless one is left out', () => {
+  for (const [a, b, c] of [['usgs', 'emsc', 'gfz'], ['usgs', 'gfz', 'emsc'], ['emsc', 'gfz', 'usgs']] as const) {
+    const two = must(evaluateStatus(failingFor({ [a]: 200, [b]: 190 }), { nowMs: NOW }), 'alerts:coverage:two');
+    assert.equal(two.severity, 'P2', `${a}+${b}`);
+    assert.match(two.text, new RegExp(`one direct source is left \\(${c}\\), with the feed backstop$`));
+  }
+  // The feed is the backstop, not a direct provider.
+  const feed = evaluateStatus(failingFor({ feed: 3_600, emsc: 3_600 }), { nowMs: NOW });
+  assert.deepEqual(sev(feed), ['alerts:provider:feed P3', 'alerts:provider:emsc P3']);
+  assert.equal(must(feed, 'alerts:provider:feed').rule, 'alerts:provider:feed');
+  assert.match(must(feed, 'alerts:provider:feed').text, /the backstop behind the direct providers is failing/);
+  // USGS ok on its summary fallback is not failing.
+  const fb = failingFor({ emsc: 3_600 });
+  Object.assign(provider(fb, 'usgs'), { fallback: 'summary', primaryConsecutiveFailures: 17, primaryLastError: 'timeout', primaryFailingSinceMs: GEN - 1_320_000 });
+  assert.deepEqual(sev(evaluateStatus(fb, { nowMs: NOW })), ['alerts:provider:emsc P3', 'alerts:usgs:primary P4']);
+  // A direct provider ok:false with neither a start nor a count stays out of coverage, but is a P4 sample of its own.
+  const unknown = failingFor({ emsc: 300, gfz: 300 });
+  Object.assign(provider(unknown, 'usgs'), { ok: false, consecutiveFailures: undefined });
+  const u = evaluateStatus(unknown, { nowMs: NOW });
+  assert.deepEqual(must(u, 'alerts:coverage:two').members, ['emsc', 'gfz']);
+  const bare = must(u, 'alerts:provider:usgs');
+  assert.deepEqual([bare.severity, bare.sinceMs], ['P4', null]);
+  assert.match(bare.text, /^provider usgs is ok:false with no failure streak published/);
+});
+
+test('coverage: the texts say when the feed backstop fails too, or is not listed', () => {
+  const all = evaluateStatus(failingFor({ usgs: 65, emsc: 95, gfz: 80, feed: 65 }), { nowMs: NOW });
+  assert.match(must(all, 'alerts:coverage:all').text, /: the feed backstop is failing too for 65 s, so the gateway sees no new quakes at all; every source failing at once points at the gateway's side/);
+  const pair = evaluateStatus(failingFor({ emsc: 200, gfz: 190, feed: 30 }), { nowMs: NOW });
+  assert.match(must(pair, 'alerts:coverage:two').text, /one direct source is left \(usgs\); the feed backstop is failing too for 30 s$/);
+  const none = failingFor({ usgs: 65, emsc: 95, gfz: 80 });
+  none.detector.providers = none.detector.providers.filter((p: { id: string }) => p.id !== BACKSTOP_PROVIDER);
+  assert.match(must(evaluateStatus(none, { nowMs: NOW }), 'alerts:coverage:all').text, /the gateway sees no new quakes from a direct source \(status\.json lists no feed backstop\)/);
+});
+
+test('an older gateway (counts only): a P1/P2 is never earlier than round 24 judged red', () => {
+  const pair = evaluateStatus(failingFor({ emsc: [null, { consecutiveFailures: 6 }], gfz: [null, { consecutiveFailures: 6 }] }), { nowMs: NOW });
+  assert.equal(must(pair, 'alerts:coverage:two').text, 'two of the three direct providers (emsc and gfz) have been failing together for 3.5 min (line 3 min) (emsc and gfz judged by their failure counts: no failingSinceMs): one direct source is left (usgs), with the feed backstop');
+  const round24Red = (n: Record<string, number>): boolean => {
+    const down = (id: string) => (n[id] ?? 0) >= 3;
+    const together = DIRECT_PROVIDERS.filter(down).length >= 2;
+    return Object.entries(n).some(([id, c]) => c >= (isFastProvider(id) ? (together && down(id) ? 3 : 6) : 3));
+  };
+  for (let u = 0; u <= 7; u++) for (let e = 0; e <= 7; e++) for (let g = 0; g <= 7; g++) {
+    const spec: Record<string, [null, Record<string, unknown>]> = {};
+    if (u) spec['usgs'] = [null, { consecutiveFailures: u }];
+    if (e) spec['emsc'] = [null, { consecutiveFailures: e }];
+    if (g) spec['gfz'] = [null, { consecutiveFailures: g }];
+    const red = plainExitCode(evaluateStatus(failingFor(spec), { nowMs: NOW }).findings) === 1;
+    if (red) assert.ok(round24Red({ usgs: u, emsc: e, gfz: g }), `usgs ${u} emsc ${e} gfz ${g}`);
+  }
+});
+
+test('the provider keys: unknown ids are notes; a provider listed twice is judged once; damaged starts fall back to the count', () => {
   const doc = structuredClone(HEALTHY);
-  doc.apns = { configured: true, mode: 'split', production: false, sandbox: true, problems: ['APNS_KEY_ID set without APNS_P8'] };
-  doc.fanout = { ...statusFixture('healthy-r3').fanout, skipped_no_key: 12 };
+  doc.detector.providers.push({ id: 'newsource', ok: false, consecutiveFailures: 40, failingSinceMs: GEN - DAY });
+  doc.detector.providers.push({ id: 'gfz', ok: false, consecutiveFailures: 99, failingSinceMs: GEN - DAY });
+  doc.detector.providers.push({ ok: false });
   const v = evaluateStatus(doc, { nowMs: NOW });
-  assert.equal(v.problems.length, 2);
-  assert.match(v.problems.join(' | '), /APNS_KEY_ID set without APNS_P8.*NO production key/);
-  assert.equal(v.warnings.length, 1);
+  assert.deepEqual(v.findings, []);
+  assert.deepEqual(v.notes.slice(0, 3), ['provider gfz is listed twice: the first entry is judged', 'a detector.providers entry has no id: skipped', 'provider newsource is ok:false: no rule judges this id']);
+  for (const bad of ['1790365235218', -1, 0, null, Number.NaN, GEN + 3_600_000]) {
+    const d = failingFor({ usgs: [null, { consecutiveFailures: 32, failingSinceMs: bad }] });
+    const f = must(evaluateStatus(d, { nowMs: NOW }), 'alerts:provider:usgs');
+    assert.deepEqual([f.severity, f.sinceMs], ['P3', GEN - streakSpanSec('usgs', 32) * 1000], String(bad));
+  }
 });
 
-test('fanout-warnings fixture: skipped_no_key > 0 and retry_dropped_budget > 0 warn, never fail', () => {
-  const v = evaluateStatus(statusFixture('fanout-warnings'), { nowMs: NOW });
-  assert.deepEqual(v.problems, []);
-  assert.equal(v.warnings.length, 2);
-  assert.match(v.warnings[0]!, /3 device push\(es\) skipped today \(UTC 2026-09-25\) because the gateway holds no APNs key/);
-  assert.match(v.warnings[1]!, /40 transient push failure\(s\) today \(UTC 2026-09-25\) were dropped without a retry.*retry_dropped_budget/);
-  assert.match(v.summary, /fanout=jobs:3,sent:41,no_key:3,dropped_budget:40/);
+test('a direct provider missing from detector.providers is not polled: a P3 row of its own, and the coverage rows count it as failing', () => {
+  const without = (doc: Record<string, any>, ...ids: string[]): Record<string, any> => {
+    const d = structuredClone(doc);
+    d.detector.providers = d.detector.providers.filter((p: { id: string }) => !ids.includes(p.id));
+    return d;
+  };
+  const judged = (doc: Record<string, any>): Verdict => evaluateStatus(doc, { nowMs: NOW, canary: usgsSummary() });
+
+  // gfz not listed: the gateway does not poll it. Its row says so (a config P3, never resolved as if it had recovered),
+  // and nothing is left unjudged.
+  const noGfz = judged(without(HEALTHY, 'gfz'));
+  assert.deepEqual(sev(noGfz), ['alerts:provider:gfz P3']);
+  const gfzRow = must(noGfz, 'alerts:provider:gfz');
+  assert.deepEqual([gfzRow.rule, gfzRow.class, gfzRow.sinceMs], ['alerts:provider:unlisted', 'config', null]);
+  assert.equal(gfzRow.text, 'direct provider gfz is not listed in detector.providers, so the gateway does not poll it: a deploy or a configuration change of the gateway? The coverage rows count gfz as failing while it is missing');
+  assert.deepEqual(noGfz.unjudged, []);
+  assert.match(noGfz.summary, /providers=usgs:ok,feed:ok,emsc:ok,gfz:NOT-LISTED /);
+
+  // gfz not listed and usgs failing for 40 min: two direct sources are out, so redundancy is lost (coverage:two P2).
+  const usgsToo = judged(without(failingFor({ usgs: 40 * 60 }), 'gfz'));
+  assert.deepEqual(sev(usgsToo), ['alerts:coverage:all P4', 'alerts:coverage:two P2', 'alerts:provider:usgs P3', 'alerts:provider:gfz P3']);
+  assert.equal(must(usgsToo, 'alerts:coverage:two').text, 'two of the three direct providers (gfz and usgs) are out: usgs failing for 40 min, gfz not polled (missing from detector.providers) (line 3 min): one direct source is left (emsc), with the feed backstop');
+  assert.equal(must(usgsToo, 'alerts:coverage:two').sinceMs, GEN - 40 * MIN);
+
+  // gfz not listed, usgs and emsc failing for 400 s: no direct source is left, the P1 (it used to be only a P2 that
+  // turned green after its hour, with nothing on the board about gfz: the logic review's case).
+  const pair = judged(without(failingFor({ usgs: 400, emsc: 400 }), 'gfz'));
+  assert.deepEqual(sev(pair), ['alerts:coverage:all P1', 'alerts:coverage:two P2', 'alerts:provider:usgs P4', 'alerts:provider:emsc P4', 'alerts:provider:gfz P3']);
+  const all = must(pair, 'alerts:coverage:all');
+  assert.deepEqual([all.sinceMs, all.members, all.check], [GEN - 400 * SEC, ['usgs', 'emsc', 'gfz'], 'gh-detect']);
+  assert.equal(all.text, 'all three direct providers (usgs, emsc, gfz) are out: usgs and emsc failing together for 6.5 min, gfz not polled (missing from detector.providers) (line 60 s): the gateway sees new quakes only through the feed backstop, minutes late; a direct provider missing from detector.providers points at a deploy or a configuration change of the gateway');
+  assert.match(must(pair, 'alerts:provider:usgs').text, /: 3 direct providers are failing or not polled: see alerts:coverage:two$/);
+
+  // usgs not listed: its sub-queries are unknown (frozen, not resolved).
+  const noUsgs = judged(without(HEALTHY, 'usgs'));
+  assert.deepEqual(sev(noUsgs), ['alerts:provider:usgs P3']);
+  assert.deepEqual(noUsgs.unjudged, ['alerts:usgs:*']);
+  // The feed backstop is no direct provider: a list without it judges as before.
+  const noFeed = judged(without(HEALTHY, 'feed'));
+  assert.deepEqual([noFeed.findings, noFeed.unjudged], [[], []]);
+
+  // An empty list: the gateway polls nothing. coverage:all P1 at once (no streak to wait for), the three rows, and the
+  // rest of the document still judged.
+  const e = judged(without(statusFixture('policy-fallback'), 'usgs', 'emsc', 'gfz', 'feed'));
+  assert.deepEqual(sev(e), ['alerts:coverage:all P1', 'alerts:coverage:two P2', 'alerts:provider:usgs P3', 'alerts:provider:emsc P3', 'alerts:provider:gfz P3', 'alerts:policy P1']);
+  assert.equal(must(e, 'alerts:coverage:all').sinceMs, null);
+  assert.match(must(e, 'alerts:coverage:all').text, /^all three direct providers \(usgs, emsc, gfz\) are out: usgs, emsc and gfz not polled \(missing from detector\.providers\) \(line 60 s\): the gateway sees no new quakes from a direct source/);
+  assert.match(must(e, 'alerts:provider:emsc').text, /^detector\.providers is empty, so the gateway polls no source at all: /);
+  assert.deepEqual(e.unjudged, ['alerts:usgs:*']);
+  assert.deepEqual(e.notes, ['detector.providers is empty: no alert source is being polled']);
+  // Entries without an id count as none at all.
+  const idless = structuredClone(HEALTHY);
+  idless.detector.providers = [{ ok: true }];
+  assert.deepEqual(sev(judged(idless)).slice(0, 2), ['alerts:coverage:all P1', 'alerts:coverage:two P2']);
+  // A missing list stays the unreadable gate: every alerts:* key unjudged.
+  const none = structuredClone(HEALTHY);
+  delete none.detector.providers;
+  assert.deepEqual(judged(none).unjudged, ['alerts:*']);
 });
 
-test('older gateways: missing mode/production/problems/fanout (or odd shapes) never fail or warn', () => {
-  // The live capture predates round 3: apns is just {configured:true} and there is no fanout block.
-  const legacyDoc = evaluateStatus(HEALTHY, { nowMs: NOW });
-  assert.deepEqual(legacyDoc.problems, []);
-  assert.deepEqual(legacyDoc.warnings, []);
-  assert.match(legacyDoc.summary, /apns=configured fanout=n\/a/);
+// --- USGS's sub-queries: the primary live query and the deletions query ---
 
-  const nullFanout = statusFixture('healthy-r3');
-  nullFanout.fanout = null;
-  const vn = evaluateStatus(nullFanout, { nowMs: NOW });
-  assert.deepEqual([vn.problems, vn.warnings], [[], []]);
-  assert.match(vn.summary, /fanout=none/);
+/** What a 2026-10-13 gateway publishes while ComCat's FDSN live query fails and the summary feed delivers. */
+function onSummary(sec: number | null, extra: Record<string, unknown> = {}): Record<string, any> {
+  const doc = structuredClone(HEALTHY);
+  Object.assign(provider(doc, 'usgs'), { ok: true, consecutiveFailures: 0, fallback: 'summary', primaryConsecutiveFailures: 18, primaryLastError: 'timeout', ...extra });
+  if (sec !== null) provider(doc, 'usgs').primaryFailingSinceMs = GEN - sec * 1000;
+  return doc;
+}
 
-  const odd = statusFixture('healthy-r3');
-  odd.apns = { configured: true, mode: 'legacy', problems: 'not-an-array' };
-  odd.fanout = { day: '2026-09-25' };
-  const vo = evaluateStatus(odd, { nowMs: NOW });
-  assert.deepEqual([vo.problems, vo.warnings], [[], []]);
-  assert.match(vo.summary, /fanout=jobs:\?,sent:\?,no_key:\?,dropped_budget:\?/);
+test('primary: 5.9 h on the summary fallback a P4, 6.1 h P3; without a start the count estimates it', () => {
+  const p4 = must(evaluateStatus(onSummary(5.9 * 3_600), { nowMs: NOW }), 'alerts:usgs:primary');
+  assert.deepEqual([p4.severity, p4.rule, p4.class, p4.sinceMs], ['P4', 'alerts:usgs:primary', 'external', GEN - 5.9 * HOUR]);
+  const p3 = must(evaluateStatus(onSummary(6.1 * 3_600), { nowMs: NOW }), 'alerts:usgs:primary');
+  assert.equal(p3.severity, 'P3');
+  assert.equal(p3.text, "USGS's primary live query (ComCat FDSN) has failed 18 times in a row over 6.1 h, last error timeout (slower than the gateway's fetch timeout) (line 6.0 h): its live events come from the summary feed (fallback: summary), up to about two minutes later");
+  // 18 failures span 49 min at the gateway's backoff: a P4 by the count; 90 failures span 6.8 h.
+  const byCount = must(evaluateStatus(onSummary(null), { nowMs: NOW }), 'alerts:usgs:primary');
+  assert.deepEqual([byCount.severity, byCount.sinceMs], ['P4', GEN - streakSpanSec('usgs', 18) * 1000]);
+  assert.match(byCount.text, /failed 18 times in a row \(about 49 min by its failure count\)/);
+  assert.equal(must(evaluateStatus(onSummary(null, { primaryConsecutiveFailures: 90 }), { nowMs: NOW }), 'alerts:usgs:primary').severity, 'P3');
 });
 
-test('missing optional blocks warn instead of failing; missing required fields fail', () => {
+test('primary: no finding while USGS itself fails, without the summary fallback (a note), or with malformed values', () => {
+  const down = onSummary(7 * 3_600, { ok: false, consecutiveFailures: 6, failingSinceMs: GEN - 300_000 });
+  delete provider(down, 'usgs').fallback;
+  assert.deepEqual(sev(evaluateStatus(down, { nowMs: NOW })), ['alerts:provider:usgs P4']);
+  const noFallback = onSummary(7 * 3_600);
+  delete provider(noFallback, 'usgs').fallback;
+  const nf = evaluateStatus(noFallback, { nowMs: NOW });
+  assert.deepEqual(nf.findings, []);
+  assert.match(nf.notes[0]!, /^USGS's primary live query has failed 18 times in a row over 7\.0 h, last error timeout .*with no summary fallback published$/);
+  for (const bad of [0, -1, null, '7', Number.NaN, { n: 1 }]) {
+    assert.deepEqual(evaluateStatus(onSummary(null, { primaryConsecutiveFailures: bad }), { nowMs: NOW }).findings, [], String(bad));
+  }
+  assert.equal(primaryFailure(HEALTHY.detector.providers[0]), null);
+  assert.equal(primaryFailure(null), null);
+  assert.deepEqual(primaryFailure({ primaryConsecutiveFailures: 3, primaryLastError: { x: 1 } }), { failures: 3, why: '', fallback: false, lasted: '' });
+  assert.equal(primaryFailure({ primaryConsecutiveFailures: 3, primaryFailingSinceMs: GEN - 90_000 }, GEN)!.lasted, ' over 90 s');
+  assert.equal(primaryFailure({ primaryConsecutiveFailures: 3, primaryFailingSinceMs: GEN - 90_000 })!.lasted, ''); // no reference time
+});
+
+/** What a round-16+ gateway publishes while USGS's `includedeleted=only` query fails: the provider stays ok, the
+ *  deletions fields appear, and the watermark (the deletions cursor) stops moving. */
+function deletionsFailing(sec: number | null, extra: Record<string, unknown> = {}, watermarkAgoMs = 2 * HOUR): Record<string, any> {
+  const doc = structuredClone(HEALTHY);
+  Object.assign(provider(doc, 'usgs'), { ok: true, consecutiveFailures: 0, watermarkMs: GEN - watermarkAgoMs, deletionsConsecutiveFailures: 300, deletionsLastError: 'timeout', ...extra });
+  if (sec !== null) provider(doc, 'usgs').deletionsFailingSinceMs = GEN - sec * 1000;
+  return doc;
+}
+
+test('deletions: 23 h a P4, 25 h P3, with the cursor and the 7-day window in the text', () => {
+  const p4 = must(evaluateStatus(deletionsFailing(23 * 3_600), { nowMs: NOW }), 'alerts:usgs:deletions');
+  assert.deepEqual([p4.severity, p4.rule, p4.sinceMs], ['P4', 'alerts:usgs:deletions', GEN - 23 * HOUR]);
+  const p3 = must(evaluateStatus(deletionsFailing(25 * 3_600, {}, 25 * HOUR), { nowMs: NOW }), 'alerts:usgs:deletions');
+  assert.equal(p3.severity, 'P3');
+  assert.equal(p3.text, "USGS's deletions query has failed 300 times in a row over 25.0 h, last error timeout (slower than the gateway's fetch timeout) (line 24.0 h): deleted events are not being withdrawn; its cursor (watermarkMs) is 25.0 h old (the next successful query asks from there, at most 7 days back)");
+  assert.equal(DELETIONS_MAX_WINDOW_MS, 7 * DAY);
+  const past = must(evaluateStatus(deletionsFailing(7.25 * 86_400, {}, 7.25 * DAY), { nowMs: NOW }), 'alerts:usgs:deletions');
+  assert.match(past.text, /cursor \(watermarkMs\) is 7\.3 days old, past the gateway's 7-day deletions window: a deletion from the start of the gap is no longer asked for, and that event stays live$/);
+  // No start: the count at the gateway's backoff (300 failures span about 24 h).
+  const byCount = must(evaluateStatus(deletionsFailing(null), { nowMs: NOW }), 'alerts:usgs:deletions');
+  assert.equal(byCount.sinceMs, GEN - streakSpanSec('usgs', 300) * 1000);
+  assert.equal(byCount.severity, streakSpanSec('usgs', 300) * 1000 >= 24 * HOUR ? 'P3' : 'P4');
+  assert.match(byCount.text, /failed 300 times in a row \(about 24\.\d h by its failure count\)/);
+  // Judged whatever `ok` says: a USGS that is also down has both rows.
+  const down = deletionsFailing(25 * 3_600, { ok: false, consecutiveFailures: 12, failingSinceMs: GEN - 40 * 60_000 });
+  assert.deepEqual(sev(evaluateStatus(down, { nowMs: NOW })), ['alerts:provider:usgs P3', 'alerts:usgs:deletions P3']);
+});
+
+test('deletions: missing, malformed or unknown values never break the check', () => {
+  for (const bad of [0, -2, null, '12', Number.NaN, Number.POSITIVE_INFINITY, { n: 5 }, true]) {
+    const v = evaluateStatus(deletionsFailing(25 * 3_600, { deletionsConsecutiveFailures: bad }, 1 * HOUR), { nowMs: NOW });
+    assert.deepEqual(v.findings, [], String(bad));
+    assert.doesNotMatch(v.summary, /deletions/, String(bad));
+  }
+  assert.equal(deletionsFailure(null), null);
+  assert.equal(deletionsFailure('usgs'), null);
+  assert.equal(deletionsFailure(HEALTHY.detector.providers[0]), null);
+  assert.deepEqual(deletionsFailure({ deletionsConsecutiveFailures: 4, deletionsLastError: 'tls' }), { failures: 4, why: ', last error tls', lasted: '' });
+  assert.deepEqual(deletionsFailure({ deletionsConsecutiveFailures: 4, deletionsLastError: 'y'.repeat(80) }), { failures: 4, why: `, last error ${'y'.repeat(32)}`, lasted: '' });
+  assert.deepEqual(deletionsFailure({ deletionsConsecutiveFailures: 4, deletionsLastError: { code: 1 } }), { failures: 4, why: '', lasted: '' });
+  for (const bad of [-1, 0, '1', null, GEN + 3_600_000]) {
+    assert.equal(deletionsFailure({ deletionsConsecutiveFailures: 9, deletionsFailingSinceMs: bad }, GEN)!.lasted, '', String(bad));
+  }
+  const noCursor = deletionsFailing(25 * 3_600);
+  delete provider(noCursor, 'usgs').watermarkMs;
+  assert.match(must(evaluateStatus(noCursor, { nowMs: NOW }), 'alerts:usgs:deletions').text, /: deleted events are not being withdrawn$/);
+});
+
+// --- shadow rules (logged as "would notify" only) ---
+
+test('shadow: provider-silent fires on an old watermark of an ok provider; never for usgs while its deletions query fails', () => {
+  const doc = structuredClone(HEALTHY);
+  provider(doc, 'gfz').watermarkMs = GEN - 13 * HOUR;
+  const f = must(evaluateStatus(doc, { nowMs: NOW }), 'alerts:provider-silent:gfz');
+  assert.deepEqual([f.severity, f.rule, f.shadow, f.check, f.sinceMs], ['P3', 'alerts:provider-silent', true, null, GEN - 13 * HOUR + 12 * HOUR]);
+  assert.equal(f.text, 'provider gfz is ok but its watermark (the newest M4+ origin it delivered) is 13.0 h old (line 12.0 h): it may be answering without delivering events');
+  assert.equal(plainExitCode([f]), 0);
+  // 11.9 h: below gfz's line. usgs and emsc have 3 h lines.
+  provider(doc, 'gfz').watermarkMs = GEN - 11.9 * HOUR;
+  provider(doc, 'emsc').watermarkMs = GEN - 3.1 * HOUR;
+  assert.deepEqual(sev(evaluateStatus(doc, { nowMs: NOW })), ['alerts:provider-silent:emsc P3']);
+  // A failing deletions query holds the USGS watermark still: no silent finding for it.
+  const held = deletionsFailing(4 * 3_600, {}, 4 * HOUR);
+  assert.deepEqual(sev(evaluateStatus(held, { nowMs: NOW })), ['alerts:usgs:deletions P4']);
+  const plain = structuredClone(HEALTHY);
+  provider(plain, 'usgs').watermarkMs = GEN - 4 * HOUR;
+  assert.deepEqual(sev(evaluateStatus(plain, { nowMs: NOW })), ['alerts:provider-silent:usgs P3']);
+  // Never for a failing provider, the feed backstop, or a missing watermark.
+  const failing = failingFor({ gfz: 300 });
+  provider(failing, 'gfz').watermarkMs = GEN - 20 * HOUR;
+  provider(failing, 'feed').watermarkMs = GEN - 20 * HOUR;
+  delete provider(failing, 'emsc').watermarkMs;
+  assert.deepEqual(sev(evaluateStatus(failing, { nowMs: NOW })), ['alerts:provider:gfz P4']);
+});
+
+test('shadow: latency over 3,000 ms on an ok provider is a P4 sample; a failing provider at 4,000 ms is none', () => {
+  const doc = structuredClone(HEALTHY);
+  provider(doc, 'emsc').latencyMs = 3_001;
+  provider(doc, 'feed').latencyMs = 3_000;
+  const f = must(evaluateStatus(doc, { nowMs: NOW }), 'alerts:latency:emsc');
+  assert.deepEqual([f.severity, f.rule, f.shadow, f.sinceMs, f.text], ['P4', 'alerts:latency', true, null, 'provider emsc answered in 3001 ms (line 3000 ms)']);
+  assert.equal(evaluateStatus(doc, { nowMs: NOW }).findings.length, 1);
+  assert.deepEqual(sev(evaluateStatus(failingFor({ gfz: [300, { latencyMs: 4_000 }] }), { nowMs: NOW })), ['alerts:provider:gfz P4']);
+  // An id unusable in a key (the document is public input) is a note, never a crash.
+  const odd = structuredClone(HEALTHY);
+  odd.detector.providers.push({ id: 'Weird Id`', ok: true, latencyMs: 9_000 });
+  const v = evaluateStatus(odd, { nowMs: NOW });
+  assert.deepEqual(v.findings, []);
+  assert.ok(v.notes.some((n) => /answered in 9000 ms: its id is not usable in a key/.test(n)));
+});
+
+test('shadow: the canary fires when USGS lists a 10-60 min old event newer than the newest detection', () => {
+  const stalled = structuredClone(HEALTHY);
+  stalled.lastEvent.atMs = NOW - 45 * MIN;
+  const canary = usgsSummary({ id: 'us7000abcd', time: NOW - 20 * MIN, mag: 4.7 }, { id: 'us7000late', time: NOW - 2 * MIN });
+  const f = canaryFinding(stalled, canary, NOW)!;
+  assert.deepEqual([f.key, f.severity, f.shadow, f.sinceMs], ['alerts:canary', 'P4', true, NOW - 20 * MIN]);
+  assert.equal(f.text, "USGS lists us7000abcd (M4.7, origin 20 min ago, 2026-09-25 19:27Z) but the gateway's newest detection (lastEvent.atMs) is 45 min old (2026-09-25 19:02Z): the detector may be ticking without detecting");
+  const v = evaluateStatus(stalled, { nowMs: NOW, canary });
+  assert.deepEqual(sev(v), ['alerts:canary P4']);
+  assert.deepEqual(v.unjudged, []);
+  assert.equal(plainExitCode(v.findings), 0);
+  // The oldest event inside the window is the one judged.
+  assert.equal(canaryFinding(stalled, usgsSummary({ id: 'a', time: NOW - 15 * MIN }, { id: 'b', time: NOW - 40 * MIN }), NOW)!.sinceMs, NOW - 40 * MIN);
+  // A newer detection, an event 5 or 61 min old, no lastEvent at all.
+  assert.equal(canaryFinding(HEALTHY, canary, NOW), null);
+  assert.equal(canaryFinding(stalled, usgsSummary({ id: 'x', time: NOW - 5 * MIN }), NOW), null);
+  assert.equal(canaryFinding(stalled, usgsSummary({ id: 'x', time: NOW - 61 * MIN }), NOW), null);
+  const none = structuredClone(HEALTHY);
+  delete none.lastEvent;
+  assert.match(canaryFinding(none, canary, NOW)!.text, /newest detection \(lastEvent\.atMs\) is missing/);
+  // canary null or garbage: a note, and the key is not judged.
+  const unread = evaluateStatus(stalled, { nowMs: NOW, canary: null });
+  assert.deepEqual([unread.findings, unread.unjudged], [[], ['alerts:canary']]);
+  assert.match(unread.notes.join(' | '), /canary: no USGS 4\.5_hour summary this run/);
+  const garbage = evaluateStatus(stalled, { nowMs: NOW, canary: { type: 'nope' } });
+  assert.deepEqual(garbage.unjudged, ['alerts:canary']);
+  assert.match(garbage.notes.join(' | '), /has no features list/);
+  // Never against a stale document.
+  assert.deepEqual(sev(evaluateStatus(stalled, { nowMs: GEN + 400_000, canary: usgsSummary({ id: 'x', time: GEN + 380_000 - 20 * MIN }) })), ['alerts:status:stale P1']);
+});
+
+// --- the free-tier budget, projected to the end of the UTC day ---
+
+test('budget at 12:00Z: doRowsWritten 40,000 P2, 33,000 a P4, 32,000 none; none at 01:59Z or on another day', () => {
+  const busy = statusFixture('budget-projected');
+  const ref = busy.generatedAtMs as number;
+  assert.equal(ref, T('2026-10-21T12:00:00Z'));
+  const v = evaluateStatus(busy, { nowMs: ref + 20_000, canary: usgsSummary() });
+  assert.deepEqual(sev(v), ['alerts:budget P2']);
+  const f = v.findings[0]!;
+  assert.deepEqual([f.rule, f.class, f.check, f.members, f.sinceMs], ['alerts:budget', 'capacity', 'gh-capacity', ['doRowsWritten'], null]);
+  assert.equal(f.text, "the gateway's tightest daily free-tier budget, doRowsWritten, is at 40.0 % of its cap by 12:00 UTC, projected 80.0 % by the end of the UTC day (line 75.0 %; the gateway's own estimate, not Cloudflare billing)");
+  assert.match(v.summary, /budget=doRowsWritten:80%\/day/);
+  assert.equal(plainExitCode(v.findings), 1);
+  const withRows = (n: number, at = ref) => {
+    const d = shifted(busy, at);
+    d.budget.doRowsWritten = n;
+    return budgetFinding(d, at);
+  };
+  assert.equal(withRows(33_000)!.severity, 'P4');
+  assert.equal(withRows(32_000), null);
+  assert.equal(withRows(40_000, T('2026-10-21T01:59:00Z')), null);
+  assert.equal(withRows(9_000, T('2026-10-21T02:00:00Z'))!.severity, 'P2'); // 9 % by 02:00 projects to 108 %
+  const yesterday = structuredClone(busy);
+  yesterday.budget.day = '2026-10-20';
+  assert.equal(budgetFinding(yesterday, ref), null);
+  assert.match(evaluateStatus(yesterday, { nowMs: ref }).summary, /budget=2026-10-20:not-projected/);
+  // Every counter of the rule's caps is judged; the members are the ones past 0.65, tightest first; junk is skipped.
+  const several = structuredClone(busy);
+  Object.assign(several.budget, { doRowsRead: 3_500_000, doGbSec: 'lots', doRequests: -5 });
+  const s = budgetFinding(several, ref)!;
+  assert.deepEqual([s.severity, s.members], ['P2', ['doRowsRead', 'doRowsWritten']]);
+  assert.match(s.text, /doRowsRead, is at 70\.0 % of its cap by 12:00 UTC, projected 140\.0 %.*; also past 65\.0 %: doRowsWritten 80\.0 %$/);
+});
+
+test('budget: the headroom rule and the feed/config ages are gone; the low-headroom fixture is judged by its projection', () => {
+  const tenPct = structuredClone(HEALTHY);
+  tenPct.budget.headroomPct = 10;
+  assert.deepEqual(evaluateStatus(tenPct, { nowMs: NOW }).findings, []);
+  const ages = structuredClone(HEALTHY);
+  Object.assign(ages, { feed_manifest_generated_ms: NOW - 3 * HOUR, feed_manifest_age_s: 10_800, config_bundle_generated_ms: NOW - 20 * DAY, config_bundle_age_s: 20 * 86_400, config_policy_age_s: null });
+  assert.deepEqual(evaluateStatus(ages, { nowMs: NOW }).findings, []);
+  // 88,000 rows written by 19:47Z project to 107 % of the cap: the budget rule, not the headroom.
+  const low = evaluateStatus(statusFixture('low-headroom'), { nowMs: NOW });
+  assert.deepEqual(sev(low), ['alerts:budget P2']);
+  assert.match(low.findings[0]!.text, /doRowsWritten, is at 88\.0 % of its cap by 19:47 UTC, projected 106\.7 %/);
+  // No budget block at all: the key is not judged.
+  const absent = structuredClone(HEALTHY);
+  delete absent.budget;
+  const a = evaluateStatus(absent, { nowMs: NOW, canary: usgsSummary() });
+  assert.deepEqual([a.findings, a.unjudged], [[], ['alerts:budget']]);
+  assert.match(a.summary, /budget=n\/a/);
+});
+
+// --- policy, degradation ladder, APNs ---
+
+test('degraded: unforced P1, forced P3; policy fallback P1; absent blocks are notes and unjudged', () => {
+  const d = must(evaluateStatus(statusFixture('degraded'), { nowMs: NOW }), 'alerts:degraded');
+  assert.deepEqual([d.severity, d.class, d.check, d.text], ['P1', 'symptom', 'gh-deliver', 'the gateway is DEGRADED (level tier2-off, reason: budget_exhausted): some alert tiers are not being sent']);
+  const forced = statusFixture('degraded');
+  forced.degraded.forced = true;
+  const fp = must(evaluateStatus(forced, { nowMs: NOW }), 'alerts:degraded');
+  assert.deepEqual([fp.severity, fp.check], ['P3', null]);
+  assert.match(fp.text, /^a forced override of the degradation ladder is on \(level tier2-off\)/);
+  assert.equal(plainExitCode([fp]), 0);
+  const p = must(evaluateStatus(statusFixture('policy-fallback'), { nowMs: NOW }), 'alerts:policy');
+  assert.deepEqual([p.severity, p.check, p.text], ['P1', 'gh-deliver', 'the gateway runs the compiled FALLBACK alerts policy (v1, reason: expired): the signed policy is not live']);
+  const sourceOnly = structuredClone(HEALTHY);
+  sourceOnly.policy = { source: 'fallback', version: 1 };
+  assert.deepEqual(sev(evaluateStatus(sourceOnly, { nowMs: NOW })), ['alerts:policy P1']);
   const partial = structuredClone(HEALTHY);
   delete partial.apns;
   partial.policy = null;
   delete partial.degraded;
-  const v = evaluateStatus(partial, { nowMs: NOW });
-  assert.deepEqual(v.problems, []);
-  assert.equal(v.warnings.length, 3);
-
-  const broken = structuredClone(HEALTHY);
-  delete broken.generatedAtMs;
-  delete broken.detector;
-  const b = evaluateStatus(broken, { nowMs: NOW });
-  assert.equal(b.problems.length, 2);
-  assert.match(b.problems.join(' | '), /generatedAtMs is missing.*detector\.providers is missing/);
-
-  assert.deepEqual(evaluateStatus([1, 2], { nowMs: NOW }).problems, ['status.json is not a JSON object']);
+  const v = evaluateStatus(partial, { nowMs: NOW, canary: usgsSummary() });
+  assert.deepEqual(v.findings, []);
+  assert.deepEqual(v.unjudged, ['alerts:policy', 'alerts:degraded', 'alerts:apns']);
+  assert.equal(v.notes.length, 3);
 });
 
-test('every failing condition at once is reported, one problem each', () => {
-  const doc = structuredClone(statusFixture('stale'));
-  Object.assign(doc.detector.providers[0], { ok: false, consecutiveFailures: 9 });
-  doc.policy = statusFixture('policy-fallback').policy;
-  doc.degraded = statusFixture('degraded').degraded;
-  doc.budget.headroomPct = 5;
-  doc.apns = { configured: false };
-  assert.equal(evaluateStatus(doc, { nowMs: NOW }).problems.length, 6);
-  doc.apns = { configured: true, mode: 'split', production: false, sandbox: true, problems: ['APNS_KEY_ID set without APNS_P8'] };
-  assert.equal(evaluateStatus(doc, { nowMs: NOW }).problems.length, 7);
+test('APNs: dry, key problems and split without production are P1 with members; today\'s skipped/dropped pushes P3', () => {
+  const dry = must(evaluateStatus(statusFixture('apns-dry'), { nowMs: NOW }), 'alerts:apns');
+  assert.deepEqual([dry.severity, dry.check, dry.members], ['P1', 'gh-deliver', ['dry']]);
+  assert.equal(dry.text, 'APNs is NOT configured on the gateway: fan-outs run DRY and no push reaches a device');
+  const keys = must(evaluateStatus(statusFixture('apns-key-problems'), { nowMs: NOW }), 'alerts:apns');
+  assert.deepEqual([keys.severity, keys.members], ['P1', ['key-problems', 'skipped_no_key']]);
+  assert.match(keys.text, /^the APNs key configuration has 1 problem\(s\): APNS_KEY_ID_SANDBOX set without APNS_P8_SANDBOX; .*\. 2 device push\(es\) skipped today \(UTC 2026-09-25\)/);
+  const split = evaluateStatus(statusFixture('apns-split-no-production'), { nowMs: NOW });
+  assert.deepEqual([must(split, 'alerts:apns').severity, must(split, 'alerts:apns').members], ['P1', ['no-production', 'skipped_no_key']]);
+  assert.match(split.summary, /apns=configured\/split\/production=NO/);
+  for (const production of [false, undefined, null, 'true', 1]) {
+    const doc = statusFixture('healthy-r3');
+    doc.apns = { configured: true, mode: 'split', production, sandbox: true, problems: [] };
+    if (production === undefined) delete doc.apns.production;
+    assert.deepEqual(must(evaluateStatus(doc, { nowMs: NOW }), 'alerts:apns').members, ['no-production'], String(production));
+  }
+  const ok = statusFixture('healthy-r3');
+  ok.apns = { configured: true, mode: 'split', production: true, sandbox: true, problems: [] };
+  assert.deepEqual(evaluateStatus(ok, { nowMs: NOW }).findings, []);
+  // The reviewed outage: split, APNS_P8 gone, skipped_no_key 12.
+  const reviewed = structuredClone(HEALTHY);
+  reviewed.apns = { configured: true, mode: 'split', production: false, sandbox: true, problems: ['APNS_KEY_ID set without APNS_P8'] };
+  reviewed.fanout = { ...statusFixture('healthy-r3').fanout, skipped_no_key: 12 };
+  assert.deepEqual(must(evaluateStatus(reviewed, { nowMs: NOW }), 'alerts:apns').members, ['key-problems', 'no-production', 'skipped_no_key']);
+  // With production present: the counters are a P3.
+  const counters = evaluateStatus(statusFixture('fanout-warnings'), { nowMs: NOW });
+  const c = must(counters, 'alerts:apns');
+  assert.deepEqual([c.severity, c.check, c.members], ['P3', null, ['skipped_no_key', 'retry_dropped_budget']]);
+  assert.match(c.text, /^3 device push\(es\) skipped today \(UTC 2026-09-25\) because the gateway holds no APNs key.*\. 40 transient push failure\(s\) today \(UTC 2026-09-25\) were dropped without a retry/);
+  assert.equal(plainExitCode(counters.findings), 0);
 });
 
-test('thresholds can be overridden (the selftest path)', () => {
-  const v = evaluateStatus(HEALTHY, { nowMs: NOW, thresholds: { minHeadroomPct: SELFTEST_MIN_HEADROOM_PCT } });
-  assert.equal(v.problems.length, 1);
-  assert.match(v.problems[0]!, /headroom is 92 % \(limit 101 %\)/);
+test('APNs: fields an older gateway does not publish are never a finding', () => {
+  const legacy = evaluateStatus(HEALTHY, { nowMs: NOW, canary: usgsSummary() });
+  assert.deepEqual([legacy.findings, legacy.unjudged], [[], []]);
+  const nullFanout = statusFixture('healthy-r3');
+  nullFanout.fanout = null;
+  const vn = evaluateStatus(nullFanout, { nowMs: NOW });
+  assert.deepEqual(vn.findings, []);
+  assert.match(vn.summary, /fanout=none/);
+  const odd = statusFixture('healthy-r3');
+  odd.apns = { configured: true, mode: 'legacy', problems: 'not-an-array' };
+  odd.fanout = { day: '2026-09-25' };
+  const vo = evaluateStatus(odd, { nowMs: NOW });
+  assert.deepEqual(vo.findings, []);
+  assert.match(vo.summary, /fanout=jobs:\?,sent:\?,no_key:\?,dropped_budget:\?/);
+  // apns.configured absent: a note, the key unjudged; a counter still judges it.
+  const noConfigured = statusFixture('fanout-warnings');
+  noConfigured.apns = {};
+  const nc = evaluateStatus(noConfigured, { nowMs: NOW, canary: usgsSummary() });
+  assert.deepEqual([sev(nc), nc.unjudged], [['alerts:apns P3'], []]);
+  assert.match(nc.notes[0]!, /apns\.configured is absent/);
+  // Each key fault on its own: a split mode without production is a P1 even without `configured`.
+  const splitOnly = structuredClone(HEALTHY);
+  splitOnly.apns = { mode: 'split', production: null };
+  const so = evaluateStatus(splitOnly, { nowMs: NOW });
+  assert.deepEqual(must(so, 'alerts:apns').members, ['no-production']);
+  assert.match(so.summary, /apns=\?\/split\/production=NO/);
+});
+
+// --- the selftest ---
+
+test('selftest: alerts:selftest P1 whatever the document says; plain exit 1', () => {
+  const v = evaluateStatus(HEALTHY, { nowMs: NOW, canary: usgsSummary(), selftest: true });
+  assert.deepEqual(sev(v), ['alerts:selftest P1']);
+  const f = v.findings[0]!;
+  assert.deepEqual([f.rule, f.check, f.shadow], ['alerts:selftest', 'selftest', false]);
+  assert.match(f.text, /^forced by the selftest: this run must be red/);
+  assert.equal(plainExitCode(v.findings), 1);
+  assert.deepEqual(sev(evaluateStatus(statusFixture('stale'), { nowMs: NOW, selftest: true })), ['alerts:status:stale P1', 'alerts:selftest P1']);
+  const unreadable = evaluateStatus('nope', { nowMs: NOW, selftest: true });
+  assert.deepEqual(sev(unreadable), ['alerts:status:unreadable P2', 'alerts:selftest P1']);
+  assert.equal(plainExitCode(unreadable.findings), 1);
+});
+
+// --- the usage half (fixtures only, the API is never called) ---
+
+const usage = (workersRequests: number, d1RowsWritten = 0) => ({ ok: true as const, workersRequests, d1RowsWritten });
+
+test('usage: 81 % P2 (gh-capacity), 96 % P1 (gh-deliver), 72 % a P4, 15 % at 03:00Z projects to 120 %: P2', () => {
+  const noon = T('2026-10-21T12:00:00Z');
+  const p2 = usageFindings(usage(81_000), noon);
+  assert.equal(p2.findings.length, 1);
+  const f = p2.findings[0]!;
+  assert.deepEqual([f.key, f.rule, f.severity, f.board, f.class, f.check, f.members], ['platform:cf-usage', 'platform:cf-usage', 'P2', 'platform', 'capacity', 'gh-capacity', ['workersRequests']]);
+  assert.equal(f.text, 'account Workers requests today: 81000 = 81.0 % of the Workers Free daily cap (100000/day), projected 162.0 % by 00:00 UTC; at 100 % every Worker on the account starts failing until 00:00 UTC (lines: P2 at 80.0 % or a projected 100.0 % from 02:00 UTC, P1 at 95.0 %)');
+  const p1 = usageFindings(usage(10_000, 96_000), noon).findings[0]!;
+  assert.deepEqual([p1.severity, p1.check, p1.members], ['P1', 'gh-deliver', ['d1RowsWritten']]);
+  assert.match(p1.text, /^account D1 rows written today: 96000 = 96\.0 %/);
+  const both = usageFindings(usage(81_000, 96_000), noon).findings[0]!;
+  assert.deepEqual([both.severity, both.members], ['P1', ['d1RowsWritten', 'workersRequests']]);
+  // 72 % at noon projects to 144 %: P2 by the projection; at 23:00Z it projects to 75 %: the P4 band.
+  assert.equal(usageFindings(usage(72_000), noon).findings[0]!.severity, 'P2');
+  const band = usageFindings(usage(72_000), T('2026-10-21T23:00:00Z')).findings[0]!;
+  assert.deepEqual([band.severity, band.check], ['P4', null]);
+  assert.deepEqual(usageFindings(usage(69_000), T('2026-10-21T23:00:00Z')).findings, []);
+  // The projection from 02:00 UTC only: 15 % at 03:00Z is a P2, at 01:00Z nothing.
+  assert.equal(usageFindings(usage(15_000), T('2026-10-21T03:00:00Z')).findings[0]!.severity, 'P2');
+  assert.match(usageFindings(usage(15_000), T('2026-10-21T03:00:00Z')).findings[0]!.text, /projected 120\.0 % by 00:00 UTC/);
+  const early = usageFindings(usage(15_000), T('2026-10-21T01:00:00Z'));
+  assert.deepEqual([early.findings, early.unjudged], [[], []]);
+  assert.match(early.summary, /^Workers requests 15000\/100000 \(15\.0 %, projected 360000\/day\) · D1 rows written 0\/100000/);
+  // The caps come from the rule.
+  assert.deepEqual({ ...(RULES['platform:cf-usage'].limits['caps'] as object) }, { workersRequests: 100_000, d1RowsWritten: 100_000 });
+});
+
+test('usage: a missing account id, a refused token and a transient error are watcher:cf-usage, the usage key unjudged', () => {
+  const noon = T('2026-10-21T12:00:00Z');
+  for (const [v, text] of [
+    [usageMisconfigured(), /^CF_ANALYTICS_TOKEN is set but CF_ACCOUNT_ID is empty/],
+    [usageFindings({ ok: false, kind: 'auth', message: 'not authorized for that account' }, noon), /^the account usage check was refused: not authorized for that account\. Fix or remove the CF_ANALYTICS_TOKEN secret$/],
+    [usageFindings({ ok: false, kind: 'graphql', message: 'query timed out, please retry' }, noon), /^the account usage check is unavailable this run: query timed out/],
+    [usageFindings({ ok: false, kind: 'shape', message: 'data.viewer.accounts is missing' }, noon), /unavailable this run: data\.viewer\.accounts is missing/],
+  ] as const) {
+    assert.deepEqual(v.findings.map((f) => [f.key, f.rule, f.severity, f.board, f.class]), [['watcher:cf-usage', 'watcher', 'P3', 'platform', 'watcher']]);
+    assert.match(v.findings[0]!.text, text);
+    assert.deepEqual(v.unjudged, ['platform:cf-usage']);
+    assert.equal(plainExitCode(v.findings), 3);
+  }
+});
+
+test('usage: parseUsageResponse sums every group into account totals and classifies errors', () => {
+  assert.deepEqual(parseUsageResponse(cfFixture('usage-ok')), { ok: true, workersRequests: 16150, d1RowsWritten: 5944 });
+  assert.deepEqual(parseUsageResponse(cfFixture('authz-error')), { ok: false, kind: 'auth', message: 'not authorized for that account' });
+  const empty = parseUsageResponse(cfFixture('empty-accounts'));
+  assert.equal(!empty.ok && empty.kind, 'auth');
+  const transient = parseUsageResponse(cfFixture('transient-error'));
+  assert.equal(!transient.ok && transient.kind, 'graphql');
+  const noAccounts = parseUsageResponse({ data: { viewer: {} } });
+  assert.equal(!noAccounts.ok && noAccounts.kind, 'shape');
+  const badSum = parseUsageResponse({ data: { viewer: { accounts: [{ workers: [{ sum: {} }], d1: [] }] } } });
+  assert.equal(!badSum.ok && badSum.kind, 'shape');
+  const notObject = parseUsageResponse('nope');
+  assert.equal(!notObject.ok && notObject.kind, 'shape');
+});
+
+test('usageWindow covers the current UTC day; buildUsageRequest asks for one account\'s totals', () => {
+  const w = usageWindow(Date.UTC(2026, 8, 26, 6, 0, 0));
+  assert.deepEqual(w, { date: '2026-09-26', datetimeStart: '2026-09-26T00:00:00.000Z', datetimeEnd: '2026-09-26T06:00:00.000Z', dayFraction: 0.25 });
+  assert.equal(usageWindow(Date.UTC(2026, 8, 26, 0, 0, 5)).dayFraction, 1 / 1440);
+  const req = buildUsageRequest('acct123', Date.UTC(2026, 8, 26, 12, 0, 0));
+  assert.match(req.query, /workersInvocationsAdaptive\(/);
+  assert.match(req.query, /d1AnalyticsAdaptiveGroups\(/);
+  assert.match(req.query, /sum \{ requests \}/);
+  assert.match(req.query, /sum \{ rowsWritten \}/);
+  assert.deepEqual(req.variables, { accountTag: 'acct123', datetimeStart: '2026-09-26T00:00:00.000Z', datetimeEnd: '2026-09-26T12:00:00.000Z', date: '2026-09-26' });
+});
+
+// --- plainExitCode and the arguments ---
+
+test('plainExitCode: 1 a non-shadow P1/P2 (unreadable aside), else 2 unreadable, else 3 a watcher, else 0', () => {
+  const unreadable = unreadableFinding('x');
+  const watcher = usageMisconfigured().findings[0]!;
+  const p1 = must(evaluateStatus(statusFixture('degraded'), { nowMs: NOW }), 'alerts:degraded');
+  const p3 = must(evaluateStatus(geofonAt('2026-10-21T15:22:00Z'), { nowMs: T('2026-10-21T15:22:00Z') }), 'alerts:provider:gfz');
+  const shadow = { ...p1, shadow: true };
+  assert.equal(plainExitCode([]), 0);
+  assert.equal(plainExitCode([p3]), 0);
+  assert.equal(plainExitCode([shadow]), 0);
+  assert.equal(plainExitCode([watcher, p3]), 3);
+  assert.equal(plainExitCode([unreadable, watcher]), 2);
+  assert.equal(plainExitCode([unreadable, watcher, p1]), 1);
+  assert.equal(plainExitCode(usageFindings(usage(81_000), T('2026-10-21T12:00:00Z')).findings), 1);
+});
+
+test('parseArgs: defaults, values, selftest via flag or env, the canary switches, and bad input', () => {
+  assert.deepEqual(parseArgs([]), { url: STATUS_URL, statusFile: null, selftest: false, findingsPath: null, canaryUrl: CANARY_URL, canaryFile: null });
+  assert.equal(CANARY_URL, 'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_hour.geojson');
+  const o = parseArgs(['--url', 'https://x/s.json', '--status-file', 's.json', '--findings', 'findings/alerts.json', '--canary-url', 'https://x/c.json', '--canary-file', 'c.json']);
+  assert.deepEqual(o, { url: 'https://x/s.json', statusFile: 's.json', selftest: false, findingsPath: 'findings/alerts.json', canaryUrl: 'https://x/c.json', canaryFile: 'c.json' });
+  const off = parseArgs(['--canary-file', 'c.json', '--no-canary', '--canary-url', 'https://x/c.json']);
+  assert.deepEqual([off.canaryUrl, off.canaryFile], [null, null]);
+  assert.equal(parseArgs(['--selftest']).selftest, true);
+  assert.equal(parseArgs([], { WATCHDOG_SELFTEST: '1' }).selftest, true);
+  assert.equal(parseArgs([], { WATCHDOG_SELFTEST: 'true' }).selftest, true);
+  assert.equal(parseArgs([], { WATCHDOG_SELFTEST: '' }).selftest, false);
+  assert.throws(() => parseArgs(['--url']), /--url needs a value/);
+  assert.throws(() => parseArgs(['--findings', '--selftest']), /--findings needs a value/);
+  assert.throws(() => parseArgs(['--bogus']), /unknown argument/);
+  assert.throws(() => parseArgs(['toString', '1']), /unknown argument/);
+  // The numeric threshold flags are gone: every line comes from RULES.
+  for (const flag of ['--max-age-sec', '--provider-down-sec', '--min-headroom-pct', '--usage-fail-pct', '--max-config-bundle-age-sec', '--deletions-failures']) {
+    assert.throws(() => parseArgs([flag, '10']), /unknown argument/, flag);
+  }
+});
+
+// --- main ---
+
+interface RunOptions {
+  routes?: Record<string, Array<Response | Error>>;
+  env?: Record<string, string>;
+  argv?: string[];
+  now?: number;
+  files?: Record<string, string>;
+  writeFile?: (path: string, text: string) => void;
+}
+async function run(opts: RunOptions) {
+  const lines: string[] = [];
+  const written: Record<string, string> = {};
+  const f = fakeFetch(opts.routes ?? {});
+  const code = await main({
+    argv: opts.argv ?? [],
+    env: opts.env ?? {},
+    fetchImpl: f.impl,
+    now: () => opts.now ?? NOW,
+    log: (l) => void lines.push(l),
+    sleep: noSleep,
+    readFile: (p) => {
+      if (opts.files && Object.hasOwn(opts.files, p)) return opts.files[p]!;
+      throw new Error(`ENOENT: ${p}`);
+    },
+    writeFile: opts.writeFile ?? ((p, t) => void (written[p] = t)),
+  });
+  const doc = (p: string): FindingsDocument => {
+    const parsed = parseFindingsDocument(JSON.parse(written[p]!));
+    assert.ok(parsed.ok, parsed.ok ? '' : parsed.error);
+    return parsed.doc;
+  };
+  return { code, lines, out: lines.join('\n'), calls: f.calls, written, doc };
+}
+
+const OUT = 'findings/alerts.json';
+const TOKEN_ENV = { CF_ANALYTICS_TOKEN: 'test-token', CF_ACCOUNT_ID: 'acct123' };
+
+test('main --findings: a valid document and exit 0 for a healthy, an unhealthy, an unreadable and a refused-token run', async () => {
+  const healthy = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)], [CANARY_URL]: [jsonResponse(usgsSummary())] }, argv: ['--findings', OUT] });
+  assert.equal(healthy.code, 0);
+  const h = healthy.doc(OUT);
+  assert.deepEqual([h.evaluator, h.generatedAtMs, h.findings, h.unjudged], ['alerts', NOW, [], []]);
+  assert.ok(h.notes.includes('account usage: skipped (no CF_ANALYTICS_TOKEN)'));
+  assert.match(healthy.out, /findings: wrote 0 findings to findings\/alerts\.json/);
+
+  const unhealthy = await run({ routes: { [STATUS_URL]: [jsonResponse(statusFixture('degraded'))] }, argv: ['--findings', OUT, '--no-canary'] });
+  assert.equal(unhealthy.code, 0);
+  assert.deepEqual(unhealthy.doc(OUT).findings.map((f) => `${f.key} ${f.severity}`), ['alerts:degraded P1']);
+  // No annotations for findings in this mode: reconcile prints those.
+  assert.doesNotMatch(unhealthy.out, /::(error|warning|notice)/);
+  assert.match(unhealthy.out, /^P1 alerts:degraded \(alerts:degraded\): the gateway is DEGRADED/m);
+
+  const unreadable = await run({ routes: { [STATUS_URL]: [new TypeError('fetch failed', { cause: { code: 'ENOTFOUND' } })] }, argv: ['--findings', OUT] });
+  assert.equal(unreadable.code, 0);
+  assert.equal(unreadable.calls.length, 3); // no canary for a document never read
+  const u = unreadable.doc(OUT);
+  assert.deepEqual([u.findings.map((f) => `${f.key} ${f.severity}`), u.unjudged], [['alerts:status:unreadable P2'], ['alerts:*']]);
+  assert.equal(u.findings[0]!.text, 'status.json could not be read (network error): network error: fetch failed (ENOTFOUND) after 3 attempts. The alert pipeline state is UNKNOWN. This is a network or edge problem between GitHub and data.theshelter.app, not a confirmed pipeline failure. If it repeats on the next runs, check the alerts-gateway in the Cloudflare dashboard.');
+  assert.doesNotMatch(unreadable.out, /::error/);
+
+  const refused = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)], [GRAPHQL_URL]: [jsonResponse(cfFixture('authz-error'))] }, argv: ['--findings', OUT, '--no-canary'], env: TOKEN_ENV });
+  assert.equal(refused.code, 0);
+  const r = refused.doc(OUT);
+  assert.deepEqual([r.findings.map((f) => `${f.key} ${f.severity}`), r.unjudged], [['watcher:cf-usage P3'], ['alerts:canary', 'platform:cf-usage']]);
+});
+
+test('main --findings: an HTTP 404 names the missing document; a stale document reads no canary', async () => {
+  const gone = await run({ routes: { [STATUS_URL]: [jsonResponse('gone', 404)] }, argv: ['--findings', OUT] });
+  assert.equal(gone.code, 0);
+  assert.equal(gone.calls.length, 1);
+  assert.match(gone.doc(OUT).findings[0]!.text, /^status\.json could not be read \(HTTP 404\): HTTP 404 after 1 attempt\. The alert pipeline state is UNKNOWN\. The document is missing or blocked/);
+  const stale = await run({ routes: { [STATUS_URL]: [jsonResponse(statusFixture('stale'))] }, argv: ['--findings', OUT] });
+  assert.deepEqual(stale.calls.map((c) => c.url), [STATUS_URL]);
+  assert.deepEqual(stale.doc(OUT).findings.map((f) => f.key), ['alerts:status:stale']);
+});
+
+test('main: the canary is read once with no retry; a failed read is a note; a saved summary can be judged', async () => {
+  const stalled = structuredClone(HEALTHY);
+  stalled.lastEvent.atMs = NOW - 45 * MIN;
+  const failed = await run({ routes: { [STATUS_URL]: [jsonResponse(stalled)], [CANARY_URL]: [jsonResponse('busy', 503)] }, argv: ['--findings', OUT] });
+  assert.equal(failed.code, 0);
+  assert.deepEqual(failed.calls.map((c) => c.url), [STATUS_URL, CANARY_URL]);
+  const fd = failed.doc(OUT);
+  assert.deepEqual([fd.findings, fd.unjudged], [[], ['alerts:canary']]);
+  assert.ok(fd.notes.includes("canary: USGS's 4.5_hour summary could not be read (HTTP 503)"));
+  const summary = usgsSummary({ id: 'us7000abcd', time: NOW - 20 * MIN });
+  const live = await run({ routes: { [STATUS_URL]: [jsonResponse(stalled)], [CANARY_URL]: [jsonResponse(summary)] }, argv: ['--findings', OUT] });
+  assert.deepEqual(live.doc(OUT).findings.map((f) => [f.key, f.severity, f.shadow]), [['alerts:canary', 'P4', true]]);
+  assert.match(live.out, /^shadow \(would notify\) P4 alerts:canary \(alerts:canary\): USGS lists us7000abcd/m);
+  const saved = await run({ argv: ['--status-file', 's.json', '--canary-file', 'c.json'], files: { 's.json': JSON.stringify(stalled), 'c.json': JSON.stringify(summary) } });
+  assert.equal(saved.code, 0);
+  assert.deepEqual(saved.calls, []);
+  assert.match(saved.out, /^shadow \(would notify\): P4 alerts:canary: USGS lists us7000abcd/m);
+  const off = await run({ argv: ['--status-file', 's.json', '--no-canary'], files: { 's.json': JSON.stringify(HEALTHY) } });
+  assert.match(off.out, /note: canary: off \(--no-canary\)/);
+});
+
+test('main plain mode: exit 0 healthy, 1 a P1/P2, 2 unreadable, 3 misconfigured; annotations by severity', async () => {
+  const healthy = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)] }, argv: ['--no-canary'] });
+  assert.equal(healthy.code, 0);
+  assert.doesNotMatch(healthy.out, /::error/);
+  assert.match(healthy.out, /alert pipeline healthy/);
+  assert.deepEqual(healthy.calls.map((c) => c.url), [STATUS_URL]);
+  assert.deepEqual(healthy.written, {});
+
+  for (const name of ['stale', 'policy-fallback', 'degraded', 'apns-dry', 'apns-split-no-production', 'apns-key-problems', 'low-headroom']) {
+    const r = await run({ routes: { [STATUS_URL]: [jsonResponse(statusFixture(name))] }, argv: ['--no-canary'] });
+    assert.equal(r.code, 1, name);
+    assert.match(r.out, /^::error title=Alert pipeline unhealthy::alerts:/m, name);
+  }
+  const p3 = await run({ routes: { [STATUS_URL]: [jsonResponse(statusFixture('fanout-warnings'))] }, argv: ['--no-canary'] });
+  assert.equal(p3.code, 0);
+  assert.match(p3.out, /^::warning title=Alert pipeline::alerts:apns: 3 device push\(es\) skipped today/m);
+  const p4 = await run({ routes: { [STATUS_URL]: [jsonResponse(statusFixture('provider-down'))] }, argv: ['--no-canary'] });
+  assert.equal(p4.code, 0);
+  assert.match(p4.out, /^P4 alerts:provider:usgs: provider usgs is failing/m);
+
+  const unreadable = await run({ routes: { [STATUS_URL]: [jsonResponse('gone', 404)] } });
+  assert.equal(unreadable.code, 2);
+  assert.match(unreadable.out, /::error title=Alert watchdog could not read status.json::status.json could not be read \(HTTP 404\)/);
+  assert.doesNotMatch(unreadable.out, /Alert pipeline unhealthy/);
+
+  const refused = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)], [GRAPHQL_URL]: [jsonResponse(cfFixture('authz-error'))] }, argv: ['--no-canary'], env: TOKEN_ENV });
+  assert.equal(refused.code, 3);
+  assert.match(refused.out, /::error title=Alert watchdog misconfigured::the account usage check was refused/);
+  const noAccount = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)] }, argv: ['--no-canary'], env: { CF_ANALYTICS_TOKEN: 'test-token' } });
+  assert.equal(noAccount.code, 3);
+  assert.deepEqual(noAccount.calls.map((c) => c.url), [STATUS_URL]);
+  const transient = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)], [GRAPHQL_URL]: [jsonResponse('bad gateway', 502)] }, argv: ['--no-canary'], env: TOKEN_ENV });
+  assert.equal(transient.code, 3);
+  assert.match(transient.out, /unavailable this run: HTTP 502 after 3 attempt\(s\)/);
+
+  // Precedence: an unhealthy pipeline outranks a refused token; unreadable outranks a refused token.
+  const both = await run({ routes: { [STATUS_URL]: [jsonResponse(statusFixture('degraded'))], [GRAPHQL_URL]: [jsonResponse(cfFixture('authz-error'))] }, argv: ['--no-canary'], env: TOKEN_ENV });
+  assert.equal(both.code, 1);
+  const lost = await run({ routes: { [STATUS_URL]: [jsonResponse('gone', 404)], [GRAPHQL_URL]: [jsonResponse(cfFixture('authz-error'))] }, env: TOKEN_ENV });
+  assert.equal(lost.code, 2);
+});
+
+test('main plain mode: the usage half fails at 80 % and sends the token only to the GraphQL API', async () => {
+  const routes = () => ({ [STATUS_URL]: [jsonResponse(HEALTHY)], [CANARY_URL]: [jsonResponse(usgsSummary())] });
+  const ok = await run({ routes: { ...routes(), [GRAPHQL_URL]: [jsonResponse(cfFixture('usage-ok'))] }, env: TOKEN_ENV });
+  assert.equal(ok.code, 0);
+  assert.match(ok.out, /account usage today \(UTC\): Workers requests 16150\/100000/);
+  assert.doesNotMatch(ok.out, /shelter-api-prod|00000000-0000/, 'no Worker or database names in the public run log');
+  assert.deepEqual(ok.calls.map((c) => c.url).sort(), [CANARY_URL, GRAPHQL_URL, STATUS_URL].sort());
+  for (const c of ok.calls) {
+    assert.equal(new Headers(c.init?.headers).get('authorization'), c.url === GRAPHQL_URL ? 'Bearer test-token' : null, c.url);
+  }
+  const gql = ok.calls.find((c) => c.url === GRAPHQL_URL)!;
+  assert.equal(gql.init?.method, 'POST');
+  assert.equal(JSON.parse(String(gql.init?.body)).variables.accountTag, 'acct123');
+  assert.doesNotMatch(ok.out, /test-token/);
+
+  const over = await run({ routes: { ...routes(), [GRAPHQL_URL]: [jsonResponse(cfFixture('usage-over'))] }, env: TOKEN_ENV });
+  assert.equal(over.code, 1);
+  assert.match(over.out, /::error title=Cloudflare free-tier usage high::platform:cf-usage: account D1 rows written today: 85000 = 85\.0 %/);
+});
+
+test('main: Cloudflare\'s error text reaches no finding, note, log line or step summary with the account id or the token in it', async () => {
+  // The repository is public: the run log, the findings-alerts artifact and the board body are readable by anyone, and
+  // GitHub's secret masking covers none of them once a value is cut, cased differently or rewritten.
+  const ACCOUNT = '0123456789abcdef0123456789abcdef';
+  const TOKEN = 'cf-analytics-test-token';
+  const env = { CF_ANALYTICS_TOKEN: TOKEN, CF_ACCOUNT_ID: ACCOUNT };
+  const leaks = new RegExp(`${ACCOUNT}|${TOKEN}`, 'i');
+  const echo = { data: null, errors: [{ message: `not authorized for account ${ACCOUNT.toUpperCase()} with token ${TOKEN}`, extensions: { code: 'authz' } }] };
+  assert.deepEqual(parseUsageResponse(echo, { secrets: [TOKEN, ACCOUNT] }), { ok: false, kind: 'auth', message: 'not authorized for account *** with token ***' });
+  // Redacted before the 500-character cut, so a value across the cut leaves no prefix behind.
+  const cut = parseUsageResponse({ errors: [{ message: `${'x'.repeat(480)} account ${ACCOUNT}` }] }, { secrets: [ACCOUNT] });
+  assert.ok(!cut.ok && cut.message.endsWith(' account ***') && !cut.message.includes(ACCOUNT.slice(0, 8)), JSON.stringify(cut));
+  assert.equal(redact('a ACCT b acct', ['acct', '', undefined]), 'a *** b ***');
+
+  const dir = mkdtempSync(join(tmpdir(), 'alerts-watchdog-redact-'));
+  try {
+    for (const [name, argv] of [['findings', ['--findings', OUT, '--no-canary']], ['plain', ['--no-canary']]] as const) {
+      const summary = join(dir, `${name}.md`);
+      const refused = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)], [GRAPHQL_URL]: [jsonResponse(echo)] }, argv: [...argv], env: { ...env, GITHUB_STEP_SUMMARY: summary } });
+      const everything = [refused.out, ...Object.values(refused.written), readFileSync(summary, 'utf8')].join('\n');
+      assert.doesNotMatch(everything, leaks, name);
+      assert.match(everything, /the account usage check was refused: not authorized for account \*\*\* with token \*\*\*/, name);
+    }
+    // A transport failure is redacted the same way (an error that names the account in its cause).
+    const net = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)], [GRAPHQL_URL]: [new TypeError('fetch failed', { cause: { message: `socket closed for ${ACCOUNT}` } })] }, argv: ['--findings', OUT, '--no-canary'], env });
+    assert.match(net.doc(OUT).findings[0]!.text, /^the account usage check is unavailable this run: network error: fetch failed \(socket closed for \*\*\*\) after 3 attempt\(s\)$/);
+    assert.doesNotMatch([net.out, ...Object.values(net.written)].join('\n'), leaks);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('main: the selftest turns a healthy document red in plain mode and is a finding in findings mode', async () => {
+  const plain = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)] }, argv: ['--no-canary'], env: { WATCHDOG_SELFTEST: '1' } });
+  assert.equal(plain.code, 1);
+  assert.match(plain.out, /::notice title=Alert watchdog selftest::/);
+  assert.match(plain.out, /::error title=\[selftest\] Alert pipeline unhealthy::alerts:selftest: forced by the selftest/);
+  const doc = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)] }, argv: ['--findings', OUT, '--no-canary', '--selftest'] });
+  assert.equal(doc.code, 0);
+  assert.deepEqual(doc.doc(OUT).findings.map((f) => `${f.key} ${f.severity}`), ['alerts:selftest P1']);
+  assert.doesNotMatch(doc.out, /::/);
+});
+
+test('main: a bad argument is watcher:alerts-watchdog with --findings (exit 0), exit 3 without; a missing or unwritable path exits 3', async () => {
+  const bad = await run({ argv: ['--findings', OUT, '--max-age-sec', '600'] });
+  assert.equal(bad.code, 0);
+  assert.deepEqual(bad.calls, []);
+  const d = bad.doc(OUT);
+  assert.deepEqual(d.findings.map((f) => [f.key, f.rule, f.severity, f.board]), [['watcher:alerts-watchdog', 'watcher', 'P3', 'platform']]);
+  assert.match(d.findings[0]!.text, /cannot run: unknown argument "--max-age-sec"/);
+  assert.deepEqual(d.unjudged, ['alerts:*', 'platform:cf-usage']);
+  assert.doesNotMatch(bad.out, /::error/);
+
+  const plainBad = await run({ argv: ['--bogus'] });
+  assert.equal(plainBad.code, 3);
+  assert.match(plainBad.out, /::error title=Alert watchdog misconfigured::unknown argument "--bogus"/);
+  const noPath = await run({ argv: ['--findings'] });
+  assert.equal(noPath.code, 3);
+  assert.match(noPath.out, /::error title=Alert watchdog misconfigured::--findings needs a value/);
+  const unwritable = await run({
+    routes: { [STATUS_URL]: [jsonResponse(HEALTHY)] },
+    argv: ['--findings', '/nonexistent/alerts.json', '--no-canary'],
+    writeFile: () => {
+      throw new Error('EACCES: permission denied');
+    },
+  });
+  assert.equal(unwritable.code, 3);
+  assert.match(unwritable.out, /::error title=Alert watchdog could not write its findings::\/nonexistent\/alerts.json: EACCES/);
+});
+
+test('main: the default writer creates the findings directory; the step summary lists the findings', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'alerts-watchdog-'));
+  try {
+    const path = join(dir, 'findings', 'alerts.json');
+    const summary = join(dir, 'summary.md');
+    const lines: string[] = [];
+    const f = fakeFetch({ [STATUS_URL]: [jsonResponse(geofonAt('2026-10-21T15:22:00Z'))] });
+    const code = await main({ argv: ['--findings', path, '--no-canary'], env: { GITHUB_STEP_SUMMARY: summary }, fetchImpl: f.impl, now: () => T('2026-10-21T15:22:20Z'), log: (l) => void lines.push(l), sleep: noSleep });
+    assert.equal(code, 0);
+    const parsed = parseFindingsDocument(JSON.parse(readFileSync(path, 'utf8')));
+    assert.ok(parsed.ok);
+    assert.deepEqual(parsed.doc.findings.map((x) => `${x.key} ${x.severity}`), ['alerts:provider:gfz P3']);
+    const md = readFileSync(summary, 'utf8');
+    assert.match(md, /^### Alert-pipeline watchdog$/m);
+    assert.match(md, /^- status\.json: warnings · `age=20s providers=usgs:ok,feed:ok,emsc:ok,gfz:FAIL\(\d+\)/m);
+    assert.match(md, /^- \*\*P3\*\* `alerts:provider:gfz` \(alerts:provider:fast\): provider gfz is failing: ok:false for 2\.5 h/m);
+    assert.match(md, /^- not judged this run: `alerts:canary`$/m);
+    assert.match(md, /^- note: account usage: skipped \(no CF_ANALYTICS_TOKEN\)$/m);
+    assert.doesNotMatch(md, /^- account usage:/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // --- fetchJson: bounded retries, network vs HTTP vs parse ---
@@ -366,430 +1177,23 @@ test('fetchJson does not retry a 404, retries an unparseable body, and times out
   assert.equal(!rTimeout.ok && rTimeout.message, 'timed out after 20 ms');
 });
 
-// --- usage half: parsing + judging (fixtures only, the API is never called) ---
-
-test('usageWindow covers the current UTC day', () => {
-  const w = usageWindow(Date.UTC(2026, 8, 26, 6, 0, 0));
-  assert.deepEqual(w, { date: '2026-09-26', datetimeStart: '2026-09-26T00:00:00.000Z', datetimeEnd: '2026-09-26T06:00:00.000Z', dayFraction: 0.25 });
-  assert.equal(usageWindow(Date.UTC(2026, 8, 26, 0, 0, 5)).dayFraction, 1 / 1440);
-});
-
-test('buildUsageRequest asks for Workers requests and D1 rows written of one account', () => {
-  const req = buildUsageRequest('acct123', Date.UTC(2026, 8, 26, 12, 0, 0));
-  assert.match(req.query, /workersInvocationsAdaptive\(/);
-  assert.match(req.query, /d1AnalyticsAdaptiveGroups\(/);
-  assert.match(req.query, /sum \{ requests \}/);
-  assert.match(req.query, /sum \{ rowsWritten \}/);
-  assert.deepEqual(req.variables, { accountTag: 'acct123', datetimeStart: '2026-09-26T00:00:00.000Z', datetimeEnd: '2026-09-26T12:00:00.000Z', date: '2026-09-26' });
-});
-
-test('parseUsageResponse sums every group into account totals (no per-script names leave the parser)', () => {
-  assert.deepEqual(parseUsageResponse(cfFixture('usage-ok')), { ok: true, workersRequests: 16150, d1RowsWritten: 5944 });
-});
-
-test('parseUsageResponse classifies authz errors and an invisible account as auth, others as graphql/shape', () => {
-  assert.deepEqual(parseUsageResponse(cfFixture('authz-error')), { ok: false, kind: 'auth', message: 'not authorized for that account' });
-  const empty = parseUsageResponse(cfFixture('empty-accounts'));
-  assert.equal(!empty.ok && empty.kind, 'auth');
-  const transient = parseUsageResponse(cfFixture('transient-error'));
-  assert.equal(!transient.ok && transient.kind, 'graphql');
-  const noAccounts = parseUsageResponse({ data: { viewer: {} } });
-  assert.equal(!noAccounts.ok && noAccounts.kind, 'shape');
-  const badSum = parseUsageResponse({ data: { viewer: { accounts: [{ workers: [{ sum: {} }], d1: [] }] } } });
-  assert.equal(!badSum.ok && badSum.kind, 'shape');
-  const notObject = parseUsageResponse('nope');
-  assert.equal(!notObject.ok && notObject.kind, 'shape');
-});
-
-test('evaluateUsage fails at 80 % of either Free cap and not below', () => {
-  const ok = parseUsageResponse(cfFixture('usage-ok'));
-  const over = parseUsageResponse(cfFixture('usage-over'));
-  assert.ok(ok.ok && over.ok);
-  if (!ok.ok || !over.ok) return;
-  assert.deepEqual(evaluateUsage(ok, { dayFraction: 0.5 }).problems, []);
-  const v = evaluateUsage(over, { dayFraction: 0.9 });
-  assert.equal(v.problems.length, 2);
-  assert.match(v.problems[0]!, /Workers requests today: 80440 = 80\.4 % of the Workers Free cap \(100000\/day; limit 80 %\)/);
-  assert.match(v.problems[1]!, /D1 rows written today: 85000 = 85\.0 %/);
-  const edge = evaluateUsage({ workersRequests: 79_999, d1RowsWritten: 80_000 }, { dayFraction: 1 });
-  assert.equal(edge.problems.length, 1);
-  assert.match(edge.problems[0]!, /D1 rows written/);
-  assert.match(evaluateUsage(ok, { dayFraction: 0.5 }).summary, /projected 32300\/day/);
-});
-
-// --- CLI ---
-
 test('annotation escapes the workflow-command metacharacters', () => {
   assert.equal(annotation('error', 'a: b, c', '50% done\nnext'), '::error title=a%3A b%2C c::50%25 done%0Anext');
 });
 
-test('parseArgs: defaults, overrides, selftest via flag or env, and bad input', () => {
-  assert.deepEqual(parseArgs([]).thresholds, { ...DEFAULT_THRESHOLDS });
-  const o = parseArgs(['--url', 'https://x/s.json', '--max-age-sec', '600', '--usage-fail-pct', '50']);
-  assert.equal(o.url, 'https://x/s.json');
-  assert.equal(o.thresholds.maxAgeSec, 600);
-  assert.equal(o.thresholds.usageFailPct, 50);
-  assert.equal(parseArgs(['--selftest']).thresholds.minHeadroomPct, SELFTEST_MIN_HEADROOM_PCT);
-  assert.equal(parseArgs([], { WATCHDOG_SELFTEST: '1' }).selftest, true);
-  assert.equal(parseArgs([], { WATCHDOG_SELFTEST: '' }).selftest, false);
-  assert.throws(() => parseArgs(['--max-age-sec', 'abc']), /non-negative number/);
-  assert.throws(() => parseArgs(['--url']), /needs a value/);
-  assert.throws(() => parseArgs(['--bogus']), /unknown argument/);
-  assert.throws(() => parseArgs(['toString', '1']), /unknown argument/);
+// --- the gateway's polling cadence (turns a failure count into a duration) ---
+
+test('failureReason: lastError and consecutiveTimeouts named; missing, malformed or unknown values never break it', () => {
+  assert.equal(failureReason({ lastError: 'network', consecutiveTimeouts: 0 }), ', last error network (a network failure before the timeout)');
+  assert.equal(failureReason({ lastError: 'timeout', consecutiveTimeouts: 1 }), ", last error timeout (slower than the gateway's fetch timeout), 1 timeout in a row");
+  assert.equal(failureReason({}), '');
+  assert.equal(failureReason(null), '');
+  assert.equal(failureReason({ lastError: '', consecutiveTimeouts: -1 }), '');
+  assert.equal(failureReason({ lastError: 42, consecutiveTimeouts: '3' }), '');
+  assert.equal(failureReason({ consecutiveTimeouts: Number.NaN }), '');
+  assert.equal(failureReason({ lastError: 'tls', consecutiveTimeouts: 2 }), ', last error tls, 2 timeouts in a row');
+  assert.equal(failureReason({ lastError: 'x'.repeat(100) }), `, last error ${'x'.repeat(32)}`);
 });
-
-async function run(opts: { routes: Record<string, Array<Response | Error>>; env?: Record<string, string>; argv?: string[] }) {
-  const lines: string[] = [];
-  const f = fakeFetch(opts.routes);
-  const code = await main({ argv: opts.argv ?? [], env: opts.env ?? {}, fetchImpl: f.impl, now: () => NOW, log: (l) => void lines.push(l), sleep: noSleep });
-  return { code, lines, out: lines.join('\n'), calls: f.calls };
-}
-
-test('main: healthy document, no token -> exit 0 and the usage API is never called', async () => {
-  const r = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)] } });
-  assert.equal(r.code, 0);
-  assert.doesNotMatch(r.out, /::error/);
-  assert.match(r.out, /alert pipeline healthy/);
-  assert.deepEqual(r.calls.map((c) => c.url), [STATUS_URL]);
-});
-
-test('main: every failing fixture exits 1 with an "Alert pipeline unhealthy" error', async () => {
-  for (const name of ['stale', 'provider-down', 'policy-fallback', 'degraded', 'low-headroom', 'apns-dry', 'apns-split-no-production', 'apns-key-problems']) {
-    const r = await run({ routes: { [STATUS_URL]: [jsonResponse(statusFixture(name))] } });
-    assert.equal(r.code, 1, name);
-    assert.match(r.out, /::error title=Alert pipeline unhealthy::/, name);
-  }
-});
-
-test('main: fan-out counter warnings are annotated and listed in the summary but keep exit 0', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'alerts-watchdog-'));
-  try {
-    const summary = join(dir, 'summary.md');
-    const lines: string[] = [];
-    const f = fakeFetch({ [STATUS_URL]: [jsonResponse(statusFixture('fanout-warnings'))] });
-    const code = await main({ argv: [], env: { GITHUB_STEP_SUMMARY: summary }, fetchImpl: f.impl, now: () => NOW, log: (l) => void lines.push(l), sleep: noSleep });
-    assert.equal(code, 0);
-    const out = lines.join('\n');
-    assert.doesNotMatch(out, /::error/);
-    assert.equal(lines.filter((l) => l.startsWith('::warning title=Alert pipeline::')).length, 2);
-    assert.match(out, /alert pipeline healthy/);
-    const md = readFileSync(summary, 'utf8');
-    assert.match(md, /status\.json: healthy/);
-    assert.match(md, /  - warning: 3 device push\(es\) skipped today/);
-    assert.match(md, /  - warning: 40 transient push failure\(s\)/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('main: an unreachable status.json exits 2 and says the state is UNKNOWN, not unhealthy', async () => {
-  const r = await run({ routes: { [STATUS_URL]: [new TypeError('fetch failed', { cause: { code: 'ENOTFOUND' } })] } });
-  assert.equal(r.code, 2);
-  assert.equal(r.calls.length, 3);
-  assert.match(r.out, /::error title=Alert watchdog could not read status.json \(network error\)::/);
-  assert.match(r.out, /UNKNOWN/);
-  assert.doesNotMatch(r.out, /Alert pipeline unhealthy/);
-  const http = await run({ routes: { [STATUS_URL]: [jsonResponse('gone', 404)] } });
-  assert.equal(http.code, 2);
-  assert.match(http.out, /could not read status.json \(HTTP 404\)::HTTP 404 after 1 attempt\(s\).*missing or blocked/);
-  assert.match(r.out, /not a confirmed pipeline failure/);
-});
-
-test('main: selftest turns the healthy document red', async () => {
-  const r = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)] }, env: { WATCHDOG_SELFTEST: '1' } });
-  assert.equal(r.code, 1);
-  assert.match(r.out, /::notice title=Alert watchdog selftest::/);
-  // `%` is escaped as `%25` inside a workflow command (GitHub renders it back as `%`).
-  assert.match(r.out, /::error title=\[selftest\] Alert pipeline unhealthy::free-tier headroom is 92 %25 \(limit 101 %25\)/);
-});
-
-test('main: usage half runs only with a token, sends it only to the GraphQL API, and fails at 80 %', async () => {
-  const env = { CF_ANALYTICS_TOKEN: 'test-token', CF_ACCOUNT_ID: 'acct123' };
-  const ok = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)], [GRAPHQL_URL]: [jsonResponse(cfFixture('usage-ok'))] }, env });
-  assert.equal(ok.code, 0);
-  assert.match(ok.out, /account usage today \(UTC\): Workers requests 16150\/100000/);
-  assert.doesNotMatch(ok.out, /shelter-api-prod|00000000-0000/, 'no Worker or database names in the public run log');
-  const statusCall = ok.calls.find((c) => c.url === STATUS_URL)!;
-  const gqlCall = ok.calls.find((c) => c.url === GRAPHQL_URL)!;
-  assert.equal(new Headers(statusCall.init?.headers).get('authorization'), null);
-  assert.equal(new Headers(gqlCall.init?.headers).get('authorization'), 'Bearer test-token');
-  assert.equal(gqlCall.init?.method, 'POST');
-  assert.equal(JSON.parse(String(gqlCall.init?.body)).variables.accountTag, 'acct123');
-
-  const over = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)], [GRAPHQL_URL]: [jsonResponse(cfFixture('usage-over'))] }, env });
-  assert.equal(over.code, 1);
-  assert.match(over.out, /::error title=Cloudflare free-tier usage high::/);
-});
-
-test('main: a rejected token or a missing account id is a misconfiguration (exit 3); transient errors only warn', async () => {
-  const env = { CF_ANALYTICS_TOKEN: 'test-token', CF_ACCOUNT_ID: 'acct123' };
-  const authz = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)], [GRAPHQL_URL]: [jsonResponse(cfFixture('authz-error'))] }, env });
-  assert.equal(authz.code, 3);
-  assert.match(authz.out, /::error title=Alert watchdog misconfigured::the usage check was refused/);
-  const http403 = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)], [GRAPHQL_URL]: [jsonResponse({ success: false }, 403)] }, env });
-  assert.equal(http403.code, 3);
-  const noAccount = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)] }, env: { CF_ANALYTICS_TOKEN: 'test-token' } });
-  assert.equal(noAccount.code, 3);
-  assert.deepEqual(noAccount.calls.map((c) => c.url), [STATUS_URL]);
-  const transient = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)], [GRAPHQL_URL]: [jsonResponse(cfFixture('transient-error'))] }, env });
-  assert.equal(transient.code, 0);
-  assert.match(transient.out, /::warning title=Cloudflare usage unavailable::query timed out/);
-  const down = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)], [GRAPHQL_URL]: [jsonResponse('bad gateway', 502)] }, env });
-  assert.equal(down.code, 0);
-  assert.match(down.out, /HTTP 502 after 3 attempt\(s\)/);
-});
-
-test('main: an unhealthy pipeline outranks an unreadable usage check and a bad argument exits 3', async () => {
-  const env = { CF_ANALYTICS_TOKEN: 'test-token', CF_ACCOUNT_ID: 'acct123' };
-  const r = await run({ routes: { [STATUS_URL]: [jsonResponse(statusFixture('degraded'))], [GRAPHQL_URL]: [jsonResponse(cfFixture('authz-error'))] }, env });
-  assert.equal(r.code, 1);
-  const bad = await run({ routes: {}, argv: ['--max-age-sec', '-5'] });
-  assert.equal(bad.code, 3);
-  assert.match(bad.out, /::error title=Alert watchdog misconfigured::/);
-});
-
-test('main: --status-file judges a saved document and writes the step summary', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'alerts-watchdog-'));
-  try {
-    const summary = join(dir, 'summary.md');
-    const lines: string[] = [];
-    const code = await main({
-      argv: ['--status-file', join(FIXTURES, 'alerts-status', 'apns-dry.json')],
-      env: { GITHUB_STEP_SUMMARY: summary },
-      fetchImpl: async () => {
-        throw new Error('no network in this test');
-      },
-      now: () => NOW,
-      log: (l) => void lines.push(l),
-      sleep: noSleep,
-    });
-    assert.equal(code, 1);
-    const md = readFileSync(summary, 'utf8');
-    assert.match(md, /### Alert-pipeline watchdog/);
-    assert.match(md, /status\.json: \*\*UNHEALTHY\*\* \(1 problem\(s\)\)/);
-    assert.match(md, /account usage: skipped \(no CF_ANALYTICS_TOKEN\)/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// --- upstream freshness (X-4 / P1 #14): the feed manifest and the config bundle the gateway last read ---
-
-test('freshness: a document without the fields (today\'s gateway) skips both checks', () => {
-  const v = evaluateStatus(HEALTHY, { nowMs: NOW });
-  assert.deepEqual(v.problems, []);
-  assert.match(v.summary, /feed_manifest=n\/a config_bundle=n\/a/);
-  assert.equal(DEFAULT_THRESHOLDS.maxFeedManifestAgeSec, 1_800);
-  assert.equal(DEFAULT_THRESHOLDS.maxConfigBundleAgeSec, 10 * 86_400);
-});
-
-test('freshness: the feed manifest older than 30 min fails; the age is taken from generated_ms when present', () => {
-  const doc = structuredClone(HEALTHY);
-  Object.assign(doc, { feed_manifest_generated_ms: NOW - 1_700_000, feed_manifest_age_s: 1_690, config_bundle_generated_ms: NOW - 86_400_000, config_bundle_age_s: 86_390 });
-  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).problems, []);
-  doc.feed_manifest_generated_ms = NOW - 1_801_000;
-  const v = evaluateStatus(doc, { nowMs: NOW });
-  assert.equal(v.problems.length, 1);
-  assert.match(v.problems[0]!, /earthquakes-feed manifest the gateway last read is 30 min old \(limit 30 min\)/);
-  assert.match(v.summary, /feed_manifest=1801s/);
-});
-
-test('freshness: without generated_ms the published age plus the document\'s own age is used', () => {
-  const doc = structuredClone(HEALTHY);
-  // Published 15 s before NOW with an age of 1,790 s: 1,805 s now.
-  Object.assign(doc, { feed_manifest_age_s: 1_790 });
-  const v = evaluateStatus(doc, { nowMs: NOW });
-  assert.match(v.summary, /feed_manifest=1805s/);
-  assert.equal(v.problems.length, 1);
-});
-
-test('freshness: the config bundle older than 10 days fails; a null age is a warning, not a problem', () => {
-  const doc = structuredClone(HEALTHY);
-  Object.assign(doc, { feed_manifest_generated_ms: null, feed_manifest_age_s: null, config_bundle_generated_ms: NOW - 11 * 86_400_000, config_bundle_age_s: 11 * 86_400 });
-  const v = evaluateStatus(doc, { nowMs: NOW });
-  assert.equal(v.problems.length, 1);
-  assert.match(v.problems[0]!, /signed config bundle is 11\.0 days old \(limit 10 days\)/);
-  assert.equal(v.warnings.length, 1);
-  assert.match(v.warnings[0]!, /feed_manifest_age_s is null/);
-});
-
-test('freshness: the limits can be set on the command line', () => {
-  const o = parseArgs(['--max-feed-manifest-age-sec', '900', '--max-config-bundle-age-sec', '3600']);
-  assert.equal(o.thresholds.maxFeedManifestAgeSec, 900);
-  assert.equal(o.thresholds.maxConfigBundleAgeSec, 3600);
-});
-
-// --- the USGS deletions query (GW-R15-1, round-16 gateways): a warning, never a failure ---
-
-/** What a round-16 gateway publishes while USGS's `includedeleted=only` query fails: the provider stays ok, the two
- *  deletions fields appear, and the watermark (the deletions cursor) stops moving. */
-const GEN_DEL = HEALTHY.generatedAtMs as number;
-function deletionsFailing(failures: unknown, lastError: unknown = 'timeout', watermarkAgoMs = 2 * 3_600_000): Record<string, any> {
-  const doc = structuredClone(HEALTHY);
-  Object.assign(doc.detector.providers[0], { ok: true, consecutiveFailures: 0, watermarkMs: NOW - watermarkAgoMs, deletionsConsecutiveFailures: failures, deletionsLastError: lastError });
-  return doc;
-}
-
-test('deletions: a streak of 3 warns with the reason and the cursor age; the run stays healthy', () => {
-  assert.equal(DEFAULT_THRESHOLDS.deletionsFailures, 3);
-  const v = evaluateStatus(deletionsFailing(3), { nowMs: NOW });
-  assert.deepEqual(v.problems, []);
-  assert.deepEqual(v.warnings, [
-    "provider usgs's deletions query has failed 3 times in a row, last error timeout (slower than the gateway's fetch timeout): deleted events are not being withdrawn; its cursor (watermarkMs) is 2.0 h old (the next successful query asks from there, at most 7 days back) (warning at 3)",
-  ]);
-  assert.deepEqual(v.notes, []);
-  assert.match(v.summary, /providers=usgs:ok\/deletions-FAIL\(3\),feed:ok,emsc:ok,gfz:ok/);
-});
-
-test('deletions: below the threshold it is a log note; at 0 or absent nothing is said', () => {
-  const v = evaluateStatus(deletionsFailing(2, 'http'), { nowMs: NOW });
-  assert.deepEqual(v.warnings, []);
-  assert.deepEqual(v.notes, [
-    "provider usgs's deletions query has failed 2 times in a row, last error http (an HTTP error status): deleted events are not being withdrawn; its cursor (watermarkMs) is 2.0 h old (the next successful query asks from there, at most 7 days back) (below the warning at 3)",
-  ]);
-  const one = evaluateStatus(deletionsFailing(1, null), { nowMs: NOW });
-  assert.match(one.notes[0]!, /^provider usgs's deletions query has failed 1 time in a row: deleted events/);
-  // The healthy capture (and every gateway before round 16) carries neither field.
-  const healthy = evaluateStatus(HEALTHY, { nowMs: NOW });
-  assert.deepEqual([healthy.warnings, healthy.notes], [[], []]);
-  assert.match(healthy.summary, /providers=usgs:ok,feed:ok,emsc:ok,gfz:ok/);
-  assert.equal(deletionsFailure(HEALTHY.detector.providers[0]), null);
-});
-
-test('deletions: missing, malformed or unknown values never break the check', () => {
-  for (const bad of [0, -2, null, '12', Number.NaN, Number.POSITIVE_INFINITY, { n: 5 }, true]) {
-    const v = evaluateStatus(deletionsFailing(bad), { nowMs: NOW });
-    assert.deepEqual([v.problems, v.warnings, v.notes], [[], [], []], String(bad));
-    assert.doesNotMatch(v.summary, /deletions/, String(bad));
-  }
-  assert.equal(deletionsFailure(null), null);
-  assert.equal(deletionsFailure('usgs'), null);
-  // An unknown or odd lastError: shown as is (cut to 32 characters) or left out; a missing or odd watermark drops the age.
-  assert.deepEqual(deletionsFailure({ deletionsConsecutiveFailures: 4, deletionsLastError: 'tls' }), { failures: 4, why: ', last error tls', lasted: '' });
-  assert.deepEqual(deletionsFailure({ deletionsConsecutiveFailures: 4, deletionsLastError: 'y'.repeat(80) }), { failures: 4, why: `, last error ${'y'.repeat(32)}`, lasted: '' });
-  assert.deepEqual(deletionsFailure({ deletionsConsecutiveFailures: 4, deletionsLastError: { code: 1 } }), { failures: 4, why: '', lasted: '' });
-  const doc = deletionsFailing(4, 'network');
-  delete doc.detector.providers[0].watermarkMs;
-  assert.deepEqual(evaluateStatus(doc, { nowMs: NOW }).warnings, [
-    "provider usgs's deletions query has failed 4 times in a row, last error network (a network failure before the timeout): deleted events are not being withdrawn (warning at 3)",
-  ]);
-});
-
-test('deletions: a cursor older than the gateway\'s 7-day window says deletions from the gap are lost (still a warning)', () => {
-  assert.equal(DELETIONS_MAX_WINDOW_MS, 7 * 86_400_000);
-  const inside = evaluateStatus(deletionsFailing(2_016, 'timeout', 6.5 * 86_400_000), { nowMs: NOW });
-  assert.match(inside.warnings[0]!, /cursor \(watermarkMs\) is 6\.5 days old \(the next successful query asks from there, at most 7 days back\)/);
-  const past = evaluateStatus(deletionsFailing(2_100, 'timeout', 7.25 * 86_400_000), { nowMs: NOW });
-  assert.deepEqual(past.problems, []);
-  assert.match(past.warnings[0]!, /cursor \(watermarkMs\) is 7\.3 days old, past the gateway's 7-day deletions window: a deletion from the start of the gap is no longer asked for/);
-});
-
-test('deletions: judged whatever ok says; a provider that is also down fails for its live query only', () => {
-  const doc = deletionsFailing(12);
-  Object.assign(doc.detector.providers[0], { ok: false, httpStatus: 0, consecutiveFailures: 12, lastError: 'timeout', consecutiveTimeouts: 12 });
-  const v = evaluateStatus(doc, { nowMs: NOW });
-  assert.equal(v.problems.length, 1);
-  assert.match(v.problems[0]!, /^provider usgs is down: ok:false for about 19 min \(12 consecutive failures at 60 s polls/);
-  assert.equal(v.warnings.length, 1);
-  assert.match(v.warnings[0]!, /deletions query has failed 12 times in a row/);
-  assert.match(v.summary, /usgs:FAIL\(12\)\/deletions-FAIL\(12\)/);
-});
-
-test('deletions and primary: a round-25 gateway\'s start adds how long the streak has lasted; a bad start adds nothing', () => {
-  const doc = deletionsFailing(9, 'timeout');
-  doc.detector.providers[0].deletionsFailingSinceMs = GEN_DEL - 45 * 60_000;
-  assert.match(evaluateStatus(doc, { nowMs: NOW }).warnings[0]!, /^provider usgs's deletions query has failed 9 times in a row over 45 min, last error timeout/);
-  for (const bad of [-1, 0, '1', null, GEN_DEL + 3_600_000]) {
-    doc.detector.providers[0].deletionsFailingSinceMs = bad;
-    assert.match(evaluateStatus(doc, { nowMs: NOW }).warnings[0]!, /^provider usgs's deletions query has failed 9 times in a row, last error timeout/, String(bad));
-  }
-  assert.equal(primaryFailure({ primaryConsecutiveFailures: 3, primaryFailingSinceMs: GEN_DEL - 90_000 }, GEN_DEL)!.lasted, ' over 90 s');
-  assert.equal(primaryFailure({ primaryConsecutiveFailures: 3, primaryFailingSinceMs: GEN_DEL - 90_000 })!.lasted, ''); // no reference time
-});
-
-test('deletions: the threshold can be set on the command line', () => {
-  const o = parseArgs(['--deletions-failures', '10']);
-  assert.equal(o.thresholds.deletionsFailures, 10);
-  const v = evaluateStatus(deletionsFailing(9), { nowMs: NOW, thresholds: o.thresholds });
-  assert.deepEqual(v.warnings, []);
-  assert.match(v.notes[0]!, /below the warning at 10/);
-  assert.throws(() => parseArgs(['--deletions-failures', '-1']), /non-negative number/);
-});
-
-test('main: a failing deletions query is a warning annotation and keeps exit 0', async () => {
-  const r = await run({ routes: { [STATUS_URL]: [jsonResponse(deletionsFailing(5, 'timeout'))] } });
-  assert.equal(r.code, 0);
-  assert.doesNotMatch(r.out, /::error/);
-  assert.match(r.out, /::warning title=Alert pipeline::provider usgs's deletions query has failed 5 times in a row/);
-  assert.match(r.out, /alert pipeline healthy/);
-});
-
-// --- the USGS primary live query (2026-10-13 gateways): the summary-feed fallback is a warning, never a failure ---
-
-/** What a 2026-10-13 gateway publishes while ComCat's FDSN live query fails and the summary feed delivers. */
-function onSummary(failures: unknown, lastError: unknown = 'timeout', extra: Record<string, unknown> = {}): Record<string, any> {
-  const doc = structuredClone(HEALTHY);
-  Object.assign(doc.detector.providers[0], { ok: true, consecutiveFailures: 0, fallback: 'summary', primaryConsecutiveFailures: failures, primaryLastError: lastError, ...extra });
-  return doc;
-}
-
-test('primary: a streak of 3 on the summary fallback warns with the reason; the run stays healthy', () => {
-  assert.equal(DEFAULT_THRESHOLDS.primaryFailures, 3);
-  const v = evaluateStatus(onSummary(18), { nowMs: NOW });
-  assert.deepEqual(v.problems, []);
-  assert.deepEqual(v.warnings, [
-    "provider usgs's primary live query has failed 18 times in a row, last error timeout (slower than the gateway's fetch timeout): its live events come from the summary feed (fallback: summary), up to about two minutes later (warning at 3)",
-  ]);
-  assert.match(v.summary, /providers=usgs:ok\/primary-FAIL\(18\)\+summary,feed:ok,emsc:ok,gfz:ok/);
-  const two = evaluateStatus(onSummary(2, 'http'), { nowMs: NOW });
-  assert.deepEqual(two.warnings, []);
-  assert.match(two.notes[0]!, /^provider usgs's primary live query has failed 2 times in a row, last error http .*\(below the warning at 3\)$/);
-  assert.equal(parseArgs(['--primary-failures', '5']).thresholds.primaryFailures, 5);
-});
-
-test('primary: with the provider failing too, the provider line fails the run and no fallback warning is added', () => {
-  const doc = onSummary(8, 'http', { ok: false, consecutiveFailures: 6, lastError: 'http', consecutiveTimeouts: 0, httpStatus: 503 });
-  delete doc.detector.providers[0].fallback;
-  const v = evaluateStatus(doc, { nowMs: NOW });
-  assert.equal(v.problems.length, 1);
-  assert.match(v.problems[0]!, /^provider usgs is down: ok:false for about 5 min \(6 consecutive failures/);
-  assert.deepEqual(v.warnings, []);
-  assert.match(v.summary, /usgs:FAIL\(6\)\/primary-FAIL\(8\),/);
-});
-
-test('primary: missing or malformed values never break the check', () => {
-  for (const bad of [0, -1, null, '7', Number.NaN, { n: 1 }]) {
-    const v = evaluateStatus(onSummary(bad), { nowMs: NOW });
-    assert.deepEqual([v.problems, v.warnings, v.notes], [[], [], []], String(bad));
-    assert.doesNotMatch(v.summary, /primary/, String(bad));
-  }
-  assert.equal(primaryFailure(HEALTHY.detector.providers[0]), null);
-  assert.equal(primaryFailure(null), null);
-  assert.deepEqual(primaryFailure({ primaryConsecutiveFailures: 3, primaryLastError: { x: 1 } }), { failures: 3, why: '', fallback: false, lasted: '' });
-});
-
-// --- round 25: provider outages judged by time and coverage (round 24 judged a count per polling cadence) ---
-
-const GEN = HEALTHY.generatedAtMs as number;
-
-/** The healthy capture with some providers failing: { id: [seconds failing, extra fields] } — the round-25 gateway's
- *  failingSinceMs, with a plausible count at the gateway's polling. A provider given `null` seconds publishes no start
- *  (an older gateway); then `count` must come in the extra fields. */
-function failingFor(spec: Record<string, number | null | [number | null, Record<string, unknown>]>): Record<string, any> {
-  const doc = structuredClone(HEALTHY);
-  for (const p of doc.detector.providers) {
-    const v = spec[p.id];
-    if (v === undefined) continue;
-    const [sec, extra] = Array.isArray(v) ? v : [v, {}];
-    // The count the gateway would have reached: the most failures whose span at its polling fits in `sec`.
-    let n = 1;
-    while (sec !== null && streakSpanSec(p.id, n + 1) <= sec) n++;
-    Object.assign(p, { ok: false, consecutiveFailures: n, httpStatus: 0, lastError: 'timeout', consecutiveTimeouts: n });
-    if (sec !== null) p.failingSinceMs = GEN - sec * 1000;
-    Object.assign(p, extra);
-  }
-  return doc;
-}
 
 test('cadence: the gateway polls EMSC and GFZ every 15 s tick, USGS and the feed every 60 s; backoff 60 s from 3, 300 s from 10', () => {
   assert.equal(GATEWAY_TICK_MS, 15_000);
@@ -798,216 +1202,45 @@ test('cadence: the gateway polls EMSC and GFZ every 15 s tick, USGS and the feed
   assert.deepEqual(['emsc', 'gfz', 'usgs', 'feed', 'newsource'].map(pollIntervalMs), [15_000, 15_000, 60_000, 60_000, 60_000]);
   assert.deepEqual(['emsc', 'gfz', 'usgs', 'feed', 'newsource'].map(isFastProvider), [true, true, false, false, false]);
   assert.deepEqual([...DIRECT_PROVIDERS], ['usgs', 'emsc', 'gfz']);
-  // A streak's span by its count (the fallback for a gateway without failingSinceMs): 3 EMSC failures are 30 s, 6 are
-  // 3.5 min; 3 USGS failures 2 min.
+  assert.equal(BACKSTOP_PROVIDER, 'feed');
   assert.deepEqual([1, 2, 3, 4, 5, 6, 10, 11].map((n) => streakSpanSec('gfz', n)), [0, 15, 30, 90, 150, 210, 450, 750]);
   assert.deepEqual([1, 2, 3, 4, 10, 11].map((n) => streakSpanSec('usgs', n)), [0, 60, 120, 180, 540, 840]);
   assert.equal(streakSpanSec('usgs', 387), 113_640); // the 2026-10-04..06 USGS outage: about 31.6 h
 });
 
-test('the time limits: 3 min for EMSC/GFZ, 5 min for USGS, the feed and new ids; 2 min for two direct at once, 1 min for all three', () => {
-  const t = { ...DEFAULT_THRESHOLDS };
-  assert.deepEqual(
-    [t.fastProviderDownSec, t.providerDownSec, t.twoDirectDownSec, t.allDirectDownSec, t.providerWarnSec],
-    [180, 300, 120, 60, 60],
-  );
-  assert.deepEqual(['emsc', 'gfz', 'usgs', 'feed', 'newsource'].map((id) => providerDownSec(id, t)), [180, 180, 300, 300, 300]);
-  // The count rules are gone: no threshold is a count of provider failures any more.
-  assert.equal('providerFailures' in t, false);
-  assert.equal('fastProviderFailures' in t, false);
-  assert.throws(() => parseArgs(['--provider-failures', '3']), /unknown argument/);
-  // Without a start the duration is the count's span at the gateway's polling (a lower bound of the time it lasted).
+test('streakDuration: measured from failingSinceMs when usable, else the count at the gateway\'s polling, else null', () => {
   for (const n of [1, 3, 6, 11]) assert.equal(streakDuration({ id: 'emsc', ok: false, consecutiveFailures: n }, GEN)!.sec, streakSpanSec('emsc', n));
   assert.deepEqual(streakDuration({ id: 'usgs', ok: false, consecutiveFailures: 3, failingSinceMs: GEN - 150_000 }, GEN), { sec: 150, measured: true, since: GEN - 150_000, failures: 3 });
   assert.deepEqual(streakDuration({ id: 'gfz', ok: false, consecutiveFailures: 4 }, GEN), { sec: 90, measured: false, failures: 4 });
+  // A start up to 60 s past the document's time is clock skew (0 s); further is damage (the count).
+  assert.deepEqual(streakDuration({ id: 'gfz', ok: false, consecutiveFailures: 4, failingSinceMs: GEN + 30_000 }, GEN), { sec: 0, measured: true, since: GEN + 30_000, failures: 4 });
+  assert.equal(streakDuration({ id: 'gfz', ok: false, consecutiveFailures: 4, failingSinceMs: GEN + 61_000 }, GEN)!.measured, false);
   assert.equal(streakDuration({ id: 'gfz', ok: false }, GEN), null);
   assert.equal(streakDuration(null, GEN), null);
 });
 
-// The constants above mirror the gateway's source. When a platform checkout is at hand (SHELTER_PLATFORM_DIR, or the
-// sibling ../platform of a local clone), compare them with it; CI has none and skips.
-const platformDir = process.env.SHELTER_PLATFORM_DIR ?? join(import.meta.dirname, '..', '..', 'platform');
-const gatewaySrc = join(platformDir, 'services', 'alerts-gateway', 'src');
-test('cadence: the mirrored constants match the alerts-gateway source', { skip: existsSync(gatewaySrc) ? false : 'no platform checkout' }, () => {
-  const read = (rel: string): string => readFileSync(join(gatewaySrc, rel), 'utf8');
-  const ms = (v: string): number => Number(v.replace(/_/g, ''));
-  const tick = /const TICK_INTERVAL_MS = ([\d_]+)/.exec(read('durable-objects/event-detector.ts'));
-  assert.equal(ms(tick![1]!), GATEWAY_TICK_MS);
-  const sources = read('detect/sources.ts');
-  for (const [name, id] of [['EMSC_SOURCE', 'emsc'], ['GFZ_SOURCE', 'gfz'], ['USGS_SOURCE', 'usgs']] as const) {
-    const m = new RegExp(`export const ${name}[^]*?minIntervalMs: ([\\d_]+)`).exec(sources);
-    assert.equal(ms(m![1]!), PROVIDER_MIN_INTERVAL_MS[id], name);
+// The constants above mirror the gateway's source: tests/platform-constants.test.ts checks them against a committed
+// snapshot on every run (CI has no platform checkout), and the snapshot against a platform checkout when there is one.
+
+// --- every finding this evaluator emits is one its rule judges ---
+
+test('every emitted finding validates against its rule, and the rules used are this evaluator\'s', () => {
+  const docs: Array<[unknown, { canary?: unknown; selftest?: boolean; nowMs?: number }]> = [
+    [failingFor({ usgs: 4_000, emsc: 4_000, gfz: 4_000, feed: 4_000 }), { selftest: true }],
+    [statusFixture('apns-split-no-production'), {}],
+    [statusFixture('fanout-warnings'), {}],
+    [statusFixture('low-headroom'), {}],
+    [deletionsFailing(25 * 3_600, { fallback: 'summary', primaryConsecutiveFailures: 90 }), {}],
+    ['garbage', {}],
+    [statusFixture('stale'), {}],
+  ];
+  const rules = new Set<string>();
+  for (const [doc, opts] of docs) {
+    const v = evaluateStatus(doc, { nowMs: NOW, ...opts });
+    const parsed = parseFindingsDocument({ schema: 'health-findings/1', evaluator: 'alerts', generatedAtMs: NOW, findings: v.findings, unjudged: v.unjudged, notes: v.notes });
+    assert.ok(parsed.ok, parsed.ok ? '' : parsed.error);
+    for (const f of v.findings) rules.add(f.rule);
   }
-  const feed = /const MIN_INTERVAL_MS = ([\d_]+)/.exec(read('detect/feed-source.ts'));
-  assert.equal(ms(feed![1]!), PROVIDER_MIN_INTERVAL_MS['feed']);
-  const product = (v: string): number => v.split('*').reduce((n, f) => n * ms(f.trim()), 1);
-  const steps = [...read('detect/provider-health.ts').matchAll(/\{ atFailures: (\d+), intervalMs: ([\d_ *]+?) \}/g)].map((m) => ({ atFailures: Number(m[1]), intervalMs: product(m[2]!) }));
-  assert.deepEqual(steps, PROVIDER_BACKOFF_STEPS.map((s) => ({ ...s })));
-  assert.match(sources, /ALL_SOURCES[^=]*= \[USGS_SOURCE, EMSC_SOURCE, GFZ_SOURCE\]/);
-});
-
-test('one provider: the 2026-10-09 GEOFON blip (about 40 s, at most 110 s as published) is a warning; GFZ at 3 min fails', () => {
-  // A 40 s outage: 3 failures 15 s apart, then the 60 s backoff before the poll that clears it, so the streak can read up
-  // to 90 s (110 s with slow ticks). Round 24 turned it red whenever USGS was down too; now it is a warning on its own.
-  assert.match(evaluateStatus(failingFor({ gfz: 40 }), { nowMs: NOW }).notes[0]!, /^provider gfz is ok:false for 40 s/);
-  for (const sec of [60, 90, 110, 179]) {
-    const v = evaluateStatus(failingFor({ gfz: sec }), { nowMs: NOW });
-    assert.deepEqual(v.problems, [], String(sec));
-    assert.equal(v.warnings.length, 1, String(sec));
-    assert.match(v.warnings[0]!, /^provider gfz is failing: ok:false for .* \(since .*\), a warning from 60 s, down at 3 min, \d+ consecutive failures, last HTTP 0, last error timeout .*: the other providers still deliver, so alerts still go out \(a quake only gfz reports may come later\)$/);
-  }
-  assert.match(evaluateStatus(failingFor({ gfz: 59 }), { nowMs: NOW }).notes[0]!, /^provider gfz is ok:false for 59 s \(since .*\), below the warning at 60 s, down at 3 min/);
-  const down = evaluateStatus(failingFor({ gfz: 180 }), { nowMs: NOW });
-  assert.equal(down.problems.length, 1);
-  assert.match(down.problems[0]!, /^provider gfz is down: ok:false for 3 min \(since .*\), limit 3 min for a provider polled every 15 s, 5 consecutive failures/);
-});
-
-test('one provider: USGS and the feed fail at 5 min, warn from 1 min; a new id is judged like them', () => {
-  for (const id of ['usgs', 'feed']) {
-    assert.deepEqual(evaluateStatus(failingFor({ [id]: 299 }), { nowMs: NOW }).problems, [], id);
-    assert.match(evaluateStatus(failingFor({ [id]: 299 }), { nowMs: NOW }).warnings[0]!, new RegExp(`^provider ${id} is failing: ok:false for 4\\.5 min`), id);
-    const v = evaluateStatus(failingFor({ [id]: 300 }), { nowMs: NOW });
-    assert.equal(v.problems.length, 1, id);
-    assert.match(v.problems[0]!, new RegExp(`^provider ${id} is down: ok:false for 5 min \\(since .*\\), limit 5 min for a provider polled every 60 s`), id);
-    // A USGS streak of 3 (2 min) was red before; now it is a warning: USGS ok:false already means FDSN and the summary feed fail.
-    assert.deepEqual(evaluateStatus(failingFor({ [id]: 120 }), { nowMs: NOW }).problems, [], id);
-  }
-  const doc = structuredClone(HEALTHY);
-  doc.detector.providers.push({ id: 'newsource', ok: false, consecutiveFailures: 4, failingSinceMs: GEN - 200_000 });
-  assert.match(evaluateStatus(doc, { nowMs: NOW }).warnings[0]!, /^provider newsource is failing: .*down at 5 min/);
-});
-
-test('coverage: two of the three direct providers failing together for 2 min fail the run, whichever two', () => {
-  for (const [a, b, c] of [['usgs', 'emsc', 'gfz'], ['usgs', 'gfz', 'emsc'], ['emsc', 'gfz', 'usgs']] as const) {
-    const v = evaluateStatus(failingFor({ [a]: 150, [b]: 125 }), { nowMs: NOW });
-    assert.deepEqual(v.problems, [`two of the three direct providers (${a} and ${b}) have been failing together for 2 min (limit 2 min): one direct source is left (${c}), with the feed backstop`], `${a}+${b}`);
-    // Each provider's own line stays a warning (below its own limit) and points at the problem.
-    assert.equal(v.warnings.length, 2);
-    for (const w of v.warnings) assert.match(w, /: see the direct-provider problem above$/);
-    // 119 s together is not yet: a warning per provider, no problem.
-    const short = evaluateStatus(failingFor({ [a]: 600, [b]: 119 }), { nowMs: NOW });
-    assert.equal(short.problems.length, 1); // only `a`, past its own limit
-    assert.match(short.problems[0]!, new RegExp(`^provider ${a} is down`));
-    assert.doesNotMatch(short.problems.join(' | '), /two of the three/);
-  }
-  // The round-24 rule failed EMSC and GFZ at 3 failures each when both blip at once (30 s); a blip of both, even
-  // stretched to 90 s by the backoff, is two warnings now.
-  const blips = evaluateStatus(failingFor({ emsc: 90, gfz: 90 }), { nowMs: NOW });
-  assert.deepEqual(blips.problems, []);
-  assert.equal(blips.warnings.length, 2);
-  // The pair is the two longest streaks; the third one, failing for less, is named as failing too.
-  const three = evaluateStatus(failingFor({ usgs: 30, emsc: 170, gfz: 130 }), { nowMs: NOW });
-  assert.deepEqual(three.problems, ['two of the three direct providers (emsc and gfz) have been failing together for 2 min (limit 2 min): one direct source is left (usgs, failing too for 30 s), with the feed backstop']);
-});
-
-test('coverage: all three direct providers failing together for 1 min fail the run once (not also as a pair)', () => {
-  const v = evaluateStatus(failingFor({ usgs: 65, emsc: 95, gfz: 80 }), { nowMs: NOW });
-  assert.deepEqual(v.problems, [
-    "all three direct providers (usgs, emsc, gfz) have been failing together for 65 s (limit 60 s): the gateway sees new quakes only through the feed backstop, minutes late; three agencies failing at once points at the gateway's side (its egress, DNS, the Workers runtime or a deploy)",
-  ]);
-  assert.equal(v.warnings.length, 3);
-  // 59 s together: below every rule (each a warning or a note).
-  const short = evaluateStatus(failingFor({ usgs: 59, emsc: 100, gfz: 100 }), { nowMs: NOW });
-  assert.deepEqual(short.problems, []);
-  // All three for 3 min: the all-three line plus EMSC's and GFZ's own limits.
-  const long = evaluateStatus(failingFor({ usgs: 200, emsc: 200, gfz: 200 }), { nowMs: NOW });
-  assert.equal(long.problems.length, 3);
-  assert.match(long.problems[0]!, /^all three direct providers/);
-  assert.match(long.problems[1]!, /^provider emsc is down/);
-  assert.match(long.problems[2]!, /^provider gfz is down/);
-});
-
-test('coverage: the messages say when the feed backstop is failing too (an egress outage takes every source)', () => {
-  // Round-25 review: the egress outage that fails all three direct providers fails the backstop too, and the page must
-  // not tell the reader that the gateway still sees quakes through it. The verdicts stay as they were.
-  const all = evaluateStatus(failingFor({ usgs: 65, emsc: 95, gfz: 80, feed: 65 }), { nowMs: NOW });
-  assert.equal(all.problems.length, 1);
-  assert.equal(
-    all.problems[0],
-    "all three direct providers (usgs, emsc, gfz) have been failing together for 65 s (limit 60 s): the feed backstop is failing too for 65 s, so the gateway sees no new quakes at all; every source failing at once points at the gateway's side (its egress, DNS, the Workers runtime or a deploy)",
-  );
-  const pair = evaluateStatus(failingFor({ emsc: 150, gfz: 125, feed: 30 }), { nowMs: NOW });
-  assert.deepEqual(pair.problems, ['two of the three direct providers (emsc and gfz) have been failing together for 2 min (limit 2 min): one direct source is left (usgs); the feed backstop is failing too for 30 s']);
-  // ok:false without a published streak is still failing, with no duration to give.
-  const bare = failingFor({ emsc: 150, gfz: 125 });
-  Object.assign(bare.detector.providers.find((p: { id: string }) => p.id === 'feed'), { ok: false });
-  assert.match(evaluateStatus(bare, { nowMs: NOW }).problems[0]!, /: one direct source is left \(usgs\); the feed backstop is failing too$/);
-  // A document without the backstop's entry claims nothing about it.
-  const none = failingFor({ usgs: 65, emsc: 95, gfz: 80 });
-  none.detector.providers = none.detector.providers.filter((p: { id: string }) => p.id !== 'feed');
-  assert.match(evaluateStatus(none, { nowMs: NOW }).problems[0]!, /: the gateway sees no new quakes from a direct source \(status\.json lists no feed backstop\); three agencies/);
-  const nonePair = failingFor({ emsc: 150, gfz: 125 });
-  nonePair.detector.providers = nonePair.detector.providers.filter((p: { id: string }) => p.id !== 'feed');
-  assert.match(evaluateStatus(nonePair, { nowMs: NOW }).problems[0]!, /: one direct source is left \(usgs\)$/);
-  // The backstop is no direct provider: failing or not, the verdicts are those of the direct providers alone.
-  for (const [spec, n] of [[{ usgs: 59, emsc: 100, gfz: 100, feed: 200 }, 0], [{ emsc: 119, gfz: 119, feed: 299 }, 0], [{ emsc: 120, gfz: 120, feed: 10 }, 1]] as const) {
-    assert.equal(evaluateStatus(failingFor(spec), { nowMs: NOW }).problems.length, n, JSON.stringify(spec));
-  }
-});
-
-test('coverage counts direct providers only: the feed backstop, a USGS on its summary fallback and an unknown streak do not', () => {
-  // The feed is not a direct provider: EMSC and the feed failing for 2.5 min are two warnings, no coverage problem.
-  const feed = evaluateStatus(failingFor({ feed: 150, emsc: 150 }), { nowMs: NOW });
-  assert.deepEqual(feed.problems, []);
-  assert.equal(feed.warnings.length, 2);
-  // USGS ok on its summary fallback (#95) is not failing: EMSC failing beside it stays a warning.
-  const doc = failingFor({ emsc: 150 });
-  Object.assign(doc.detector.providers[0], { ok: true, consecutiveFailures: 0, fallback: 'summary', primaryConsecutiveFailures: 17, primaryLastError: 'timeout', primaryFailingSinceMs: GEN - 1_320_000 });
-  const fb = evaluateStatus(doc, { nowMs: NOW });
-  assert.deepEqual(fb.problems, []);
-  assert.equal(fb.warnings.length, 2);
-  assert.equal(fb.warnings[0], "provider usgs's primary live query has failed 17 times in a row over 22 min, last error timeout (slower than the gateway's fetch timeout): its live events come from the summary feed (fallback: summary), up to about two minutes later (warning at 3)");
-  assert.match(fb.warnings[1]!, /^provider emsc is failing/);
-  assert.match(fb.summary, /providers=usgs:ok\/primary-FAIL\(17\)\+summary,feed:ok,emsc:FAIL\(\d+\),gfz:ok/);
-  // A direct provider ok:false with neither a start nor a count is left out of the coverage rules.
-  const unknown = failingFor({ emsc: 300, gfz: 300 });
-  Object.assign(unknown.detector.providers[0], { ok: false, consecutiveFailures: undefined });
-  const u = evaluateStatus(unknown, { nowMs: NOW });
-  assert.match(u.problems[0]!, /^two of the three direct providers \(emsc and gfz\)/);
-});
-
-test('an older gateway during the deploy: coverage by count is never earlier than round 24 judged', () => {
-  // Round 24 failed EMSC and GFZ at 3 each "together" (30 s); by count they now span 30 s: warnings at most.
-  const blip = failingFor({ emsc: [null, { consecutiveFailures: 3 }], gfz: [null, { consecutiveFailures: 3 }], usgs: [null, { consecutiveFailures: 2 }] });
-  assert.deepEqual(evaluateStatus(blip, { nowMs: NOW }).problems, []);
-  // 5 EMSC and 5 GFZ failures (2.5 min each by count): the pair rule, named as judged by count.
-  const pair = evaluateStatus(failingFor({ emsc: [null, { consecutiveFailures: 5 }], gfz: [null, { consecutiveFailures: 5 }] }), { nowMs: NOW });
-  assert.deepEqual(pair.problems, ['two of the three direct providers (emsc and gfz) have been failing together for 2.5 min (limit 2 min) (emsc and gfz judged by their failure counts: no failingSinceMs): one direct source is left (usgs), with the feed backstop']);
-  // A mixed document (one streak older than the field): each judged by what it has.
-  const mixed = evaluateStatus(failingFor({ usgs: [null, { consecutiveFailures: 3 }], emsc: 140 }), { nowMs: NOW });
-  assert.deepEqual(mixed.problems, ['two of the three direct providers (emsc and usgs) have been failing together for 2 min (limit 2 min) (usgs judged by its failure count: no failingSinceMs): one direct source is left (gfz), with the feed backstop']);
-  // Exhaustively for small counts: whenever the count rule is red now, round 24's rule was red too.
-  const round24Red = (n: Record<string, number>): boolean => {
-    const down = (id: string) => (n[id] ?? 0) >= 3;
-    const together = DIRECT_PROVIDERS.filter(down).length >= 2;
-    return Object.entries(n).some(([id, c]) => c >= (isFastProvider(id) ? (together && down(id) ? 3 : 6) : 3));
-  };
-  for (let u = 0; u <= 7; u++) for (let e = 0; e <= 7; e++) for (let g = 0; g <= 7; g++) {
-    const spec: Record<string, [null, Record<string, unknown>]> = {};
-    if (u) spec.usgs = [null, { consecutiveFailures: u }];
-    if (e) spec.emsc = [null, { consecutiveFailures: e }];
-    if (g) spec.gfz = [null, { consecutiveFailures: g }];
-    const red = evaluateStatus(failingFor(spec), { nowMs: NOW }).problems.length > 0;
-    if (red) assert.ok(round24Red({ usgs: u, emsc: e, gfz: g }), `usgs ${u} emsc ${e} gfz ${g}`);
-  }
-});
-
-test('provider limits can be set on the command line', () => {
-  const t = parseArgs(['--fast-provider-down-sec', '240', '--provider-down-sec', '600', '--two-direct-down-sec', '90', '--all-direct-down-sec', '30', '--provider-warn-sec', '120']).thresholds;
-  assert.deepEqual([t.fastProviderDownSec, t.providerDownSec, t.twoDirectDownSec, t.allDirectDownSec, t.providerWarnSec], [240, 600, 90, 30, 120]);
-  assert.deepEqual(evaluateStatus(failingFor({ emsc: 200 }), { nowMs: NOW, thresholds: t }).problems, []);
-  assert.match(evaluateStatus(failingFor({ emsc: 240 }), { nowMs: NOW, thresholds: t }).problems[0]!, /limit 4 min/);
-  assert.match(evaluateStatus(failingFor({ emsc: 100 }), { nowMs: NOW, thresholds: t }).notes[0]!, /below the warning at 2 min, down at 4 min/);
-  assert.throws(() => parseArgs(['--provider-down-sec', '-1']), /non-negative number/);
-});
-
-test('main: a GFZ blip keeps exit 0 with a warning annotation; EMSC and GFZ down together for 2 min exit 1', async () => {
-  const blip = await run({ routes: { [STATUS_URL]: [jsonResponse(failingFor({ gfz: 90 }))] } });
-  assert.equal(blip.code, 0);
-  assert.doesNotMatch(blip.out, /::error/);
-  assert.match(blip.out, /::warning title=Alert pipeline::provider gfz is failing: ok:false for 90 s/);
-  assert.match(blip.out, /alert pipeline healthy/);
-  const both = await run({ routes: { [STATUS_URL]: [jsonResponse(failingFor({ emsc: 130, gfz: 125 }))] } });
-  assert.equal(both.code, 1);
-  assert.equal(both.lines.filter((l) => l.startsWith('::error title=Alert pipeline unhealthy::two of the three direct providers (emsc and gfz)')).length, 1);
+  for (const r of rules) assert.equal(RULES[r as keyof typeof RULES].phase, 1, r);
+  assert.ok(![...rules].some((r) => r === 'alerts:dispatch' || r === 'alerts:fanout'));
 });

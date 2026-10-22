@@ -287,12 +287,13 @@ its frozen budget is **frozen**: listed in `frozen` (by id: `newest_origin`, `ne
 so 84 h in all), `frozenBudgetHours` for a source that lists its last N events and legitimately stands still for days
 (216 h: BGS, IG-EPN, CWA; their longest quiet spells 2026-07-05 → 10-06 were 180, 168 and 157 h, the longest among the
 other sources without a time window CENC's 59.6 h). An answer limited to a time window can never be frozen. The v2
-status adds `providers.<id>.frozen` and `frozenProviders`; the health workflow lists frozen sources in the silent
-providers issue (`frozen:<id>` in its set line). Pinned sources (FEED-SEC-1) also carry `providers.<id>.tls_leaf` and
+status adds `providers.<id>.frozen` and `frozenProviders`; the health workflow files a frozen source on the
+"[health] feed" board (`feed:source:<id>`, member `frozen`). Pinned sources (FEED-SEC-1) also carry `providers.<id>.tls_leaf` and
 `tls_leaves` (of the leaves the host presented in the last week, the first to expire: `not_after`, `days_left`, `issuer`,
 `subject`, `seen_at`, `leaves` when more than one; an expired leaf goes once the host presents a valid one), and since
 2026-10-13 `tls_errors` (by id: `error`, `since`, `last_at`; a pinned source whose fetch failed on a certificate in the
-last 6 hours, which keeps the "[health] pinned certificate expiring" issue open; providers/tls/README.md).
+last 6 hours; while such a source's fetch fails, the health workflow judges it a definite failure, on a 2 h line;
+providers/tls/README.md).
 
 **Failing and silent sources.** A provider whose fetch failed has `ok: false` and is in `degraded`. An FDSN answer of
 HTTP 204 is an empty success; HTTP 404 is an empty success only for a source whose query asks `nodata=404` (none does
@@ -816,9 +817,10 @@ warning for a pushed file above 50 MiB and its rejection above 100 MiB, and each
 compressed copy of the file in the repository's storage per GitHub repack (*Repository size*, below). The aggregate run
 prints a warning once the day file passes 5 MB (`HISTORY_FILE_WARN_BYTES`, src/bitemporal.ts): the line has grown about
 fourfold. The `health` watchdog checks the same from outside every 15 minutes (round 17): it reads the `data` branch's
-tree from the API, logs the files under `status/history/` (count, total, largest, whatever their layout) and opens the
-`[health] data file size` issue while a status-history day file (`YYYY-MM-DD.ndjson`) is over 5 MB or any other file
-on the branch over 45 MB (closed when none is; never a red run).
+tree from the API, logs the files under `status/history/` (count, total, largest, whatever their layout) and files
+`feed:size` on the "[health] feed" board while a status-history day file (`YYYY-MM-DD.ndjson`) is over 5 MB or any other
+file on the branch over 45 MB (resolved when none is; never a red run). A tree read that fails leaves `feed:size` as it
+was and files `watcher:feed-github`; a truncated listing is judged as far as it goes, with a `Data file size` warning.
 
 ## Repository size
 
@@ -910,7 +912,8 @@ until era A finished at 10-14 00:37, and more late revisions of days 2–9 days 
   is strongly recommended"; above that it warns of degraded repository health and may ask the owner to take corrective
   action ([About large files](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github)).
   Only 100 MB per file and 2 GB per push are enforced. At 55–90 MB a day 10 GB comes between late November and late
-  December 2026. The `health` warning threshold is 8,000,000 KB since round 25 (22 days before 10 GB at 90 MB a day).
+  December 2026. The `health` line (`feed:repo-size`) is 8,000,000 KB since round 25 (22 days before 10 GB at 90 MB a
+  day).
 
 The cause is the 5-minute views committed to git: every run rewrites the unfrozen day partitions (2.5–2.8 MB each),
 about 79 % of the bytes GitHub keeps. The fix (storage option 4) takes them out of git without rewriting anything:

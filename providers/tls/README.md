@@ -33,11 +33,12 @@ error until the new intermediate is pinned.
 chain error says to pin the intermediate the leaf names, any other (expired, not yet valid, another name) says the
 leaf does not verify (`src/custom.ts` `PIN_HINT`, `CERT_HINT`). The aggregate keeps such a failure per source in
 `provider_activity.json` (`tlsError`: the message, the streak's first and last run) until 6 hours pass without one, and
-status.json lists it in `tls_errors` (`error`, `since`, `last_at`). The health workflow opens the issue "[health]
-pinned certificate expiring" when a leaf has under 7 days left or a source is in `tls_errors` (`cert:<id>` in its set
-line), and closes it once neither holds. Before, only the leaf kept the issue open: TMD failed every handshake from
-2026-10-09, and the issue would have closed on 10-16, when its last leaf left the week's memory, with TMD still cut
-off. The 6 hours ride out a host that fails by turns (geo-DNS) and still close the issue the day a pin is fixed.
+status.json lists it in `tls_errors` (`error`, `since`, `last_at`). The health workflow files `feed:cert:<id>` on the
+"[health] feed" board when a leaf has under 7 days left, and a source whose fetch fails while it is in `tls_errors` as
+`feed:source:<id>` with a definite error (a 2 h line instead of 12 h); each resolves once its condition is gone (until
+2026-10-22 both were the issue "[health] pinned certificate expiring"). Before 2026-10-13 only the leaf kept that issue
+open: TMD failed every handshake from 2026-10-09, and the issue would have closed on 10-16, when its last leaf left the
+week's memory, with TMD still cut off. The 6 hours ride out a host that fails by turns (geo-DNS).
 
 **When a source starts failing with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`** (its leaf was renewed under another
 intermediate), print the leaf's issuer and AIA URL, fetch that file and add it here and to the registry entry. Then

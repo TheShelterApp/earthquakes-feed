@@ -115,14 +115,26 @@ jobs:
           name: history-dry-run
           path: history-out/
           retention-days: 3
-      - name: Fail if the walk was blocked
+      # A blocked or stalled walk keeps the run green (alerting plan of 2026-10-22): a warning here, and the marker as the
+      # artifact walk-blocked-history, which the health workflow's feed evaluator (scripts/feed-health.mjs) files on the
+      # "[health] feed" board as walks:history:<source> (a P3: one comment; it resolves once no marker is newer than
+      # 26 h). A dry run's marker stays a warning only.
+      - name: Warn if the walk was blocked
         if: always()
         run: |
           if [ -f history-blocked.txt ]; then
             cat history-blocked.txt
-            echo '::error::history: blocked or stalled (see above); the index of the uploaded work is still committed'
-            exit 1
+            echo '::warning::history: blocked or stalled (see above); the index of the uploaded work is still committed, and the health workflow files the marker on the "[health] feed" board'
           fi
+      - name: Upload the blocked marker (read by the health workflow)
+        if: always() && !inputs.dry_run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: walk-blocked-history
+          path: history-blocked.txt
+          if-no-files-found: ignore
+          retention-days: 3
+          overwrite: true
 
   commit:
     needs: collect

@@ -59,25 +59,13 @@ jobs:
           bash "$GITHUB_WORKSPACE/scripts/push-data.sh"
       # LAST, and `always()`: a blocked month must not stop the commit above from landing. The
       # script deliberately exits 0 and leaves a marker instead, so the durable state (index
-      # entries for uploaded assets, pruned tree) is safe on the data branch first. Failing
-      # earlier would skip the commit and make every later run repeat the same work.
-      # A blocked month keeps the run green (alerting plan of 2026-10-22): a warning here, and the marker as the artifact
-      # walk-blocked-archive, which the health workflow's feed evaluator (scripts/feed-health.mjs) files on the
-      # "[health] feed" board as walks:archive:<source> (a P3: one comment; it resolves once no marker is newer than
-      # 26 h). A script that throws still fails its own step, and the run.
-      - name: Warn if any month was blocked
+      # entries for uploaded assets, pruned tree) is safe on the data branch before the job goes
+      # red. Failing earlier would skip the commit and make every later run repeat the same work.
+      - name: Fail if any month was blocked
         if: always()
         run: |
           if [ -f archive-blocked.txt ]; then
             cat archive-blocked.txt
-            echo '::warning::archive: one or more months blocked (see above), and the health workflow files the marker on the "[health] feed" board; check whether the commit step above ran, it is skipped if the script itself threw'
+            echo '::error::archive: one or more months blocked (see above) — check whether the commit step above ran, it is skipped if the script itself threw'
+            exit 1
           fi
-      - name: Upload the blocked marker (read by the health workflow)
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: walk-blocked-archive
-          path: archive-blocked.txt
-          if-no-files-found: ignore
-          retention-days: 3
-          overwrite: true

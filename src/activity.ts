@@ -62,11 +62,10 @@ export const TLS_LEAF_MEMORY_MS = 7 * 86_400_000;
 
 /**
  * How long a pinned source's certificate failure stays reported after the last run that had it (status.json
- * `tls_errors`: the health workflow judges a pinned fetch that fails while listed there a definite failure, on a 2 h
- * line; until 2026-10-22 it kept the "[health] pinned certificate expiring" issue open). The kept leaves alone do not
- * do it: TMD's host renewed its leaf under another intermediate on 2026-10-09, every handshake failed from then on,
- * and the old leaf (last read at 01:56 UTC) would have left `tls_leaves` a week later, closing the issue on 10-16 with
- * TMD still dead. A host behind geo-DNS can fail by turns (PHIVOLCS's two servers): six hours without one
+ * `tls_errors`, which keeps the health workflow's "[health] pinned certificate expiring" issue open). The kept leaves
+ * alone do not do it: TMD's host renewed its leaf under another intermediate on 2026-10-09, every handshake failed from
+ * then on, and the old leaf (last read at 01:56 UTC) would have left `tls_leaves` a week later, closing the issue on
+ * 10-16 with TMD still dead. A host behind geo-DNS can fail by turns (PHIVOLCS's two servers): six hours without one
  * failure, about 70 aggregate runs, is far past any run of luck, and still closes the issue the same day a pin is fixed.
  */
 export const TLS_ERROR_MEMORY_MS = 6 * 3_600_000;

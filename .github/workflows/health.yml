@@ -1,429 +1,129 @@
 name: health
 
-# Watchdogs, run every 15 min by the heartbeat Worker (workflow_dispatch at :07/:22/:37/:52)
-# plus this file's own hourly cron as a fallback. Two independent jobs:
-#   health — the FEED: checks the LIVE Pages manifest (the only check that catches every
-#            stale mode: dead cron, failed derive, failed deploy) and per-provider degradation.
-#            On failure: opens/refreshes the "[health] feed unhealthy" issue and fails the run.
-#   alerts — The Shelter's ALERT PIPELINE (alerts-gateway on Cloudflare): scripts/alerts-watchdog.mjs
-#            reads data.theshelter.app/alerts/status.json (+ optional account usage) and fails the
-#            run; GitHub's failed-workflow email is its alarm (no issue). It also fails when the feed
-#            manifest the gateway last read is over 30 min old or the config bundle over 10 days
-#            (fields of round-13 gateways; absent = skipped). See README "Health watchdogs".
-#   platform — The Shelter's API and config Workers: scripts/platform-watchdog.mjs GETs
-#            api.theshelter.app/v1/health and config.theshelter.app/healthz and fails the run when
-#            either is down (X-4: before 2026-10-04 nothing noticed). Same alarm: the failed-run email.
+# Watchdogs (alerting plan of 2026-10-22, Phase 1a; README "Health watchdogs"). The heartbeat Worker dispatches this
+# workflow every 15 min (:07/:22/:37/:52); the `:25` cron is the fallback for a Worker outage and runs its checks only
+# when no workflow_dispatch health run was created in the last 20 min; the monthly selftest cron forces a P1.
+#   gate      scripts/reconcile.mjs --gate: whether this run judges at all (the fallback cron's skip) and whether it is
+#             a selftest
+#   feed      scripts/feed-health.mjs: the live v1/v2 manifests, the per-source status, the data files, the repository
+#             size and the walks' blocked markers
+#   alerts    scripts/alerts-watchdog.mjs: The Shelter's alert pipeline (data.theshelter.app/alerts/status.json, the
+#             USGS canary, the optional account usage)
+#   platform  scripts/platform-watchdog.mjs: The Shelter's API and config Workers and the config bundle's age
+#   reconcile scripts/reconcile.mjs: the only writer of the three board issues ("[health] alert pipeline", "[health]
+#             feed", "[health] platform"; created together on the first run, then pinned and locked) and the only
+#             pinger; it sets the run's conclusion: red on every run a P1's finding holds (or cannot be judged), during
+#             the first hour of a P2, and when alerting itself is broken (the boards unreadable, a board body not
+#             created or saved, board comments failing on two runs in a row, no GH_TOKEN).
+# The evaluator jobs are stateless: each writes one findings document (scripts/lib/findings.mjs) as the artifact
+# findings-<evaluator> and exits 0 whatever it judged; a non-zero exit is a crash (the run is red, and reconcile files
+# watcher:evaluator:<name> and freezes that evaluator's entries). Everything that needs memory across runs (the 2-run
+# confirmation, 4 of the last 8 runs, resolving, escalation, the promotion, inhibition, silences, the P2 red hour, the
+# last selftest) is reconcile's, in the boards' hidden state. A single external source, a maintenance walk and the
+# watcher itself never turn a run red.
 on:
   schedule:
     - cron: '25 * * * *'
+    # The selftest (scripts/reconcile.mjs SELFTEST_CRON): 09:17 UTC on the 1st of each month, a forced P1, so the run
+    # must be red; it proves the red path and the failed-run email once a month. GitHub can drop a scheduled run, so
+    # reconcile tracks the last selftest: 35 days without one opens watcher:selftest-overdue.
+    - cron: '17 9 1 * *'
   workflow_dispatch:
     inputs:
       watchdog_selftest:
-        description: 'Alert watchdog selftest: force an impossible headroom limit so the alerts job MUST fail (proves the red path + email)'
+        description: 'Selftest: force the P1 finding alerts:selftest, so this run MUST be red (proves the red path and the email)'
         type: boolean
         default: false
 
+# One health run at a time: reconcile reads the boards' state, applies the run's findings and writes it back, so two
+# runs must never interleave. A queued run waits (a newer arrival replaces it); none is cancelled mid-flight.
+concurrency:
+  group: health
+  cancel-in-progress: false
+
 permissions:
   contents: read
-  issues: write
-  # reads this run's own created_at, to measure how long it sat in the runner queue
-  actions: read
 
 jobs:
-  health:
+  gate:
     # Pinned, not ubuntu-latest: ubuntu-latest moves to Ubuntu 26.04 from 2026-10-19
     # (actions/runner-images#14748). Move to ubuntu-26.04 deliberately, after a green test run.
     runs-on: ubuntu-24.04
-    # 10, not 5: the queue-stall branch below can spend ~260s on retries plus its deliberate
-    # 60s re-read, and a step killed mid-flight never writes GITHUB_OUTPUT — which would skip
-    # both issue steps, leaving an open health issue neither refreshed nor closed.
-    timeout-minutes: 10
+    # One GET (the dispatched health runs), only on the fallback cron: 3 tries of 20 s at most.
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # Lists this workflow's dispatched runs (the fallback cron's skip).
+      actions: read
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+      selftest: ${{ steps.gate.outputs.selftest }}
     steps:
-      - name: Check live feed freshness + providers
-        id: check
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      # The `:25` cron skips its checks when a workflow_dispatch health run was CREATED in the last 20 min, running or
+      # not (on 2026-10-21 the dispatched run created at 15:22:30 was still running when the scheduled one started at
+      # 15:22:39, and both turned red on the same GEOFON outage), unless it was cancelled or skipped: a pending dispatched
+      # run is cancelled when a newer one joins the concurrency group. A listing that fails means run.
+      - name: Gate (the fallback cron's skip, the selftest)
+        id: gate
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -e
-          # Fetch to files, not shell vars: the manifest is >128 KB and passing it as an
-          # argv element trips MAX_ARG_STRLEN → `exec: Argument list too long` (E2BIG).
-          # Retried like the others: this is the ONE fetch whose failure alone raises the alarm, so
-          # a single edge 502 or TCP reset would open "[health] feed unhealthy" on a healthy feed.
-          curl -sf --retry-all-errors --retry 3 --retry-delay 3 --max-time 20 "https://earthquakes-feed.theshelter.app/v1/manifest.json" -o manifest.json \
-            || { echo "problem=manifest unreachable" >> "$GITHUB_OUTPUT"; exit 0; }
-          # --retry-all-errors + atomic swap: plain --retry covers only timeouts and 408/429/5xx,
-          # so a connection reset made exactly ONE attempt — and -o had already truncated the file,
-          # so JSON.parse threw, s stayed null, and the watchdog opened "[health] feed unhealthy"
-          # on a perfectly healthy feed. Stage to .new; the real file changes only on curl exit 0.
-          curl -sf --retry-all-errors --retry 3 --retry-delay 3 --max-time 20 "https://earthquakes-feed.theshelter.app/v1/status.json" -o status.json.new \
-            && mv status.json.new status.json || rm -f status.json.new
-          # timeout-minutes bounds execution, not queue wait: on 2026-07-25 the hosted-runner
-          # queue stalled 1h54m, derive starved, and the second watchdog run double-reported the
-          # same incident off a manifest published before the backlog drained. Re-read once after
-          # a long queue so publishing has a chance to catch up before we judge staleness.
-          # Every step degrades to queued=0 rather than dying: a watchdog that kills itself on a
-          # bad timestamp takes its own alarm down with it, which is the failure class we're fixing.
-          CREATED=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" --jq .created_at || true)
-          CREATED_S=$(date -u -d "$CREATED" +%s 2>/dev/null || echo 0)
-          QUEUED=0
-          if [ "$CREATED_S" -gt 0 ]; then QUEUED=$(( $(date -u +%s) - CREATED_S )); fi
-          if [ "$QUEUED" -gt 600 ]; then
-            sleep 60
-            # Same atomic swap, and it matters more here: a mid-transfer abort used to truncate the
-            # already-good manifest, the node script then died on JSON.parse under `bash -e` before
-            # writing GITHUB_OUTPUT, and both issue steps were skipped — an open health issue would
-            # never be refreshed or closed. A failed re-fetch now just keeps the first fetch's copy.
-            curl -sf --retry-all-errors --retry 3 --retry-delay 3 --max-time 20 "https://earthquakes-feed.theshelter.app/v1/manifest.json" -o manifest.json.new \
-              && mv manifest.json.new manifest.json || rm -f manifest.json.new
-          fi
-          QUEUED_S="$QUEUED" node -e '
-            const fs = require("fs");
-            const m = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
-            // null, not {}: an unfetchable status.json used to yield total=1 / degraded=[], so the
-            // provider check passed trivially — a missed alarm, not a false one.
-            let s = null;
-            try { const raw = fs.readFileSync("status.json", "utf8"); if (raw.trim()) s = JSON.parse(raw); } catch {}
-            const queuedS = Number(process.env.QUEUED_S || 0);
-            const ageS = (Date.now() - m.generated) / 1000;
-            const staleAfter = (m.freshness && m.freshness.stale_after_seconds) || 1800;
-            const degraded = (s && s.degraded) || [];
-            // FEED-3: a silent source (it answers, with no rows, for longer than its activity budget) is listed in
-            // `silent` and also counted in `degraded`. It is reported in its own issue below and kept out of the
-            // systemic count, so a few long-dead sources cannot push routine flapping over the limit. A silent source
-            // whose fetch FAILS in this run still counts as failing: silence is measured from its last rows, so a
-            // source that has been down past its budget is silent too, and a long systemic outage must not leave the
-            // count once it is 12 h old.
-            const silent = (s && s.silent && typeof s.silent === "object" && !Array.isArray(s.silent)) ? s.silent : {};
-            const silentIds = Object.keys(silent).sort();
-            // Round 14: a FROZEN source answers with rows whose newest origin stands still past its window plus budget
-            // (src/activity.ts). Reported with the silent ones, kept out of the systemic count the same way.
-            const frozen = (s && s.frozen && typeof s.frozen === "object" && !Array.isArray(s.frozen)) ? s.frozen : {};
-            const frozenIds = Object.keys(frozen).sort();
-            const quiet = (id) => id in silent || id in frozen;
-            const failing = degraded.filter((id) => !quiet(id) || (s && s.providers && s.providers[id] && s.providers[id].ok === false));
-            const total = Object.keys((s && s.providers) || {}).length || 1;
-            // Scale with the roster: a handful of slow national FDSN nodes flap constantly and
-            // the feed stays fully covered by the global catalogs — only a systemic share down
-            // (~30%, floor 8) signals a real problem. Manifest staleness is the primary signal.
-            const degLimit = Math.max(8, Math.ceil(total * 0.3));
-            console.log(`age=${Math.round(ageS)}s (stale_after=${staleAfter}) head_seq=${m.head_seq} events=${m.event_count} failing=${failing.length}/${total} limit=${degLimit} [${failing.join(",")}] silent=[${silentIds.join(",")}] frozen=[${frozenIds.join(",")}] queued=${queuedS}s`);
-            const hours = (x) => (typeof x === "number" ? Math.round(x) : "?");
-            // Round 24: a silent source whose fetch FAILS in this run is named by its error and how long its fetch has failed
-            // (providers.<id>.error, lastSuccessAt), not as "no rows": TMD failed its certificate chain for days from
-            // 2026-10-09 while the warning and the issue said "no rows". The error text comes from the source, so it is cut
-            // to one line without the entry separator ";" or backticks.
-            const oneLine = (x) => String(x == null ? "" : x).replace(/[\u0000-\u001f\u007f;`]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 240);
-            const genMs = (s && (typeof s.generatedAt === "number" ? s.generatedAt : Date.parse(s.generated))) || Date.now();
-            const fetchFailure = (id) => {
-              const p = s && s.providers && s.providers[id];
-              if (!p || p.ok !== false) return null;
-              const err = p.error && typeof p.error === "object" ? p.error.message : p.error;
-              const lastOk = typeof p.lastSuccessAt === "number" ? p.lastSuccessAt : null;
-              return { message: oneLine(err) || "no error message", lastOk, hours: lastOk == null ? null : Math.max(0, (genMs - lastOk) / 3600000) };
-            };
-            const failingFor = {};
-            const silentText = silentIds.map((id) => {
-              const e = silent[id] || {};
-              const rows = `no rows for ${hours(e.silent_hours)} h (budget ${hours(e.budget_hours)} h, last rows ${e.last_non_empty_at || "not since " + (e.counted_from || "?")})`;
-              const f = fetchFailure(id);
-              if (!f) return `${id}: ${rows}`;
-              failingFor[id] = f;
-              const since = f.lastOk == null ? "no successful fetch on record" : `last successful fetch ${new Date(f.lastOk).toISOString()}`;
-              return `${id}: fetch failing${f.hours == null ? "" : ` for ${hours(f.hours)} h`} (${since}), ${rows}, error: ${f.message}`;
-            });
-            for (const t of silentText) console.log(`::warning::silent provider ${t}`);
-            // The issue step comments again, with the set unchanged, once a listed source has failed its fetch for 48 h, and
-            // every 48 h after: the latest time one of them reached 48 h of failure (epoch s), empty when none has.
-            const FAIL_REMIND_H = 48;
-            const reached = Object.values(failingFor).filter((f) => f.hours != null && f.hours >= FAIL_REMIND_H).map((f) => Math.floor(f.lastOk / 1000) + FAIL_REMIND_H * 3600);
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, `failing_48h_at=${reached.length ? Math.max(...reached) : ""}\n`);
-            const frozenText = frozenIds.map((id) => {
-              const e = frozen[id] || {};
-              return `${id}: frozen, ${e.rows ?? "?"} rows whose newest origin (${e.newest_origin || "?"}) is ${hours(e.newest_origin_age_hours)} h old (window ${hours(e.window_hours)} h + budget ${hours(e.budget_hours)} h)`;
-            });
-            for (const t of frozenText) console.log(`::warning::frozen provider ${t}`);
-            // The issue below lists both kinds; its set marker names a frozen one as frozen:<id>.
-            const quietSet = [...silentIds, ...frozenIds.map((id) => `frozen:${id}`)].join(",");
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, `status_read=${s ? "1" : ""}\nsilent_set=${quietSet}\nsilent=${[...silentText, ...frozenText].join("; ")}\n`);
-            // FEED-SEC-1: the leaf certificate of each pinned source (status.json tls_leaves, round 14). Under 7 days a
-            // warning and the "[health] pinned certificate expiring" issue below; never a red run (the source itself
-            // fails once the leaf expires, and the failing count sees that).
-            const leaves = (s && s.tls_leaves && typeof s.tls_leaves === "object") ? s.tls_leaves : {};
-            const expiring = Object.keys(leaves).sort().filter((id) => typeof leaves[id].days_left === "number" && leaves[id].days_left < 7);
-            const leafText = expiring.map((id) => {
-              const l = leaves[id];
-              return `${id}: leaf ${l.subject || "?"} (issuer ${l.issuer || "?"}) expires ${l.not_after}, in ${l.days_left} days (read ${l.seen_at})`;
-            });
-            for (const t of leafText) console.log(`::warning::pinned certificate ${t}`);
-            console.log(`tls_leaf_days=[${Object.keys(leaves).sort().map((id) => `${id}:${leaves[id].days_left}`).join(",")}]`);
-            // A pinned source whose fetch fails on a certificate (its chain, or the leaf itself) keeps the issue open
-            // (status.json tls_errors, kept 6 h past the last such run): TMD failed that way from 2026-10-09, and its
-            // expired leaf alone would have closed the issue on 10-16 with TMD still cut off. Named cert:<id> in the set.
-            const tlsErrors = (s && s.tls_errors && typeof s.tls_errors === "object" && !Array.isArray(s.tls_errors)) ? s.tls_errors : {};
-            const certIds = Object.keys(tlsErrors).sort();
-            const certText = certIds.map((id) => {
-              const e = tlsErrors[id] || {};
-              return `${id}: the pinned fetch fails on a certificate since ${e.since || "?"} (last ${e.last_at || "?"}): ${oneLine(e.error) || "no error message"}`;
-            });
-            for (const t of certText) console.log(`::warning::pinned certificate ${t}`);
-            const tlsSet = [...expiring, ...certIds.map((id) => `cert:${id}`)].join(",");
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, `tls_set=${tlsSet}\ntls=${[...leafText, ...certText].join("; ")}\n`);
-            const problems = [];
-            // Name the queue in the alarm: a stall upstream of us reads as broken publishing.
-            const queueNote = queuedS > 600 ? ` — this run itself waited ${Math.round(queuedS / 60)} min in the runner queue` : "";
-            if (ageS > staleAfter) problems.push(`live manifest is ${Math.round(ageS / 60)} min stale (contract: ${staleAfter / 60} min)${queueNote}`);
-            if (!s) problems.push("status.json unreachable — provider health unknown");
-            else if (failing.length >= degLimit) problems.push(`${failing.length}/${total} providers failing: ${failing.join(", ")}`);
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, `problem=${problems.join("; ")}\n`);
-          '
-      - name: Silent providers issue (opened, commented when the set changes or a fetch has failed for 48 h, closed when none; never fails the run)
-        # A silent source loses events quietly (NOA, 2026-09-24 → 10-04: 352 Greek events) but is usually one
-        # agency, not an outage of the feed: an issue (GitHub emails it) instead of a red run every 15 minutes. Frozen
-        # sources (rows, but the newest origin stands still; round 14) are listed here too, as frozen:<id> in the set.
-        # A source whose fetch fails is listed with its error (round 24), and while one has failed for 48 h or more the
-        # issue is commented again every 48 h even when the set stays the same (TMD's fetch failed from 2026-10-09 with a
-        # single comment). An unreadable status.json changes nothing (state unknown). The entries are joined with "; " for
-        # the one-line step output and split back into a list here, so an entry itself never contains a semicolon.
-        # continue-on-error: a GitHub API error while filing the issue must not turn a healthy run red.
-        if: steps.check.outputs.status_read == '1'
-        continue-on-error: true
+          EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          SELFTEST_INPUT: ${{ inputs.watchdog_selftest }}
+        run: node scripts/reconcile.mjs --gate
+
+  feed:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    # Manifest reads of 4 tries x 20 s, the deliberate 60 s re-read (a stale manifest, or a run that sat over 10 min in
+    # the runner queue: on 2026-07-25 the queue stalled 1 h 54 min) and the GitHub reads (the data tree allows 60 s a
+    # try) run in parallel; 10 min leaves room for the worst case of each.
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # This run's created_at (its queue time) and the walks' walk-blocked-<workflow> marker artifacts.
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # providers/registry.json: the source ids a walk marker's line is filed under.
+          sparse-checkout: |
+            scripts
+            providers
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Judge the feed (findings for the "[health] feed" board)
         env:
+          # GitHub's own API only (the script hard-codes the host): the run, the repository's size, the data tree, the
+          # walk markers. A read that fails (or no token) is the finding watcher:feed-github.
           GH_TOKEN: ${{ github.token }}
-          SILENT: ${{ steps.check.outputs.silent }}
-          SILENT_SET: ${{ steps.check.outputs.silent_set }}
-          FAILING_48H_AT: ${{ steps.check.outputs.failing_48h_at }}
-        run: |
-          TITLE="[health] silent providers"
-          NUM=$(gh issue list --repo "${{ github.repository }}" --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
-          RUN="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          if [ -n "$SILENT_SET" ]; then
-            BODY="Automated watchdog: these sources have brought no rows for longer than their activity budget, or (frozen) rows whose newest origin has stood still past their query window plus their frozen budget (src/activity.ts, providers/registry.json \`activityBudgetHours\` / \`frozenBudgetHours\`). A source whose fetch fails is listed with its error and how long it has failed; one that answers without rows says only \"no rows\". Their events reach the feed only through other agencies.
-
-          $(printf '%s\n' "$SILENT" | tr ';' '\n' | sed 's/^ */- /')
-
-          silent-set: ${SILENT_SET}
-          Run: ${RUN} ($(date -u +%FT%TZ))"
-            if [ -z "$NUM" ]; then
-              gh issue create --repo "${{ github.repository }}" --title "$TITLE" --body "$BODY" --label bug
-            else
-              # Comment when the set of silent sources changed (the hours grow every run), and, with the set unchanged, when a
-              # listed source's fetch has failed for 48 h since the last post naming the set, or the last such post is 48 h old
-              # while one still fails that long (FAILING_48H_AT: the latest time one of them reached 48 h of failure, epoch s).
-              POST=$(gh issue view "$NUM" --repo "${{ github.repository }}" --json body,createdAt,comments --jq '[{b: .body, t: .createdAt}] + [.comments[] | {b: .body, t: .createdAt}] | map(select(.b | test("silent-set: "))) | last // {b: "", t: ""} | "\(if .t == "" then 0 else (.t | fromdateiso8601 | floor) end)\n\(.b)"')
-              NOW_S=$(date -u +%s)
-              LAST_AT=${POST%%$'\n'*}
-              LAST_AT=${LAST_AT%%.*}
-              LAST=$(printf '%s\n' "${POST#*$'\n'}" | sed -n 's/^ *silent-set: //p' | tail -1)
-              # An unreadable post time counts as now: no reminder rather than one every run.
-              case "$LAST_AT" in ''|0|*[!0-9]*) LAST_AT=$NOW_S;; esac
-              case "$FAILING_48H_AT" in *[!0-9]*) FAILING_48H_AT="";; esac
-              if [ "$LAST" != "$SILENT_SET" ]; then
-                gh issue comment "$NUM" --repo "${{ github.repository }}" --body "$BODY"
-              elif [ -n "$FAILING_48H_AT" ] && { [ "$LAST_AT" -lt "$FAILING_48H_AT" ] || [ $(( NOW_S - LAST_AT )) -ge 172800 ]; }; then
-                gh issue comment "$NUM" --repo "${{ github.repository }}" --body "Still failing: the fetch of a source listed here has failed for 48 h or more (this issue is commented again every 48 h while that lasts, even when the set stays the same).
-
-          ${BODY}"
-              else
-                echo "issue #$NUM already lists ${SILENT_SET}"
-              fi
-            fi
-          elif [ -n "$NUM" ]; then
-            gh issue comment "$NUM" --repo "${{ github.repository }}" --body "No silent source as of $(date -u +%FT%TZ) (run ${RUN}).
-
-          silent-set: "
-            gh issue close "$NUM" --repo "${{ github.repository }}"
-          fi
-      - name: Pinned certificate issue (opened when a pinned leaf has under 7 days or a pinned fetch fails on a certificate, closed when neither; never fails the run)
-        # FEED-SEC-1: TMD and PHIVOLCS serve their leaf without the intermediate, so the feed pins the intermediate
-        # (providers/tls). A renewed leaf under the same intermediate needs nothing; under another one the source fails
-        # until the new intermediate is pinned (providers/tls/README.md). This gives a week's notice, and stays open
-        # while the source fails on its certificate (tls_errors, cert:<id> in the set).
-        if: steps.check.outputs.status_read == '1'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TLS: ${{ steps.check.outputs.tls }}
-          TLS_SET: ${{ steps.check.outputs.tls_set }}
-        run: |
-          TITLE="[health] pinned certificate expiring"
-          NUM=$(gh issue list --repo "${{ github.repository }}" --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
-          RUN="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          if [ -n "$TLS_SET" ]; then
-            BODY="Automated watchdog: the leaf certificate of these pinned sources expires within 7 days (status.json \`tls_leaves\`), or their pinned fetch fails on a certificate (\`tls_errors\`, kept 6 h past the last such run). When the host renews its leaf, check its issuer: a new intermediate must be pinned (providers/tls/README.md), the same one needs nothing.
-
-          $(printf '%s\n' "$TLS" | tr ';' '\n' | sed 's/^ */- /')
-
-          tls-set: ${TLS_SET}
-          Run: ${RUN} ($(date -u +%FT%TZ))"
-            if [ -z "$NUM" ]; then
-              gh issue create --repo "${{ github.repository }}" --title "$TITLE" --body "$BODY" --label bug
-            else
-              LAST=$(gh issue view "$NUM" --repo "${{ github.repository }}" --json body,comments --jq '[.body, (.comments[].body)] | map(select(test("tls-set: "))) | last // ""' | sed -n 's/^ *tls-set: //p' | tail -1)
-              if [ "$LAST" != "$TLS_SET" ]; then
-                gh issue comment "$NUM" --repo "${{ github.repository }}" --body "$BODY"
-              else
-                echo "issue #$NUM already lists ${TLS_SET}"
-              fi
-            fi
-          elif [ -n "$NUM" ]; then
-            gh issue comment "$NUM" --repo "${{ github.repository }}" --body "No pinned leaf expires within 7 days and no pinned fetch fails on a certificate as of $(date -u +%FT%TZ) (run ${RUN}).
-
-          tls-set: "
-            gh issue close "$NUM" --repo "${{ github.repository }}"
-          fi
-      - name: Open/refresh health issue and fail
-        if: steps.check.outputs.problem != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PROBLEM: ${{ steps.check.outputs.problem }}
-        run: |
-          TITLE="[health] feed unhealthy"
-          BODY="Automated watchdog: ${PROBLEM}
-
-          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} ($(date -u +%FT%TZ))"
-          EXISTING=$(gh issue list --repo "${{ github.repository }}" --state open --search "$TITLE in:title" --json number,updatedAt --jq '.[0] | "\(.number // "") \(.updatedAt // "")"')
-          NUM="${EXISTING%% *}"; UPD="${EXISTING##* }"
-          if [ -n "$NUM" ]; then
-            # The heartbeat drives this every 15 min, so a multi-hour outage would otherwise
-            # leave 4 identical comments an hour on the same issue. Re-comment at most hourly;
-            # the run still goes red below either way, so nothing is hidden.
-            AGE=$(( $(date -u +%s) - $(date -u -d "$UPD" +%s 2>/dev/null || echo 0) ))
-            if [ "$AGE" -gt 3600 ] || [ "$AGE" -lt 0 ]; then
-              gh issue comment "$NUM" --repo "${{ github.repository }}" --body "$BODY"
-            else
-              echo "issue #$NUM already refreshed ${AGE}s ago — not commenting again"
-            fi
-          else
-            gh issue create --repo "${{ github.repository }}" --title "$TITLE" --body "$BODY" --label bug
-          fi
-          echo "::error::$PROBLEM"
-          exit 1
-      - name: Close health issue on recovery
-        if: steps.check.outputs.problem == ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          NUM=$(gh issue list --repo "${{ github.repository }}" --state open --search "[health] feed unhealthy in:title" --json number --jq '.[0].number // empty')
-          if [ -n "$NUM" ]; then
-            gh issue comment "$NUM" --repo "${{ github.repository }}" --body "Recovered — live feed healthy again as of $(date -u +%FT%TZ) (run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
-            gh issue close "$NUM" --repo "${{ github.repository }}"
-          fi
-      - name: Repository size (logged; a warning past the threshold, never a red run)
-        # LIVE-2: the data branch's history only grows (nothing is ever rewritten) and GitHub asks to keep repositories
-        # small; finished months of status/history and changes/ leave the tree (archive.yml). The growth is the large
-        # files every commit rewrites (day partitions, event_map shards): GitHub keeps about one compressed copy of each
-        # per roll-up, 55-60 MB a day from 2026-10-06 to 10-14 and up to about 90 on busy days (APIs.md Repository
-        # size). GitHub reports `size` in KB.
-        if: always()
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          # 8 GB (round 25): 6.10 GB on 2026-10-14, when the 6 GB threshold had warned on every run since 10-13. At 90 MB
-          # a day it leaves 22 days before GitHub's recommended 10 GB; storage option 4 (APIs.md Repository size) is
-          # meant to keep the repository well under it. After a repack by GitHub: the new size + 1,000,000.
-          REPO_SIZE_WARN_KB: '8000000'
-        run: |
-          KB=$(gh api "repos/${{ github.repository }}" --jq .size || true)
-          case "$KB" in ''|*[!0-9]*) echo "repository size: unknown"; exit 0;; esac
-          GB=$(awk -v kb="$KB" 'BEGIN { printf "%.2f", kb / 1e6 }')
-          echo "repository size: ${GB} GB (${KB} KB, warning above ${REPO_SIZE_WARN_KB} KB)"
-          if [ "$KB" -gt "$REPO_SIZE_WARN_KB" ]; then
-            echo "::warning title=Repository size::the repository is ${GB} GB, over the ${REPO_SIZE_WARN_KB} KB threshold: check what grows (gh api repos/${{ github.repository }} --jq .size; the data branch tree by top-level directory)"
-          fi
-      - name: Data file sizes (the run log and every file on data; logged, a warning and an issue past the limit, never a red run)
-        # R16-FOLLOWUPS (3): every aggregate commit rewrites the current run-log file under status/history, and GitHub warns on
-        # a pushed file above 50 MiB and rejects one above 100 MiB, which would stop the feed publishing. The aggregate run's
-        # own warning (src/bitemporal.ts HISTORY_FILE_WARN_BYTES) is an annotation among ~288 green runs a day; this one is
-        # in the watchdog and files an issue (emailed). It reads the data branch's tree from the API (one call, no
-        # checkout) and judges every blob, so it fits either layout of status/history: a day file (YYYY-MM-DD.ndjson, round
-        # 17 lane G: about 1.3 MB a day) warns past 5 MB, the aggregate's limit for a day file; any other file, a month file
-        # (YYYY-MM.ndjson, the layout until then) included, past 45 MB. The files under the directory are summed and the
-        # largest named, and a large file anywhere else on data warns the same way.
-        id: sizes
-        if: always()
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          # 45 MB, the month file's HISTORY_FILE_WARN_BYTES until round 17: under GitHub's 50 MiB push warning.
-          DATA_FILE_WARN_BYTES: '45000000'
-          # 5 MB, a status/history day file's HISTORY_FILE_WARN_BYTES (round 17 lane G): about four times a day's lines.
-          HISTORY_DAY_FILE_WARN_BYTES: '5000000'
-        run: |
-          gh api "repos/${{ github.repository }}/git/trees/data?recursive=1" > data-tree.json \
-            || { echo "data tree: unknown (the API call failed)"; exit 0; }
-          node -e '
-            const fs = require("fs");
-            const limit = Number(process.env.DATA_FILE_WARN_BYTES) || 45000000;
-            const dayLimit = Number(process.env.HISTORY_DAY_FILE_WARN_BYTES) || 5000000;
-            const mb = (b) => (b / 1e6).toFixed(1);
-            const isDayFile = (p) => /^status\/history\/\d{4}-\d{2}-\d{2}\.ndjson$/.test(p);
-            const limitOf = (p) => (isDayFile(p) ? dayLimit : limit);
-            let t = null;
-            try { t = JSON.parse(fs.readFileSync("data-tree.json", "utf8")); } catch {}
-            if (!t || !Array.isArray(t.tree)) { console.log("data tree: unknown (no tree in the answer)"); process.exit(0); }
-            const blobs = t.tree.filter((e) => e && e.type === "blob" && typeof e.path === "string" && typeof e.size === "number");
-            // The status history, whatever its file layout (one file a month today): the current file is rewritten by every
-            // aggregate commit, so it is the one that grows toward the limit.
-            const history = blobs.filter((e) => e.path.startsWith("status/history/"));
-            const largest = history.reduce((m, e) => (m && m.size >= e.size ? m : e), null);
-            const total = history.reduce((n, e) => n + e.size, 0);
-            const days = history.filter((e) => isDayFile(e.path)).length;
-            console.log(`status history: ${history.length} file(s) (${days} day file(s)), ${mb(total)} MB, largest ${largest ? `${largest.path} ${mb(largest.size)} MB` : "none"} (warning above ${mb(dayLimit)} MB a day file, ${mb(limit)} MB any other file)`);
-            const dirs = {};
-            for (const e of blobs) { const top = e.path.includes("/") ? e.path.slice(0, e.path.indexOf("/")) : "(root)"; dirs[top] = (dirs[top] || 0) + e.size; }
-            const all = blobs.reduce((n, e) => n + e.size, 0);
-            console.log(`data tree: ${blobs.length} files, ${mb(all)} MB (${Object.entries(dirs).sort((a, b) => b[1] - a[1]).map(([d, n]) => `${d} ${mb(n)} MB`).join(", ")})${t.truncated ? ", listing TRUNCATED" : ""}`);
-            const over = blobs.filter((e) => e.size > limitOf(e.path)).sort((a, b) => b.size - a.size || (a.path < b.path ? -1 : 1));
-            const text = over.map((e) => `${e.path}: ${mb(e.size)} MB, over ${mb(limitOf(e.path))} MB (${e.path.startsWith("status/history/") ? "the run log, rewritten by every aggregate commit" : "a file on the data branch"})`);
-            for (const x of text) console.log(`::warning title=Data file size::${x}: every rewrite of a large file grows the repository, and GitHub rejects a pushed file above 100 MiB, which stops the feed publishing (APIs.md Run logs)`);
-            // A truncated listing (over 100,000 entries or 7 MB) may miss a file: said, never guessed.
-            if (t.truncated) console.log("::warning title=Data file size::the data tree listing was truncated, so some files were not judged");
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, `tree_read=1\nsize_set=${over.map((e) => e.path).join(",")}\nsize=${text.join("; ")}\n`);
-          '
-      - name: Data file size issue (opened when a file on data passes its limit, closed when none; never fails the run)
-        if: always() && steps.sizes.outputs.tree_read == '1'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SIZE: ${{ steps.sizes.outputs.size }}
-          SIZE_SET: ${{ steps.sizes.outputs.size_set }}
-        run: |
-          TITLE="[health] data file size"
-          NUM=$(gh issue list --repo "${{ github.repository }}" --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
-          RUN="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          if [ -n "$SIZE_SET" ]; then
-            BODY="Automated watchdog: these files on the data branch are over their limit (5 MB for a status/history day file, 45 MB for any other file). Every rewrite of a large file grows the repository; GitHub warns on a pushed file above 50 MiB and rejects one above 100 MiB, and a rejected push stops the feed publishing. For the run log under status/history, slim its line (APIs.md *Run logs*).
-
-          $(printf '%s\n' "$SIZE" | tr ';' '\n' | sed 's/^ */- /')
-
-          size-set: ${SIZE_SET}
-          Run: ${RUN} ($(date -u +%FT%TZ))"
-            if [ -z "$NUM" ]; then
-              gh issue create --repo "${{ github.repository }}" --title "$TITLE" --body "$BODY" --label bug
-            else
-              # Comment only when the set of files changed: the sizes grow every run.
-              LAST=$(gh issue view "$NUM" --repo "${{ github.repository }}" --json body,comments --jq '[.body, (.comments[].body)] | map(select(test("size-set: "))) | last // ""' | sed -n 's/^ *size-set: //p' | tail -1)
-              if [ "$LAST" != "$SIZE_SET" ]; then
-                gh issue comment "$NUM" --repo "${{ github.repository }}" --body "$BODY"
-              else
-                echo "issue #$NUM already lists ${SIZE_SET}"
-              fi
-            fi
-          elif [ -n "$NUM" ]; then
-            gh issue comment "$NUM" --repo "${{ github.repository }}" --body "No file on the data branch is over its limit as of $(date -u +%FT%TZ) (run ${RUN}).
-
-          size-set: "
-            gh issue close "$NUM" --repo "${{ github.repository }}"
-          fi
+        run: node scripts/feed-health.mjs --findings findings/feed.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: findings-feed
+          path: findings/feed.json
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: true
 
   alerts:
-    # The alert-pipeline watchdog. A separate job on purpose: it runs in parallel with the feed
-    # check, never touches the feed's health issue, and a red here is attributable at a glance.
-    # It lives in GitHub (not on Cloudflare) so it still fires when Cloudflare is the problem.
+    # It runs from GitHub, not Cloudflare, on purpose: it must keep working when Cloudflare is the thing that broke.
     name: alert pipeline
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-24.04
-    # The script bounds itself: 3 attempts x 15 s + 7 s backoff for status.json, the same for the
-    # optional usage query (20 s per attempt). 5 min leaves room for checkout + setup-node.
+    # status.json: 3 tries x 15 s + 7 s backoff; the canary one 15 s try; the optional usage query the same as
+    # status.json. 5 min leaves room for checkout + setup-node.
     timeout-minutes: 5
     permissions:
       contents: read
@@ -435,26 +135,34 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
-      - name: Check alert pipeline (status.json + optional free-tier usage)
+      - name: Judge the alert pipeline (findings for the "[health] alert pipeline" board)
         env:
-          # Optional (owner): a read-only Cloudflare token with Account Analytics: Read. Unset -> the
-          # usage half is skipped silently. The account queried is the CF_ANALYTICS_ACCOUNT_ID variable
-          # when set, else the repo's CF_ACCOUNT_ID secret (the one the Pages deploy uses). A token that
-          # cannot see that account fails the job as "misconfigured" instead of passing silently.
+          # Optional (owner): a read-only Cloudflare token with Account Analytics: Read. Unset -> the usage half
+          # (platform:cf-usage) is skipped. The account queried is the CF_ANALYTICS_ACCOUNT_ID variable when set, else
+          # the repo's CF_ACCOUNT_ID secret (the one the Pages deploy uses); a token without an account, or one that
+          # cannot see it, is the finding watcher:cf-usage.
           CF_ANALYTICS_TOKEN: ${{ secrets.CF_ANALYTICS_TOKEN }}
           CF_ACCOUNT_ID: ${{ vars.CF_ANALYTICS_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
-          WATCHDOG_SELFTEST: ${{ inputs.watchdog_selftest && '1' || '' }}
-        # Exit 0 healthy, 1 unhealthy, 2 status.json unreadable after retries (state unknown),
-        # 3 watchdog misconfigured. Any non-zero exit fails the run; the ::error:: annotations say which.
-        run: node scripts/alerts-watchdog.mjs
+          # '1' on a selftest run (the dispatch input, or the monthly cron): the finding alerts:selftest (P1).
+          WATCHDOG_SELFTEST: ${{ needs.gate.outputs.selftest }}
+        run: node scripts/alerts-watchdog.mjs --findings findings/alerts.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: findings-alerts
+          path: findings/alerts.json
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: true
 
   platform:
-    # API and config Workers, up or down. A job of its own, like `alerts`: a red here names the host at a glance,
-    # and it runs from GitHub so it still fires when Cloudflare is the problem.
+    # A job of its own, like `alerts`, and from GitHub for the same reason.
     name: api and config
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-24.04
-    # 2 GETs x 3 attempts x 15 s + 7 s backoff, in parallel; 3 min leaves room for checkout + setup-node.
-    timeout-minutes: 3
+    # The API's 3 tries are 30 s apart (an outage under a minute is not reported): about 60-105 s, in parallel with
+    # /healthz and status.json; 5 min leaves room for checkout + setup-node.
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
@@ -465,6 +173,60 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
-      # Exit 0 healthy, 1 a host is down or unhealthy, 3 misconfigured; the ::error:: annotations say which.
-      - name: Check api.theshelter.app and config.theshelter.app
-        run: node scripts/platform-watchdog.mjs
+      - name: Judge api.theshelter.app, config.theshelter.app and the config bundle (findings for the "[health] platform" board)
+        run: node scripts/platform-watchdog.mjs --findings findings/platform.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: findings-platform
+          path: findings/platform.json
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: true
+
+  reconcile:
+    needs: [gate, feed, alerts, platform]
+    # Also after an evaluator failed: its findings are then missing, which reconcile reports (watcher:evaluator:<name>)
+    # and which freezes that evaluator's entries instead of resolving them. Not when the gate skipped the run, nor in a
+    # run cancelled by hand (it would record its stopped evaluators as missing).
+    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' }}
+    runs-on: ubuntu-24.04
+    # A few GitHub API calls: one listing; on the first run the five labels and per board its creation, pin and lock;
+    # then per board at most one comment (3 tries on a network error, a 429 or a 5xx), its body and its labels (GET,
+    # PATCH and PUT retried twice; a board locked against the bot is unlocked and locked again around the write); once
+    # a day one GraphQL query of the pins and locks. Pings only with HC_PING_KEY (unset: none).
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # The only job that writes issues: the boards' bodies, labels, comments, pin and lock.
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      # This run's findings-<evaluator> artifacts, as findings/<evaluator>.json; one that is missing (its job failed)
+      # is simply absent.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: findings-*
+          path: findings
+          merge-multiple: true
+      # Exit 0 green, 1 red (a P1 whose finding holds, a P2 in its first hour, the selftest), 3 red because alerting
+      # itself is broken: the boards unreadable; a board body not created (one POST, tried again by the next run), not
+      # saved after its retries, or too long even shrunk (the boards are the memory of every rule: without them nothing
+      # confirms, resolves or comments); a new board that cannot be labelled; board comments failing on two runs in a
+      # row; no GH_TOKEN, a bad argument or a crash. A comment that fails once is an ::error::, retried by the next run
+      # (watcher:reconcile); a failed ping, label edit, lock or pin check is a ::warning:: and never changes the exit
+      # code.
+      - name: Reconcile the boards and set the run's verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # key=until,reason;... (README "Health watchdogs"): mutes a key's comments and pings until a date.
+          HEALTH_SILENCES: ${{ vars.HEALTH_SILENCES }}
+          # Healthchecks.io ping key (owner decision 2026-10-22: no push channel for now, so it is unset and every
+          # ping is skipped). A capability: the script never logs it or the ping URLs.
+          HC_PING_KEY: ${{ secrets.HC_PING_KEY }}
+        run: node scripts/reconcile.mjs --findings-dir findings

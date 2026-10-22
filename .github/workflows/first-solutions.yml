@@ -147,23 +147,12 @@ jobs:
           # No writer lock (FEED-OPS-4): only this workflow writes these files, so a push that loses the race to another
           # writer fetches, rebases this one commit onto it (no conflict possible) and tries again (scripts/push-data.sh).
           PUSH_ATTEMPTS=6 PUSH_BACKOFF_S=3 bash "$GITHUB_WORKSPACE/scripts/push-data.sh"
-      # After the commit. A stalled source keeps the run green (alerting plan of 2026-10-22): a warning here, and the
-      # marker as the artifact walk-blocked-first-solutions, which the health workflow's feed evaluator
-      # (scripts/feed-health.mjs) files on the "[health] feed" board as walks:first-solutions:<source> (a P3: one
-      # comment; it resolves once no marker is newer than 26 h).
-      - name: Warn if a source's walk is stalled
+      # After the commit, so a stalled source does not hold back the others' progress.
+      - name: Fail if a source's walk is stalled
         if: always()
         run: |
           if [ -f fs-out/blocked.txt ]; then
             cat fs-out/blocked.txt
-            echo '::warning::first-solutions: a source has failed for days (see above); the other sources'"'"' work was committed, and the health workflow files the marker on the "[health] feed" board'
+            echo '::error::first-solutions: a source has failed for days (see above); the other sources'"'"' work was committed'
+            exit 1
           fi
-      - name: Upload the blocked marker (read by the health workflow)
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: walk-blocked-first-solutions
-          path: fs-out/blocked.txt
-          if-no-files-found: ignore
-          retention-days: 3
-          overwrite: true

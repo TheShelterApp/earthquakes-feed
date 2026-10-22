@@ -181,8 +181,8 @@ open, reachable source appears.
   prunes the tree — so the `data` branch stays bounded. The run logs (`status/history`, one
   file per day since round 17, and `changes/`) keep only the current month in the tree; finished months become immutable
   gzip assets of the `logs-YYYY-MM` releases ([APIs.md](APIs.md#run-logs)). The `health`
-  workflow logs the repository's size and files `feed:repo-size` above 8 GB (5.48 GB on 2026-10-04, 5.64 GB on
-  2026-10-06, about 67 MB a day: GitHub keeps about one compressed copy of every large file a commit rewrites, see
+  workflow logs the repository's size and warns above 6 GB (5.48 GB on 2026-10-04, 5.64 GB on 2026-10-06, about 67 MB a
+  day: GitHub keeps about one compressed copy of every large file a commit rewrites, see
   [APIs.md](APIs.md#repository-size); `scripts/repo-growth/` measures it). `event_map` is sharded by
   event-day and UTC hour (`YYYY-MM-DD-HH.ndjson` since round 17) and pruned to a 45-day dedup horizon; identity older than that lives in the
   frozen day partitions. Every source with a time-range query reached the target
@@ -258,142 +258,138 @@ to the Worker goes through a pull request like any other code and is deployed af
 
 ## Health watchdogs (`.github/workflows/health.yml`)
 
-The heartbeat Worker dispatches `health.yml` every 15 minutes (:07, :22, :37, :52). The workflow's own `:25` cron is
-the fallback for a Worker outage: it runs its checks only when no dispatched health run was created in the last 20
-minutes (one that was cancelled or skipped does not count). One health run runs at a time (concurrency group
-`health`). Every threshold is in one table, `RULES` in [`scripts/lib/findings.mjs`](scripts/lib/findings.mjs)
-(alerting plan of 2026-10-22, Phase 1a).
+The heartbeat Worker dispatches `health.yml` every 15 minutes (plus an hourly GitHub cron
+as a fallback). It runs three independent jobs; any one failing turns the run red.
 
-- **`gate`** ([`scripts/reconcile.mjs`](scripts/reconcile.mjs) `--gate`): the fallback cron's skip, and the selftest.
-- **Three evaluators**, run from GitHub on purpose, so they keep working when Cloudflare is the thing that broke. Each
-  writes one findings document (the artifact `findings-<evaluator>`) and stays green whatever it judged; only a crash,
-  or a findings file it cannot write, turns its job red.
-  - `feed` ([`scripts/feed-health.mjs`](scripts/feed-health.mjs)): the live `v1` and `v2` manifests, `v1/status.json`,
-    the files on `data`, the repository size and the walks' blocked markers (a GitHub read that fails is
-    `watcher:feed-github`; a truncated listing of the `data` tree is a warning).
-  - `alerts` ([`scripts/alerts-watchdog.mjs`](scripts/alerts-watchdog.mjs)): The Shelter's alert pipeline, from the
-    alerts-gateway's public `https://data.theshelter.app/alerts/status.json`, the USGS `4.5_hour` canary and, with the
-    `CF_ANALYTICS_TOKEN` secret, the account's daily usage (only account totals are logged, and an API error is
-    redacted of the token and the account id: the run logs are public). The gateway constants it mirrors (polling,
-    backoff, providers, free-tier caps) are checked against `tests/fixtures/platform-constants.json`: when the gateway
-    changes one, update the mirror and that snapshot (`tests/platform-constants.test.ts` compares the snapshot with a
-    platform checkout when one is at hand).
-  - `platform` ([`scripts/platform-watchdog.mjs`](scripts/platform-watchdog.mjs)): `https://api.theshelter.app/v1/health`,
-    `https://config.theshelter.app/healthz` and the config bundle's age.
-- **`reconcile`** ([`scripts/reconcile.mjs`](scripts/reconcile.mjs)): the only job that writes issues. It applies each
-  rule's holds, resolves, inhibitions, escalation and the silences, writes the boards and sets the run's conclusion. It
-  runs after a failed evaluator too (its rows freeze), but not in a run cancelled by hand. Exit 1 is red for a finding;
-  exit 3 is red because alerting itself is broken: the boards unreadable, a board body not created, not saved or too
-  long even shrunk, a new board that cannot be labelled, board comments failing on two runs in a row, or no
-  `GH_TOKEN`.
+- **`health` (the feed):** reads the live Pages `v1/manifest.json` and `v1/status.json` and
+  fails when the manifest is older than its `stale_after_seconds` contract or a systemic
+  share of providers is failing (30 %, at least 8). It opens (and on recovery closes) the
+  `[health] feed unhealthy` issue. A **silent** source (it answers, with no rows, for longer
+  than its activity budget: 12 h by default, `activityBudgetHours` in the registry; see
+  [APIs.md](APIs.md#get-v1statusjson)) is not counted as failing: it gets a `::warning::` and
+  the `[health] silent providers` issue, opened when one appears, commented when the set of
+  silent sources changes and closed when none is left. The run does not go red for it. A silent
+  source whose fetch fails in the run is listed with its error (`providers.<id>.error`) and how
+  long its fetch has failed (from `lastSuccessAt`), not as "no rows"; once such a fetch has
+  failed for 48 h the issue is commented again, and every 48 h after while it lasts, even when
+  the set stays the same.
+  Two size checks never turn the run red either: the repository's size (a warning above 6 GB),
+  and every file on the `data` branch, read from the API's tree listing: the status history under
+  `status/history/` (whatever its layout) is summed and its largest file named, and a status-history
+  day file (`YYYY-MM-DD.ndjson`) over 5 MB or any other file over 45 MB gets a warning and the
+  `[health] data file size` issue (every rewrite of a large file grows the repository, and GitHub
+  rejects a pushed file above 100 MiB, which would stop the feed publishing; see
+  [APIs.md](APIs.md#run-logs)).
+- **`alerts` (The Shelter's alert pipeline):** runs
+  [`scripts/alerts-watchdog.mjs`](scripts/alerts-watchdog.mjs) (dependency-free Node 22)
+  against the alerts-gateway's public `https://data.theshelter.app/alerts/status.json`. It
+  runs from GitHub on purpose, so it keeps working when Cloudflare is the thing that broke.
+  It fails when:
 
-**Severity ladder.**
+  | Condition in `status.json` | Meaning |
+  |---|---|
+  | `generatedAtMs` older than 300 s | the detector stopped ticking or publishing (it publishes every 60 s) |
+  | a `detector.providers[]` entry `ok: false` for 3 min (`emsc`, `gfz`: polled every 15 s detector tick) or 5 min (`usgs`, `feed`, any other id: polled every 60 s) | an alert source is down; from 1 min it is a warning, a shorter streak is a log line. The message says how long and why when the gateway says so: `lastError` (`timeout`, `http`, `network`, `invalid`) and `consecutiveTimeouts` |
+  | two of the three direct providers (`usgs`, `emsc`, `gfz`) `ok: false` together for 2 min | one direct source is left, with the feed backstop (the message says when the backstop is failing too) |
+  | all three direct providers `ok: false` together for 1 min | the gateway sees new quakes only through the feed backstop, minutes late; three agencies at once points at the gateway's side (egress, DNS, the Workers runtime, a deploy). An egress outage takes the backstop too: the message then says the gateway sees no new quakes at all |
+  | `policy.fallback == true` | the restrictive compiled alerts policy runs instead of the signed one |
+  | `degraded.active == true` | the free-tier degradation ladder is shedding alert tiers |
+  | `budget.headroomPct < 20` (when present) | the gateway is close to a Workers Free daily cap |
+  | `apns.configured == false` | fan-outs run dry: no push reaches a device |
+  | `apns.problems` is a non-empty list | an APNs key is half set: devices in that environment get no push |
+  | `apns.mode == "split"` and `apns.production != true` | no production key: every App Store and TestFlight device is skipped |
+  | `feed_manifest_age_s` over 1,800 s (age now, from `feed_manifest_generated_ms` when present) | the feed manifest the gateway reads every minute is stale: the feed stopped publishing (heartbeat Worker, `GH_PAT`, Actions, Pages) |
+  | `config_bundle_age_s` over 10 days (from `config_bundle_generated_ms` when present) | the signed config bundle stopped refreshing; apps fall back to compiled defaults once it expires |
 
-| Level | Meaning | Run | Board |
-|---|---|---|---|
-| P1 page | Alerts are not reaching users, or will stop within hours or days | Red on every run while it holds | Silent row |
-| P2 urgent | Redundancy lost, or a symptom a fallback still covers | Red during its first hour, then green with `::error::` | Silent row |
-| P3 ticket | Act within days, or one external source has been out long enough to matter | Green with `::warning::` | One comment when it enters, one when it escalates |
-| P4 info | Normal churn, or a condition below its line | Green | The job summary only |
+  Outages are judged by time, not by a failure count (round 25, 2026-10-14): a count meant 30 s on
+  EMSC and GFZ and 2 min on USGS: a count of 3 turned the 40 s GEOFON blip of 2026-10-09 red, and
+  the round-24 rule "3 failures while another direct provider is down" would still turn a 40 s blip
+  of two providers red. The duration is `generatedAtMs - failingSinceMs`, published by the
+  gateway from 2026-10-14 while a streak lasts (absent while healthy). For an older gateway, or a
+  streak that began before the field, it is the span of `consecutiveFailures` at the gateway's
+  polling (`TICK_INTERVAL_MS` 15 s, each source's `minIntervalMs`, the backoff to 60 s from the 3rd
+  failure and 300 s from the 10th; mirrored in the script and checked against a sibling `platform`
+  checkout by `npm test` when one is present), a lower bound, so such a streak is never judged
+  earlier. Two streaks are "together" for as long as the shorter one. Why these limits (measured in
+  the round-24 sweep of 2026-10-06..13):
 
-Red only on evidence: a P1 or P2 entry held open only by its resolve count, or by a P4 sample below its line (two
-providers still down after all three were), is not red. A single external source, a maintenance walk and the watcher
-itself never turn a run red. The shadow rules (`alerts:canary`, `alerts:provider-silent:<id>`, `alerts:latency:<id>`,
-`feed:systemic`) only log "would notify" until a pull request promotes them.
+  - 3 min for EMSC and GFZ is about 5 failed polls in a row (15 s, 15 s, then 60 s apart under the
+    backoff), close to the round-24 line of 6 failures (3.5 min). A streak can read up to one backoff
+    interval longer than the outage (the poll that clears it waits), so the 40 s GEOFON blip of
+    2026-10-09 reads as at most 90–110 s: a warning.
+  - 5 min for USGS, the feed and new ids is 5 failed polls at 60 s, the same evidence. Since
+    2026-10-13 USGS `ok: false` means both ComCat FDSN and its summary feed fail (the 15–50 min ComCat
+    slowdowns stay green with the fallback warning), and the backstop's own source moves every 5 min.
+    Every measured real outage is red at the first health run past it.
+  - 2 min for two direct providers at once is above the 90–110 s a fast provider's blip can read and
+    below every single-provider limit; 1 min for all three is reached only when USGS fails two polls
+    60 s apart.
 
-**Boards.** Three permanent issues, `[health] alert pipeline`, `[health] feed` and `[health] platform` (label
-`health-board`), all three created by the first `reconcile` run (a one-time "issue opened" notification to the
-repository's watchers), then pinned and locked; they are never closed, and one deleted by hand comes back on the next
-run. Once a day the pins and locks are checked again (`GITHUB_TOKEN` may lack the right to pin, which is a warning; the
-three boards take all three of the repository's pin slots). Each body lists the open rows, the rows still confirming or
-holding, the shadow rules and a "Last 7 days" table (red runs, comments, push transitions, shadow would-notify), and
-the alert-pipeline board the last selftest; it ends in a hidden `<!-- health-state v1 … -->` marker: the memory across
-runs, so do not edit a body by hand (a broken marker starts the board empty). A body that would pass GitHub's limit
-drops its log rows first, then shortens texts and lists fewer rows; the marker keeps every open row (over about a
-hundred, the board is not written at all: exit 3). The label `health:p1` … `health:ok` is the board's worst open row.
-- **Comments** only when a P3 enters and when it stays open past its rule's age line (the escalation, on a run where
-  its finding is present). P1/P2 rows, a rise into P1/P2 (`config:bundle` by age, the promotion below), members leaving
-  and resolutions are silent edits: the red run is the P1/P2 alarm, and it reaches the owner only. A comment goes out
-  before the body that records it: one GitHub refuses is an `::error::`, rolled back and posted by the next run
-  (`watcher:reconcile`), and a body that is not saved afterwards can repeat a comment, never lose one. A board locked
-  against the bot is unlocked around its comment or body edit and locked again.
-- **Holds.** A condition below its line is a P4 sample. Depending on the rule, a key enters after 2 runs in a row, on 4
-  of the last 8 runs or after a 24 h hold, and resolves after 2 healthy runs (4 when it entered on the ratio). Runs
-  count by time: a run less than 10 minutes after the previous one (a rerun, an extra dispatch) shares its sample slot,
-  confirms nothing and is no healthy run of its own. A resolved key starts its samples afresh, so its next outage is a
-  new episode. A finding whose start is unknown (a feed source that never fetched successfully) is held for its rule's
-  line from the first run that saw it. While `status.json` is stale or unreadable every other `alerts:*` row is frozen,
-  and so are the rows of an evaluator whose findings are missing; `status.json` unreadable for 60 minutes becomes a P1.
-- **Inhibition.** While `feed:freshness` is open, `feed:source:*` and `alerts:provider:feed` send nothing; while
-  `alerts:provider:usgs|emsc|gfz` is open, `feed:source:usgs|emsc|geofon` sends nothing; a coverage row mutes its
-  providers. A held-back comment goes out once the parent resolves, only if the row's own finding is still present.
+  A model of the gateway's polling (its own backoff code, 15 s ticks plus the poll time, 4 s
+  timeouts, status.json written on the 60 s flush), run against outages at random phases, agrees
+  (round-25 review): one or both fast providers out for up to 90 s, or every source for up to 60 s,
+  never turn a run red; red takes an outage of about 100 s for two direct providers, 70 s for all
+  three, 3 min for EMSC or GFZ alone and 6 min for USGS (FDSN and summary feed both down); a
+  ComCat-only slowdown stays a warning.
 
-**Runbook**, one line per key (the row says since when and why):
+  `--provider-down-sec`, `--fast-provider-down-sec`, `--two-direct-down-sec`, `--all-direct-down-sec`
+  and `--provider-warn-sec` (seconds) set the limits. A USGS provider that stays `ok` on its
+  summary-feed fallback is not down.
 
-| Key | Sev | When | First step |
-|---|---|---|---|
-| `alerts:status:stale` | P1 | `generatedAtMs` over 300 s old | The detector stopped ticking or publishing: the gateway Worker's logs and its last deploy |
-| `alerts:status:unreadable` | P2 (2nd run); P1 after 60 min | 3 tries within 60 s fail; open for 60 min it is a P1 (`gh-detect`), since every other `alerts:*` row is frozen meanwhile | `data.theshelter.app` (edge, object), then the gateway's publishing |
-| `alerts:coverage:all` | P1 | `usgs`, `emsc` and `gfz` all `ok: false` (or not polled) together for 60 s | Three agencies at once points at the gateway (egress, DNS, a deploy): its logs first |
-| `alerts:coverage:two` | P2 | Two of them together for 180 s | One direct source and the feed backstop are left: which two, and their `lastError` |
-| `alerts:provider:<id>` | P3 | `usgs` 30 min, `emsc` and `gfz` 60 min (15 min for `invalid` bodies), or 4 of the last 8 runs; escalates at 2 h (`usgs`, `invalid`) or 12 h | Usually the agency: act when it escalates; `invalid` means its format changed |
-| `alerts:provider:<id>` (not polled) | P3 (2nd run) | `usgs`, `emsc` or `gfz` missing from `detector.providers` (all three when the list is empty); the coverage rows count it as failing | The gateway's last deploy and its provider configuration |
-| `alerts:usgs:primary` | P3 | ComCat FDSN failing 6 h while the summary feed serves | Live USGS events arrive up to about 2 min later; ComCat's FDSN service |
-| `alerts:usgs:deletions` | P3 | The deletions query failing 24 h; escalates at 5 d | Deleted quakes are not withdrawn: fix it inside the gateway's 7-day withdrawal window |
-| `alerts:provider:feed` | P3 | The gateway's feed backstop `ok: false` 30 min | Muted while `feed:freshness` is open; else the gateway's read of `v2/manifest.json` |
-| `alerts:budget` | P2 | The tightest of the gateway's five daily free-tier ratios projected to 0.75 of the day (from 02:00 UTC); resolves under 0.65 | What spends rows or requests (`budget` in `status.json`), before the degradation ladder sheds tiers |
-| `alerts:degraded` | P1; P3 when forced | The degradation ladder is active | Relieve the budget cause; a forced override is a reminder to lift it |
-| `alerts:policy` | P1 | The compiled fallback policy runs instead of the signed one | Republish or repair the signed alerts policy |
-| `alerts:apns` | P1 / P3 | P1: APNs not configured, `apns.problems` not empty, or split mode without production; P3: today's `skipped_no_key` or `retry_dropped_budget` above 0 | The gateway's APNs keys for the environment named |
-| `alerts:selftest` | P1 | The selftest (below) | Expected; never stored on a board |
-| `feed:freshness` | P2 (unreachable: 2nd run) | The older of the live `v1` and `v2` manifests past `stale_after_seconds` (1,800 s), confirmed by a re-read 60 s later; or a manifest unreachable | The aggregate runs, the heartbeat Worker and its `GH_PAT`, the Pages deploy; `v1` fresh and `v2` stale means signing stopped |
-| `feed:status` | P3 (2nd run) | `v1/status.json` unreadable | The per-source rows are frozen meanwhile: the aggregate runs' Pages publish |
-| `feed:source:<id>` | P3 | Its fetch failing from `lastSuccessAt` for 3 h (`usgs`, `emsc`, `geofon`), 12 h (the others) or 2 h (HTTP 401/403/404/410, a schema error, a certificate), or silent or frozen past its activity budget; for a source that never fetched successfully, that line counts from the first run that saw it; escalates at 24 h (core sources, definite errors) | Usually the agency; a certificate: [providers/tls/README.md](providers/tls/README.md); a 404 or a schema error: the adapter |
-| `feed:cert:<id>` | P3 | A pinned leaf with under 7 days left; escalates at 2 days left | Pin the new leaf's intermediate if its issuer changed ([providers/tls/README.md](providers/tls/README.md)) |
-| `feed:size` | P3 | A status-history day file over 5 MB, or any other file on `data` over 45 MB | Slim what grows ([APIs.md](APIs.md#run-logs)): GitHub rejects a pushed file above 100 MiB |
-| `feed:repo-size` | P3 | The repository over 8,000,000 KB | [APIs.md](APIs.md#repository-size) |
-| `walks:<workflow>:<source>` | P3 | A blocked marker of `history`, `first-solutions`, `backfill` or `archive` in the last 26 h (`run` for a line about the walk itself) | The walk run's warning; the row resolves 26 h after the last marker |
-| `platform:api` | P2 | `/v1/health` not 200 `ok: true` after 3 tries over 60 s, or `sessionKeySource: "ephemeral"` | The API Worker; an ephemeral key means its session signing secret is missing (random 401s in the app) |
-| `platform:api:envelope` | P3 | `providerTokenEnvelope: "missing"` | Account deletion cannot revoke at Apple until the envelope key is set |
-| `platform:config-worker` | P3 | `/healthz` not 200 `ok: true`; escalates at 6 h | Apps read the data copy first and keep their last good config: the config Worker |
-| `config:bundle` | P3 / P2 / P1 | The older of the config bundle's data copy and the signed policy over 5 / 10 / 25 days (the bundle expires at 30); or the copy's version behind `/healthz` for 24 h (a partial publish) | Rerun the config bundle's refresh, then check the copy reaches the host's version |
-| `platform:cf-usage` | P2 / P1 | Only with `CF_ANALYTICS_TOKEN`: Workers requests or D1 rows written at 80 % (or a projected 100 %) / 95 % of the free daily caps | What spends them; the caps reset at 00:00 UTC |
-| `watcher:<name>` | P3 (2nd run) | The monitoring itself: an evaluator without findings, a refused token, a usage query that failed, a GitHub read of the feed job (`feed-github`), board comments `reconcile` could not post (`reconcile`), no selftest for 35 days (`selftest-overdue`) | The job's log; the frozen rows wait for it; `selftest-overdue`: run the selftest |
+  It only **warns** (the run stays green) when today's `fanout.skipped_no_key` or
+  `fanout.retry_dropped_budget` is above 0, and when a provider's `deletionsConsecutiveFailures`
+  is 3 or more (`--deletions-failures <n>`): the gateway's separate USGS deletions query
+  (`includedeleted=only`, published from 2026-10-06 only while it fails, with `deletionsLastError`)
+  is failing, so a quake USGS deletes is not withdrawn while the provider itself stays `ok`. The
+  message gives the age of the provider's `watermarkMs`, the cursor the gateway asks from again once
+  the query succeeds (at most 7 days back, so a shorter gap recovers by itself); a shorter streak is a
+  log line. It also only warns when a provider has been `ok: false` for 1 min or more but less than
+  its limit (see the table), and when a provider's `primaryConsecutiveFailures` is 3 or more while it
+  stays `ok` with `fallback: "summary"` (`--primary-failures <n>`, gateways from 2026-10-13: USGS's
+  ComCat FDSN live query is failing, and its live events come from the summary feed, up to about two
+  minutes later). Both sub-query warnings say how long the streak has lasted when the gateway
+  publishes `deletionsFailingSinceMs` / `primaryFailingSinceMs`.
+  Fields an older gateway does not publish
+  (`apns.mode`, `apns.production`, `apns.problems`, `fanout`, the two ages, a provider's `lastError` /
+  `consecutiveTimeouts` / `deletionsConsecutiveFailures` / `deletionsLastError` / `failingSinceMs`) are never treated as a problem;
+  a null age (not read since the gateway deployed) is a warning.
 
-**Silences.** The repository variable `HEALTH_SILENCES` mutes a key's comments and pings until a date, with no commit:
-`key=until,reason;…`, where `key` is exact or a prefix ending in `*` and `until` is `YYYY-MM-DD` (the end of that UTC day)
-or an ISO time with a zone (at most 20 entries). A silence lifts early when the key's severity rises, and it does not
-change a red run; an expired or malformed entry is named in the run's warnings. For example
-`gh variable set HEALTH_SILENCES --body 'feed:source:tmd=2026-11-01,new certificate chain' -R TheShelterApp/earthquakes-feed`.
+  The fetch is retried twice (2 s, then 5 s backoff) before it gives up. A document it cannot
+  read is reported as **"could not read status.json"** (state unknown: network, edge or a
+  missing object), never as "Alert pipeline unhealthy", which is reserved for a document that
+  was read and failed a check. Exit codes: `0` healthy, `1` unhealthy, `2` unreadable after
+  retries, `3` watchdog misconfigured.
 
-**Who is told.**
-- **A red run** sends GitHub's failed-workflow email (Settings → Notifications → Actions) to whoever GitHub notifies for
-  that run: for the runs the heartbeat dispatches, the account that owns its `GH_PAT` (another account's PAT reroutes the
-  email); for the cron runs, the last person who edited the cron line.
-- **A board comment** notifies whoever subscribed to that board or watches the repository: subscribe to the three boards
-  once they exist. Only P3 entries and escalations comment, so a P1 reaches the owner alone (the red run).
-- **No push channel for now** (owner decision 2026-10-22): `reconcile` computes the Healthchecks.io pings (`gh-detect`,
-  `gh-deliver`, `gh-redundancy`, `gh-feed`, `gh-platform`, `gh-capacity`, `gh-aging`, `health-watchdog`, `selftest`) but
-  skips them while the `HC_PING_KEY` secret is unset.
+  **Optional usage half.** When the repository secret `CF_ANALYTICS_TOKEN` exists (a read-only
+  Cloudflare API token with *Account Analytics: Read*), the job also reads today's (UTC)
+  account-wide Workers requests and D1 rows written from the GraphQL Analytics API and fails at
+  80 % of the Workers Free daily caps (100,000 requests; 100,000 D1 rows written). The account
+  is the `CF_ANALYTICS_ACCOUNT_ID` repository variable when set, else the `CF_ACCOUNT_ID`
+  secret. Without the token this half is skipped silently; a token that is rejected or cannot
+  see the account fails the job as misconfigured; a transient analytics error only warns.
+  Only account totals are logged: this repository's run logs are public.
 
-**Selftest.** The monthly cron (09:17 UTC on the 1st) and `gh workflow run health.yml -f watchdog_selftest=true` force the
-P1 `alerts:selftest`: the run must be red, which proves the red path and the email. `reconcile` records the last selftest
-on the boards; GitHub can drop a scheduled run, so 35 days without one opens `watcher:selftest-overdue`.
+  **Alarm channel.** No issue is opened for the alert pipeline: the red run itself is the
+  alarm, delivered by GitHub's failed-workflow email (Settings → Notifications → Actions →
+  "Only notify for failed workflows"). For runs dispatched by the heartbeat the email goes to
+  the account that owns the heartbeat's `GH_PAT`; for the hourly cron, to the last person who
+  edited the cron line.
 
-**Walks and writers.** `history`, `first-solutions`, `backfill` and `archive` keep a blocked run green: a `::warning::`,
-and the marker as the artifact `walk-blocked-<workflow>`, which the `feed` job files as `walks:<workflow>:<source>`.
-`aggregate` and `derive` still go red on a failed publish (owner decision 2026-10-22); `feed:freshness` is the symptom
-either way.
+  **Selftest.** `gh workflow run health.yml -f watchdog_selftest=true` forces an impossible
+  headroom limit (101 %), so the `alerts` job must fail: use it once after changing the
+  watchdog or the notification settings to prove the red path and the email end to end.
+  Locally: `node scripts/alerts-watchdog.mjs` (or `--selftest`, `--status-file <doc.json>`,
+  `--max-age-sec <n>`, `--min-headroom-pct <n>`, ...); `npm test` covers every condition with
+  fixtures in `tests/fixtures/` and never calls the network.
 
-**Locally.** `npm test` covers every rule with fixtures and never calls the network.
-
-```bash
-node scripts/alerts-watchdog.mjs        # annotations and exit codes: 0 healthy, 1 a P1/P2, 2 unreadable, 3 misconfigured
-node scripts/platform-watchdog.mjs      # the same for the API and config Workers: 0 healthy, 1 a host down, 3 misconfigured
-node scripts/feed-health.mjs            # prints its findings document (without GH_TOKEN, no GitHub parts)
-node scripts/alerts-watchdog.mjs --findings findings/alerts.json   # likewise feed-health.mjs and platform-watchdog.mjs
-node scripts/reconcile.mjs --findings-dir findings --dry-run         # what the boards would say; writes and pings nothing
-```
+- **`platform` (The Shelter's API and config Workers):** runs
+  [`scripts/platform-watchdog.mjs`](scripts/platform-watchdog.mjs) (dependency-free) against
+  `https://api.theshelter.app/v1/health` and `https://config.theshelter.app/healthz`, each retried twice
+  (2 s, 5 s). It fails when either does not answer 200 with `ok: true`, or when the API reports
+  `sessionKeySource: "ephemeral"` (the session signing key is missing: random 401s in the app); it warns
+  when the API reports `providerTokenEnvelope: "missing"`. Exit codes: `0` healthy, `1` down or unhealthy,
+  `3` misconfigured. Before 2026-10-04 nothing noticed when either Worker stopped answering. Its alarm is
+  the same failed-workflow email as the `alerts` job's.
 
 ## Licensing & takedowns
 

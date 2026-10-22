@@ -79,27 +79,16 @@ jobs:
           # Fail-loud push loop (H3; tests/push-data.test.ts): a concurrent writer's commit is rebased onto, a conflict
           # aborts the rebase and fails.
           bash "$GITHUB_WORKSPACE/scripts/push-data.sh"
-      # The signal AFTER the durable work: backfill exits 0 and drops a marker instead of failing
+      # Red signal AFTER the durable work: backfill exits 0 and drops a marker instead of failing
       # its own step, because a failed step skips every later step without `if:` — the commit
       # would never land and each run would repeat and re-discard identical work.
       # The marker names each reason: an unreadable archived month, a dispatched window that failed
       # or overflowed, or a provider whose walk has kept failing at a one-day window (about once a day).
-      # It keeps the run green (alerting plan of 2026-10-22): a warning here, and the marker as the artifact
-      # walk-blocked-backfill, which the health workflow's feed evaluator (scripts/feed-health.mjs) files on the
-      # "[health] feed" board as walks:backfill:<source> (a P3: one comment; it resolves once no marker is newer than 26 h).
-      - name: Warn if backfill was blocked or a walk is stalled
+      - name: Fail if backfill was blocked or a walk is stalled
         if: always()
         run: |
           if [ -f backfill-blocked.txt ]; then
             cat backfill-blocked.txt
-            echo '::warning::backfill: blocked or stalled (see above); this run'"'"'s other work was still committed, and the health workflow files the marker on the "[health] feed" board'
+            echo '::error::backfill: blocked or stalled (see above); this run'"'"'s other work was still committed'
+            exit 1
           fi
-      - name: Upload the blocked marker (read by the health workflow)
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: walk-blocked-backfill
-          path: backfill-blocked.txt
-          if-no-files-found: ignore
-          retention-days: 3
-          overwrite: true

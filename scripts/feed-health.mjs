@@ -18,7 +18,10 @@
 //     the watchdog must not read as broken publishing (2026-07-25: the queue stalled 1 h 54 min);
 //   - with GH_TOKEN and GITHUB_REPOSITORY (GitHub's own API only): this run's created_at (the queue time), the
 //     repository's size, the data branch's tree (every file's size) and the newest walk-blocked-<workflow> artifact of
-//     each maintenance walk (history, first-solutions, backfill, archive), whose zip holds the walk's blocked marker;
+//     each maintenance walk (history, first-solutions, backfill, archive), whose zip holds the walk's blocked marker.
+//     A read that fails leaves its keys unjudged and is the finding watcher:feed-github (platform board, P3 after 2
+//     runs, never red), so a read that keeps failing does not freeze those rows unseen; without GH_TOKEN in Actions
+//     every read fails, in a local run none is made;
 //   - providers/registry.json from the checkout (the source ids a marker line is filed under).
 //
 //   node scripts/feed-health.mjs --findings findings/feed.json   # the CI invocation: writes the document
@@ -27,7 +30,7 @@
 // Exit codes: 0 the document was written (or printed), whatever it says · 3 a bad argument, or the --findings file
 // cannot be written · anything else is a crash (the job goes red and reconcile reports the evaluator missing).
 // The findings are plain log lines and a step-summary section, never annotations: reconcile annotates them. Only the
-// evaluator's own failures are annotated.
+// evaluator's own failures are annotated, and a truncated data tree listing (a warning: some files went unjudged).
 //
 // Dependency-free (Node >= 22, global fetch). The pure helpers are exported for tests/feed-health.test.ts, which never
 // touches the network. Types: feed-health.d.mts.
@@ -167,13 +170,17 @@ function errorMessage(err) {
   return '';
 }
 
-/** When a failing provider last fetched: lastSuccessAt, else error.since (ms, or an ISO time); null when neither. */
-function failingStart(p) {
+/**
+ * When a failing provider last fetched: lastSuccessAt, else error.since (ms, or an ISO time) when it is before the
+ * document (`refMs`); null when the start is unknown. src/status-v2.ts publishes error.since = the document's own time
+ * for a source with no lastSuccessAt (one that has never fetched successfully): no start, or it would read as a
+ * failure that has just begun on every run.
+ */
+function failingStart(p, refMs) {
   if (isNum(p.lastSuccessAt)) return p.lastSuccessAt;
-  const since = isObject(p.error) ? p.error.since : undefined;
-  if (isNum(since)) return since;
-  if (typeof since === 'string' && Number.isFinite(Date.parse(since))) return Date.parse(since);
-  return null;
+  const raw = isObject(p.error) ? p.error.since : undefined;
+  const since = isNum(raw) ? raw : typeof raw === 'string' && Number.isFinite(Date.parse(raw)) ? Date.parse(raw) : null;
+  return since !== null && (!isNum(refMs) || since < refMs) ? since : null;
 }
 
 /**
@@ -226,8 +233,9 @@ function certFinding(id, leaf) {
 /**
  * The per-source findings of a readable status.json, judged as of the document (`refMs`), not now:
  *   feed:source:<id>  one row per source: its fetch failing past its line (2 h definite, 3 h core, 12 h other; a P4
- *                     sample from 30 min to the line, or with no start on record), silent, frozen (P3, members ⊆
- *                     [fetch, silent, frozen]);
+ *                     sample from 30 min to the line), silent, frozen (P3, members ⊆ [fetch, silent, frozen]). A
+ *                     source that has never fetched successfully (no start on record) is P3 with sinceMs null at
+ *                     once: reconcile holds a finding without a start on its own clock;
  *   feed:cert:<id>    a pinned leaf with under 7 days left (P3);
  *   feed:systemic     (shadow) 2 or more core sources, or 6 or more in all, failing for 30 min or more (P2).
  * `opts.nowMs` only adds a note on the document's own age.
@@ -262,14 +270,16 @@ export function evaluateSources(status, refMs, { nowMs } = {}) {
     let fetchPart = '';
     let errorPart = '';
     if (p && p.ok === false) {
-      start = failingStart(p);
+      start = failingStart(p, refMs);
       const cls = classifyFailure(p, { tlsError: tlsErrors[id], tlsLeaf: leaves[id] });
       fetchRule = cls.definite ? 'feed:source:definite' : coreIds.includes(id) ? 'feed:source:core' : 'feed:source';
       const { lineMs, resolveWithinMs } = RULES[fetchRule].limits;
       const kindText = cls.definite ? `definite: ${cls.reason}` : coreIds.includes(id) ? `a core source, ${cls.reason}` : cls.reason;
       if (start === null) {
-        sample = true;
-        fetchPart = `fetch failing (no successful fetch on record; ${kindText}, line ${ageText(lineMs)})`;
+        // Never fetched successfully: no start to measure the line from, so the finding carries sinceMs null at the
+        // rule's severity and reconcile holds it on its own clock.
+        members.push('fetch');
+        fetchPart = `fetch failing, never fetched successfully (no successful fetch on record, so its failing time is unknown; ${kindText}, line ${ageText(lineMs)})`;
       } else {
         const age = refMs - start;
         if (age >= lineMs) members.push('fetch');
@@ -594,7 +604,39 @@ export function evaluateFeed(inputs) {
   add(evaluateWalks(inputs.walks ?? [], nowMs, inputs.ids ?? []));
   parts.push(`walks=${(inputs.walks ?? []).map((r) => `${r.workflow}:${!r.ok ? 'unreadable' : r.marker ? 'marker' : 'clear'}`).join(',')}`);
 
+  // The GitHub reads (not in a local run): one that failed froze its keys above; watcher:feed-github says so on the
+  // platform board, or a read that keeps failing (a lost `actions: read`, an API outage) would freeze them unseen.
+  if (!inputs.githubSkipped) {
+    const failed = [];
+    if (inputs.queueError) failed.push(['run', "this run's created_at", inputs.queueError]);
+    if (!repo || !repo.ok) failed.push(['repository', 'the repository size', repo ? repo.message : 'not read']);
+    if (!tree || !tree.ok) failed.push(['data-tree', 'the data tree', tree ? tree.message : 'not read']);
+    else if (!isObject(tree.json) || !Array.isArray(tree.json.tree)) failed.push(['data-tree', 'the data tree', 'no tree in the answer']);
+    for (const r of inputs.walks ?? []) if (!r.ok) failed.push([`walks:${r.workflow}`, `the ${r.workflow} walk's marker`, r.message]);
+    if (failed.length > 0) findings.push(githubWatcher(failed, [...new Set(unjudged)].filter((k) => k === 'feed:repo-size' || k === 'feed:size' || k.startsWith('walks:'))));
+  }
+
   return { findings, unjudged: [...new Set(unjudged)], notes, summary: parts.join(' ') };
+}
+
+/**
+ * watcher:feed-github (P3 after 2 runs, never red): the GitHub reads that failed ([member, what, why]; the reasons
+ * grouped), and which keys they leave unjudged.
+ */
+function githubWatcher(failed, frozen) {
+  const byWhy = new Map();
+  for (const [, what, why] of failed) {
+    const reason = oneLine(why, 160);
+    byWhy.set(reason, [...(byWhy.get(reason) ?? []), what]);
+  }
+  const reads = [...byWhy].map(([why, whats]) => `${whats.join(', ')}: ${why}`).join('; ');
+  const effect = frozen.length > 0 ? `${frozen.join(', ')} not judged this run` : 'the queue time is unknown this run (counted as 0)';
+  return makeFinding('watcher', {
+    id: 'feed-github',
+    members: failed.map(([member]) => member),
+    // The effect first: a long list of reasons is what the 500-character cut takes.
+    text: `${effect}: the feed evaluator's GitHub reads failed (check the feed job's GH_TOKEN, actions: read, and GitHub's status): ${reads}`,
+  });
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -664,36 +706,40 @@ async function readWalk(workflow, { gh, token, repo, fetchImpl, sleep, nowMs }) 
 
 /**
  * Everything GitHub tells, started at once: queue time, repository size, data tree, walk markers (promises, so the
- * re-read decision waits for the queue time only). Never rejects. `notes` fills in as they settle.
+ * re-read decision waits for the queue time only). Never rejects. `notes` fills in as they settle. Without GH_TOKEN or
+ * GITHUB_REPOSITORY nothing is read: on purpose in a local run (`skipped`), a failed read of every part in Actions.
  */
 function collectGitHub({ env, fetchImpl, sleep, now }) {
   const token = env.GH_TOKEN;
   const repo = env.GITHUB_REPOSITORY;
   const workflows = RULES.walks.limits.workflows;
   if (!token || !repo) {
-    const message = 'no GH_TOKEN or GITHUB_REPOSITORY (a local run)';
+    const local = env.GITHUB_ACTIONS !== 'true';
+    const message = local ? 'no GH_TOKEN or GITHUB_REPOSITORY (a local run)' : 'GH_TOKEN or GITHUB_REPOSITORY is not set in the job';
     return {
-      queuedMs: Promise.resolve(0),
+      queue: Promise.resolve({ ms: 0, error: local ? null : message }),
       repoSize: Promise.resolve({ ok: false, message }),
       tree: Promise.resolve({ ok: false, message }),
       walks: Promise.resolve(workflows.map((workflow) => ({ workflow, ok: false, message }))),
       notes: [`GitHub parts not judged: ${message}`],
+      skipped: local ? message : null,
     };
   }
   const gh = (path, opts = {}) => fetchJson(`${GITHUB_API}${path}`, { init: { headers: ghHeaders(token) }, fetchImpl, sleep, attempts: 3, backoffMs: [2_000, 5_000], ...opts });
   const notes = [];
-  const queuedMs = (async () => {
+  const queue = (async () => {
     if (!env.GITHUB_RUN_ID) {
       notes.push('queue time unknown (no GITHUB_RUN_ID): counted as 0');
-      return 0;
+      return { ms: 0, error: null };
     }
     const r = await gh(`/repos/${repo}/actions/runs/${encodeURIComponent(env.GITHUB_RUN_ID)}`);
     const created = r.ok && isObject(r.json) && typeof r.json.created_at === 'string' ? Date.parse(r.json.created_at) : NaN;
     if (!Number.isFinite(created)) {
-      notes.push(`queue time unknown (${r.ok ? 'no created_at in the answer' : failText(r)}): counted as 0`);
-      return 0;
+      const error = r.ok ? 'no created_at in the answer' : failText(r);
+      notes.push(`queue time unknown (${error}): counted as 0`);
+      return { ms: 0, error };
     }
-    return Math.max(0, now() - created);
+    return { ms: Math.max(0, now() - created), error: null };
   })();
   const repoSize = gh(`/repos/${repo}`).then((r) => {
     if (!r.ok) return { ok: false, message: failText(r) };
@@ -701,7 +747,7 @@ function collectGitHub({ env, fetchImpl, sleep, now }) {
   });
   const tree = gh(`/repos/${repo}/git/trees/data?recursive=1`, { timeoutMs: 60_000 }).then((r) => (r.ok ? { ok: true, json: r.json } : { ok: false, message: failText(r) }));
   const walks = Promise.all(workflows.map((workflow) => readWalk(workflow, { gh, token, repo, fetchImpl, sleep, nowMs: now() })));
-  return { queuedMs, repoSize, tree, walks, notes };
+  return { queue, repoSize, tree, walks, notes, skipped: null };
 }
 
 /**
@@ -718,7 +764,8 @@ export async function collect({ env = process.env, fetchImpl = globalThis.fetch,
   const asManifest = (r, decode, name) => (r.ok ? decode(r.json) : { ok: false, message: `${name}/manifest.json: ${failText(r)}` });
 
   const gh = collectGitHub({ env, fetchImpl, sleep, now: clock });
-  const [r1, r2, rs, queuedMs] = await Promise.all([read(MANIFEST_V1_URL), read(MANIFEST_V2_URL), read(STATUS_V1_URL), gh.queuedMs]);
+  const [r1, r2, rs, queue] = await Promise.all([read(MANIFEST_V1_URL), read(MANIFEST_V2_URL), read(STATUS_V1_URL), gh.queue]);
+  const queuedMs = queue.ms;
   let v1 = asManifest(r1, readManifestV1, 'v1');
   let v2 = asManifest(r2, decodeManifestV2, 'v2');
   const status = rs.ok ? { ok: true, json: rs.json } : { ok: false, message: failText(rs) };
@@ -754,7 +801,7 @@ export async function collect({ env = process.env, fetchImpl = globalThis.fetch,
   }
 
   const [repoSize, tree, walks] = await Promise.all([gh.repoSize, gh.tree, gh.walks]);
-  return { nowMs: clock(), v1, v2, reRead, queuedMs, status, repoSize, tree, walks, ids, notes: [...gh.notes, ...notes] };
+  return { nowMs: clock(), v1, v2, reRead, queuedMs, queueError: queue.error, githubSkipped: gh.skipped, status, repoSize, tree, walks, ids, notes: [...gh.notes, ...notes] };
 }
 
 /** argv to options; throws an Error with a readable message on a bad argument. */
@@ -814,6 +861,10 @@ export async function main({
   }
   for (const n of doc.notes) log(`note: ${n}`);
   if (doc.unjudged.length > 0) log(`not judged this run: ${doc.unjudged.join(', ')}`);
+  // GitHub lists at most 100,000 entries (7 MB): feed:size was judged only as far as the listing went.
+  if (inputs.tree.ok && isObject(inputs.tree.json) && inputs.tree.json.truncated === true) {
+    log(annotation('warning', 'Data file size', 'the data tree listing was truncated, so some files were not judged'));
+  }
 
   let code = 0;
   if (opts.findingsPath) {

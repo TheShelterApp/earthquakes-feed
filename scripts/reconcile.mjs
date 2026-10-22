@@ -11,21 +11,41 @@
 // across runs in the three permanent board issues ("[health] alert pipeline", "[health] feed", "[health] platform";
 // label health-board; pinned and locked), as a hidden `<!-- health-state v1 {json} -->` marker at the end of each body.
 // It applies the reconcile parameters of the rule each finding names: the 2-run confirmation, the 24 h hold, 4 of the
-// last 8 runs, resolving after N healthy runs, the time escalation, the inhibitions, the HEALTH_SILENCES silences, the
-// frozen keys of an input that could not be read, and the P2 red hour.
+// last 8 samples, resolving after N healthy runs, the time escalation, the promotion (status.json unreadable for 60 min
+// becomes P1), the inhibitions, the HEALTH_SILENCES silences, the frozen keys of an input that could not be read, and
+// the P2 red hour. Samples, confirmations and resolves go by time, not by the number of runs: a run less than 10 min
+// after the previous sample shares its slot (and counts as no healthy run of its own), and a confirming run must come at
+// least 10 min after the first sighting, so an extra dispatch adds nothing. A resolved entry starts its samples afresh.
 //
-// Notifications (owner decisions 2026-10-22): a board gets a comment only when a P3 enters or an entry escalates (its
-// severity rises, or it passes its rule's age line). A P1/P2 row is silent: its alarm is the red run (a P1 on every run
-// while it holds, a P2 during its first hour, then green with ::error::). Members leaving and resolutions are silent
-// body edits. A single external source, a maintenance walk and the watcher itself never turn a run red. Shadow rules only
-// log "would notify". The Healthchecks.io pings are computed on every run but skipped while the HC_PING_KEY secret is
-// unset (no push channel for now).
+// Notifications (owner decisions 2026-10-22): a board gets a comment only when a P3 enters or passes its rule's age line
+// (the escalation), at most one item per key per run. A P1/P2 row is silent, and so is a rise into P1/P2 (config:bundle
+// by age, the promotion): the boards are public and P1 goes to the owner only, through the red run. Red only on
+// evidence: a P1 on every run its finding is present at P1/P2 or frozen, a P2 so during its first hour (then green with
+// ::error::); an entry held open only by its resolve count, or by a P4 sample below its line, is not red. Members leaving
+// and resolutions are silent body edits. A comment an inhibition held back goes out only on a run where the key's own
+// finding is present (a child that cleared while its parent was open never comments); one a silence held back goes out
+// when the silence ends. A single external source, a maintenance walk and the watcher itself never turn a run red.
+// Shadow rules only log "would notify". The Healthchecks.io pings are computed on every run but skipped while the
+// HC_PING_KEY secret is unset (no push channel for now). The last selftest is recorded on every board: 35 days without
+// one opens watcher:selftest-overdue.
+//
+// Boards: the first run that finds none creates all three at once, the labels first. That is a one-time rollout
+// notification to the repository's watchers; afterwards a board is created again only when one was deleted or renamed
+// by hand, never because of a finding (a P4 sample, a pending one or a shadow rule cannot open an issue). A key's
+// comment is posted before the body that records it: a comment GitHub refuses is rolled back and retried by the next
+// run, and a body that is not saved after its comment went out makes a rare duplicate rather than a lost comment. A
+// board locked against the bot's comment or body edit is unlocked around it and locked again. A body is shrunk to fit
+// (log rows, texts, closed rows, then rendered rows; the state keeps every open row); one that still does not fit is
+// neither written nor commented on. Once a day the pins and locks are checked again through GraphQL.
 //
 // Environment: GH_TOKEN (issues: write, actions: read), GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_SERVER_URL,
 // GITHUB_EVENT_NAME, HEALTH_SILENCES (repository variable), HC_PING_KEY (secret, optional), GITHUB_STEP_SUMMARY; with
 // --gate also GITHUB_OUTPUT, EVENT, SCHEDULE and SELFTEST_INPUT.
-// Exit codes: 0 green · 1 red (an open P1, a P2 in its first hour, the selftest) · 3 misconfigured or crashed. A failed
-// board write or ping is a ::warning:: and never changes the exit code.
+// Exit codes: 0 green · 1 red (a P1, a P2 in its first hour, the selftest) · 3 alerting itself is broken: a bad
+// argument, GH_TOKEN or GITHUB_REPOSITORY unset, the boards unreadable, a board body not created or saved (the memory
+// of every rule is lost, or it does not fit), a board created this run that cannot be labelled, board comments that
+// fail on two runs in a row, or a crash. A comment that fails once is an ::error::, retried by the next run, which
+// reports it as watcher:reconcile; a failed ping, label edit of an existing board, lock or pin check is a ::warning::.
 //
 // Dependency-free (Node >= 22, global fetch): the health workflow runs it from a sparse checkout without `npm ci`, so it
 // imports nothing but scripts/lib. Types: reconcile.d.mts. The pure core is exported for tests/reconcile.test.ts, which
@@ -73,16 +93,29 @@ const DAY = 24 * HOUR;
 export const SELFTEST_CRON = '17 9 1 * *';
 /** A board body stays under this (GitHub rejects a body over 65,536 characters). */
 export const MAX_BODY_CHARS = 60_000;
-/** Presence samples kept per key ('1' present, '0' absent; newest last): enough for 4 of the last 8 runs. */
+/** Presence samples kept per key ('1' present, '0' absent; newest last): enough for 4 of the last 8. */
 export const SAMPLE_WINDOW = 8;
+/**
+ * A run less than this after the previous sample shares its slot (present if either run saw the key, and no healthy run
+ * of its own toward a resolve), and a confirming run must come at least this long after the first sighting: a rerun, a
+ * queued or extra dispatch, or the Worker's double dispatch adds no evidence.
+ */
+export const SAMPLE_SLOT_MS = 10 * MIN;
+/** Without a selftest run for this long (and boards older than that) watcher:selftest-overdue opens. */
+export const SELFTEST_OVERDUE_MS = 35 * DAY;
+/** The boards' pin and lock are checked through GraphQL at most this often. */
+export const PIN_CHECK_MS = DAY;
+/** A board state keeps at most this many comment failures for watcher:reconcile. */
+export const MAX_FAULTS = 10;
 /** The state's event log keeps 7 days, at most 300 events (the oldest go first). */
 export const LOG_KEEP_MS = 7 * DAY;
 export const LOG_MAX_EVENTS = 300;
 /** The "Last 7 days" counters keep today and the 6 UTC days before it. */
 export const DAYS_KEPT = 7;
-/** A finding's text as the state keeps it; shortened to 160 characters when a body would not fit otherwise. */
+/** A finding's text as the state keeps it; shortened to 160, then 60 characters when a body would not fit otherwise. */
 export const STATE_TEXT_CHARS = 300;
 export const STATE_TEXT_SHORT_CHARS = 160;
+export const STATE_TEXT_MIN_CHARS = 60;
 /** Event rows rendered in a body (newest first); the state keeps more. */
 export const LOG_ROWS_SHOWN = 50;
 /** HEALTH_SILENCES holds at most this many entries. */
@@ -92,7 +125,7 @@ export const PING_REASON_CHARS = 1_000;
 export const PING_TIMEOUT_MS = 10_000;
 /** The severity label of a board: its worst open non-shadow severity, or ok. */
 export const SEVERITY_LABELS = Object.freeze({ P1: 'health:p1', P2: 'health:p2', P3: 'health:p3', ok: 'health:ok' });
-/** The five labels reconcile uses, created when GitHub refuses an issue for a missing label. */
+/** The five labels reconcile uses, created before the first board (and again when GitHub refuses one as missing). */
 export const LABEL_DEFS = Object.freeze([
   Object.freeze({ name: BOARD_LABEL, color: '5319e7', description: 'Permanent health board, written by the health workflow' }),
   Object.freeze({ name: SEVERITY_LABELS.P1, color: 'b60205', description: 'Health board with an open P1 (page)' }),
@@ -103,6 +136,8 @@ export const LABEL_DEFS = Object.freeze([
 
 const API = 'https://api.github.com';
 const READ_ATTEMPTS = 3;
+/** A comment is tried this often (BACKOFF_MS apart) on a network error, a 5xx or a 429. */
+const COMMENT_ATTEMPTS = 3;
 const BACKOFF_MS = Object.freeze([2_000, 5_000]);
 const REQUEST_TIMEOUT_MS = 20_000;
 const MAX_MEMBERS = 50;
@@ -110,8 +145,12 @@ const KEY_RE = /^[a-z0-9][a-z0-9._:-]*$/;
 const EVENTS = Object.freeze(['open', 'escalate', 'resolve', 'would-resolve', 'would-notify', 'notify']);
 const BOARD_IDS = Object.freeze(Object.keys(BOARDS));
 const SELFTEST_KEY = RULES['alerts:selftest'].key;
+const RECONCILE_WATCHER_ID = 'reconcile';
+const SELFTEST_WATCHER_ID = 'selftest-overdue';
 const STATUS_KEYS = Object.freeze([RULES['alerts:status:stale'].key, RULES['alerts:status:unreadable'].key]);
 const RENDER_ROWS = Object.freeze([LOG_ROWS_SHOWN, 25, 10, 0]);
+/** The last resort of fitBody: at most this many rows per table (worst first); the state keeps every row. */
+const TABLE_ROWS = Object.freeze([40, 20, 10]);
 const BOARD_SCOPE = Object.freeze({
   alerts: "The Shelter's alert pipeline: the alerts gateway's public status.json (providers, detection, delivery, budget)",
   feed: 'the earthquakes feed: the live manifests, the per-source status, the data files and the maintenance walks',
@@ -140,6 +179,13 @@ const ordered = (obj, order) => {
 const byKey = (a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
 /** Worst severity first, then the oldest episode, then the key. */
 const byWorst = (a, b) => severityRank(a.severity) - severityRank(b.severity) || (a.episodeSinceMs ?? Infinity) - (b.episodeSinceMs ?? Infinity) || byKey(a, b);
+/**
+ * An open P1/P2 entry whose finding is present this run below a red severity: a P4 sample keeps it open until it
+ * resolves (coverage:all while two providers still fail), but its condition no longer holds, so it is not red and fails
+ * no check.
+ */
+const heldBelowRed = (e) => e.open && redSeverity(e.severity) && e.frozen === null && e.found !== null && !redSeverity(e.found);
+const BELOW_LINE_NOTE = 'below its line this run: not red, open until it resolves';
 
 /**
  * Untrusted text as one line of markdown that is safe inside a table cell and notifies nobody: no pipes, no @mentions,
@@ -194,10 +240,12 @@ function blankEntry(key, board) {
     firstSeenMs: null,
     lastSeenMs: null,
     samples: '',
+    sampleMs: [],
     firstSampleMs: null,
     notified: null,
     escalated: false,
     escalationNotified: false,
+    retryComment: false,
     redSinceMs: null,
     silence: null,
     muted: null,
@@ -231,11 +279,16 @@ function normalizeEntry(key, raw, board) {
   e.absentRuns = count(raw.absentRuns);
   e.firstSeenMs = numOrNull(raw.firstSeenMs);
   e.lastSeenMs = numOrNull(raw.lastSeenMs);
-  e.samples = typeof raw.samples === 'string' && /^[01]*$/.test(raw.samples) ? raw.samples.slice(-SAMPLE_WINDOW) : '';
-  e.firstSampleMs = numOrNull(raw.firstSampleMs);
+  // The samples and their times go together: a pair that does not match starts the window afresh.
+  if (typeof raw.samples === 'string' && /^[01]*$/.test(raw.samples) && Array.isArray(raw.sampleMs) && raw.sampleMs.length === raw.samples.length && raw.sampleMs.every(finite)) {
+    e.samples = raw.samples.slice(-SAMPLE_WINDOW);
+    e.sampleMs = raw.sampleMs.slice(-SAMPLE_WINDOW);
+  }
+  e.firstSampleMs = oldestFailingSample(e);
   e.notified = severityOrNull(raw.notified);
   e.escalated = raw.escalated === true;
   e.escalationNotified = raw.escalationNotified === true;
+  e.retryComment = raw.retryComment === true;
   e.redSinceMs = numOrNull(raw.redSinceMs);
   e.silence = isObject(raw.silence) && typeof raw.silence.spec === 'string' && SEVERITIES.includes(raw.silence.severity) ? { spec: oneLine(raw.silence.spec, 300), severity: raw.silence.severity } : null;
   e.muted = isObject(raw.muted) && (raw.muted.by === 'inhibited' || raw.muted.by === 'silenced') && typeof raw.muted.note === 'string' ? { by: raw.muted.by, note: oneLine(raw.muted.note, 300) } : null;
@@ -244,6 +297,35 @@ function normalizeEntry(key, raw, board) {
 }
 
 const validEvent = (x) => isObject(x) && finite(x.ms) && typeof x.key === 'string' && KEY_RE.test(x.key) && x.key.length <= 120 && EVENTS.includes(x.event);
+const validFault = (x) => isObject(x) && finite(x.ms) && typeof x.text === 'string';
+
+/** The time of the oldest '1' still in an entry's sample window, or null. */
+function oldestFailingSample(e) {
+  const i = e.samples.indexOf('1');
+  return i < 0 ? null : e.sampleMs[i];
+}
+
+/**
+ * Add this run's sample ('1' present, '0' absent). A run less than SAMPLE_SLOT_MS after the newest slot shares it: the
+ * slot becomes present when either run saw the key (and then takes this run's time, so its time is a run that saw it).
+ * Returns whether the run opened a slot of its own (only such an absent run counts toward a resolve).
+ */
+function addSample(e, bit, nowMs) {
+  const last = e.samples.length - 1;
+  let opened = false;
+  if (last >= 0 && nowMs - e.sampleMs[last] < SAMPLE_SLOT_MS) {
+    if (bit === '1' && e.samples[last] === '0') {
+      e.samples = `${e.samples.slice(0, last)}1`;
+      e.sampleMs = [...e.sampleMs.slice(0, last), nowMs];
+    }
+  } else {
+    e.samples = `${e.samples}${bit}`.slice(-SAMPLE_WINDOW);
+    e.sampleMs = [...e.sampleMs, nowMs].slice(-SAMPLE_WINDOW);
+    opened = true;
+  }
+  e.firstSampleMs = oldestFailingSample(e);
+  return opened;
+}
 
 /** A state object checked field by field; null for a wrong version or board (the board then starts empty). */
 function normalizeState(raw, board) {
@@ -262,6 +344,7 @@ function normalizeState(raw, board) {
     }
   }
   const log = Array.isArray(raw.log) ? raw.log.filter(validEvent).map((x) => ({ ms: x.ms, key: x.key, event: x.event, severity: severityOrNull(x.severity) })) : [];
+  const faults = Array.isArray(raw.faults) ? raw.faults.filter(validFault).slice(-MAX_FAULTS).map((x) => ({ ms: x.ms, text: oneLine(x.text, 300) })) : [];
   const days = {};
   if (isObject(raw.days)) {
     for (const d of Object.keys(raw.days).sort()) {
@@ -272,12 +355,16 @@ function normalizeState(raw, board) {
   return {
     v: 1,
     board: b,
+    createdMs: numOrNull(raw.createdMs),
     updatedMs: numOrNull(raw.updatedMs),
     runId: typeof raw.runId === 'string' ? oneLine(raw.runId, 40) : null,
     runUrl: runUrlOrNull(raw.runUrl),
     pings: raw.pings === 'sent' ? 'sent' : 'skipped',
     evaluators,
     checks,
+    lastSelftestMs: numOrNull(raw.lastSelftestMs),
+    pinsCheckedMs: numOrNull(raw.pinsCheckedMs),
+    faults,
     entries,
     log,
     days,
@@ -306,9 +393,23 @@ export function parseBoardState(body, board) {
   return normalizeState(raw, board);
 }
 
-/** The marker: JSON with every < and > escaped, so ` -->` can never appear inside it. */
+/** Entry fields the marker leaves out: the rule gives board, class and shadow, and the samples give firstSampleMs. */
+const DERIVED_FIELDS = new Set(['board', 'class', 'shadow', 'firstSampleMs']);
+const BLANK_ENTRY = blankEntry('', '');
+const isBlank = (v, blank) => v === blank || (Array.isArray(v) && v.length === 0 && Array.isArray(blank) && blank.length === 0);
+
+/** An entry as the marker stores it: no derived field and no field at its blank value (normalizeEntry restores both). */
+function compactEntry(e) {
+  const out = {};
+  for (const [k, v] of Object.entries(e)) if (k === 'key' || k === 'rule' || (!DERIVED_FIELDS.has(k) && !isBlank(v, BLANK_ENTRY[k]))) out[k] = v;
+  return out;
+}
+
+/** The marker: compact JSON with every < and > escaped, so ` -->` can never appear inside it. */
 function stateMarker(state) {
-  const json = JSON.stringify(state).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
+  const entries = {};
+  for (const [k, e] of Object.entries(state.entries)) entries[k] = compactEntry(e);
+  const json = JSON.stringify({ ...state, entries }).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
   return `<!-- ${STATE_MARKER} ${json} -->`;
 }
 
@@ -368,29 +469,36 @@ export function parseSilences(text, nowMs) {
   return { silences, errors };
 }
 
+/** Workflow-run conclusions of a dispatched health run that judged nothing, so it cannot stand in for the fallback. */
+const NOT_A_RUN = Object.freeze(['cancelled', 'skipped']);
+
 /**
  * Whether this health run judges at all, and whether it is a selftest. health.yml's own fallback cron
  * (HEALTH_FALLBACK_CRON) skips its checks when a workflow_dispatch health run was created within SCHEDULE_SKIP_MS,
- * whatever that run's status (on 2026-10-21 the dispatched run created at 15:22:30 was still running when the
- * scheduled one started at 15:22:39). A list that could not be read (null) means run.
+ * whatever that run's status otherwise (on 2026-10-21 the dispatched run created at 15:22:30 was still running when the
+ * scheduled one started at 15:22:39). A run that was cancelled or skipped does not count: a pending dispatched run is
+ * cancelled when a newer one joins the `health` concurrency group, so a fallback run that arrives behind it would
+ * otherwise skip on behalf of a run that never judged. A list that could not be read (null) means run.
+ * `dispatchedRuns` are the workflow runs as the Actions API lists them (created_at, status, conclusion).
  */
-export function scheduleGate({ eventName, schedule, selftestInput, dispatchedCreatedAt, nowMs }) {
+export function scheduleGate({ eventName, schedule, selftestInput, dispatchedRuns, nowMs }) {
   const cron = String(schedule ?? '').trim();
   const selftest = String(selftestInput ?? '').trim() === 'true' || cron === SELFTEST_CRON;
   if (eventName !== 'schedule' || cron !== HEALTH_FALLBACK_CRON) {
     return { run: true, selftest, reason: eventName === 'schedule' ? `schedule '${cron}'` : `event ${eventName || '(unknown)'}` };
   }
-  if (!Array.isArray(dispatchedCreatedAt)) {
+  if (!Array.isArray(dispatchedRuns)) {
     return { run: true, selftest, reason: 'the dispatched health runs could not be listed, so the fallback cron runs the checks' };
   }
-  const recent = dispatchedCreatedAt
-    .map((s) => Date.parse(String(s)))
+  const recent = dispatchedRuns
+    .filter((x) => isObject(x) && !NOT_A_RUN.includes(x.conclusion))
+    .map((x) => Date.parse(String(x.created_at)))
     .filter((ms) => Number.isFinite(ms) && Math.abs(nowMs - ms) < SCHEDULE_SKIP_MS)
     .sort((a, b) => b - a);
   if (recent.length > 0) {
     return { run: false, selftest, reason: `a workflow_dispatch health run was created ${ageText(nowMs - recent[0])} ago (within ${ageText(SCHEDULE_SKIP_MS)}): the fallback cron skips its checks` };
   }
-  return { run: true, selftest, reason: `no workflow_dispatch health run in the last ${ageText(SCHEDULE_SKIP_MS)}: the fallback cron runs the checks` };
+  return { run: true, selftest, reason: `no workflow_dispatch health run (not cancelled or skipped) created in the last ${ageText(SCHEDULE_SKIP_MS)}: the fallback cron runs the checks` };
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -405,8 +513,9 @@ function entryItem(e, nowMs) {
   const ratio = e.enteredBy === 'ratio' && r.ratio ? `; entered on ${onesIn(e.samples, r.ratio.of)} of the last ${r.ratio.of} runs` : '';
   return `${head(e)} — ${md(e.text)} (${sinceText(e, nowMs)}${ratio})`;
 }
-const riseItem = (e, was, nowMs) => `${head(e)} — now ${e.severity}, was ${was}: ${md(e.text)} (${sinceText(e, nowMs)})`;
 const agingItem = (e, nowMs) => `${head(e)} — open for ${ageText(nowMs - e.episodeSinceMs)}: ${md(e.text)} (${sinceText(e, nowMs)})`;
+/** An entry that is past its escalation line in the same run: one item says both. */
+const agingNote = (e) => `; past its ${ageText(RULES[e.rule].escalateAfterMs)} escalation line`;
 
 /** Merge a duplicate finding of one key: the worst severity wins, members are merged. */
 function addPresent(present, f, evaluator) {
@@ -420,12 +529,18 @@ function addPresent(present, f, evaluator) {
   present.set(f.key, { f: members.length > 0 ? { ...winner.f, members } : winner.f, evaluator: winner.evaluator });
 }
 
-/** Whether the run is red, and why (frozen entries included; shadow, inhibited and never-red classes excluded). */
+/**
+ * Whether the run is red, and why. Red only on evidence: an open P1/P2 entry whose finding is present this run at P1 or
+ * P2, or that is frozen (its evaluator missing or stale, or the key not judged: it cannot be told from one that still
+ * holds). An entry held open only by its resolve count, or by a P4 sample below its line, is not red; neither are
+ * shadow, inhibited and never-red classes.
+ */
 function redVerdict(entries, nowMs, selftest) {
   const reasons = [];
   const boards = new Set();
   for (const e of [...entries].sort(byWorst)) {
     if (!e.open || e.shadow || e.muted?.by === 'inhibited' || !mayTurnRed(e.class)) continue;
+    if ((e.frozen === null && e.found === null) || heldBelowRed(e)) continue;
     if (e.severity === 'P1') reasons.push(`P1 \`${e.key}\``);
     else if (e.severity === 'P2' && finite(e.redSinceMs) && nowMs - e.redSinceMs < P2_RED_MS) reasons.push(`P2 \`${e.key}\` (red for its first hour: ${ageText(nowMs - e.redSinceMs)} so far)`);
     else continue;
@@ -444,12 +559,15 @@ function computePings(entries, ctx, evaluatorStatus, selftest) {
   const pings = [];
   const drivers = [];
   const describe = (list) => oneLine(list.map((e) => `${e.severity} ${e.key}: ${e.text}`).join('; '), PING_REASON_CHARS);
+  // An entry waiting on its resolve count keeps its check failing (no flapping push); one present below its line not.
   for (const check of VERDICT_CHECKS) {
-    const culprits = live.filter((e) => e.check === check && redSeverity(e.severity));
+    const culprits = live.filter((e) => e.check === check && redSeverity(e.severity) && !heldBelowRed(e));
     pings.push({ check, signal: culprits.length > 0 ? 'fail' : 'success', reason: culprits.length > 0 ? describe(culprits) : 'no open P1/P2 finding' });
     drivers.push([...new Set(culprits.map((e) => e.board))]);
   }
-  const aging = live.filter((e) => e.escalated);
+  // gh-aging fails while an announced escalation is open, muted or not: a mute that comes later must not flip it back to
+  // /0, or the unmute would push a second time in the same episode. An escalation still held back pushes once announced.
+  const aging = [...entries].filter((e) => e.open && !e.shadow && e.escalated && e.escalationNotified).sort(byWorst);
   pings.push({ check: AGING_CHECK, signal: aging.length > 0 ? 'fail' : 'success', reason: aging.length > 0 ? describe(aging) : 'no escalated entry' });
   drivers.push([...new Set(aging.map((e) => e.board))]);
   if (ctx.eventName === 'workflow_dispatch') {
@@ -474,11 +592,16 @@ function labelFor(state) {
   return worst ? SEVERITY_LABELS[worst] : SEVERITY_LABELS.ok;
 }
 
-/** Render, then shrink the state until the body fits: rendered log rows, then the oldest log events, then texts. */
+/**
+ * Render, then shrink until the body fits: rendered log rows, then the oldest log events, then texts (160 characters),
+ * then the closed rows, then the rendered rows of each table, then texts of 60. `fits` is false when even that is over
+ * MAX_BODY_CHARS (about a hundred open rows): the wrapper then neither saves the board nor posts its comment, and the
+ * run exits 3.
+ */
 function fitBody(board, state) {
-  const tryRows = (s) => {
+  const tryRows = (s, tableRows) => {
     for (const rows of RENDER_ROWS) {
-      const body = renderBody(board, s, { logRows: rows });
+      const body = renderBody(board, s, { logRows: rows, tableRows });
       if (body.length <= MAX_BODY_CHARS) return body;
     }
     return null;
@@ -496,13 +619,23 @@ function fitBody(board, state) {
     body = tryRows(s);
   }
   if (body === null) {
-    // Last resort: keep only the open rows (the samples of closed keys are the cheapest history to lose).
+    // Keep only the open rows (the samples of closed keys are the cheapest history to lose).
     const entries = {};
     for (const [k, e] of Object.entries(s.entries)) if (e.open) entries[k] = e;
     s = { ...s, entries };
-    body = tryRows(s) ?? renderBody(board, s, { logRows: 0 });
+    body = tryRows(s);
   }
-  return { body, state: s };
+  // Last resort: fewer rendered rows, then texts of 60 characters, with every row's memory kept.
+  for (const tableRows of TABLE_ROWS) if (body === null) body = tryRows(s, tableRows);
+  const fewest = TABLE_ROWS[TABLE_ROWS.length - 1];
+  if (body === null) {
+    const entries = {};
+    for (const [k, e] of Object.entries(s.entries)) entries[k] = { ...e, text: oneLine(e.text, STATE_TEXT_MIN_CHARS) };
+    s = { ...s, entries };
+    body = tryRows(s, fewest);
+  }
+  if (body === null) return { body: renderBody(board, s, { logRows: 0, tableRows: fewest }), state: s, fits: false };
+  return { body, state: s, fits: true };
 }
 
 /**
@@ -528,10 +661,16 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
   const existing = new Set(Array.isArray(context?.existing) ? context.existing.filter((b) => BOARD_IDS.includes(b)) : BOARD_IDS.filter((b) => prev[b] !== null));
   const active = (Array.isArray(silences) ? silences : []).filter((s) => isObject(s) && typeof s.pattern === 'string' && finite(s.untilMs) && nowMs < s.untilMs);
 
-  // The copies every board holds: the last applied document per evaluator (the max), the check states (the newest).
+  // The copies every board holds: the last applied document per evaluator, the last selftest and the last pin check
+  // (the max of each), the check states (the newest board's). The oldest board's creation, and the comments the last
+  // run could not post.
   const lastApplied = {};
   let checks = {};
   let checksMs = -Infinity;
+  let lastSelftestMs = null;
+  let pinsCheckedMs = null;
+  let boardsSinceMs = null;
+  const priorFaults = [];
   const before = new Map();
   for (const b of BOARD_IDS) {
     const s = prev[b];
@@ -541,6 +680,10 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
       checks = { ...s.checks };
       checksMs = s.updatedMs ?? -Infinity;
     }
+    if (finite(s.lastSelftestMs) && (lastSelftestMs === null || s.lastSelftestMs > lastSelftestMs)) lastSelftestMs = s.lastSelftestMs;
+    if (finite(s.pinsCheckedMs) && (pinsCheckedMs === null || s.pinsCheckedMs > pinsCheckedMs)) pinsCheckedMs = s.pinsCheckedMs;
+    if (finite(s.createdMs) && (boardsSinceMs === null || s.createdMs < boardsSinceMs)) boardsSinceMs = s.createdMs;
+    priorFaults.push(...s.faults);
     for (const [k, e] of Object.entries(s.entries)) before.set(k, e);
   }
 
@@ -606,6 +749,8 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
       annotations: buildAnnotations(all, null, ctx),
       evaluators: evaluatorStatus,
       replay: true,
+      pinCheck: false,
+      commentFaultsBefore: priorFaults.length,
     };
   }
 
@@ -620,15 +765,33 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
     const text = `the ${e} evaluator produced no findings this run (${evaluatorStatus[e].reason}): its entries are frozen until it does`;
     addPresent(present, makeFinding('watcher', { id: `evaluator:${e}`, text }), null);
   }
+  // The comments the last run could not post (it rolled them back, so this run posts them again): a watcher fault.
+  if (priorFaults.length > 0) {
+    const n = priorFaults.length;
+    const text = `the last health run could not post ${n === 1 ? 'a board comment' : `${n} board comments`} (rolled back, so this run posts ${n === 1 ? 'it' : 'them'} again): ${priorFaults[n - 1].text}`;
+    addPresent(present, makeFinding('watcher', { id: RECONCILE_WATCHER_ID, sinceMs: priorFaults[0].ms, text }), null);
+  }
   const selftestFinding = present.get(SELFTEST_KEY)?.f ?? null;
   present.delete(SELFTEST_KEY);
+  // The selftest proves the red path, and GitHub can drop its monthly cron without a trace: a long gap is a watcher
+  // fault. Counted from the last selftest, or from the oldest board's creation until the first (none at rollout).
+  const selftestMs = selftestFinding ? nowMs : lastSelftestMs;
+  const selftestBase = selftestMs ?? boardsSinceMs;
+  if (finite(selftestBase) && nowMs - selftestBase > SELFTEST_OVERDUE_MS) {
+    const since = selftestMs === null ? `no selftest since the boards were created at ${utcText(selftestBase)}` : `the last selftest ran at ${utcText(selftestBase)}`;
+    const text = `${since} (${ageText(nowMs - selftestBase)}; line ${ageText(SELFTEST_OVERDUE_MS)}): GitHub may have dropped the monthly selftest cron, so run the health workflow with watchdog_selftest=true`;
+    addPresent(present, makeFinding('watcher', { id: SELFTEST_WATCHER_ID, sinceMs: selftestBase + SELFTEST_OVERDUE_MS, text }), null);
+  }
 
-  // 2. Frozen keys keep their entry unchanged: no counters, no samples, no enter, no resolve.
-  const alertsFrozen = evaluatorStatus.alerts.state !== 'fresh' || STATUS_KEYS.some((k) => present.has(k) || before.get(k)?.open === true);
+  // 2. Frozen keys keep their entry unchanged: no counters, no samples, no enter, no resolve. Every other alerts:* key
+  // is frozen while status.json is stale or unreadable THIS run (or its status keys are not judged): on the first run
+  // the document is fresh again they are judged, so a P1 it shows is red on that run.
+  const notJudged = (key) => !present.has(key) && unjudged.some((p) => matchesKey(p, key));
+  const alertsFrozen = evaluatorStatus.alerts.state !== 'fresh' || STATUS_KEYS.some((k) => present.has(k) || notJudged(k));
   const frozenReason = (key) => {
     const entry = before.get(key);
     if (entry?.evaluator && evaluatorStatus[entry.evaluator].state !== 'fresh') return `not judged this run (the ${entry.evaluator} findings are ${evaluatorStatus[entry.evaluator].state})`;
-    if (!present.has(key) && unjudged.some((p) => matchesKey(p, key))) return 'not judged this run (its input could not be read)';
+    if (notJudged(key)) return 'not judged this run (its input could not be read)';
     if (alertsFrozen && key.startsWith('alerts:') && !key.startsWith('alerts:status:') && key !== SELFTEST_KEY) {
       return evaluatorStatus.alerts.state !== 'fresh' ? `not judged this run (the alerts findings are ${evaluatorStatus.alerts.state})` : 'not judged this run (status.json is stale or unreadable)';
     }
@@ -669,8 +832,7 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
       e.absentRuns = 0;
       e.firstSeenMs ??= nowMs;
       e.lastSeenMs = nowMs;
-      if (!e.samples.includes('1')) e.firstSampleMs = nowMs;
-      e.samples = `${e.samples}1`.slice(-SAMPLE_WINDOW);
+      addSample(e, '1', nowMs);
       e.rule = r.id;
       e.board = r.board;
       e.class = r.class;
@@ -684,13 +846,21 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
       let pending = null;
       let byRatio = false;
       if (notifiable(f.severity)) {
-        if (e.seenRuns < r.confirmRuns) {
+        // A confirming run counts only SAMPLE_SLOT_MS after the first sighting. A finding whose start is unknown
+        // (sinceMs null: a feed source that never fetched successfully) is held for its rule's line from that sighting.
+        const confirmed = e.seenRuns >= r.confirmRuns && nowMs - e.firstSeenMs >= (r.confirmRuns - 1) * SAMPLE_SLOT_MS;
+        const holdMs = Math.max(r.holdMs, f.sinceMs === null && finite(r.limits.lineMs) ? r.limits.lineMs : 0);
+        if (!confirmed) {
           eff = 'P4';
-          pending = `confirming ${e.seenRuns}/${r.confirmRuns}`;
-        } else if (r.holdMs > 0 && nowMs - e.firstSeenMs < r.holdMs) {
+          pending = `confirming ${Math.min(e.seenRuns, r.confirmRuns - 1)}/${r.confirmRuns}`;
+        } else if (holdMs > 0 && nowMs - e.firstSeenMs < holdMs) {
           eff = 'P4';
-          pending = `holding ${ageText(nowMs - e.firstSeenMs)} of ${ageText(r.holdMs)}`;
+          pending = `holding ${ageText(nowMs - e.firstSeenMs)} of ${ageText(holdMs)}${holdMs > r.holdMs ? ' (its start is unknown)' : ''}`;
         }
+      }
+      // The rule's promotion (alerts:status:unreadable: P1 once open for 60 min), while its finding holds.
+      if (e.open && r.promote && pending === null && notifiable(eff) && finite(e.openedMs) && nowMs - e.openedMs >= r.promote.afterMs && moreSevere(r.promote.to, eff)) {
+        eff = r.promote.to;
       }
       if (pending === null && eff === 'P4' && r.ratio && onesIn(e.samples, r.ratio.of) >= r.ratio.min) {
         eff = r.ratio.severity;
@@ -704,7 +874,10 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
         e.open = true;
         e.openedMs = nowMs;
         e.enteredBy = byRatio ? 'ratio' : 'line';
-        e.episodeSinceMs = Math.min(f.sinceMs ?? Infinity, e.firstSampleMs ?? e.firstSeenMs);
+        // The episode's start: by its line, the finding's own streak start (reconcile's first sighting when that is
+        // unknown); by ratio, the earlier of that and the oldest failing sample in the window (which only holds samples
+        // since the last resolve), so an older episode never dates a new one.
+        e.episodeSinceMs = byRatio ? Math.min(f.sinceMs ?? Infinity, e.firstSampleMs ?? nowMs) : (f.sinceMs ?? e.firstSeenMs);
         e.severity = eff;
         e.notified = null;
         e.escalated = false;
@@ -725,34 +898,40 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
       const r = RULES[e.rule];
       e.seenRuns = 0;
       e.firstSeenMs = null;
-      e.absentRuns += 1;
-      e.samples = `${e.samples}0`.slice(-SAMPLE_WINDOW);
-      if (!e.samples.includes('1')) e.firstSampleMs = null;
+      // Resolving goes by time too: an absent run in the slot of the previous sample (a rerun, an extra dispatch) adds
+      // no healthy run, so "2 healthy runs" spans at least 10 min.
+      if (addSample(e, '0', nowMs)) e.absentRuns += 1;
       if (e.open) {
         const need = e.enteredBy === 'ratio' ? r.resolveRunsAfterRatio : r.resolveRuns;
         if (e.absentRuns >= need && nowMs - (e.lastSeenMs ?? -Infinity) >= r.resolveAfterMs) {
           e.open = false;
+          // The next episode starts from nothing: the samples before the resolve neither re-open it nor date it.
+          e.samples = '';
+          e.sampleMs = [];
+          e.firstSampleMs = null;
           logEvent(e, e.shadow ? 'would-resolve' : 'resolve');
         }
       }
     }
     const r = RULES[e.rule];
-    if (e.open && !e.escalated && r.escalateAfterMs !== null && finite(e.episodeSinceMs) && nowMs - e.episodeSinceMs >= r.escalateAfterMs) {
+    // The time escalation, only on a run where the key's finding is present (a recovering entry does not escalate).
+    if (p !== null && e.open && !e.escalated && r.escalateAfterMs !== null && finite(e.episodeSinceMs) && nowMs - e.episodeSinceMs >= r.escalateAfterMs) {
       e.escalated = true;
       logEvent(e, 'escalate');
     }
     if (e.open && redSeverity(e.severity) && e.redSinceMs === null) e.redSinceMs = nowMs;
-    if (!e.open) e.muted = null;
+    if (!e.open) {
+      e.muted = null;
+      e.retryComment = false;
+    }
     const keep = e.open || (p !== null && e.pending !== null) || (r.ratio !== null && e.samples.includes('1'));
     if (keep) next.set(key, e);
   }
 
-  // 4. Mute: shadow, then inhibited (by an open entry or a present P1-P3 finding), then silenced.
-  const inhibitors = [...new Set([
-    ...[...next.values()].filter((e) => e.open && !e.shadow).map((e) => e.key),
-    ...[...present.values()].filter(({ f }) => notifiable(f.severity) && !f.shadow).map(({ f }) => f.key),
-  ])].sort();
-  const membersOf = (k) => present.get(k)?.f.members ?? next.get(k)?.members ?? [];
+  // 4. Mute: shadow, then inhibited, then silenced. Only an entry open after this run's holds inhibits (a frozen one
+  // while it is open): a finding still confirming or holding shows as P4 and mutes nothing.
+  const inhibitors = [...next.values()].filter((e) => e.open && !e.shadow).map((e) => e.key).sort();
+  const membersOf = (k) => next.get(k)?.members ?? [];
   const inhibitorOf = (key) => {
     for (const inh of INHIBITIONS) {
       for (const k of inhibitors) {
@@ -788,8 +967,12 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
     e.muted = moreSevere(e.severity, record.severity) ? null : { by: 'silenced', note: oneLine(`silenced until ${utcText(s.untilMs)}${s.reason ? `: ${s.reason}` : ''}`, 300) };
   }
 
-  // 5. Notifications: one comment per board per run; a due item that is muted stays due.
+  // 5. Notifications: one comment per board per run, one item per key. A due item that is muted stays due. One an
+  // inhibition held back goes out only on a run where the key's own finding is present (a child whose condition
+  // cleared while its parent was open never comments); one a silence held back goes out once the silence ends, and one
+  // whose post failed (rolled back by the wrapper) on the next run, present or not.
   const items = { alerts: [], feed: [], platform: [] };
+  const announced = { alerts: [], feed: [], platform: [] };
   for (const e of [...next.values()].sort(byWorst)) {
     if (!e.open || e.frozen) continue;
     if (e.shadow) {
@@ -801,28 +984,36 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
       continue;
     }
     if (e.muted || !notifiable(e.severity)) continue;
+    if (e.found === null && before.get(e.key)?.muted?.by !== 'silenced' && !e.retryComment) continue;
+    const was = { key: e.key, notified: e.notified, escalationNotified: e.escalationNotified };
+    let item = null;
+    // A P3 entry gets its comment. A P1/P2 entry, and a rise (it always lands at P1 or P2: config:bundle by age, the
+    // promotion of an unreadable status.json), is announced by the red run alone: the boards are public, and P1 goes to
+    // the owner only (owner decisions 2026-10-22).
     if (e.notified === null) {
-      // A P3 entry gets its comment; a P1/P2 entry is announced by the red run.
-      if (e.severity === 'P3') {
-        items[e.board].push(entryItem(e, nowMs));
-        logEvent(e, 'notify');
-      }
+      if (e.severity === 'P3') item = entryItem(e, nowMs);
       e.notified = e.severity;
     } else if (moreSevere(e.severity, e.notified)) {
-      items[e.board].push(riseItem(e, e.notified, nowMs));
-      logEvent(e, 'notify');
       e.notified = e.severity;
     }
+    // An entry already past its escalation line when it enters (its finding's sinceMs hours old on the first run after
+    // the rollout) gets one item that says both.
     if (e.escalated && !e.escalationNotified) {
-      items[e.board].push(agingItem(e, nowMs));
-      logEvent(e, 'notify');
+      item = item === null ? agingItem(e, nowMs) : `${item}${agingNote(e)}`;
       e.escalationNotified = true;
+    }
+    e.retryComment = false;
+    if (item !== null) {
+      items[e.board].push(item);
+      announced[e.board].push(was);
+      logEvent(e, 'notify');
     }
   }
   const comments = [];
   for (const b of BOARD_IDS) {
     if (items[b].length === 0) continue;
-    comments.push({ board: b, body: [...items[b], `Run: ${ctx.runUrl ?? '(a local run)'}`].join('\n\n') });
+    // `keys`: the keys it announces, with what they had before (the wrapper restores it when the post fails).
+    comments.push({ board: b, body: [...items[b], `Run: ${ctx.runUrl ?? '(a local run)'}`].join('\n\n'), keys: announced[b] });
     bump(b, 'comments');
   }
 
@@ -837,7 +1028,9 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
     running[p.check] = p.signal;
   });
 
-  // 8. States and bodies.
+  // 8. States and bodies. Every board exists from the first run on (see the header): nothing here decides whether one
+  // is needed, so no finding can be the reason an issue is created.
+  const pinCheck = pinsCheckedMs === null || nowMs - pinsCheckedMs >= PIN_CHECK_MS;
   const applied = { ...lastApplied };
   for (const e of fresh) applied[e] = Math.max(applied[e] ?? -Infinity, evaluatorStatus[e].generatedAtMs);
   const evaluators = ordered(applied, EVALUATORS);
@@ -856,27 +1049,25 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
     const state = {
       v: 1,
       board: b,
+      createdMs: prev[b]?.createdMs ?? nowMs,
       updatedMs: nowMs,
       runId: ctx.runId,
       runUrl: ctx.runUrl,
       pings: ctx.pingsEnabled ? 'sent' : 'skipped',
       evaluators: { ...evaluators },
       checks: { ...checksOut },
+      lastSelftestMs: selftestMs,
+      pinsCheckedMs: pinCheck ? nowMs : pinsCheckedMs,
+      faults: [],
       entries,
       log,
       days: daysKept,
     };
-    const needed = existing.has(b) || Object.keys(entries).length > 0 || log.length > 0;
-    if (!needed) {
-      states[b] = null;
-      bodies[b] = null;
-    } else {
-      const fit = fitBody(b, state);
-      states[b] = fit.state;
-      bodies[b] = fit.body;
-      if (!existing.has(b)) create.push(b);
-    }
-    labels[b] = [BOARD_LABEL, labelFor(states[b] ?? state)];
+    const fit = fitBody(b, state);
+    states[b] = fit.state;
+    bodies[b] = fit.body;
+    if (!existing.has(b)) create.push(b);
+    labels[b] = [BOARD_LABEL, labelFor(states[b])];
   }
   const finalEntries = BOARD_IDS.flatMap((b) => Object.values(states[b]?.entries ?? {}));
   return {
@@ -891,14 +1082,57 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
     annotations: buildAnnotations(finalEntries, selftestFinding, ctx),
     evaluators: evaluatorStatus,
     replay: false,
+    pinCheck,
+    commentFaultsBefore: priorFaults.length,
   };
+}
+
+/**
+ * The states and bodies once some of a run's comments could not be posted. Each comment's keys get back the notified
+ * and escalationNotified they had before the run and are marked for a retry (the next run posts them, present or not);
+ * the run's notify events and comment count for them are taken back; and the failures are kept on the watcher's board,
+ * where the next run turns them into watcher:reconcile. Pure.
+ * @param {ReturnType<typeof reconcile>} result
+ * @param {Array<{ comment: { board: string, keys: Array<{ key: string, notified: string | null, escalationNotified: boolean }> }, message: string }>} failed
+ */
+export function withFailedComments(result, failed) {
+  const states = { ...result.state };
+  const bodies = { ...result.bodies };
+  const touched = new Set();
+  for (const { comment } of failed) {
+    const s = states[comment.board];
+    if (!s) continue;
+    const keys = new Set(comment.keys.map((k) => k.key));
+    const entries = { ...s.entries };
+    for (const k of comment.keys) {
+      if (entries[k.key]) entries[k.key] = { ...entries[k.key], notified: k.notified, escalationNotified: k.escalationNotified, retryComment: true };
+    }
+    const day = isoDate(s.updatedMs);
+    const days = { ...s.days };
+    if (days[day]) days[day] = { ...days[day], comments: Math.max(0, days[day].comments - 1) };
+    const log = s.log.filter((x) => !(x.ms === s.updatedMs && x.event === 'notify' && keys.has(x.key)));
+    states[comment.board] = { ...s, entries, log, days };
+    touched.add(comment.board);
+  }
+  const wb = RULES.watcher.board;
+  if (states[wb] && failed.length > 0) {
+    const faults = failed.map(({ comment, message }) => ({ ms: states[wb].updatedMs, text: oneLine(`"${BOARDS[comment.board]}": ${message}`, 300) }));
+    states[wb] = { ...states[wb], faults: [...states[wb].faults, ...faults].slice(-MAX_FAULTS) };
+    touched.add(wb);
+  }
+  for (const b of touched) {
+    const fit = fitBody(b, states[b]);
+    states[b] = fit.state;
+    bodies[b] = fit.body;
+  }
+  return { state: states, bodies };
 }
 
 function buildAnnotations(entries, selftestFinding, ctx) {
   const out = [];
   for (const e of [...entries].filter((x) => x.open).sort(byWorst)) {
     const level = e.shadow ? 'notice' : redSeverity(e.severity) ? 'error' : 'warning';
-    const flags = [e.shadow ? 'shadow rule: log only' : null, e.muted ? `muted: ${e.muted.note}` : null, e.frozen].filter(Boolean);
+    const flags = [e.shadow ? 'shadow rule: log only' : null, e.muted ? `muted: ${e.muted.note}` : null, e.frozen, heldBelowRed(e) ? BELOW_LINE_NOTE : null].filter(Boolean);
     out.push(annotation(level, `${e.severity} ${e.key}`, `${e.text}${flags.length > 0 ? ` (${flags.join('; ')})` : ''}`));
   }
   if (selftestFinding) out.push(annotation('error', `P1 ${SELFTEST_KEY}`, selftestFinding.text));
@@ -921,7 +1155,7 @@ function buildSummary({ ctx, nowMs, evaluatorStatus, all, present, comments, pin
   else {
     lines.push('');
     for (const e of open) {
-      const flags = [e.muted ? `muted: ${md(e.muted.note)}` : null, e.frozen ? md(e.frozen) : null, e.escalated ? 'escalated' : null].filter(Boolean);
+      const flags = [e.muted ? `muted: ${md(e.muted.note)}` : null, e.frozen ? md(e.frozen) : null, heldBelowRed(e) ? BELOW_LINE_NOTE : null, e.escalated ? 'escalated' : null].filter(Boolean);
       lines.push(`- ${e.severity} \`${e.key}\` (${e.board}, ${sinceText(e, nowMs)}): ${md(e.text)}${flags.length > 0 ? ` · ${flags.join(' · ')}` : ''}`);
     }
   }
@@ -960,41 +1194,49 @@ function conditionCell(e) {
   if (e.escalated) parts.push('escalated');
   if (e.muted) parts.push(`muted: ${md(e.muted.note)}`);
   if (e.frozen) parts.push(md(e.frozen));
+  if (heldBelowRed(e)) parts.push(BELOW_LINE_NOTE);
   return parts.join(' · ');
 }
 
 /**
  * A board's full issue body, a pure function of its state (so a replay renders the body it found). `view.logRows`
- * limits the rendered event rows (default 50).
+ * limits the rendered event rows (default 50), `view.tableRows` the rows of each table (default all).
  */
 export function renderBody(board, state, view = {}) {
   const logRows = Number.isInteger(view.logRows) && view.logRows >= 0 ? view.logRows : LOG_ROWS_SHOWN;
+  const tableRows = Number.isInteger(view.tableRows) && view.tableRows >= 0 ? view.tableRows : Infinity;
   const nowMs = state.updatedMs ?? 0;
   const entries = Object.values(state.entries ?? {});
   const open = entries.filter((e) => e.open && !e.shadow).sort(byWorst);
   const pending = entries.filter((e) => !e.open && e.pending).sort(byKey);
   const shadow = entries.filter((e) => e.open && e.shadow).sort(byWorst);
   const lines = [];
+  const more = (list) => {
+    if (list.length > tableRows) lines.push('', `${list.length - tableRows} more row(s) are kept in the state only (the run's job summary lists them).`);
+  };
   lines.push(
-    `Automated health board of ${BOARD_SCOPE[board] ?? board}. The health workflow rewrites this body on every run and comments only when a P3 enters or an entry escalates; P1/P2 rows, members leaving and resolutions are silent edits (the red run is the P1/P2 alarm). Severity: P1 page, P2 urgent, P3 ticket. Runbook: README "Health watchdogs".`,
+    `Automated health board of ${BOARD_SCOPE[board] ?? board}. The health workflow rewrites this body on every run and comments only when a P3 enters or passes its age line; P1/P2 rows (a rise into P1/P2 too), members leaving and resolutions are silent edits (the red run is the P1/P2 alarm). Severity: P1 page, P2 urgent, P3 ticket. Runbook: README "Health watchdogs".`,
   );
   lines.push('', '### Open', '');
   if (open.length === 0) lines.push('Nothing open.');
   else {
     lines.push('| Sev | Key | Since | Condition |', '|---|---|---|---|');
-    for (const e of open) lines.push(`| ${e.severity} | \`${e.key}\` | ${sinceCell(e, nowMs)} | ${conditionCell(e)} |`);
+    for (const e of open.slice(0, tableRows)) lines.push(`| ${e.severity} | \`${e.key}\` | ${sinceCell(e, nowMs)} | ${conditionCell(e)} |`);
+    more(open);
   }
   lines.push('', '### Pending', '');
   if (pending.length === 0) lines.push('Nothing confirming or holding.');
   else {
     lines.push('| Key | Judged | Waiting | Condition |', '|---|---|---|---|');
-    for (const e of pending) lines.push(`| \`${e.key}\` | ${e.found ?? '?'} | ${md(e.pending)} | ${conditionCell(e)} |`);
+    for (const e of pending.slice(0, tableRows)) lines.push(`| \`${e.key}\` | ${e.found ?? '?'} | ${md(e.pending)} | ${conditionCell(e)} |`);
+    more(pending);
   }
   lines.push('', '### Shadow rules (log only)', '');
   if (shadow.length === 0) lines.push('No shadow rule would notify now.');
   else {
     lines.push('| Sev | Key | Since | Condition |', '|---|---|---|---|');
-    for (const e of shadow) lines.push(`| ${e.severity} | \`${e.key}\` | ${sinceCell(e, nowMs)} | ${conditionCell(e)} |`);
+    for (const e of shadow.slice(0, tableRows)) lines.push(`| ${e.severity} | \`${e.key}\` | ${sinceCell(e, nowMs)} | ${conditionCell(e)} |`);
+    more(shadow);
   }
   lines.push('', '### Last 7 days', '');
   const dayKeys = Object.keys(state.days ?? {}).sort().reverse();
@@ -1009,6 +1251,7 @@ export function renderBody(board, state, view = {}) {
     lines.push(`| **7 days** | ${total.red} | ${total.comments} | ${total.transitions} | ${total.would} |`, '');
   }
   lines.push(`Push transitions count the checks that went to /fail${state.pings === 'sent' ? '' : ' (pings skipped: HC_PING_KEY unset, so these are the pushes that would have gone out)'}.`);
+  if (board === 'alerts') lines.push('', `Last selftest (the forced P1 that proves the red run): ${finite(state.lastSelftestMs) ? utcText(state.lastSelftestMs) : 'none yet'}.`);
   const log = state.log ?? [];
   const opened = new Map();
   for (const x of log) if (x.event === 'open') opened.set(x.key, (opened.get(x.key) ?? 0) + 1);
@@ -1073,7 +1316,7 @@ async function request(fetchImpl, url, { method = 'GET', headers = {}, body, tim
   }
 }
 
-/** The GitHub REST/GraphQL client: GET, PATCH and PUT are retried on 5xx and network errors (2 s, 5 s); POST is not. */
+/** The GitHub REST/GraphQL client: every method but POST is retried on 5xx and network errors (2 s, 5 s). */
 function githubClient({ token, fetchImpl, sleep }) {
   const headers = {
     authorization: `Bearer ${token}`,
@@ -1133,48 +1376,160 @@ async function ensureLabels(gh, repo, warn) {
 
 const OUR_LABELS = new Set(LABEL_DEFS.map((l) => l.name));
 const PIN_MUTATION = 'mutation($issueId: ID!) { pinIssue(input: {issueId: $issueId}) { issue { number } } }';
+const PINS_QUERY = 'query($ids: [ID!]!) { nodes(ids: $ids) { ... on Issue { id number isPinned locked } } }';
+const lockPath = (repo, n) => `/repos/${repo}/issues/${n}/lock`;
 
-/** Create or update one board, then post its comments (skipped when its body write failed). */
-async function writeBoard({ b, result, read, gh, repo, log, warn }) {
-  const body = result.bodies[b];
-  if (body === null || body === undefined) return;
-  const labels = result.labels[b];
-  let issue = read.boards[b] ?? null;
-  if (!issue) {
-    if (!result.create.includes(b)) return;
-    let r = await gh.call('POST', `/repos/${repo}/issues`, { title: BOARDS[b], body, labels });
-    if (r.status === 422) {
-      await ensureLabels(gh, repo, warn);
-      r = await gh.call('POST', `/repos/${repo}/issues`, { title: BOARDS[b], body, labels });
+/**
+ * One write to a board (`what`: "comment", "save its body"). Whether GITHUB_TOKEN may comment on, or edit, a locked
+ * issue is not documented: when GitHub refuses the write as locked (a 403, or a 422 that says so), the board is
+ * unlocked, written and locked again (a relock that fails is a warning; the next run locks it again).
+ */
+async function writeUnlocked({ gh, repo, issue, what, write, log, warn }) {
+  const r = await write();
+  if (r.ok || !(r.status === 403 || (r.status === 422 && /lock/i.test(r.message)))) return r;
+  const unlock = await gh.call('DELETE', lockPath(repo, issue.number));
+  if (!unlock.ok) return { ...r, message: `${r.message}; cannot unlock it to ${what}: ${unlock.message}` };
+  log(`board #${issue.number} refused the write (${what}) while locked (${r.message}): unlocked for it`);
+  issue.locked = false;
+  const again = await write();
+  const relock = await gh.call('PUT', lockPath(repo, issue.number));
+  if (relock.ok) issue.locked = true;
+  else warn(`cannot lock board #${issue.number} again (unlocked to ${what}): ${relock.message}`);
+  return again;
+}
+
+/**
+ * POST one comment: up to COMMENT_ATTEMPTS tries on a network error, a 5xx or a 429 (a timeout that did post makes a
+ * rare duplicate, which beats a lost comment), around an unlock when the board is locked against it.
+ */
+async function postComment({ gh, repo, issue, body, sleep, log, warn }) {
+  const post = async () => {
+    let r = null;
+    for (let attempt = 1; attempt <= COMMENT_ATTEMPTS; attempt++) {
+      if (attempt > 1) await sleep(BACKOFF_MS[Math.min(attempt - 2, BACKOFF_MS.length - 1)]);
+      r = await gh.call('POST', `/repos/${repo}/issues/${issue.number}/comments`, { body });
+      if (r.ok || !(r.status === 0 || r.status === 429 || r.status >= 500)) break;
     }
+    return r;
+  };
+  return writeUnlocked({ gh, repo, issue, what: 'comment', write: post, log, warn });
+}
+
+/**
+ * The daily check (result.pinCheck) of boards that already existed: one GraphQL query for their pin and lock, then
+ * pinIssue or the lock for one that lost it. Every failure is a warning only: GITHUB_TOKEN may lack the right to pin, and
+ * GitHub pins at most three issues per repository (the three boards).
+ */
+async function checkPins({ gh, repo, issues, log, warn }) {
+  const list = issues.filter((i) => typeof i.nodeId === 'string');
+  if (list.length === 0) return;
+  const r = await gh.graphql(PINS_QUERY, { ids: list.map((i) => i.nodeId) });
+  const nodes = r.ok && Array.isArray(r.json?.data?.nodes) ? r.json.data.nodes : null;
+  if (!nodes) {
+    warn(`cannot check the boards' pins: ${r.ok ? 'the answer has no nodes' : r.message}`);
+    return;
+  }
+  for (const issue of list) {
+    const node = nodes.find((x) => isObject(x) && x.id === issue.nodeId);
+    if (!node) {
+      warn(`cannot check the pin of board #${issue.number}: it is not in the answer`);
+      continue;
+    }
+    if (node.isPinned !== true) {
+      const pin = await gh.graphql(PIN_MUTATION, { issueId: issue.nodeId });
+      if (pin.ok) log(`pinned board #${issue.number} again`);
+      else warn(`cannot pin board #${issue.number} again: ${pin.message}`);
+    }
+    if (node.locked !== true) {
+      const lock = await gh.call('PUT', lockPath(repo, issue.number));
+      if (lock.ok) log(`locked board #${issue.number} again`);
+      else warn(`cannot lock board #${issue.number} again: ${lock.message}`);
+    }
+  }
+}
+
+/**
+ * Write a run's result: create the boards that do not exist (the labels first; all three on the first run), post the
+ * comments, then save the bodies (with a failed comment's keys rolled back), the locks and the labels, and run the
+ * daily pin check. A comment that fails is an error that the next run retries and reports as watcher:reconcile. A board
+ * whose body does not fit even shrunk is neither written nor commented on (its comment would repeat on every run).
+ * @returns {Promise<{ saved: boolean, failedComments: number }>} saved is false when a board body could not be created
+ *   or saved, or a board created this run could not be labelled (the next run would not find it): the run then exits 3
+ */
+async function writeBoards({ result, read, gh, repo, sleep, log, warn, error }) {
+  let saved = true;
+  const issues = {};
+  for (const b of BOARD_IDS) if (read.boards[b]) issues[b] = { ...read.boards[b] };
+  const pinned = result.pinCheck ? BOARD_IDS.filter((b) => issues[b]).map((b) => issues[b]) : [];
+  const oversize = new Set(BOARD_IDS.filter((b) => (result.bodies[b]?.length ?? 0) > MAX_BODY_CHARS));
+  for (const b of oversize) {
+    error(`the body of "${BOARDS[b]}" is ${result.bodies[b].length} characters even shrunk (over ${MAX_BODY_CHARS}: too many open rows): the board is not written and its comment is held back`);
+    saved = false;
+  }
+  const created = new Set();
+
+  // 1. The missing boards, each pinned and locked once created. Its labels are the ones GitHub reports (it drops them
+  // silently for a token without push access), so step 3 sets them again when they are missing.
+  const missing = BOARD_IDS.filter((b) => !issues[b] && result.create.includes(b) && !oversize.has(b));
+  if (missing.length > 0) await ensureLabels(gh, repo, warn);
+  for (const b of missing) {
+    const r = await gh.call('POST', `/repos/${repo}/issues`, { title: BOARDS[b], body: result.bodies[b], labels: result.labels[b] });
     if (!r.ok || !Number.isInteger(r.json?.number)) {
-      warn(`cannot create the board "${BOARDS[b]}": ${r.message}`);
-      return;
+      error(`cannot create the board "${BOARDS[b]}": ${r.message}`);
+      saved = false;
+      continue;
     }
-    issue = { number: r.json.number, nodeId: typeof r.json.node_id === 'string' ? r.json.node_id : null };
+    const labels = (Array.isArray(r.json.labels) ? r.json.labels : []).map((l) => (typeof l === 'string' ? l : l?.name)).filter((n) => typeof n === 'string');
+    const issue = { number: r.json.number, nodeId: typeof r.json.node_id === 'string' ? r.json.node_id : null, body: result.bodies[b], state: 'open', locked: false, labels };
+    issues[b] = issue;
+    created.add(b);
     if (issue.nodeId) {
       const pin = await gh.graphql(PIN_MUTATION, { issueId: issue.nodeId });
       if (!pin.ok) warn(`cannot pin board #${issue.number}: ${pin.message}`);
     } else warn(`cannot pin board #${issue.number}: the created issue has no node id`);
-    const lock = await gh.call('PUT', `/repos/${repo}/issues/${issue.number}/lock`);
-    if (!lock.ok) warn(`cannot lock board #${issue.number}: ${lock.message}`);
+    const lock = await gh.call('PUT', lockPath(repo, issue.number));
+    if (lock.ok) issue.locked = true;
+    else warn(`cannot lock board #${issue.number}: ${lock.message}`);
     log(`created board #${issue.number} "${BOARDS[b]}"`);
-  } else {
+  }
+
+  // 2. The comments, before the bodies that record them as posted.
+  const failed = [];
+  for (const c of result.comments) {
+    if (oversize.has(c.board)) continue;
+    const issue = issues[c.board];
+    const r = issue ? await postComment({ gh, repo, issue, body: c.body, sleep, log, warn }) : { ok: false, message: 'the board does not exist' };
+    if (r.ok) {
+      log(`commented on board #${issue.number}`);
+      continue;
+    }
+    error(`cannot comment on board "${BOARDS[c.board]}": ${r.message}; ${c.keys.map((k) => k.key).join(', ')} rolled back, so the next run posts it again (and reports watcher:reconcile)`);
+    failed.push({ comment: c, message: r.message });
+  }
+  const out = failed.length > 0 ? withFailedComments(result, failed) : result;
+
+  // 3. Bodies, locks and labels.
+  for (const b of BOARD_IDS) {
+    const issue = issues[b];
+    const body = out.bodies[b];
+    if (!issue || body === null || body === undefined || oversize.has(b)) continue;
     const n = issue.number;
     if (!issue.locked) {
-      const lock = await gh.call('PUT', `/repos/${repo}/issues/${n}/lock`);
+      const lock = await gh.call('PUT', lockPath(repo, n));
       if (lock.ok) log(`re-locked board #${n}`);
       else warn(`cannot re-lock board #${n}: ${lock.message}`);
     }
-    const reopen = issue.state === 'closed' && Object.values(result.state[b]?.entries ?? {}).some((e) => e.open);
+    const reopen = issue.state === 'closed' && Object.values(out.state[b]?.entries ?? {}).some((e) => e.open);
     if (body !== issue.body || reopen) {
-      const r = await gh.call('PATCH', `/repos/${repo}/issues/${n}`, reopen ? { body, state: 'open' } : { body });
-      if (!r.ok) {
-        warn(`cannot update board #${n}: ${r.message} (its comments are skipped)`);
-        return;
+      const patch = () => gh.call('PATCH', `/repos/${repo}/issues/${n}`, reopen ? { body, state: 'open' } : { body });
+      const r = await writeUnlocked({ gh, repo, issue, what: 'save its body', write: patch, log, warn });
+      if (r.ok) log(`updated board #${n}${reopen ? ' (reopened)' : ''}`);
+      else {
+        error(`cannot update board #${n}: ${r.message} (its state is not saved: every rule's memory of this run is lost)`);
+        saved = false;
       }
-      log(`updated board #${n}${reopen ? ' (reopened)' : ''}`);
     }
+    const labels = result.labels[b];
     const desired = [...labels, ...issue.labels.filter((l) => !OUR_LABELS.has(l))];
     const same = desired.length === issue.labels.length && desired.every((l) => issue.labels.includes(l));
     if (!same) {
@@ -1183,14 +1538,18 @@ async function writeBoard({ b, result, read, gh, repo, log, warn }) {
         await ensureLabels(gh, repo, warn);
         r = await gh.call('PUT', `/repos/${repo}/issues/${n}/labels`, { labels: desired });
       }
-      if (!r.ok) warn(`cannot set the labels of board #${n}: ${r.message}`);
+      if (r.ok) continue;
+      if (created.has(b) && !issue.labels.includes(BOARD_LABEL)) {
+        // The boards are found by this label: without it the next run creates the board again, and again.
+        error(`cannot label the new board #${n} ${BOARD_LABEL}: ${r.message} (the next run would not find it and would create it again)`);
+        saved = false;
+      } else warn(`cannot set the labels of board #${n}: ${r.message}`);
     }
   }
-  for (const c of result.comments.filter((x) => x.board === b)) {
-    const r = await gh.call('POST', `/repos/${repo}/issues/${issue.number}/comments`, { body: c.body });
-    if (r.ok) log(`commented on board #${issue.number}`);
-    else warn(`cannot comment on board #${issue.number}: ${r.message}`);
-  }
+
+  // 4. The daily pin check.
+  if (pinned.length > 0) await checkPins({ gh, repo, issues: pinned, log, warn });
+  return { saved, failedComments: failed.length };
 }
 
 /** POST each ping (the reason as the body), 3 tries with a 10 s timeout each. The URL never reaches a log line. */
@@ -1255,17 +1614,17 @@ function readFindingsDir(dir, { readDir, readFile }) {
 async function runGate({ env, fetchImpl, nowMs, sleep, log, appendFile }) {
   const eventName = env.EVENT || env.GITHUB_EVENT_NAME || '';
   const schedule = env.SCHEDULE ?? '';
-  let dispatchedCreatedAt = [];
+  let dispatchedRuns = [];
   if (eventName === 'schedule' && schedule.trim() === HEALTH_FALLBACK_CRON) {
-    dispatchedCreatedAt = null;
+    dispatchedRuns = null;
     if (env.GH_TOKEN && env.GITHUB_REPOSITORY) {
       const gh = githubClient({ token: env.GH_TOKEN, fetchImpl, sleep });
       const r = await gh.call('GET', `/repos/${env.GITHUB_REPOSITORY}/actions/workflows/health.yml/runs?event=workflow_dispatch&per_page=10`);
-      if (r.ok && Array.isArray(r.json?.workflow_runs)) dispatchedCreatedAt = r.json.workflow_runs.map((x) => x?.created_at).filter((s) => typeof s === 'string');
+      if (r.ok && Array.isArray(r.json?.workflow_runs)) dispatchedRuns = r.json.workflow_runs.filter(isObject);
       else log(`gate: cannot list the dispatched health runs (${r.message})`);
     } else log('gate: GH_TOKEN or GITHUB_REPOSITORY unset');
   }
-  const g = scheduleGate({ eventName, schedule, selftestInput: env.SELFTEST_INPUT, dispatchedCreatedAt, nowMs });
+  const g = scheduleGate({ eventName, schedule, selftestInput: env.SELFTEST_INPUT, dispatchedRuns, nowMs });
   log(`gate: run=${g.run} selftest=${g.selftest}: ${g.reason}`);
   const out = `run=${g.run ? 'true' : 'false'}\nselftest=${g.selftest ? '1' : '0'}\n`;
   if (env.GITHUB_STEP_SUMMARY && !g.run) {
@@ -1320,6 +1679,8 @@ export async function main({
   const pingKey = env.HC_PING_KEY ?? '';
   const warnings = [];
   const warn = (m) => warnings.push(m);
+  const errors = [];
+  const error = (m) => errors.push(m);
   const { silences, errors: silenceErrors } = parseSilences(env.HEALTH_SILENCES ?? '', nowMs);
   const { docs, missing, notes } = readFindingsDir(opts.findingsDir, { readDir, readFile });
   for (const n of notes) log(`reconcile: ${n}`);
@@ -1329,7 +1690,7 @@ export async function main({
   let read;
   if (gh) read = await readBoards(gh, repo);
   else if (opts.dryRun) read = { ok: true, boards: {}, warnings: ['GH_TOKEN or GITHUB_REPOSITORY unset: the dry run starts from empty boards'] };
-  else read = { ok: false, message: 'GH_TOKEN or GITHUB_REPOSITORY unset' };
+  else read = { ok: false, message: 'GH_TOKEN or GITHUB_REPOSITORY unset (misconfigured)' };
 
   const writeSummary = (text) => {
     if (!env.GITHUB_STEP_SUMMARY) return;
@@ -1341,15 +1702,18 @@ export async function main({
   };
 
   if (!read.ok) {
-    // Nothing written, no pings: red only for a P1 that would be red whatever the state says (or the selftest).
+    // Nothing written, no pings, and red (exit 3): the prior state is unknown, so no hold, ratio or resolve can be
+    // applied, and alerting itself is broken. The P1/P2 findings of this run are listed, so the red run names them.
     const findings = docs.flatMap((d) => d.findings);
-    const red = findings.some((f) => (f.severity === 'P1' && !f.shadow && mayTurnRed(f.class)) || f.key === SELFTEST_KEY);
+    const urgent = findings.filter((f) => (redSeverity(f.severity) && !f.shadow && mayTurnRed(f.class)) || f.key === SELFTEST_KEY);
     log(annotation('error', null, `boards unreadable (${read.message}): nothing was written and no ping was sent`));
     for (const f of findings.filter((x) => notifiable(x.severity)).sort((a, b) => severityRank(a.severity) - severityRank(b.severity))) {
       log(annotation(f.shadow ? 'notice' : redSeverity(f.severity) ? 'error' : 'warning', `${f.severity} ${f.key}`, f.text));
     }
-    writeSummary(`### Health reconcile\n\n**Boards unreadable** (${md(read.message)}): nothing was written and no ping was sent; the run is ${red ? 'red (a P1 finding or the selftest)' : 'green'}.\n`);
-    return red ? 1 : 0;
+    const named = urgent.length > 0 ? `; P1/P2 findings present this run: ${urgent.map((f) => `${f.severity} \`${f.key}\``).join(', ')}` : '';
+    writeSummary(`### Health reconcile\n\n**Boards unreadable** (${md(read.message)}): nothing was written and no ping was sent; the run is red (exit 3: alerting itself is broken)${named}.\n`);
+    log(`reconcile: the run is red (the boards are unreadable${urgent.length > 0 ? `, and ${urgent.length} P1/P2 finding(s) are present` : ''})`);
+    return 3;
   }
   for (const w of read.warnings) warn(w);
 
@@ -1380,17 +1744,29 @@ export async function main({
     return result.exitCode;
   }
 
-  if (!result.replay) for (const b of BOARD_IDS) await writeBoard({ b, result, read, gh, repo, log, warn });
+  let written = { saved: true, failedComments: 0 };
+  if (!result.replay) written = await writeBoards({ result, read, gh, repo, sleep, log, warn, error });
   else log('reconcile: every findings document was already applied (an overlapping run or a rerun): nothing to write');
+  // A comment that fails once is retried by the next run; failing on two runs in a row, it turns the run red, because
+  // watcher:reconcile's own comment cannot reach anyone either.
+  const commentsBroken = written.failedComments > 0 && result.commentFaultsBefore > 0;
+  if (commentsBroken) error(`board comments failed on two runs in a row (${result.commentFaultsBefore} on the last run, ${written.failedComments} on this one): the P3 notices are not reaching anyone`);
 
   if (!pingKey) log('pings skipped (HC_PING_KEY unset)');
   else await sendPings({ pings: result.pings, key: pingKey, fetchImpl, sleep, log });
 
   for (const a of result.annotations) log(a);
+  for (const e of errors) log(annotation('error', 'Health reconcile', e));
   for (const w of warnings) log(annotation('warning', 'Health reconcile', w));
-  writeSummary(`${result.summary}${warnings.length > 0 ? `\n${warnings.map((w) => `- warning: ${md(w)}`).join('\n')}\n` : ''}`);
-  log(`reconcile: the run is ${result.exitCode === 1 ? 'red' : 'green'}`);
-  return result.exitCode;
+  const problems = [...errors.map((e) => `- error: ${md(e)}`), ...warnings.map((w) => `- warning: ${md(w)}`)];
+  writeSummary(`${result.summary}${problems.length > 0 ? `\n${problems.join('\n')}\n` : ''}`);
+  // A board body that was not created or saved (every rule's memory of this run is lost), or comments that keep
+  // failing: alerting itself is broken.
+  const broken = !written.saved || commentsBroken;
+  const code = broken ? 3 : result.exitCode;
+  const why = !written.saved ? ' (a board could not be written)' : commentsBroken ? ' (board comments failed on two runs in a row)' : '';
+  log(`reconcile: the run is ${code === 0 ? 'green' : `red${why}`}`);
+  return code;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

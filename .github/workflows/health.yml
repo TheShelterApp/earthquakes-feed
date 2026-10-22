@@ -11,18 +11,22 @@ name: health
 #             USGS canary, the optional account usage)
 #   platform  scripts/platform-watchdog.mjs: The Shelter's API and config Workers and the config bundle's age
 #   reconcile scripts/reconcile.mjs: the only writer of the three board issues ("[health] alert pipeline", "[health]
-#             feed", "[health] platform"; created, pinned and locked on first need) and the only pinger; it sets the
-#             run's conclusion: red while a P1 is open, and during the first hour of a P2.
+#             feed", "[health] platform"; created together on the first run, then pinned and locked) and the only
+#             pinger; it sets the run's conclusion: red on every run a P1's finding holds (or cannot be judged), during
+#             the first hour of a P2, and when alerting itself is broken (the boards unreadable, a board body not
+#             created or saved, board comments failing on two runs in a row, no GH_TOKEN).
 # The evaluator jobs are stateless: each writes one findings document (scripts/lib/findings.mjs) as the artifact
 # findings-<evaluator> and exits 0 whatever it judged; a non-zero exit is a crash (the run is red, and reconcile files
 # watcher:evaluator:<name> and freezes that evaluator's entries). Everything that needs memory across runs (the 2-run
-# confirmation, 4 of the last 8 runs, resolving, escalation, inhibition, silences, the P2 red hour) is reconcile's, in
-# the boards' hidden state. A single external source, a maintenance walk and the watcher itself never turn a run red.
+# confirmation, 4 of the last 8 runs, resolving, escalation, the promotion, inhibition, silences, the P2 red hour, the
+# last selftest) is reconcile's, in the boards' hidden state. A single external source, a maintenance walk and the
+# watcher itself never turn a run red.
 on:
   schedule:
     - cron: '25 * * * *'
     # The selftest (scripts/reconcile.mjs SELFTEST_CRON): 09:17 UTC on the 1st of each month, a forced P1, so the run
-    # must be red; it proves the red path and the failed-run email once a month.
+    # must be red; it proves the red path and the failed-run email once a month. GitHub can drop a scheduled run, so
+    # reconcile tracks the last selftest: 35 days without one opens watcher:selftest-overdue.
     - cron: '17 9 1 * *'
   workflow_dispatch:
     inputs:
@@ -62,9 +66,10 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
-      # The `:25` cron skips its checks when a workflow_dispatch health run was CREATED in the last 20 min, whatever its
-      # status: on 2026-10-21 the dispatched run created at 15:22:30 was still running when the scheduled one started at
-      # 15:22:39, and both turned red on the same GEOFON outage. A listing that fails means run.
+      # The `:25` cron skips its checks when a workflow_dispatch health run was CREATED in the last 20 min, running or
+      # not (on 2026-10-21 the dispatched run created at 15:22:30 was still running when the scheduled one started at
+      # 15:22:39, and both turned red on the same GEOFON outage), unless it was cancelled or skipped: a pending dispatched
+      # run is cancelled when a newer one joins the concurrency group. A listing that fails means run.
       - name: Gate (the fallback cron's skip, the selftest)
         id: gate
         env:
@@ -100,7 +105,7 @@ jobs:
       - name: Judge the feed (findings for the "[health] feed" board)
         env:
           # GitHub's own API only (the script hard-codes the host): the run, the repository's size, the data tree, the
-          # walk markers.
+          # walk markers. A read that fails (or no token) is the finding watcher:feed-github.
           GH_TOKEN: ${{ github.token }}
         run: node scripts/feed-health.mjs --findings findings/feed.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -181,11 +186,14 @@ jobs:
   reconcile:
     needs: [gate, feed, alerts, platform]
     # Also after an evaluator failed: its findings are then missing, which reconcile reports (watcher:evaluator:<name>)
-    # and which freezes that evaluator's entries instead of resolving them. Not when the gate skipped the run.
-    if: always() && needs.gate.outputs.run == 'true'
+    # and which freezes that evaluator's entries instead of resolving them. Not when the gate skipped the run, nor in a
+    # run cancelled by hand (it would record its stopped evaluators as missing).
+    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' }}
     runs-on: ubuntu-24.04
-    # A few GitHub API calls (one listing, then per board an edit, its labels and at most one comment), each retried
-    # twice; pings only with HC_PING_KEY (unset: none).
+    # A few GitHub API calls: one listing; on the first run the five labels and per board its creation, pin and lock;
+    # then per board at most one comment (3 tries on a network error, a 429 or a 5xx), its body and its labels (GET,
+    # PATCH and PUT retried twice; a board locked against the bot is unlocked and locked again around the write); once
+    # a day one GraphQL query of the pins and locks. Pings only with HC_PING_KEY (unset: none).
     timeout-minutes: 10
     permissions:
       contents: read
@@ -206,8 +214,13 @@ jobs:
           pattern: findings-*
           path: findings
           merge-multiple: true
-      # Exit 0 green, 1 red (an open P1, a P2 in its first hour, the selftest), 3 misconfigured or crashed. A failed
-      # board write or ping is a ::warning:: and never changes the exit code.
+      # Exit 0 green, 1 red (a P1 whose finding holds, a P2 in its first hour, the selftest), 3 red because alerting
+      # itself is broken: the boards unreadable; a board body not created (one POST, tried again by the next run), not
+      # saved after its retries, or too long even shrunk (the boards are the memory of every rule: without them nothing
+      # confirms, resolves or comments); a new board that cannot be labelled; board comments failing on two runs in a
+      # row; no GH_TOKEN, a bad argument or a crash. A comment that fails once is an ::error::, retried by the next run
+      # (watcher:reconcile); a failed ping, label edit, lock or pin check is a ::warning:: and never changes the exit
+      # code.
       - name: Reconcile the boards and set the run's verdict
         env:
           GH_TOKEN: ${{ github.token }}

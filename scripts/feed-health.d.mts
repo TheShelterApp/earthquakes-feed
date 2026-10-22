@@ -81,6 +81,10 @@ export interface FeedInputs {
   reRead: boolean;
   /** How long this run waited in the runner queue (ms); 0 when unknown. */
   queuedMs: number;
+  /** Why this run's created_at could not be read (a failed GitHub read: watcher:feed-github); null or absent when read. */
+  queueError?: string | null;
+  /** Why the GitHub parts were not read on purpose (a local run without GH_TOKEN): no watcher:feed-github then. */
+  githubSkipped?: string | null;
   status: { ok: true; json: unknown } | { ok: false; message: string };
   repoSize: { ok: true; kb: number } | { ok: false; message: string };
   tree: { ok: true; json: unknown } | { ok: false; message: string };
@@ -90,6 +94,7 @@ export interface FeedInputs {
   notes: string[];
 }
 
+/** Every feed finding of one run; a failed GitHub read (unless `githubSkipped`) adds watcher:feed-github. */
 export function evaluateFeed(inputs: FeedInputs): { findings: Finding[]; unjudged: string[]; notes: string[]; summary: string };
 
 export function collect(opts?: {

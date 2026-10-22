@@ -5,14 +5,16 @@
 // The evaluators (scripts/alerts-watchdog.mjs --findings, scripts/feed-health.mjs, scripts/platform-watchdog.mjs
 // --findings) are stateless: each judges what it reads as of one moment and writes a findings document. Everything
 // that needs memory across health runs (a 2-run confirmation, 4 of the last 8 runs, a 24 h hold, resolving after 2
-// healthy runs, the escalation, the P2 red hour) belongs to the reconcile job, which takes those parameters from the
-// RULES entry a finding names. An evaluator therefore emits a condition below its line as a P4 "sample": a sample never
-// opens a board entry by itself, but it keeps an open entry open and counts toward a ratio rule.
+// healthy runs, the escalation, the promotion, the P2 red hour) belongs to the reconcile job, which takes those
+// parameters from the RULES entry a finding names. An evaluator therefore emits a condition below its line as a P4
+// "sample": a sample never opens a board entry by itself, but it keeps an open entry open (not red) and counts toward a
+// ratio rule.
 //
 // Severity ladder: P1 page (alerts are not reaching users, or will stop within hours or days), P2 urgent (redundancy
 // lost, or a symptom a fallback still covers), P3 ticket (act within days, or one external source has been out long
-// enough to matter), P4 info (normal churn: a job-summary row). A run goes red for an open P1 on every run and for a P2
-// during its first hour only; a single external source, a maintenance walk and the watcher itself are never red.
+// enough to matter), P4 info (normal churn: a job-summary row). A run goes red for an open P1 on every run its finding is
+// present at P1/P2 (or cannot be judged), and for a P2 so during its first hour only; a single external source, a
+// maintenance walk and the watcher itself are never red.
 //
 // Dependency-free (Node >= 22): the health workflow runs it without `npm ci`. Types: findings.d.mts.
 
@@ -115,7 +117,7 @@ const deepFreeze = (o) => {
 
 /**
  * One rule. Reconcile parameters default to "at once": confirmRuns 1, holdMs 0, no ratio, resolve on the first run
- * without the finding, no escalation.
+ * without the finding, no escalation, no promotion.
  */
 function rule(id, r) {
   return Object.freeze({
@@ -136,6 +138,7 @@ function rule(id, r) {
     resolveRunsAfterRatio: r.resolveRunsAfterRatio ?? r.resolveRuns ?? 1,
     resolveAfterMs: r.resolveAfterMs ?? 0,
     escalateAfterMs: r.escalateAfterMs ?? null,
+    promote: r.promote ? Object.freeze({ ...r.promote }) : null,
     limits: deepFreeze({ ...(r.limits ?? {}) }),
   });
 }
@@ -156,13 +159,22 @@ const FOUR_OF_EIGHT = { min: 4, of: 8, severity: 'P3' };
  *   phase          1: evaluated from Phase 1a; 2: needs a gateway field (the plan's star), not emitted yet
  *   shadow         logs "would notify" only: never a comment, a ping or a red run (owner: the canary, watermark-age
  *                  and latency rules; the plan: feed:systemic)
- *   confirmRuns    consecutive runs with the finding before it takes its severity (P4 until then)
- *   holdMs         continuous presence, by reconcile's own run times, before it takes its severity (P4 until then)
- *   ratio          also enters (at ratio.severity) when present in at least `min` of the last `of` runs
+ *   confirmRuns    consecutive runs with the finding before it takes its severity (P4 until then); the confirming run
+ *                  must come at least 10 min after the first sighting (a rerun or an extra dispatch confirms nothing)
+ *   holdMs         continuous presence, by reconcile's own run times, before it takes its severity (P4 until then).
+ *                  A finding with sinceMs null (its start is unknown) is also held for its rule's `limits.lineMs`
+ *   ratio          also enters (at ratio.severity) when present in at least `min` of the last `of` samples; a run less
+ *                  than 10 min after the previous sample shares its slot, so 4 of 8 is about 2 h at the 15-min cadence.
+ *                  The samples restart when the entry resolves
  *   resolveRuns    consecutive runs without the finding that resolve an open entry (resolveRunsAfterRatio when it
- *                  entered by ratio), and absent for at least resolveAfterMs
- *   escalateAfterMs  an entry open this long, counted from its episode's start (the earliest sinceMs or first run
- *                  seen), escalates once: one board comment and gh-aging
+ *                  entered by ratio), and absent for at least resolveAfterMs; a run less than 10 min after the previous
+ *                  sample is no healthy run of its own
+ *   escalateAfterMs  an entry open this long, counted from its episode's start, escalates once (one board comment and
+ *                  gh-aging), only on a run where its finding is present. The start: the finding's sinceMs (the streak
+ *                  start) for an entry by its line, the earlier of that and the oldest failing sample in the window for
+ *                  one by ratio, reconcile's first run that saw it when sinceMs is null
+ *   promote        { afterMs, to }: an entry open continuously for afterMs takes severity `to` while its finding holds
+ *                  (silently, like every rise into P1/P2: the red run is its alarm)
  * `limits` are the evaluator's own thresholds.
  *
  * Not here on purpose (owner decision 2026-10-22): writer:aggregate / writer:derive. Transient publish failures of
@@ -173,29 +185,34 @@ export const RULES = Object.freeze({
   'alerts:status:stale': rule('alerts:status:stale', {
     title: 'status.json stale',
     board: 'alerts', class: 'symptom', severity: 'P1', key: 'alerts:status:stale', check: 'gh-detect',
-    // The detector publishes every 60 s: 5 missed publishes. While this or alerts:status:unreadable is present or
-    // open, every other alerts:* key is frozen (nothing enters, nothing resolves): a stale document's fields are old.
+    // The detector publishes every 60 s: 5 missed publishes. While this or alerts:status:unreadable is present (or
+    // not judged), every other alerts:* key is frozen (nothing enters, nothing resolves): a stale document's fields
+    // are old.
     limits: { maxAgeMs: 300 * SEC },
   }),
   'alerts:status:unreadable': rule('alerts:status:unreadable', {
     title: 'status.json unreadable',
-    // P2 in Phase 1 (nothing else sees the outage); P3 from Phase 2, when the gateway's own check owns it.
-    board: 'alerts', class: 'unknown', severity: 'P2', key: 'alerts:status:unreadable', check: 'gh-platform',
-    confirmRuns: 2,
+    // P2 in Phase 1 (nothing else sees the outage); P3 from Phase 2, when the gateway's own check owns it. Open for
+    // 60 min it becomes P1 (red on every run while it holds, gh-detect): every other alerts:* key is frozen meanwhile,
+    // so a 404 or 403 that keeps repeating would otherwise leave P1 detection blind behind a green run (decision
+    // 2026-10-22 on the logic review's plan gap).
+    board: 'alerts', class: 'unknown', severity: 'P2', key: 'alerts:status:unreadable', check: { P1: 'gh-detect', P2: 'gh-platform' },
+    confirmRuns: 2, promote: { afterMs: 60 * MIN, to: 'P1' },
     // 3 tries, all inside 60 s (fetchJson: 15 s per try, 2 s and 5 s apart).
     limits: { attempts: 3, withinMs: 60 * SEC },
   }),
   'alerts:coverage:all': rule('alerts:coverage:all', {
     title: 'all direct providers down',
-    // usgs, emsc and gfz all ok:false, together (the shortest streak) at least 60 s. The evaluator emits P4 while two
-    // or more fail, so the entry resolves only once at least 2 direct providers are ok.
+    // usgs, emsc and gfz all ok:false (or not polled: alerts:provider:unlisted), together (the shortest streak) at
+    // least 60 s. The evaluator emits P4 while two or more fail, so the entry stays open (not red: its condition no
+    // longer holds) until at least 2 direct providers are ok.
     board: 'alerts', class: 'symptom', severity: 'P1', key: 'alerts:coverage:all', check: 'gh-detect',
     limits: { minTogetherMs: 60 * SEC },
   }),
   'alerts:coverage:two': rule('alerts:coverage:two', {
     title: 'two direct providers down',
-    // Two or more direct providers ok:false together at least 180 s (120 s before the plan); resolves after 2 runs
-    // with at most one failing.
+    // Two or more direct providers ok:false (or not polled) together at least 180 s (120 s before the plan); resolves
+    // after 2 runs with at most one failing.
     board: 'alerts', class: 'redundancy', severity: 'P2', key: 'alerts:coverage:two', check: 'gh-redundancy',
     resolveRuns: 2,
     limits: { minTogetherMs: 180 * SEC },
@@ -243,6 +260,14 @@ export const RULES = Object.freeze({
     board: 'alerts', class: 'redundancy', severity: 'P3', key: 'alerts:provider:feed',
     resolveRuns: 2,
     limits: { lineMs: 30 * MIN },
+  }),
+  'alerts:provider:unlisted': rule('alerts:provider:unlisted', {
+    title: 'direct provider not polled',
+    // usgs, emsc or gfz missing from detector.providers (all three when the list is empty): the gateway no longer polls
+    // it, after a deploy or a configuration change of ours, so this is a config row, not the agency's. The coverage
+    // rows count it as failing for as long as it is missing (an empty list is alerts:coverage:all, P1).
+    board: 'alerts', class: 'config', severity: 'P3', keyPrefix: 'alerts:provider:',
+    confirmRuns: 2,
   }),
   'alerts:provider-silent': rule('alerts:provider-silent', {
     title: 'direct provider ok but its watermark old',
@@ -440,8 +465,10 @@ export const RULES = Object.freeze({
   'watcher': rule('watcher', {
     title: 'watcher fault',
     // The monitoring itself: a refused or misconfigured token (alerts-watchdog exit 3), usage-query errors, GitHub API
-    // errors, an evaluator that produced no findings. P3 after 2 runs, never red. HC_PING_KEY unset is NOT a fault
-    // (owner decision 2026-10-22: no push channel for now).
+    // errors, an evaluator that produced no findings (watcher:evaluator:<name>), board comments reconcile could not post
+    // (watcher:reconcile), no selftest for 35 days (watcher:selftest-overdue). P3 after 2 runs, never red (comments that
+    // fail on two runs in a row make reconcile exit 3 instead). HC_PING_KEY unset is NOT a fault (owner decision
+    // 2026-10-22: no push channel for now).
     board: 'platform', class: 'watcher', severity: 'P3', keyPrefix: 'watcher:',
     confirmRuns: 2,
   }),

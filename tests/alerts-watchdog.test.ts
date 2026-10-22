@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -22,6 +22,7 @@ import {
   main,
   parseArgs,
   parseUsageResponse,
+  redact,
   plainExitCode,
   pollIntervalMs,
   primaryFailure,
@@ -37,7 +38,7 @@ import {
   type FetchImpl,
   type Verdict,
 } from '../scripts/alerts-watchdog.mjs';
-import { RULES, parseFindingsDocument, type Finding, type FindingsDocument } from '../scripts/lib/findings.mjs';
+import { RULES, matchesKey, parseFindingsDocument, type Finding, type FindingsDocument } from '../scripts/lib/findings.mjs';
 
 // The alert-pipeline evaluator (scripts/alerts-watchdog.mjs, run by .github/workflows/health.yml): findings of the
 // alerting plan of 2026-10-22, section 3a. Fixtures: tests/fixtures/alerts-status/healthy.json is a real capture of the
@@ -391,11 +392,66 @@ test('the provider keys: unknown ids are notes; a provider listed twice is judge
     const f = must(evaluateStatus(d, { nowMs: NOW }), 'alerts:provider:usgs');
     assert.deepEqual([f.severity, f.sinceMs], ['P3', GEN - streakSpanSec('usgs', 32) * 1000], String(bad));
   }
-  const empty = structuredClone(HEALTHY);
-  empty.detector.providers = [];
-  const e = evaluateStatus(empty, { nowMs: NOW });
-  assert.deepEqual(e.findings, []);
-  assert.match(e.notes.join(' | '), /detector\.providers is empty: no alert source is being polled \| direct provider usgs is not listed/);
+});
+
+test('a direct provider missing from detector.providers is not polled: a P3 row of its own, and the coverage rows count it as failing', () => {
+  const without = (doc: Record<string, any>, ...ids: string[]): Record<string, any> => {
+    const d = structuredClone(doc);
+    d.detector.providers = d.detector.providers.filter((p: { id: string }) => !ids.includes(p.id));
+    return d;
+  };
+  const judged = (doc: Record<string, any>): Verdict => evaluateStatus(doc, { nowMs: NOW, canary: usgsSummary() });
+
+  // gfz not listed: the gateway does not poll it. Its row says so (a config P3, never resolved as if it had recovered),
+  // and nothing is left unjudged.
+  const noGfz = judged(without(HEALTHY, 'gfz'));
+  assert.deepEqual(sev(noGfz), ['alerts:provider:gfz P3']);
+  const gfzRow = must(noGfz, 'alerts:provider:gfz');
+  assert.deepEqual([gfzRow.rule, gfzRow.class, gfzRow.sinceMs], ['alerts:provider:unlisted', 'config', null]);
+  assert.equal(gfzRow.text, 'direct provider gfz is not listed in detector.providers, so the gateway does not poll it: a deploy or a configuration change of the gateway? The coverage rows count gfz as failing while it is missing');
+  assert.deepEqual(noGfz.unjudged, []);
+  assert.match(noGfz.summary, /providers=usgs:ok,feed:ok,emsc:ok,gfz:NOT-LISTED /);
+
+  // gfz not listed and usgs failing for 40 min: two direct sources are out, so redundancy is lost (coverage:two P2).
+  const usgsToo = judged(without(failingFor({ usgs: 40 * 60 }), 'gfz'));
+  assert.deepEqual(sev(usgsToo), ['alerts:coverage:all P4', 'alerts:coverage:two P2', 'alerts:provider:usgs P3', 'alerts:provider:gfz P3']);
+  assert.equal(must(usgsToo, 'alerts:coverage:two').text, 'two of the three direct providers (gfz and usgs) are out: usgs failing for 40 min, gfz not polled (missing from detector.providers) (line 3 min): one direct source is left (emsc), with the feed backstop');
+  assert.equal(must(usgsToo, 'alerts:coverage:two').sinceMs, GEN - 40 * MIN);
+
+  // gfz not listed, usgs and emsc failing for 400 s: no direct source is left, the P1 (it used to be only a P2 that
+  // turned green after its hour, with nothing on the board about gfz: the logic review's case).
+  const pair = judged(without(failingFor({ usgs: 400, emsc: 400 }), 'gfz'));
+  assert.deepEqual(sev(pair), ['alerts:coverage:all P1', 'alerts:coverage:two P2', 'alerts:provider:usgs P4', 'alerts:provider:emsc P4', 'alerts:provider:gfz P3']);
+  const all = must(pair, 'alerts:coverage:all');
+  assert.deepEqual([all.sinceMs, all.members, all.check], [GEN - 400 * SEC, ['usgs', 'emsc', 'gfz'], 'gh-detect']);
+  assert.equal(all.text, 'all three direct providers (usgs, emsc, gfz) are out: usgs and emsc failing together for 6.5 min, gfz not polled (missing from detector.providers) (line 60 s): the gateway sees new quakes only through the feed backstop, minutes late; a direct provider missing from detector.providers points at a deploy or a configuration change of the gateway');
+  assert.match(must(pair, 'alerts:provider:usgs').text, /: 3 direct providers are failing or not polled: see alerts:coverage:two$/);
+
+  // usgs not listed: its sub-queries are unknown (frozen, not resolved).
+  const noUsgs = judged(without(HEALTHY, 'usgs'));
+  assert.deepEqual(sev(noUsgs), ['alerts:provider:usgs P3']);
+  assert.deepEqual(noUsgs.unjudged, ['alerts:usgs:*']);
+  // The feed backstop is no direct provider: a list without it judges as before.
+  const noFeed = judged(without(HEALTHY, 'feed'));
+  assert.deepEqual([noFeed.findings, noFeed.unjudged], [[], []]);
+
+  // An empty list: the gateway polls nothing. coverage:all P1 at once (no streak to wait for), the three rows, and the
+  // rest of the document still judged.
+  const e = judged(without(statusFixture('policy-fallback'), 'usgs', 'emsc', 'gfz', 'feed'));
+  assert.deepEqual(sev(e), ['alerts:coverage:all P1', 'alerts:coverage:two P2', 'alerts:provider:usgs P3', 'alerts:provider:emsc P3', 'alerts:provider:gfz P3', 'alerts:policy P1']);
+  assert.equal(must(e, 'alerts:coverage:all').sinceMs, null);
+  assert.match(must(e, 'alerts:coverage:all').text, /^all three direct providers \(usgs, emsc, gfz\) are out: usgs, emsc and gfz not polled \(missing from detector\.providers\) \(line 60 s\): the gateway sees no new quakes from a direct source/);
+  assert.match(must(e, 'alerts:provider:emsc').text, /^detector\.providers is empty, so the gateway polls no source at all: /);
+  assert.deepEqual(e.unjudged, ['alerts:usgs:*']);
+  assert.deepEqual(e.notes, ['detector.providers is empty: no alert source is being polled']);
+  // Entries without an id count as none at all.
+  const idless = structuredClone(HEALTHY);
+  idless.detector.providers = [{ ok: true }];
+  assert.deepEqual(sev(judged(idless)).slice(0, 2), ['alerts:coverage:all P1', 'alerts:coverage:two P2']);
+  // A missing list stays the unreadable gate: every alerts:* key unjudged.
+  const none = structuredClone(HEALTHY);
+  delete none.detector.providers;
+  assert.deepEqual(judged(none).unjudged, ['alerts:*']);
 });
 
 // --- USGS's sub-queries: the primary live query and the deletions query ---
@@ -987,6 +1043,38 @@ test('main plain mode: the usage half fails at 80 % and sends the token only to 
   assert.match(over.out, /::error title=Cloudflare free-tier usage high::platform:cf-usage: account D1 rows written today: 85000 = 85\.0 %/);
 });
 
+test('main: Cloudflare\'s error text reaches no finding, note, log line or step summary with the account id or the token in it', async () => {
+  // The repository is public: the run log, the findings-alerts artifact and the board body are readable by anyone, and
+  // GitHub's secret masking covers none of them once a value is cut, cased differently or rewritten.
+  const ACCOUNT = '0123456789abcdef0123456789abcdef';
+  const TOKEN = 'cf-analytics-test-token';
+  const env = { CF_ANALYTICS_TOKEN: TOKEN, CF_ACCOUNT_ID: ACCOUNT };
+  const leaks = new RegExp(`${ACCOUNT}|${TOKEN}`, 'i');
+  const echo = { data: null, errors: [{ message: `not authorized for account ${ACCOUNT.toUpperCase()} with token ${TOKEN}`, extensions: { code: 'authz' } }] };
+  assert.deepEqual(parseUsageResponse(echo, { secrets: [TOKEN, ACCOUNT] }), { ok: false, kind: 'auth', message: 'not authorized for account *** with token ***' });
+  // Redacted before the 500-character cut, so a value across the cut leaves no prefix behind.
+  const cut = parseUsageResponse({ errors: [{ message: `${'x'.repeat(480)} account ${ACCOUNT}` }] }, { secrets: [ACCOUNT] });
+  assert.ok(!cut.ok && cut.message.endsWith(' account ***') && !cut.message.includes(ACCOUNT.slice(0, 8)), JSON.stringify(cut));
+  assert.equal(redact('a ACCT b acct', ['acct', '', undefined]), 'a *** b ***');
+
+  const dir = mkdtempSync(join(tmpdir(), 'alerts-watchdog-redact-'));
+  try {
+    for (const [name, argv] of [['findings', ['--findings', OUT, '--no-canary']], ['plain', ['--no-canary']]] as const) {
+      const summary = join(dir, `${name}.md`);
+      const refused = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)], [GRAPHQL_URL]: [jsonResponse(echo)] }, argv: [...argv], env: { ...env, GITHUB_STEP_SUMMARY: summary } });
+      const everything = [refused.out, ...Object.values(refused.written), readFileSync(summary, 'utf8')].join('\n');
+      assert.doesNotMatch(everything, leaks, name);
+      assert.match(everything, /the account usage check was refused: not authorized for account \*\*\* with token \*\*\*/, name);
+    }
+    // A transport failure is redacted the same way (an error that names the account in its cause).
+    const net = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)], [GRAPHQL_URL]: [new TypeError('fetch failed', { cause: { message: `socket closed for ${ACCOUNT}` } })] }, argv: ['--findings', OUT, '--no-canary'], env });
+    assert.match(net.doc(OUT).findings[0]!.text, /^the account usage check is unavailable this run: network error: fetch failed \(socket closed for \*\*\*\) after 3 attempt\(s\)$/);
+    assert.doesNotMatch([net.out, ...Object.values(net.written)].join('\n'), leaks);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('main: the selftest turns a healthy document red in plain mode and is a finding in findings mode', async () => {
   const plain = await run({ routes: { [STATUS_URL]: [jsonResponse(HEALTHY)] }, argv: ['--no-canary'], env: { WATCHDOG_SELFTEST: '1' } });
   assert.equal(plain.code, 1);
@@ -1131,27 +1219,8 @@ test('streakDuration: measured from failingSinceMs when usable, else the count a
   assert.equal(streakDuration(null, GEN), null);
 });
 
-// The constants above mirror the gateway's source. When a platform checkout is at hand (SHELTER_PLATFORM_DIR, or the
-// sibling ../platform of a local clone), compare them with it; CI has none and skips.
-const platformDir = process.env.SHELTER_PLATFORM_DIR ?? join(import.meta.dirname, '..', '..', 'platform');
-const gatewaySrc = join(platformDir, 'services', 'alerts-gateway', 'src');
-test('cadence: the mirrored constants match the alerts-gateway source', { skip: existsSync(gatewaySrc) ? false : 'no platform checkout' }, () => {
-  const read = (rel: string): string => readFileSync(join(gatewaySrc, rel), 'utf8');
-  const ms = (v: string): number => Number(v.replace(/_/g, ''));
-  const tick = /const TICK_INTERVAL_MS = ([\d_]+)/.exec(read('durable-objects/event-detector.ts'));
-  assert.equal(ms(tick![1]!), GATEWAY_TICK_MS);
-  const sources = read('detect/sources.ts');
-  for (const [name, id] of [['EMSC_SOURCE', 'emsc'], ['GFZ_SOURCE', 'gfz'], ['USGS_SOURCE', 'usgs']] as const) {
-    const m = new RegExp(`export const ${name}[^]*?minIntervalMs: ([\\d_]+)`).exec(sources);
-    assert.equal(ms(m![1]!), PROVIDER_MIN_INTERVAL_MS[id], name);
-  }
-  const feed = /const MIN_INTERVAL_MS = ([\d_]+)/.exec(read('detect/feed-source.ts'));
-  assert.equal(ms(feed![1]!), PROVIDER_MIN_INTERVAL_MS['feed']);
-  const product = (v: string): number => v.split('*').reduce((n, f) => n * ms(f.trim()), 1);
-  const steps = [...read('detect/provider-health.ts').matchAll(/\{ atFailures: (\d+), intervalMs: ([\d_ *]+?) \}/g)].map((m) => ({ atFailures: Number(m[1]), intervalMs: product(m[2]!) }));
-  assert.deepEqual(steps, PROVIDER_BACKOFF_STEPS.map((s) => ({ ...s })));
-  assert.match(sources, /ALL_SOURCES[^=]*= \[USGS_SOURCE, EMSC_SOURCE, GFZ_SOURCE\]/);
-});
+// The constants above mirror the gateway's source: tests/platform-constants.test.ts checks them against a committed
+// snapshot on every run (CI has no platform checkout), and the snapshot against a platform checkout when there is one.
 
 // --- every finding this evaluator emits is one its rule judges ---
 

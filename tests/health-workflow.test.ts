@@ -133,10 +133,12 @@ test('health.yml: the alerts job gets the selftest from the gate, the account-us
   assert.equal(alertsArgs([], { WATCHDOG_SELFTEST: '' }).selftest, false);
 });
 
-test('health.yml: reconcile runs after every evaluator, even a failed one, and reads every findings artifact', () => {
+test('health.yml: reconcile runs after every evaluator, even a failed one, but not in a cancelled run, and reads every findings artifact', () => {
   const block = job(health, 'reconcile');
   assert.match(block, /\n {4}needs: \[gate, feed, alerts, platform\]\n/);
-  assert.match(block, /\n {4}if: always\(\) && needs\.gate\.outputs\.run == 'true'\n/);
+  // !cancelled(), not always(): a run cancelled by hand would record its stopped evaluators as missing.
+  assert.match(block, /\n {4}if: \$\{\{ !cancelled\(\) && needs\.gate\.outputs\.run == 'true' \}\}\n/);
+  assert.doesNotMatch(health, /always\(\) && needs\.gate/);
   const download = stepWith(block, 'actions/download-artifact@');
   assert.ok(download.includes('\n          pattern: findings-*\n          path: findings\n          merge-multiple: true'));
   const run = stepWith(block, 'reconcile.mjs');
@@ -147,7 +149,7 @@ test('health.yml: reconcile runs after every evaluator, even a failed one, and r
   assert.deepEqual(reconcileArgs(['--findings-dir', 'findings']), { gate: false, findingsDir: 'findings', dryRun: false });
 });
 
-test('health.yml end to end: the documents the evaluator jobs upload are the ones reconcile reads; a missing one is never red', async () => {
+test('health.yml end to end: the documents the evaluator jobs upload are the ones reconcile reads; a missing one does not make reconcile exit red', async () => {
   const NOW = Date.parse('2026-10-22T12:07:00Z');
   /** The findings directory as the reconcile job's download leaves it: each job's upload path, merged. */
   const dirWith = (docs: Record<string, object>): string => {
@@ -169,7 +171,9 @@ test('health.yml end to end: the documents the evaluator jobs upload are the one
   assert.equal(all.code, 0);
   assert.ok(all.log.includes('reconcile: findings from alerts (0), feed (0), platform (0)'), all.log.join('\n'));
 
-  // An evaluator job that crashed uploads nothing: its absence is a watcher finding (P3 after 2 runs), never red.
+  // An evaluator job that crashed uploads nothing: reconcile files its absence as a watcher finding (P3 after 2 runs)
+  // and its own exit code stays 0. The run is red all the same: the evaluator's own job failed (no evaluator job has
+  // continue-on-error, checked above).
   const crashed = await dryRun(dirWith({ feed: doc('feed'), alerts: doc('alerts') }));
   assert.equal(crashed.code, 0);
   assert.ok(crashed.log.some((l) => l.includes('watcher:evaluator:platform')), crashed.log.join('\n'));

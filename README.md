@@ -260,22 +260,32 @@ to the Worker goes through a pull request like any other code and is deployed af
 
 The heartbeat Worker dispatches `health.yml` every 15 minutes (:07, :22, :37, :52). The workflow's own `:25` cron is
 the fallback for a Worker outage: it runs its checks only when no dispatched health run was created in the last 20
-minutes. One health run runs at a time (concurrency group `health`). Every threshold is in one table, `RULES` in
-[`scripts/lib/findings.mjs`](scripts/lib/findings.mjs) (alerting plan of 2026-10-22, Phase 1a).
+minutes (one that was cancelled or skipped does not count). One health run runs at a time (concurrency group
+`health`). Every threshold is in one table, `RULES` in [`scripts/lib/findings.mjs`](scripts/lib/findings.mjs)
+(alerting plan of 2026-10-22, Phase 1a).
 
 - **`gate`** ([`scripts/reconcile.mjs`](scripts/reconcile.mjs) `--gate`): the fallback cron's skip, and the selftest.
 - **Three evaluators**, run from GitHub on purpose, so they keep working when Cloudflare is the thing that broke. Each
   writes one findings document (the artifact `findings-<evaluator>`) and stays green whatever it judged; only a crash,
   or a findings file it cannot write, turns its job red.
   - `feed` ([`scripts/feed-health.mjs`](scripts/feed-health.mjs)): the live `v1` and `v2` manifests, `v1/status.json`,
-    the files on `data`, the repository size and the walks' blocked markers.
+    the files on `data`, the repository size and the walks' blocked markers (a GitHub read that fails is
+    `watcher:feed-github`; a truncated listing of the `data` tree is a warning).
   - `alerts` ([`scripts/alerts-watchdog.mjs`](scripts/alerts-watchdog.mjs)): The Shelter's alert pipeline, from the
     alerts-gateway's public `https://data.theshelter.app/alerts/status.json`, the USGS `4.5_hour` canary and, with the
-    `CF_ANALYTICS_TOKEN` secret, the account's daily usage (only account totals are logged: the run logs are public).
+    `CF_ANALYTICS_TOKEN` secret, the account's daily usage (only account totals are logged, and an API error is
+    redacted of the token and the account id: the run logs are public). The gateway constants it mirrors (polling,
+    backoff, providers, free-tier caps) are checked against `tests/fixtures/platform-constants.json`: when the gateway
+    changes one, update the mirror and that snapshot (`tests/platform-constants.test.ts` compares the snapshot with a
+    platform checkout when one is at hand).
   - `platform` ([`scripts/platform-watchdog.mjs`](scripts/platform-watchdog.mjs)): `https://api.theshelter.app/v1/health`,
     `https://config.theshelter.app/healthz` and the config bundle's age.
 - **`reconcile`** ([`scripts/reconcile.mjs`](scripts/reconcile.mjs)): the only job that writes issues. It applies each
-  rule's holds, resolves, inhibitions, escalation and the silences, writes the boards and sets the run's conclusion.
+  rule's holds, resolves, inhibitions, escalation and the silences, writes the boards and sets the run's conclusion. It
+  runs after a failed evaluator too (its rows freeze), but not in a run cancelled by hand. Exit 1 is red for a finding;
+  exit 3 is red because alerting itself is broken: the boards unreadable, a board body not created, not saved or too
+  long even shrunk, a new board that cannot be labelled, board comments failing on two runs in a row, or no
+  `GH_TOKEN`.
 
 **Severity ladder.**
 
@@ -286,35 +296,48 @@ minutes. One health run runs at a time (concurrency group `health`). Every thres
 | P3 ticket | Act within days, or one external source has been out long enough to matter | Green with `::warning::` | One comment when it enters, one when it escalates |
 | P4 info | Normal churn, or a condition below its line | Green | The job summary only |
 
-A single external source, a maintenance walk and the watcher itself never turn a run red. The shadow rules
-(`alerts:canary`, `alerts:provider-silent:<id>`, `alerts:latency:<id>`, `feed:systemic`) only log "would notify" until a
-pull request promotes them.
+Red only on evidence: a P1 or P2 entry held open only by its resolve count, or by a P4 sample below its line (two
+providers still down after all three were), is not red. A single external source, a maintenance walk and the watcher
+itself never turn a run red. The shadow rules (`alerts:canary`, `alerts:provider-silent:<id>`, `alerts:latency:<id>`,
+`feed:systemic`) only log "would notify" until a pull request promotes them.
 
 **Boards.** Three permanent issues, `[health] alert pipeline`, `[health] feed` and `[health] platform` (label
-`health-board`), created by `reconcile` the first time one has something to show, then pinned and locked; they are never
-closed. Each body lists the open rows, the rows still confirming or holding, the shadow rules and a "Last 7 days" table
-(red runs, comments, push transitions, shadow would-notify), and ends in a hidden `<!-- health-state v1 … -->` marker: the
-memory across runs, so do not edit a body by hand (a broken marker starts the board empty). The label `health:p1` …
-`health:ok` is the board's worst open row.
-- **Comments** only when a P3 enters and when an entry escalates (its severity rises, or it stays open past its rule's
-  age line). P1/P2 rows, members leaving and resolutions are silent edits: the red run is the P1/P2 alarm.
+`health-board`), all three created by the first `reconcile` run (a one-time "issue opened" notification to the
+repository's watchers), then pinned and locked; they are never closed, and one deleted by hand comes back on the next
+run. Once a day the pins and locks are checked again (`GITHUB_TOKEN` may lack the right to pin, which is a warning; the
+three boards take all three of the repository's pin slots). Each body lists the open rows, the rows still confirming or
+holding, the shadow rules and a "Last 7 days" table (red runs, comments, push transitions, shadow would-notify), and
+the alert-pipeline board the last selftest; it ends in a hidden `<!-- health-state v1 … -->` marker: the memory across
+runs, so do not edit a body by hand (a broken marker starts the board empty). A body that would pass GitHub's limit
+drops its log rows first, then shortens texts and lists fewer rows; the marker keeps every open row (over about a
+hundred, the board is not written at all: exit 3). The label `health:p1` … `health:ok` is the board's worst open row.
+- **Comments** only when a P3 enters and when it stays open past its rule's age line (the escalation, on a run where
+  its finding is present). P1/P2 rows, a rise into P1/P2 (`config:bundle` by age, the promotion below), members leaving
+  and resolutions are silent edits: the red run is the P1/P2 alarm, and it reaches the owner only. A comment goes out
+  before the body that records it: one GitHub refuses is an `::error::`, rolled back and posted by the next run
+  (`watcher:reconcile`), and a body that is not saved afterwards can repeat a comment, never lose one. A board locked
+  against the bot is unlocked around its comment or body edit and locked again.
 - **Holds.** A condition below its line is a P4 sample. Depending on the rule, a key enters after 2 runs in a row, on 4
-  of the last 8 runs or after a 24 h hold, and resolves after 2 healthy runs (4 when it entered on the ratio). While
-  `status.json` is stale or unreadable every other `alerts:*` row is frozen, and so are the rows of an evaluator whose
-  findings are missing.
+  of the last 8 runs or after a 24 h hold, and resolves after 2 healthy runs (4 when it entered on the ratio). Runs
+  count by time: a run less than 10 minutes after the previous one (a rerun, an extra dispatch) shares its sample slot,
+  confirms nothing and is no healthy run of its own. A resolved key starts its samples afresh, so its next outage is a
+  new episode. A finding whose start is unknown (a feed source that never fetched successfully) is held for its rule's
+  line from the first run that saw it. While `status.json` is stale or unreadable every other `alerts:*` row is frozen,
+  and so are the rows of an evaluator whose findings are missing; `status.json` unreadable for 60 minutes becomes a P1.
 - **Inhibition.** While `feed:freshness` is open, `feed:source:*` and `alerts:provider:feed` send nothing; while
   `alerts:provider:usgs|emsc|gfz` is open, `feed:source:usgs|emsc|geofon` sends nothing; a coverage row mutes its
-  providers.
+  providers. A held-back comment goes out once the parent resolves, only if the row's own finding is still present.
 
 **Runbook**, one line per key (the row says since when and why):
 
 | Key | Sev | When | First step |
 |---|---|---|---|
 | `alerts:status:stale` | P1 | `generatedAtMs` over 300 s old | The detector stopped ticking or publishing: the gateway Worker's logs and its last deploy |
-| `alerts:status:unreadable` | P2 (2nd run) | 3 tries within 60 s fail | `data.theshelter.app` (edge, object), then the gateway's publishing |
-| `alerts:coverage:all` | P1 | `usgs`, `emsc` and `gfz` all `ok: false` together for 60 s | Three agencies at once points at the gateway (egress, DNS, a deploy): its logs first |
+| `alerts:status:unreadable` | P2 (2nd run); P1 after 60 min | 3 tries within 60 s fail; open for 60 min it is a P1 (`gh-detect`), since every other `alerts:*` row is frozen meanwhile | `data.theshelter.app` (edge, object), then the gateway's publishing |
+| `alerts:coverage:all` | P1 | `usgs`, `emsc` and `gfz` all `ok: false` (or not polled) together for 60 s | Three agencies at once points at the gateway (egress, DNS, a deploy): its logs first |
 | `alerts:coverage:two` | P2 | Two of them together for 180 s | One direct source and the feed backstop are left: which two, and their `lastError` |
 | `alerts:provider:<id>` | P3 | `usgs` 30 min, `emsc` and `gfz` 60 min (15 min for `invalid` bodies), or 4 of the last 8 runs; escalates at 2 h (`usgs`, `invalid`) or 12 h | Usually the agency: act when it escalates; `invalid` means its format changed |
+| `alerts:provider:<id>` (not polled) | P3 (2nd run) | `usgs`, `emsc` or `gfz` missing from `detector.providers` (all three when the list is empty); the coverage rows count it as failing | The gateway's last deploy and its provider configuration |
 | `alerts:usgs:primary` | P3 | ComCat FDSN failing 6 h while the summary feed serves | Live USGS events arrive up to about 2 min later; ComCat's FDSN service |
 | `alerts:usgs:deletions` | P3 | The deletions query failing 24 h; escalates at 5 d | Deleted quakes are not withdrawn: fix it inside the gateway's 7-day withdrawal window |
 | `alerts:provider:feed` | P3 | The gateway's feed backstop `ok: false` 30 min | Muted while `feed:freshness` is open; else the gateway's read of `v2/manifest.json` |
@@ -325,7 +348,7 @@ memory across runs, so do not edit a body by hand (a broken marker starts the bo
 | `alerts:selftest` | P1 | The selftest (below) | Expected; never stored on a board |
 | `feed:freshness` | P2 (unreachable: 2nd run) | The older of the live `v1` and `v2` manifests past `stale_after_seconds` (1,800 s), confirmed by a re-read 60 s later; or a manifest unreachable | The aggregate runs, the heartbeat Worker and its `GH_PAT`, the Pages deploy; `v1` fresh and `v2` stale means signing stopped |
 | `feed:status` | P3 (2nd run) | `v1/status.json` unreadable | The per-source rows are frozen meanwhile: the aggregate runs' Pages publish |
-| `feed:source:<id>` | P3 | Its fetch failing from `lastSuccessAt` for 3 h (`usgs`, `emsc`, `geofon`), 12 h (the others) or 2 h (HTTP 401/403/404/410, a schema error, a certificate), or silent or frozen past its activity budget; escalates at 24 h (core sources, definite errors) | Usually the agency; a certificate: [providers/tls/README.md](providers/tls/README.md); a 404 or a schema error: the adapter |
+| `feed:source:<id>` | P3 | Its fetch failing from `lastSuccessAt` for 3 h (`usgs`, `emsc`, `geofon`), 12 h (the others) or 2 h (HTTP 401/403/404/410, a schema error, a certificate), or silent or frozen past its activity budget; for a source that never fetched successfully, that line counts from the first run that saw it; escalates at 24 h (core sources, definite errors) | Usually the agency; a certificate: [providers/tls/README.md](providers/tls/README.md); a 404 or a schema error: the adapter |
 | `feed:cert:<id>` | P3 | A pinned leaf with under 7 days left; escalates at 2 days left | Pin the new leaf's intermediate if its issuer changed ([providers/tls/README.md](providers/tls/README.md)) |
 | `feed:size` | P3 | A status-history day file over 5 MB, or any other file on `data` over 45 MB | Slim what grows ([APIs.md](APIs.md#run-logs)): GitHub rejects a pushed file above 100 MiB |
 | `feed:repo-size` | P3 | The repository over 8,000,000 KB | [APIs.md](APIs.md#repository-size) |
@@ -335,7 +358,7 @@ memory across runs, so do not edit a body by hand (a broken marker starts the bo
 | `platform:config-worker` | P3 | `/healthz` not 200 `ok: true`; escalates at 6 h | Apps read the data copy first and keep their last good config: the config Worker |
 | `config:bundle` | P3 / P2 / P1 | The older of the config bundle's data copy and the signed policy over 5 / 10 / 25 days (the bundle expires at 30); or the copy's version behind `/healthz` for 24 h (a partial publish) | Rerun the config bundle's refresh, then check the copy reaches the host's version |
 | `platform:cf-usage` | P2 / P1 | Only with `CF_ANALYTICS_TOKEN`: Workers requests or D1 rows written at 80 % (or a projected 100 %) / 95 % of the free daily caps | What spends them; the caps reset at 00:00 UTC |
-| `watcher:<name>` | P3 (2nd run) | The monitoring itself: an evaluator without findings, a refused token, a usage query that failed | The job's log; the frozen rows wait for it |
+| `watcher:<name>` | P3 (2nd run) | The monitoring itself: an evaluator without findings, a refused token, a usage query that failed, a GitHub read of the feed job (`feed-github`), board comments `reconcile` could not post (`reconcile`), no selftest for 35 days (`selftest-overdue`) | The job's log; the frozen rows wait for it; `selftest-overdue`: run the selftest |
 
 **Silences.** The repository variable `HEALTH_SILENCES` mutes a key's comments and pings until a date, with no commit:
 `key=until,reason;…`, where `key` is exact or a prefix ending in `*` and `until` is `YYYY-MM-DD` (the end of that UTC day)
@@ -348,13 +371,14 @@ change a red run; an expired or malformed entry is named in the run's warnings. 
   that run: for the runs the heartbeat dispatches, the account that owns its `GH_PAT` (another account's PAT reroutes the
   email); for the cron runs, the last person who edited the cron line.
 - **A board comment** notifies whoever subscribed to that board or watches the repository: subscribe to the three boards
-  once they exist.
+  once they exist. Only P3 entries and escalations comment, so a P1 reaches the owner alone (the red run).
 - **No push channel for now** (owner decision 2026-10-22): `reconcile` computes the Healthchecks.io pings (`gh-detect`,
   `gh-deliver`, `gh-redundancy`, `gh-feed`, `gh-platform`, `gh-capacity`, `gh-aging`, `health-watchdog`, `selftest`) but
   skips them while the `HC_PING_KEY` secret is unset.
 
 **Selftest.** The monthly cron (09:17 UTC on the 1st) and `gh workflow run health.yml -f watchdog_selftest=true` force the
-P1 `alerts:selftest`: the run must be red, which proves the red path and the email.
+P1 `alerts:selftest`: the run must be red, which proves the red path and the email. `reconcile` records the last selftest
+on the boards; GitHub can drop a scheduled run, so 35 days without one opens `watcher:selftest-overdue`.
 
 **Walks and writers.** `history`, `first-solutions`, `backfill` and `archive` keep a blocked run green: a `::warning::`,
 and the marker as the artifact `walk-blocked-<workflow>`, which the `feed` job files as `walks:<workflow>:<source>`.

@@ -34,6 +34,7 @@ import {
   type WalkRead,
 } from '../scripts/feed-health.mjs';
 import { mayTurnRed, parseFindingsDocument, RULES, type Finding } from '../scripts/lib/findings.mjs';
+import { enrichStatusV2 } from '../src/status-v2.js';
 
 // The feed health evaluator (scripts/feed-health.mjs, the `feed` job of .github/workflows/health.yml): the findings of
 // the "[health] feed" board (alerting plan of 2026-10-22, section 3b). The cases of tests/health-check.test.ts (the
@@ -224,15 +225,14 @@ test('an answer without rows says only "no rows"; an unknown start keeps the sou
   assert.equal(q.text, 'tmd: no rows for 112 h (budget 12 h, last rows 2026-10-09T01:56:48.498Z)');
   assert.equal(q.rule, 'feed:source:quiet');
   assert.equal(q.sinceMs, Date.parse('2026-10-09T01:56:48.498Z'));
-  // No last success and no error.since on record (a source that never succeeded): silent still holds it at P3.
+  // No last success and no error.since on record (a source that never succeeded): its fetch is a P3 member at once,
+  // with no start (reconcile holds it on its own clock).
   const never = tmdStatus(gen);
   never.providers.tmd.lastSuccessAt = null;
   delete never.providers.tmd.error.since;
   const n = judge(never).findings[0]!;
-  assert.equal(n.severity, 'P3');
-  assert.deepEqual(n.members, ['silent']);
-  assert.equal(n.rule, 'feed:source:quiet');
-  assert.match(n.text, /^tmd: fetch failing \(no successful fetch on record; definite: a certificate failure, line 2\.0 h\), no rows for 112 h/);
+  assert.deepEqual([n.severity, n.members, n.rule, n.sinceMs], ['P3', ['fetch', 'silent'], 'feed:source:definite', null]);
+  assert.match(n.text, /^tmd: fetch failing, never fetched successfully \(no successful fetch on record, so its failing time is unknown; definite: a certificate failure, line 2\.0 h\), no rows for 112 h/);
   // error.since stands in for lastSuccessAt (ms, or an ISO time).
   const since = tmdStatus(gen);
   since.providers.tmd.lastSuccessAt = null;
@@ -299,14 +299,48 @@ test('feed:source lines: 12 h for a transient error, 3 h for a core source, 2 h 
   assert.deepEqual(at('tmd', 20 * MIN), []);
   assert.deepEqual(at('usgs', 29.9 * MIN), []);
   assert.deepEqual(judge(statusAt()).findings, []);
-  // No lastSuccessAt and no error.since (a v1 string error): a P4 sample with an unknown start.
+  // No lastSuccessAt and no error.since (a v1 string error): never fetched successfully, P3 with an unknown start.
   f = one(at('tmd', 0, 'HTTP 503', { lastSuccessAt: null }));
-  assert.deepEqual([f.severity, f.sinceMs, f.rule], ['P4', null, 'feed:source']);
-  assert.match(f.text, /^tmd: fetch failing \(no successful fetch on record; a transient error, line 12\.0 h\), error: HTTP 503$/);
+  assert.deepEqual([f.severity, f.sinceMs, f.rule, f.members], ['P3', null, 'feed:source', ['fetch']]);
+  assert.match(f.text, /^tmd: fetch failing, never fetched successfully \(no successful fetch on record, so its failing time is unknown; a transient error, line 12\.0 h\), error: HTTP 503$/);
   // Every threshold is the rule table's.
   assert.equal(RULES['feed:source'].limits.lineMs, 12 * HOUR);
   assert.equal(RULES['feed:source:core'].limits.lineMs, 3 * HOUR);
   assert.equal(RULES['feed:source:definite'].limits.lineMs, 2 * HOUR);
+});
+
+test('a source that has never fetched successfully, as derive publishes it (error.since = the document time): P3 with no start, a 404 too', () => {
+  // src/status-v2.ts, unchanged: a source without a success on record gets lastSuccessAt null and error.since = the
+  // document's own time. Read as a start, that failure began "just now" on every run and never reached a line.
+  const raw = {
+    generated: ISO(STATUS_MS),
+    head_seq: 1,
+    providers: {
+      newsrc: { ok: false, http_status: 404, error: 'HTTP 404', events_returned: 0 },
+      slowsrc: { ok: false, error: 'timed out after 30000 ms', events_returned: 0 },
+      usgs: { ok: false, http_status: 503, error: 'HTTP 503', events_returned: 0 },
+      emsc: { ok: true, http_status: 200, events_returned: 12 },
+    },
+  };
+  const opts = { generatedMs: STATUS_MS, expectedIntervalSeconds: 300, staleAfterSeconds: 1_800 };
+  const status = enrichStatusV2(raw, { ...opts, health: { emsc: STATUS_MS } }) as Record<string, any>;
+  assert.deepEqual([status.providers.newsrc.lastSuccessAt, status.providers.newsrc.error.since, status.generatedAt], [null, STATUS_MS, STATUS_MS]);
+  const r = judge(status);
+  assert.deepEqual(r.findings.map((f) => [f.key, f.rule, f.severity, f.members, f.sinceMs]), [
+    ['feed:source:newsrc', 'feed:source:definite', 'P3', ['fetch'], null],
+    ['feed:source:slowsrc', 'feed:source', 'P3', ['fetch'], null],
+    ['feed:source:usgs', 'feed:source:core', 'P3', ['fetch'], null],
+  ]);
+  assert.equal(byKey(r.findings)['feed:source:newsrc']!.text, 'newsrc: fetch failing, never fetched successfully (no successful fetch on record, so its failing time is unknown; definite: HTTP 404, line 2.0 h), error: HTTP 404');
+  assert.ok(r.findings.every((f) => f.check === null && !f.shadow && !mayTurnRed(f.class)), 'one source never turns a run red');
+  // A start that is known wins: a success on record (lastSuccessAt, and error.since with it) is measured as before.
+  const known = judge(enrichStatusV2(raw, { ...opts, health: { newsrc: STATUS_MS - 3 * HOUR } }));
+  assert.deepEqual(known.findings.filter((f) => f.key === 'feed:source:newsrc').map((f) => [f.severity, f.members, f.sinceMs]), [['P3', ['fetch'], STATUS_MS - 3 * HOUR]]);
+  // An error.since at or after the document's time is no start either (ms or ISO alike).
+  for (const since of [STATUS_MS, STATUS_MS + MIN, ISO(STATUS_MS)]) {
+    const odd = statusAt(STATUS_MS, (x) => failing(x, 'tmd', null, { kind: 'http', message: 'HTTP 410', since }, { http_status: 410 }));
+    assert.deepEqual(judge(odd).findings.map((f) => [f.key, f.rule, f.severity, f.sinceMs]), [['feed:source:tmd', 'feed:source:definite', 'P3', null]], String(since));
+  }
 });
 
 test('TMD replay (2026-10-09): certificate failing from 02:01Z; nothing at 02:20, a sample at 03:30, definite P3 at 04:02 from 02:01', () => {
@@ -670,6 +704,32 @@ test('evaluateFeed: a healthy run is no finding and nothing unjudged; status.jso
   const gh = evaluateFeed(healthyInputs({ repoSize: { ok: false, message: 'HTTP 403 after 1 attempt(s)' }, tree: { ok: false, message: 'HTTP 500 after 3 attempt(s)' }, walks: [{ workflow: 'history', ok: false, message: 'x' }] }));
   assert.deepEqual(gh.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*']);
   assert.match(gh.notes.join('\n'), /repository size: HTTP 403 after 1 attempt\(s\)/);
+  // ... and one watcher finding says so (platform board, P3 after 2 runs, never red), or the rows freeze unseen.
+  assert.deepEqual(gh.findings.map((f) => [f.key, f.rule, f.board, f.severity, f.class, f.members]), [['watcher:feed-github', 'watcher', 'platform', 'P3', 'watcher', ['repository', 'data-tree', 'walks:history']]]);
+  assert.equal(
+    gh.findings[0]!.text,
+    "feed:repo-size, feed:size, walks:history:* not judged this run: the feed evaluator's GitHub reads failed (check the feed job's GH_TOKEN, actions: read, and GitHub's status): the repository size: HTTP 403 after 1 attempt(s); the data tree: HTTP 500 after 3 attempt(s); the history walk's marker: x",
+  );
+});
+
+test('evaluateFeed: watcher:feed-github for every GitHub read that fails, the reasons grouped; none in a local run', () => {
+  const watcher = (over: Partial<FeedInputs>): Finding | undefined => evaluateFeed(healthyInputs(over)).findings.find((f) => f.key === 'watcher:feed-github');
+  // This run's created_at alone: nothing is unjudged, the queue time is 0.
+  const queue = watcher({ queueError: 'HTTP 404 after 1 attempt(s)' })!;
+  assert.deepEqual(queue.members, ['run']);
+  assert.match(queue.text, /^the queue time is unknown this run \(counted as 0\): .*: this run's created_at: HTTP 404 after 1 attempt\(s\)$/);
+  // An answer without the field read: a tree answer without its list.
+  const noTree = evaluateFeed(healthyInputs({ tree: { ok: true, json: { sha: 'x' } } }));
+  assert.deepEqual([noTree.unjudged, noTree.findings.map((f) => [f.key, f.members])], [['feed:size'], [['watcher:feed-github', ['data-tree']]]]);
+  // One reason for many reads (GH_TOKEN missing in Actions, a lost permission) is said once.
+  const why = 'HTTP 403 after 1 attempt(s)';
+  const lost = watcher({ walks: ['history', 'first-solutions', 'backfill', 'archive'].map((workflow) => ({ workflow, ok: false as const, message: why })) })!;
+  assert.match(lost.text, /: the history walk's marker, the first-solutions walk's marker, the backfill walk's marker, the archive walk's marker: HTTP 403 after 1 attempt\(s\)$/);
+  // Every read fine, or a local run that reads none on purpose: no watcher.
+  assert.equal(watcher({}), undefined);
+  const local = 'no GH_TOKEN or GITHUB_REPOSITORY (a local run)';
+  const skipped = evaluateFeed(healthyInputs({ githubSkipped: local, repoSize: { ok: false, message: local }, tree: { ok: false, message: local }, walks: [{ workflow: 'history', ok: false, message: local }] }));
+  assert.deepEqual([skipped.findings, skipped.unjudged], [[], ['feed:repo-size', 'feed:size', 'walks:history:*']]);
 });
 
 /** A fetch stub routing by exact URL (or a RegExp); unmatched URLs fail like a network error. Records every call. */
@@ -803,9 +863,10 @@ test('collect: walk markers: the newest artifact under 26 h is downloaded and re
     [listing('history'), () => new Response('oops', { status: 500 })],
   ]);
   const r = evaluateFeed(await collect({ env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep }));
-  assert.deepEqual(keys(r.findings), ['walks:first-solutions:emsc']);
+  assert.deepEqual(keys(r.findings), ['walks:first-solutions:emsc', 'watcher:feed-github']);
   assert.match(r.findings[0]!.text, /\(marker of 2026-10-22 10:14Z, run 911\)$/);
   assert.deepEqual(r.unjudged, ['walks:history:*']);
+  assert.match(byKey(r.findings)['watcher:feed-github']!.text, /^walks:history:\* not judged this run: .*: the history walk's marker: listing walk-blocked-history: HTTP 500 after 3 attempt\(s\)$/);
   assert.match(r.notes.join('\n'), /walks: history: marker unreadable \(listing walk-blocked-history: HTTP 500 after 3 attempt\(s\)\)/);
   assert.match(r.notes.join('\n'), /walks: backfill: newest marker 27\.0 h old: the walk has moved on/);
   const zips = w.calls.filter((x) => x.url.endsWith('/zip')).map((x) => x.url);
@@ -819,7 +880,8 @@ test('collect: walk markers: the newest artifact under 26 h is downloaded and re
     [`${API_REPO}/actions/artifacts/41/zip`, () => new Response('<html>not a zip</html>')],
   ]);
   const r2 = evaluateFeed(await collect({ env: ENV, fetchImpl: w2.fetchImpl, now: c2.now, sleep: c2.sleep }));
-  assert.deepEqual(keys(r2.findings), ['walks:history:run']);
+  assert.deepEqual(keys(r2.findings), ['walks:history:run', 'watcher:feed-github']);
+  assert.deepEqual(byKey(r2.findings)['watcher:feed-github']!.members, ['walks:archive']);
   assert.deepEqual(r2.unjudged, ['walks:archive:*']);
   assert.match(r2.notes.join('\n'), /artifact 41 of walk-blocked-archive: not a readable zip \(not a zip/);
 });
@@ -875,7 +937,10 @@ test('main: every network call failing still writes a document: unreachable mani
   assert.deepEqual(doc.findings.map((f: Finding) => [f.key, f.rule, f.severity, f.members ?? null]), [
     ['feed:freshness', 'feed:freshness:unreachable', 'P2', ['v1', 'v2']],
     ['feed:status', 'feed:status', 'P3', null],
+    ['watcher:feed-github', 'watcher', 'P3', ['run', 'repository', 'data-tree', 'walks:history', 'walks:first-solutions', 'walks:backfill', 'walks:archive']],
   ]);
+  assert.match(doc.findings[2].text, /^feed:repo-size, feed:size, walks:history:\*, walks:first-solutions:\*, walks:backfill:\*, walks:archive:\* not judged this run: the feed evaluator's GitHub reads failed/);
+  assert.ok(doc.findings[2].text.length <= 500);
   assert.deepEqual(doc.unjudged, ['feed:source:*', 'feed:cert:*', 'feed:systemic', 'feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*']);
   assert.match(doc.notes.join('\n'), /queue time unknown \(network error: .*\): counted as 0/);
 });
@@ -898,6 +963,33 @@ test('main: no GH_TOKEN (a local run): the GitHub parts are unjudged, nothing is
   const inputs = await collect({ env: { GH_TOKEN: TOKEN, GITHUB_REPOSITORY: REPO }, fetchImpl: world().fetchImpl, now: c2.now, sleep: c2.sleep });
   assert.equal(inputs.queuedMs, 0);
   assert.match(inputs.notes.join(), /no GITHUB_RUN_ID/);
+});
+
+test('main: in Actions, no GH_TOKEN or a failed created_at read is watcher:feed-github; a truncated tree listing is a warning', async () => {
+  const written: Record<string, string> = {};
+  const findingsOf = async (env: Record<string, string>, w = world()): Promise<{ doc: { findings: Finding[]; unjudged: string[] }; logs: string[] }> => {
+    const c = clock();
+    const logs: string[] = [];
+    assert.equal(await main({ argv: ['--findings', 'f.json'], env, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep, log: (l) => logs.push(l), writeFile: (p, d) => void (written[p] = d) }), 0);
+    const doc = JSON.parse(written['f.json']!);
+    assert.ok(parseFindingsDocument(doc).ok);
+    return { doc, logs };
+  };
+  // GH_TOKEN dropped from the feed job: every GitHub part unjudged, and the watcher names the cause once.
+  const noToken = (await findingsOf({ GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: '4242' })).doc;
+  assert.deepEqual(noToken.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*']);
+  assert.deepEqual(noToken.findings.map((f) => [f.key, f.members]), [['watcher:feed-github', ['run', 'repository', 'data-tree', 'walks:history', 'walks:first-solutions', 'walks:backfill', 'walks:archive']]]);
+  assert.match(noToken.findings[0]!.text, /: this run's created_at, the repository size, the data tree, the history walk's marker, .*the archive walk's marker: GH_TOKEN or GITHUB_REPOSITORY is not set in the job$/);
+  // This run's created_at unreadable: the queue time is 0, and the watcher says why.
+  const runGone = await findingsOf(ENV, world([[`${API_REPO}/actions/runs/4242`, () => json({ message: 'Not Found' }, 404)]]));
+  assert.deepEqual(runGone.doc.findings.map((f) => [f.key, f.members]), [['watcher:feed-github', ['run']]]);
+  assert.deepEqual(runGone.doc.unjudged, []);
+  assert.match(runGone.doc.findings[0]!.text, /^the queue time is unknown this run \(counted as 0\): .*: this run's created_at: HTTP 404 after 1 attempt\(s\)$/);
+  // A truncated listing is judged as far as it goes, with the warning the health job always gave.
+  const truncated = await findingsOf(ENV, world([[`${API_REPO}/git/trees/data?recursive=1`, () => json({ ...todaysTree(), truncated: true })]]));
+  assert.deepEqual([truncated.doc.findings, truncated.doc.unjudged], [[], []]);
+  assert.deepEqual(truncated.logs.filter((l) => l.startsWith('::')), ['::warning title=Data file size::the data tree listing was truncated, so some files were not judged']);
+  assert.ok(!(await findingsOf(ENV)).logs.some((l) => l.startsWith('::')));
 });
 
 test('main: the registry unreadable files marker lines by status.json\'s ids', async () => {

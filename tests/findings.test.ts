@@ -75,8 +75,10 @@ test('owner decisions 2026-10-22: P2 pushes would bypass quiet hours, P2 is red 
   assert.equal(P2_RED_MS, HOUR);
   // Transient aggregate/derive publish failures stay red runs: no rule judges the writer workflows.
   assert.ok(ids.every((id) => !id.startsWith('writer')));
-  // Single external-source outages are never red.
-  for (const id of ids) if (id.startsWith('alerts:provider:') && id !== 'alerts:provider:feed') assert.equal(RULES[id].class, 'external', id);
+  // Single external-source outages are never red. alerts:provider:unlisted is the gateway's own configuration (a
+  // direct provider it no longer polls), a P3 that the coverage rows back up.
+  for (const id of ids) if (id.startsWith('alerts:provider:') && id !== 'alerts:provider:feed' && id !== 'alerts:provider:unlisted') assert.equal(RULES[id].class, 'external', id);
+  assert.deepEqual([RULES['alerts:provider:unlisted'].class, RULES['alerts:provider:unlisted'].severity, RULES['alerts:provider:unlisted'].confirmRuns], ['config', 'P3', 2]);
   for (const id of ids) if (id.startsWith('feed:source')) assert.equal(RULES[id].class, 'external', id);
   assert.equal(mayTurnRed('external'), false);
   assert.equal(mayTurnRed('maintenance'), false);
@@ -110,6 +112,11 @@ test('RULES: every entry is well formed and consistent with its board', () => {
     assert.ok(r.resolveRunsAfterRatio >= r.resolveRuns, `${id}: resolveRunsAfterRatio`);
     for (const n of [r.holdMs, r.resolveAfterMs]) assert.ok(Number.isFinite(n) && n >= 0, `${id}: ms`);
     assert.ok(r.escalateAfterMs === null || r.escalateAfterMs > 0, `${id}: escalateAfterMs`);
+    if (r.promote) {
+      assert.ok(r.promote.afterMs > 0 && moreSevere(r.promote.to, r.severity), `${id}: promote`);
+      assert.ok(checkFor(r, r.promote.to), `${id}: a promoted entry pings a check`);
+      assert.ok(Object.isFrozen(r.promote), `${id}: promote frozen`);
+    }
     if (r.ratio) assert.ok(r.ratio.min >= 1 && r.ratio.min <= r.ratio.of && SEVERITIES.includes(r.ratio.severity), `${id}: ratio`);
     assert.ok(Object.isFrozen(r) && Object.isFrozen(r.limits), `${id}: frozen`);
   }
@@ -142,7 +149,7 @@ test('RULES: every key of the plan\'s section 3 has a rule, on the right board',
   const judgesOf = (key: string): string[] => ids.filter((id) => ruleJudgesKey(RULES[id], key)).sort();
   assert.deepEqual(judgesOf('feed:freshness'), ['feed:freshness', 'feed:freshness:unreachable']);
   assert.deepEqual(judgesOf('config:bundle'), ['config:bundle:age', 'config:bundle:gap']);
-  assert.deepEqual(judgesOf('alerts:provider:gfz'), ['alerts:provider:fast', 'alerts:provider:fast:invalid']);
+  assert.deepEqual(judgesOf('alerts:provider:gfz'), ['alerts:provider:fast', 'alerts:provider:fast:invalid', 'alerts:provider:unlisted']);
   assert.deepEqual(judgesOf('feed:source:tmd'), ['feed:source', 'feed:source:core', 'feed:source:definite', 'feed:source:quiet']);
   // alerts:provider:usgs and :feed are single-key rules, also covered by the fast rules' prefix: an evaluator names the
   // rule, so the overlap is harmless, but the fast rules' ids are the two that poll every tick.
@@ -154,7 +161,13 @@ test('RULES: the alert-pipeline thresholds (section 3a as adjusted)', () => {
   assert.equal(RULES['alerts:status:stale'].severity, 'P1');
   assert.equal(RULES['alerts:status:stale'].check, 'gh-detect');
   const unreadable = RULES['alerts:status:unreadable'];
-  assert.deepEqual([unreadable.severity, unreadable.confirmRuns, unreadable.check, unreadable.class], ['P2', 2, 'gh-platform', 'unknown']);
+  assert.deepEqual([unreadable.severity, unreadable.confirmRuns, unreadable.check, unreadable.class], ['P2', 2, { P1: 'gh-detect', P2: 'gh-platform' }, 'unknown']);
+  // Open for 60 min it is a P1 (decision 2026-10-22): every other alerts:* key is frozen meanwhile, so P1 detection is
+  // blind. The only promotion; alerts:status:stale is a P1 already.
+  assert.deepEqual({ ...unreadable.promote }, { afterMs: 60 * MIN, to: 'P1' });
+  assert.deepEqual(ids.filter((id) => RULES[id].promote !== null), ['alerts:status:unreadable']);
+  assert.equal(checkFor(unreadable, 'P2'), 'gh-platform');
+  assert.equal(checkFor(unreadable, 'P1'), 'gh-detect');
   assert.deepEqual([limits('alerts:status:unreadable')['attempts'], limits('alerts:status:unreadable')['withinMs']], [3, 60 * SEC]);
   assert.deepEqual([RULES['alerts:coverage:all'].severity, limits('alerts:coverage:all')['minTogetherMs'], RULES['alerts:coverage:all'].resolveRuns], ['P1', 60 * SEC, 1]);
   assert.deepEqual([RULES['alerts:coverage:two'].severity, limits('alerts:coverage:two')['minTogetherMs'], RULES['alerts:coverage:two'].resolveRuns], ['P2', 180 * SEC, 2]);

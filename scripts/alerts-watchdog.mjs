@@ -19,7 +19,9 @@
 //   alerts:coverage:all / :two   all three direct providers (usgs, emsc, gfz) ok:false together for 60 s: P1; two or
 //                                more together for 180 s: P2; P4 while two or more fail below those lines
 //   alerts:provider:<id>         one provider's streak: emsc and gfz 60 min (15 min while lastError is invalid), usgs
-//                                and the feed backstop 30 min: P3 (a single provider never turns a run red)
+//                                and the feed backstop 30 min: P3 (a single provider never turns a run red). A direct
+//                                provider missing from detector.providers (all three when the list is empty) is not
+//                                polled: P3 alerts:provider:unlisted, and the coverage rows count it as failing
 //   alerts:usgs:primary          ComCat FDSN failing for 6 h while the summary feed serves: P3
 //   alerts:usgs:deletions        the deletions query failing for 24 h (deleted events are not withdrawn): P3
 //   alerts:budget                the gateway's tightest daily free-tier ratio, projected to the end of the UTC day
@@ -35,7 +37,8 @@
 // Optional usage half (board "[health] platform"): when CF_ANALYTICS_TOKEN (Account Analytics: Read) is set, it reads
 // today's (UTC) account-wide Workers requests and D1 rows written from the GraphQL Analytics API: platform:cf-usage P1 at
 // 95 % of a Workers Free daily cap, P2 at 80 % or a projected 100 % (from 02:00 UTC), P4 from 70 %. A token without
-// CF_ACCOUNT_ID, a refused token or an unavailable API is watcher:cf-usage. Without the token that half is skipped.
+// CF_ACCOUNT_ID, a refused token or an unavailable API is watcher:cf-usage; the API's error text is redacted of the
+// token and the account id before it reaches a finding or a log line. Without the token that half is skipped.
 //
 // Two modes:
 //   --findings <path>  writes the findings document (evaluator `alerts`) for scripts/reconcile.mjs and exits 0 whatever
@@ -394,8 +397,13 @@ export function evaluateStatus(doc, { nowMs, canary = null, selftest = false } =
       entries.set(p.id, p);
     }
   }
+  // A direct provider the document does not list is not polled: the gateway lost it (a deploy, a configuration change).
+  // It is neither healthy nor silent: its row says so (alerts:provider:unlisted, below), and the coverage rows count it
+  // as failing for as long as it is missing (an empty list is all three). Without a usgs entry USGS's sub-queries are
+  // unknown: frozen, not resolved.
+  const unlisted = DIRECT_PROVIDERS.filter((id) => !entries.has(id));
   if (entries.size === 0) notes.push('detector.providers is empty: no alert source is being polled');
-  for (const id of DIRECT_PROVIDERS) if (!entries.has(id)) notes.push(`direct provider ${id} is not listed in detector.providers`);
+  if (unlisted.includes('usgs')) unjudged.push('alerts:usgs:*');
   const durations = new Map();
   for (const [id, p] of entries) {
     if (p.ok !== false) continue;
@@ -404,46 +412,64 @@ export function evaluateStatus(doc, { nowMs, canary = null, selftest = false } =
   }
 
   // 2. Coverage: the redundant set of direct providers. Ongoing streaks overlap for as long as the shortest of them, so
-  //    "together" is the shortest duration of the group. A direct provider ok:false with no streak is left out.
-  const directFailing = DIRECT_PROVIDERS.filter((id) => durations.has(id));
+  //    "together" is the shortest duration of the group; a provider that is not polled counts as failing with no end
+  //    to its streak. A direct provider ok:false with no streak is left out.
+  const directFailing = DIRECT_PROVIDERS.filter((id) => durations.has(id) || unlisted.includes(id));
   const backstop = entries.get(BACKSTOP_PROVIDER);
   const backstopDown = isObject(backstop) && backstop.ok === false;
   const backstopFor = durations.has(BACKSTOP_PROVIDER) ? ` for ${spanText(durations.get(BACKSTOP_PROVIDER).sec)}` : '';
   if (directFailing.length >= 2) {
-    const sec = (id) => durations.get(id).sec;
+    const sec = (id) => (durations.has(id) ? durations.get(id).sec : Infinity);
+    const sinceOf = (s) => (Number.isFinite(s) ? refMs - s * 1000 : null);
     const longest = [...directFailing].sort((a, b) => sec(b) - sec(a));
     const togetherAll = Math.min(...directFailing.map(sec));
     const togetherPair = sec(longest[1]);
     const byCount = (ids) => {
-      const est = ids.filter((id) => !durations.get(id).measured);
+      const est = ids.filter((id) => durations.has(id) && !durations.get(id).measured);
       return est.length > 0 ? ` (${est.join(' and ')} judged by ${est.length === 1 ? 'its failure count' : 'their failure counts'}: no failingSinceMs)` : '';
     };
+    // "have been failing together for 3 min"; with a provider that is not polled, "are out: usgs failing for 4 min, gfz
+    // not polled (missing from detector.providers)".
+    const andList = (ids) => (ids.length > 1 ? `${ids.slice(0, -1).join(', ')} and ${ids[ids.length - 1]}` : ids.join(''));
+    const group = (ids, verb) => {
+      const off = ids.filter((id) => unlisted.includes(id));
+      const on = ids.filter((id) => !unlisted.includes(id));
+      if (off.length === 0) return `${verb} together for ${spanText(Math.min(...ids.map(sec)))}`;
+      const parts = on.length > 0 ? [`${andList(on)} failing${on.length > 1 ? ' together' : ''} for ${spanText(Math.min(...on.map(sec)))}`] : [];
+      return `are out: ${[...parts, `${andList(off)} not polled (missing from detector.providers)`].join(', ')}`;
+    };
+    const anyUnlisted = directFailing.some((id) => unlisted.includes(id));
     const allRule = limits('alerts:coverage:all');
     const all = directFailing.length === DIRECT_PROVIDERS.length && togetherAll * 1000 >= allRule.minTogetherMs;
     let allText;
     if (all) {
-      const left = backstopDown
-        ? `the feed backstop is failing too${backstopFor}, so the gateway sees no new quakes at all; every source failing at once`
+      const outcome = backstopDown
+        ? `the feed backstop is failing too${backstopFor}, so the gateway sees no new quakes at all`
         : backstop
-          ? 'the gateway sees new quakes only through the feed backstop, minutes late; three agencies failing at once'
-          : 'the gateway sees no new quakes from a direct source (status.json lists no feed backstop); three agencies failing at once';
-      allText = `all three direct providers (${DIRECT_PROVIDERS.join(', ')}) have been failing together for ${spanText(togetherAll)} (line ${spanText(allRule.minTogetherMs / 1000)})${byCount(directFailing)}: ${left} points at the gateway's side (its egress, DNS, the Workers runtime or a deploy)`;
+          ? 'the gateway sees new quakes only through the feed backstop, minutes late'
+          : 'the gateway sees no new quakes from a direct source (status.json lists no feed backstop)';
+      const cause = anyUnlisted
+        ? 'a direct provider missing from detector.providers points at a deploy or a configuration change of the gateway'
+        : `${backstopDown ? 'every source' : 'three agencies'} failing at once points at the gateway's side (its egress, DNS, the Workers runtime or a deploy)`;
+      allText = `all three direct providers (${DIRECT_PROVIDERS.join(', ')}) ${group(directFailing, 'have been failing')} (line ${spanText(allRule.minTogetherMs / 1000)})${byCount(directFailing)}: ${outcome}; ${cause}`;
+    } else if (anyUnlisted) {
+      allText = `${directFailing.length} of the 3 direct providers ${group(directFailing, 'are failing')}: below the all-three line (all three for ${spanText(allRule.minTogetherMs / 1000)})`;
     } else {
       allText = `${directFailing.length} of the 3 direct providers are failing (${directFailing.join(', ')}), together for ${spanText(togetherAll)}: below the all-three line (all three for ${spanText(allRule.minTogetherMs / 1000)})`;
     }
-    findings.push(makeFinding('alerts:coverage:all', { severity: all ? 'P1' : 'P4', sinceMs: refMs - togetherAll * 1000, text: allText, members: directFailing }));
+    findings.push(makeFinding('alerts:coverage:all', { severity: all ? 'P1' : 'P4', sinceMs: sinceOf(togetherAll), text: allText, members: directFailing }));
 
     const twoRule = limits('alerts:coverage:two');
     const pair = longest.slice(0, 2);
     const two = togetherPair * 1000 >= twoRule.minTogetherMs;
     const rest = DIRECT_PROVIDERS.filter((id) => !pair.includes(id))
-      .map((id) => (durations.has(id) ? `${id}, failing too for ${spanText(sec(id))}` : id))
+      .map((id) => (durations.has(id) ? `${id}, failing too for ${spanText(sec(id))}` : unlisted.includes(id) ? `${id}, not polled either` : id))
       .join(', ');
     const behind = backstopDown ? `; the feed backstop is failing too${backstopFor}` : backstop ? ', with the feed backstop' : '';
     const twoText = two
-      ? `two of the three direct providers (${pair.join(' and ')}) have been failing together for ${spanText(togetherPair)} (line ${spanText(twoRule.minTogetherMs / 1000)})${byCount(pair)}: one direct source is left (${rest})${behind}`
-      : `two of the three direct providers (${pair.join(' and ')}) are failing together for ${spanText(togetherPair)}: below the ${spanText(twoRule.minTogetherMs / 1000)} line${backstopDown ? behind : ''}`;
-    findings.push(makeFinding('alerts:coverage:two', { severity: two ? 'P2' : 'P4', sinceMs: refMs - togetherPair * 1000, text: twoText, members: directFailing }));
+      ? `two of the three direct providers (${pair.join(' and ')}) ${group(pair, 'have been failing')} (line ${spanText(twoRule.minTogetherMs / 1000)})${byCount(pair)}: one direct source is left (${rest})${behind}`
+      : `two of the three direct providers (${pair.join(' and ')}) ${group(pair, 'are failing')}: below the ${spanText(twoRule.minTogetherMs / 1000)} line${backstopDown ? behind : ''}`;
+    findings.push(makeFinding('alerts:coverage:two', { severity: two ? 'P2' : 'P4', sinceMs: sinceOf(togetherPair), text: twoText, members: directFailing }));
   }
 
   // 3. One provider on its own: a P3 at its line, a P4 sample below it (reconcile also enters at 4 of the last 8 runs).
@@ -478,7 +504,7 @@ export function evaluateStatus(doc, { nowMs, canary = null, selftest = false } =
     if (id === BACKSTOP_PROVIDER) {
       consequence = 'the backstop behind the direct providers is failing: a quake they miss is not picked up from the feed';
     } else if (directFailing.length >= 2) {
-      consequence = `${directFailing.length} direct providers are failing: see alerts:coverage:two`;
+      consequence = `${directFailing.length} direct providers are failing${unlisted.length > 0 ? ' or not polled' : ''}: see alerts:coverage:two`;
     } else {
       consequence = `${id === 'usgs' ? 'ComCat FDSN and its summary feed both fail; ' : ''}the other direct providers still deliver, so alerts still go out (a quake only ${id} reports may come later)`;
     }
@@ -487,6 +513,16 @@ export function evaluateStatus(doc, { nowMs, canary = null, selftest = false } =
       severity,
       sinceMs: d.measured ? d.since : refMs - d.sec * 1000,
       text: `provider ${id} is failing: ok:false ${durationText(id, d)}${count}${http}${why} (${severity === 'P3' ? 'past' : 'below'} the ${spanText(line / 1000)} line${lineWhat}): ${consequence}`,
+    }));
+  }
+  // A direct provider that is not polled: P3 (after reconcile's 2 runs), at once, with no streak to measure.
+  for (const id of unlisted) {
+    tags.push(`${id}:NOT-LISTED`);
+    const why = entries.size === 0 ? 'detector.providers is empty, so the gateway polls no source at all' : `direct provider ${id} is not listed in detector.providers, so the gateway does not poll it`;
+    findings.push(makeFinding('alerts:provider:unlisted', {
+      id,
+      sinceMs: null,
+      text: `${why}: a deploy or a configuration change of the gateway? The coverage rows count ${id} as failing while it is missing`,
     }));
   }
   parts.push(`providers=${tags.join(',') || 'none'}`);
@@ -747,16 +783,30 @@ export function buildUsageRequest(accountTag, nowMs) {
 const AUTH_RE = /authz|authn|not authori[sz]ed|unauthori[sz]ed|forbidden|permission|authentication/i;
 
 /**
+ * `text` with every occurrence of each non-empty secret (any letter case) replaced by ***. A Cloudflare API error can
+ * echo the account id it was asked about, and its text reaches the public run log, the findings artifact and a board
+ * body, where GitHub's secret masking does not apply.
+ */
+export function redact(text, secrets) {
+  let out = String(text);
+  for (const s of secrets ?? []) {
+    if (typeof s === 'string' && s !== '') out = out.replace(new RegExp(s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '***');
+  }
+  return out;
+}
+
+/**
  * Parse a GraphQL Analytics response for USAGE_QUERY.
  * Only account totals come out: the run logs of this public repository must not list Worker or database names.
+ * `secrets` (the token, the account id) are redacted from error messages before they are cut to length.
  * @returns {{ ok: true, workersRequests: number, d1RowsWritten: number }
  *   | { ok: false, kind: 'auth' | 'graphql' | 'shape', message: string }}
  */
-export function parseUsageResponse(json) {
+export function parseUsageResponse(json, { secrets = [] } = {}) {
   if (!isObject(json)) return { ok: false, kind: 'shape', message: 'the response is not a JSON object' };
   const errors = Array.isArray(json.errors) ? json.errors.filter(isObject) : [];
   if (errors.length > 0) {
-    const message = errors.map((e) => String(e.message ?? 'unknown error')).join('; ').slice(0, 500);
+    const message = errors.map((e) => redact(String(e.message ?? 'unknown error'), secrets)).join('; ').slice(0, 500);
     const auth = errors.some((e) => AUTH_RE.test(String(e.message ?? '')) || AUTH_RE.test(String(isObject(e.extensions) ? e.extensions.code ?? '' : '')));
     return { ok: false, kind: auth ? 'auth' : 'graphql', message };
   }
@@ -786,10 +836,11 @@ export function parseUsageResponse(json) {
 }
 
 /**
- * Query the usage. Never throws.
+ * Query the usage. Never throws. Every message it returns has the token and the account id redacted.
  * @returns {Promise<ReturnType<typeof parseUsageResponse>>}
  */
 export async function fetchUsage({ token, accountTag, nowMs, fetchImpl = globalThis.fetch, sleep = sleepMs }) {
+  const secrets = [token, accountTag];
   const r = await fetchJson(GRAPHQL_URL, {
     init: {
       method: 'POST',
@@ -800,11 +851,11 @@ export async function fetchUsage({ token, accountTag, nowMs, fetchImpl = globalT
     sleep,
     timeoutMs: 20_000,
   });
-  if (r.ok) return parseUsageResponse(r.json);
+  if (r.ok) return parseUsageResponse(r.json, { secrets });
   if (r.kind === 'http' && (r.status === 401 || r.status === 403)) {
     return { ok: false, kind: 'auth', message: `HTTP ${r.status}: the token was rejected` };
   }
-  return { ok: false, kind: 'graphql', message: `${r.message} after ${r.attempts} attempt(s)` };
+  return { ok: false, kind: 'graphql', message: redact(`${r.message} after ${r.attempts} attempt(s)`, secrets) };
 }
 
 /** watcher:cf-usage (P3; reconcile confirms it on the 2nd run): the usage half could not judge, platform:cf-usage frozen. */

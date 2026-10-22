@@ -19,6 +19,7 @@ export type RuleId =
   | 'alerts:usgs:primary'
   | 'alerts:usgs:deletions'
   | 'alerts:provider:feed'
+  | 'alerts:provider:unlisted'
   | 'alerts:provider-silent'
   | 'alerts:latency'
   | 'alerts:budget'
@@ -66,7 +67,8 @@ export interface Finding {
   /** What kind of thing it is about (always the rule's); external, maintenance and watcher are never red. */
   class: FindingClass;
   /** When the condition started, by the evaluator's best evidence (failingSinceMs, lastSuccessAt, a generated time);
-   *  null when unknown (reconcile then counts from the first run that saw it). */
+   *  null when unknown: reconcile then counts the episode from the first run that saw it, and holds a finding at its
+   *  rule's severity for the rule's `limits.lineMs` from there. */
   sinceMs: number | null;
   /** One line, safe for a public issue: what is wrong, how long, and what it means. */
   text: string;
@@ -101,11 +103,13 @@ export interface Rule {
   /** 1: evaluated from Phase 1a; 2: needs a gateway field not published yet. */
   phase: 1 | 2;
   shadow: boolean;
-  /** Consecutive runs with the finding before it takes its severity (P4 until then). */
+  /** Consecutive runs with the finding before it takes its severity (P4 until then); the confirming run at least 10 min
+   *  after the first sighting. */
   confirmRuns: number;
   /** Continuous presence (reconcile's run times) before it takes its severity (P4 until then). */
   holdMs: number;
-  /** Also enters, at ratio.severity, when present (any severity) in at least `min` of the last `of` runs. */
+  /** Also enters, at ratio.severity, when present (any severity) in at least `min` of the last `of` samples (a run
+   *  less than 10 min after the previous sample shares its slot). */
   ratio: Readonly<Ratio> | null;
   /** Consecutive runs without the finding that resolve an open entry. */
   resolveRuns: number;
@@ -113,8 +117,11 @@ export interface Rule {
   resolveRunsAfterRatio: number;
   /** And absent for at least this long. */
   resolveAfterMs: number;
-  /** An entry open this long (from its episode's start) escalates once: one comment and gh-aging. */
+  /** An entry open this long (from its episode's start) escalates once, on a run its finding is present: one comment
+   *  and gh-aging. */
   escalateAfterMs: number | null;
+  /** An entry open continuously for `afterMs` takes severity `to` while its finding holds. */
+  promote: Readonly<{ afterMs: number; to: Severity }> | null;
   /** The evaluator's own thresholds. */
   limits: Readonly<Record<string, unknown>>;
 }

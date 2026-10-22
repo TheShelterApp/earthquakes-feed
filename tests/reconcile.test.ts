@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { test } from 'node:test';
+import { evaluateStatus } from '../scripts/alerts-watchdog.mjs';
 import {
   EVALUATORS,
   HC_PING_BASE,
@@ -137,7 +140,7 @@ const failing = (r: ReconcileResult): string[] => r.pings.filter((p) => p.signal
 const f = (rule: RuleId, fields: { id?: string; severity?: Severity; sinceMs?: number | null; text?: string; members?: string[] }): Finding =>
   makeFinding(rule, { ...fields, text: fields.text ?? `${rule}${fields.id ? ` ${fields.id}` : ''} (${fields.severity ?? 'rule severity'})` });
 const gfz = (severity: Severity, sinceMs: number, rule: RuleId = 'alerts:provider:fast'): Finding => f(rule, { id: 'gfz', severity, sinceMs, text: `gfz failing (timeout) since ${utcText(sinceMs)}` });
-const tmd = (severity: Severity = 'P3', sinceMs: number | null = null): Finding =>
+const tmd = (severity: Severity = 'P3', sinceMs: number | null = T('2026-10-21T07:50:00Z')): Finding =>
   f('feed:source:definite', { id: 'tmd', severity, sinceMs, members: ['fetch'], text: 'tmd fetch failing: unable to verify the first certificate' });
 
 // ---------------------------------------------------------------------------------------------------------
@@ -177,7 +180,7 @@ test('2026-10-21 GEOFON: P4 samples, enters by 4 of 8 at 13:37 (one comment), P3
     const r = w.run(iso, {});
     assert.equal(r.exitCode, 0);
     assert.equal(r.comments.length, 0, `${iso}: leaving is silent`);
-    assert.equal(w.entry('alerts:provider:gfz')!.open, iso !== '2026-10-21T16:22:00.000Z', `${iso}: 4 healthy runs after a ratio entry`);
+    assert.equal(w.entry('alerts:provider:gfz')?.open ?? false, iso !== '2026-10-21T16:22:00.000Z', `${iso}: 4 healthy runs after a ratio entry`);
   }
   assert.equal(w.comments.length, 1, 'exactly one comment for the whole incident');
   const log = w.state('alerts')!.log;
@@ -185,7 +188,11 @@ test('2026-10-21 GEOFON: P4 samples, enters by 4 of 8 at 13:37 (one comment), P3
   assert.deepEqual(w.state('alerts')!.days['2026-10-21'], { red: 0, comments: 1, transitions: 0, would: 0 });
 
   // The scheduled run of 15:22:39 that duplicated the dispatched one (created 15:22:30) is skipped by the gate.
-  const gate = scheduleGate({ eventName: 'schedule', schedule: HEALTH_FALLBACK_CRON, selftestInput: '', dispatchedCreatedAt: ['2026-10-21T15:22:30Z', '2026-10-21T15:07:31Z'], nowMs: T('2026-10-21T15:22:39Z') });
+  const dispatchedRuns = [
+    { created_at: '2026-10-21T15:22:30Z', status: 'in_progress', conclusion: null },
+    { created_at: '2026-10-21T15:07:31Z', status: 'completed', conclusion: 'success' },
+  ];
+  const gate = scheduleGate({ eventName: 'schedule', schedule: HEALTH_FALLBACK_CRON, selftestInput: '', dispatchedRuns, nowMs: T('2026-10-21T15:22:39Z') });
   assert.equal(gate.run, false);
   assert.match(gate.reason, /created 9 s ago/);
 
@@ -242,7 +249,8 @@ test('2026-10-04..06 USGS: enters past 30 min, escalates exactly 2 h after its s
   assert.equal(w.entry('alerts:provider:usgs')!.open, true, 'one healthy run is not enough');
   assert.equal(a.comments.length, 0);
   const b = w.run('2026-10-06T02:07:00Z', {});
-  assert.equal(w.entry('alerts:provider:usgs')!.open, false);
+  assert.equal(w.entry('alerts:provider:usgs'), undefined, 'resolved, and its samples cleared: nothing left to keep');
+  assert.equal(w.state('alerts')!.log.at(-1)!.event, 'resolve');
   assert.equal(b.comments.length, 0, 'resolving is silent');
   assert.deepEqual(signal(b, 'gh-aging'), ['success']);
   assert.equal(w.state('alerts')!.days['2026-10-04']!.transitions, 1, 'gh-aging went to /fail once');
@@ -295,13 +303,40 @@ test('stale status.json: P1 and red, and every provider entry frozen (no counter
       assert.match(now.frozen ?? '', /not judged this run/);
     }
   }
-  // The document is fresh again: the stale entry resolves; the providers are judged again once it is closed.
+  // The document is fresh again: the stale entry resolves, and on that same run the providers are judged again: absent,
+  // so coverage:two (2 runs to resolve) is only held open by its resolve count and is no longer red.
   const back = w.run('2026-10-21T10:52:00Z', {});
   assert.equal(w.entry('alerts:status:stale'), undefined);
-  assert.equal(back.exitCode, 1, 'coverage:two (frozen) is still within its red hour');
+  assert.equal(back.exitCode, 0, 'nothing is present this run: no evidence, no red');
+  for (const key of ['alerts:provider:gfz', 'alerts:coverage:two']) {
+    assert.equal(w.entry(key)!.absentRuns, 1, key);
+    assert.equal(w.entry(key)!.frozen, null, key);
+    assert.equal(w.entry(key)!.open, true, key);
+  }
   w.run('2026-10-21T11:07:00Z', {});
-  assert.equal(w.entry('alerts:provider:gfz')!.absentRuns, 1);
-  assert.equal(w.entry('alerts:provider:gfz')!.frozen, null);
+  assert.equal(w.entry('alerts:provider:gfz'), undefined, 'resolved after its 2 healthy runs');
+  assert.equal(w.entry('alerts:coverage:two'), undefined);
+});
+
+test('a fresh status.json right after a stale one is judged on that run: a P1 it shows is red at once (not one run late)', () => {
+  const w = new World();
+  const stale = f('alerts:status:stale', { sinceMs: T('2026-10-21T10:00:00Z'), text: 'status.json is 420 s old' });
+  assert.equal(w.run('2026-10-21T10:07:00Z', { alerts: [stale] }, { unjudged: { alerts: ['alerts:*'] } }).exitCode, 1);
+  const all = f('alerts:coverage:all', { sinceMs: T('2026-10-21T10:15:00Z'), members: ['usgs', 'emsc', 'gfz'], text: 'usgs, emsc and gfz all failing together for 7 min' });
+  const r = w.run('2026-10-21T10:22:00Z', { alerts: [all] });
+  assert.equal(w.entry('alerts:status:stale'), undefined);
+  assert.equal(w.entry('alerts:coverage:all')!.open, true);
+  assert.equal(w.entry('alerts:coverage:all')!.frozen, null);
+  assert.equal(r.exitCode, 1);
+  assert.match(r.summary, /\*\*Run verdict: red\*\*: P1 `alerts:coverage:all`/);
+  assert.deepEqual(signal(r, 'gh-detect'), ['fail']);
+  // A run that cannot read status.json freezes it (it cannot tell, so it stays red, even before the unreadable finding
+  // confirms); the next fresh document without it resolves it.
+  const back = w.run('2026-10-21T10:37:00Z', { alerts: [f('alerts:status:unreadable', { text: 'HTTP 522 after 3 attempt(s)' })] }, { unjudged: { alerts: ['alerts:*'] } });
+  assert.match(w.entry('alerts:coverage:all')!.frozen ?? '', /not judged this run/);
+  assert.equal(back.exitCode, 1);
+  w.run('2026-10-21T10:52:00Z', { alerts: [] });
+  assert.equal(w.entry('alerts:coverage:all'), undefined);
 });
 
 test('status.json unreadable: P4 (green) on the first run, P2 (red) on the second, resolved on the third', () => {
@@ -372,7 +407,7 @@ test('confirmation and the red hour: unreachable is P4 then P2; stale is P2 at o
   assert.equal(P2_RED_MS, HOUR);
 });
 
-test('config v65/v66 replay: the gap holds 24 h, then a P3 entry; the age keeps it open; P2 escalates (red 1 h), P1 escalates (red every run)', () => {
+test('config v65/v66 replay: the gap holds 24 h, then a P3 entry; the age keeps it open; the rises to P2 (red 1 h) and P1 (red every run) are silent', () => {
   const w = new World();
   const gap = f('config:bundle:gap', { severity: 'P3', members: ['gap'], text: 'the data copy serves v65 while config.theshelter.app serves v66' });
   const age = (severity: Severity): Finding => f('config:bundle:age', { severity, sinceMs: T('2026-10-22T20:39:00Z'), members: ['age', 'gap'], text: `config bundle copy v65 is old (${severity})` });
@@ -382,12 +417,12 @@ test('config v65/v66 replay: the gap holds 24 h, then a P3 entry; the age keeps 
     ['2026-10-20T11:07:00Z', gap, { exit: 0, comment: /^\*\*P3 · `config:bundle`\*\* config partial publish — the data copy serves v65/, open: true }],
     ['2026-10-21T11:07:00Z', gap, { exit: 0, comment: null, open: true }],
     ['2026-10-22T20:40:00Z', age('P3'), { exit: 0, comment: null, open: true }],
-    ['2026-10-27T20:40:00Z', age('P2'), { exit: 1, comment: /^\*\*P2 · `config:bundle`\*\* config bundle old — now P2, was P3: /, open: true }],
+    ['2026-10-27T20:40:00Z', age('P2'), { exit: 1, comment: null, open: true }],
     ['2026-10-27T20:55:00Z', age('P2'), { exit: 1, comment: null, open: true }],
     ['2026-10-27T21:10:00Z', age('P2'), { exit: 1, comment: null, open: true }],
     ['2026-10-27T21:25:00Z', age('P2'), { exit: 1, comment: null, open: true }],
     ['2026-10-27T21:40:00Z', age('P2'), { exit: 0, comment: null, open: true }],
-    ['2026-11-11T20:40:00Z', age('P1'), { exit: 1, comment: /^\*\*P1 · `config:bundle`\*\* config bundle old — now P1, was P2: /, open: true }],
+    ['2026-11-11T20:40:00Z', age('P1'), { exit: 1, comment: null, open: true }],
     ['2026-11-11T20:55:00Z', age('P1'), { exit: 1, comment: null, open: true }],
   ];
   for (const [iso, finding, want] of steps) {
@@ -408,6 +443,9 @@ test('config v65/v66 replay: the gap holds 24 h, then a P3 entry; the age keeps 
     }
   }
   assert.deepEqual(w.state('platform')!.entries['config:bundle']!.rule, 'config:bundle:age');
+  // A rise lands at P1 or P2: the red run (and its push) is the alarm, never a comment on the public board.
+  assert.equal(w.entry('config:bundle')!.notified, 'P1');
+  assert.equal(w.comments.length, 1, 'the P3 entry comment only');
 });
 
 test('inhibition: an open feed:freshness mutes a new feed source until it resolves; the gateway gfz entry mutes feed:source:geofon', () => {
@@ -424,7 +462,7 @@ test('inhibition: an open feed:freshness mutes a new feed source until it resolv
   assert.match(r2.comments[0]!.body, /`feed:source:tmd`/);
 
   const g = new World();
-  const geofon = f('feed:source:core', { id: 'geofon', severity: 'P3', members: ['fetch'], text: 'geofon fetch failing for 3.1 h' });
+  const geofon = f('feed:source:core', { id: 'geofon', severity: 'P3', sinceMs: T('2026-10-21T11:00:00Z'), members: ['fetch'], text: 'geofon fetch failing for 3.1 h' });
   const r = g.run('2026-10-21T14:07:00Z', { alerts: [gfz('P3', T('2026-10-21T12:50:00Z'))], feed: [geofon] });
   assert.deepEqual(g.entry('feed:source:geofon')!.muted, { by: 'inhibited', note: 'inhibited by alerts:provider:gfz' });
   assert.deepEqual(r.comments.map((c) => c.board), ['alerts']);
@@ -481,8 +519,9 @@ test('silences: parseSilences, a silenced key gets no comment, a rise lifts it, 
   assert.deepEqual(signal(b, 'gh-feed'), ['success'], 'a silenced entry does not ping');
   assert.equal(b.exitCode, 1, 'silences never stop red');
   const c = v.run('2026-11-11T20:40:00Z', { platform: [age('P1')] }, { silences: all });
-  assert.equal(c.comments.length, 1, 'a later rise is an escalation comment');
-  assert.match(c.comments[0]!.body, /now P1, was P2/);
+  assert.equal(c.comments.length, 0, 'a later rise is silent too: the red run announces it');
+  assert.equal(c.exitCode, 1);
+  assert.equal(v.entry('config:bundle')!.notified, 'P1');
 });
 
 test('shadow rules: the canary, provider-silent, latency and feed:systemic log would-notify once, never a comment, a red run or a ping', () => {
@@ -533,7 +572,7 @@ test('shadow rules: the canary, provider-silent, latency and feed:systemic log w
 
 test('never red: one external agency at P1 and the watcher stay green', () => {
   const w = new World();
-  const r = w.run('2026-10-21T10:07:00Z', { alerts: [f('alerts:provider:usgs', { severity: 'P1', text: 'hand-built P1' })] });
+  const r = w.run('2026-10-21T10:07:00Z', { alerts: [f('alerts:provider:usgs', { severity: 'P1', sinceMs: T('2026-10-21T09:30:00Z'), text: 'hand-built P1' })] });
   assert.equal(w.entry('alerts:provider:usgs')!.open, true);
   assert.equal(r.exitCode, 0);
   const watcher = f('watcher', { id: 'cf-usage', severity: 'P1', text: 'the analytics token was refused' });
@@ -595,7 +634,10 @@ test('pings: the verdict checks, gh-aging, and the selftest (fail then success, 
   const st = s.run('2026-11-01T09:17:00Z', { alerts: [f('alerts:selftest', { text: 'forced by the selftest: this run must be red' })] });
   assert.equal(st.exitCode, 1);
   assert.deepEqual(st.pings.filter((p) => p.check === 'selftest').map((p) => p.signal), ['fail', 'success']);
-  assert.deepEqual(st.bodies, { alerts: null, feed: null, platform: null }, 'no board row, no board');
+  for (const b of BOARD_IDS) assert.deepEqual(st.state[b]!.entries, {}, `${b}: no board row`);
+  assert.equal(s.state('alerts')!.lastSelftestMs, T('2026-11-01T09:17:00Z'), 'recorded, on every board');
+  assert.equal(s.state('platform')!.lastSelftestMs, T('2026-11-01T09:17:00Z'));
+  assert.match(s.bodies.alerts!, /Last selftest \(the forced P1 that proves the red run\): 2026-11-01 09:17Z\./);
   assert.ok(st.annotations.includes('::error title=P1 alerts%3Aselftest::forced by the selftest: this run must be red'));
   assert.match(st.summary, /\*\*Run verdict: red\*\*: the selftest/);
 });
@@ -603,7 +645,7 @@ test('pings: the verdict checks, gh-aging, and the selftest (fail then success, 
 test('body: round trip, escaping of untrusted text, a broken marker, and 42 open sources plus 300 log events under the limit', () => {
   const w = new World();
   const nasty = 'x --> y | z @user #12 <img src=x> `tick`';
-  const r = w.run('2026-10-21T10:07:00Z', { feed: [f('feed:source:definite', { id: 'tmd', members: ['fetch'], text: nasty })] });
+  const r = w.run('2026-10-21T10:07:00Z', { feed: [f('feed:source:definite', { id: 'tmd', sinceMs: T('2026-10-21T07:50:00Z'), members: ['fetch'], text: nasty })] });
   const body = w.bodies.feed!;
   assert.equal(body.indexOf('-->'), body.lastIndexOf('-->'), 'only the marker ends a comment');
   assert.ok(body.trimEnd().endsWith(' -->'));
@@ -647,7 +689,6 @@ test('labels follow the worst open severity; the 7-day counts and the log drop w
   assert.deepEqual(w.run('2026-10-21T10:22:00Z', { feed: [tmd(), f('feed:freshness', { text: 'stale' })] }).labels.feed, ['health-board', 'health:p2']);
   const r = w.run('2026-10-21T10:37:00Z', { alerts: [f('alerts:policy', { text: 'fallback policy' })] });
   assert.deepEqual(r.labels, { alerts: ['health-board', 'health:p1'], feed: ['health-board', 'health:ok'], platform: ['health-board', 'health:ok'] });
-  assert.equal(r.bodies.platform, null, 'the platform board is not needed yet');
 
   const prev = w.prev();
   prev.feed!.days = { '2026-10-10': { red: 9, comments: 9, transitions: 9, would: 9 }, '2026-10-15': { red: 1, comments: 2, transitions: 3, would: 4 }, ...prev.feed!.days };
@@ -664,16 +705,25 @@ test('labels follow the worst open severity; the 7-day counts and the log drop w
   assert.match(w.bodies.feed!, /pings skipped: HC_PING_KEY unset/);
 });
 
-test('scheduleGate: the fallback cron skips within 20 min of a dispatched run (whatever its status); everything else runs', () => {
+test('scheduleGate: the fallback cron skips within 20 min of a dispatched run (whatever its status, unless cancelled or skipped); everything else runs', () => {
   const now = T('2026-10-21T15:25:00Z');
   const gate = (o: Partial<Parameters<typeof scheduleGate>[0]>): ReturnType<typeof scheduleGate> =>
-    scheduleGate({ eventName: 'schedule', schedule: HEALTH_FALLBACK_CRON, selftestInput: '', dispatchedCreatedAt: [], nowMs: now, ...o });
-  assert.equal(gate({ dispatchedCreatedAt: [new Date(now - 9 * SEC).toISOString()] }).run, false);
-  assert.equal(gate({ dispatchedCreatedAt: [new Date(now - 21 * MIN).toISOString()] }).run, true);
-  assert.equal(gate({ dispatchedCreatedAt: [new Date(now - SCHEDULE_SKIP_MS + SEC).toISOString(), 'garbage'] }).run, false);
-  assert.equal(gate({ dispatchedCreatedAt: null }).run, true);
-  assert.equal(gate({ dispatchedCreatedAt: [] }).run, true);
-  assert.equal(gate({ eventName: 'workflow_dispatch', dispatchedCreatedAt: [new Date(now).toISOString()] }).run, true);
+    scheduleGate({ eventName: 'schedule', schedule: HEALTH_FALLBACK_CRON, selftestInput: '', dispatchedRuns: [], nowMs: now, ...o });
+  const run = (agoMs: number, status = 'in_progress', conclusion: string | null = null): { created_at: string; status: string; conclusion: string | null } => ({ created_at: new Date(now - agoMs).toISOString(), status, conclusion });
+  assert.equal(gate({ dispatchedRuns: [run(9 * SEC)] }).run, false);
+  assert.equal(gate({ dispatchedRuns: [run(9 * SEC, 'queued')] }).run, false);
+  assert.equal(gate({ dispatchedRuns: [run(9 * SEC, 'completed', 'failure')] }).run, false, 'a red run judged');
+  assert.equal(gate({ dispatchedRuns: [run(21 * MIN)] }).run, true);
+  assert.equal(gate({ dispatchedRuns: [run(SCHEDULE_SKIP_MS - SEC), { created_at: 'garbage' }] }).run, false);
+  assert.equal(gate({ dispatchedRuns: null }).run, true);
+  assert.equal(gate({ dispatchedRuns: [] }).run, true);
+  assert.equal(gate({ eventName: 'workflow_dispatch', dispatchedRuns: [run(0)] }).run, true);
+  // A dispatched run that judged nothing does not stand in for the fallback: a pending run that a newer arrival in the
+  // `health` concurrency group cancelled (the fallback itself, or the next dispatch), or one that was skipped.
+  const cancelled = gate({ dispatchedRuns: [run(3 * MIN, 'completed', 'cancelled'), run(9 * MIN, 'completed', 'skipped'), run(25 * MIN, 'completed', 'success')] });
+  assert.equal(cancelled.run, true);
+  assert.match(cancelled.reason, /no workflow_dispatch health run \(not cancelled or skipped\) created in the last 20 min/);
+  assert.equal(gate({ dispatchedRuns: [run(3 * MIN, 'completed', 'cancelled'), run(12 * MIN, 'completed', 'success')] }).run, false, 'an earlier one that judged still counts');
   assert.deepEqual(gate({ eventName: 'schedule', schedule: SELFTEST_CRON }), { run: true, selftest: true, reason: `schedule '${SELFTEST_CRON}'` });
   assert.equal(gate({ eventName: 'workflow_dispatch', selftestInput: 'true' }).selftest, true);
   assert.equal(gate({ eventName: 'workflow_dispatch', selftestInput: true }).selftest, true);
@@ -709,6 +759,379 @@ test('duplicate findings of one key: the worst severity wins and the members mer
 });
 
 // ---------------------------------------------------------------------------------------------------------
+// The review fixes of 2026-10-22 (logic review, incident replay, workflow review)
+
+test('a resolved entry starts its samples afresh: one blip after a resolve re-opens nothing and posts nothing', () => {
+  // The 2026-10-21 GEOFON replay (a ratio entry, resolved after 4 healthy runs) plus one P4 blip at 16:37.
+  const w = new World();
+  const since = T('2026-10-21T12:50:00Z');
+  for (const iso of every15('2026-10-21T12:52:00Z', '2026-10-21T15:22:00Z')) w.run(iso, { alerts: [gfz(T(iso) - since >= 60 * MIN ? 'P3' : 'P4', since)] });
+  for (const iso of every15('2026-10-21T15:37:00Z', '2026-10-21T16:22:00Z')) w.run(iso, {});
+  assert.equal(w.entry('alerts:provider:gfz'), undefined, 'resolved: no sample is kept');
+  const blip = w.run('2026-10-21T16:37:00Z', { alerts: [gfz('P4', T('2026-10-21T16:36:30Z'))] });
+  assert.equal(w.entry('alerts:provider:gfz')!.open, false);
+  assert.equal(w.entry('alerts:provider:gfz')!.samples, '1');
+  assert.deepEqual(blip.comments, []);
+  assert.equal(w.comments.length, 1, 'the one entry comment of the incident');
+
+  // A line entry (USGS 30 min): 6 runs present, resolved after 2 healthy runs, then one blip (was 6 of the last 8).
+  const v = new World();
+  const S = T('2026-10-05T03:00:00Z');
+  const usgs = (nowMs: number, sinceMs = S): Finding => f('alerts:provider:usgs', { severity: nowMs - sinceMs >= 30 * MIN ? 'P3' : 'P4', sinceMs, text: 'usgs ok:false' });
+  for (const iso of every15('2026-10-05T03:07:00Z', '2026-10-05T04:22:00Z')) v.run(iso, { alerts: [usgs(T(iso))] });
+  v.run('2026-10-05T04:37:00Z', {});
+  v.run('2026-10-05T04:52:00Z', {});
+  assert.equal(v.entry('alerts:provider:usgs'), undefined);
+  const again = v.run('2026-10-05T05:07:00Z', { alerts: [usgs(T('2026-10-05T05:07:00Z'), T('2026-10-05T05:06:00Z'))] });
+  assert.equal(v.entry('alerts:provider:usgs')!.open, false);
+  assert.deepEqual(again.comments, []);
+  assert.deepEqual(signal(again, 'gh-aging'), ['success']);
+});
+
+test('the episode start: a streak after a day of blips enters with its own start (no escalation in the same run); one past its line on entry gets one item', () => {
+  // GFZ blips once every 90 min for a day (the logic review's t1 case 3), then a real 60-min streak.
+  const w = new World();
+  every15('2026-10-20T00:07:00Z', '2026-10-20T23:52:00Z').forEach((iso, i) => {
+    w.run(iso, i % 6 === 0 ? { alerts: [gfz('P4', T(iso) - 30 * SEC)] } : {});
+  });
+  const s0 = T('2026-10-21T00:00:00Z');
+  for (const iso of every15('2026-10-21T00:07:00Z', '2026-10-21T01:07:00Z')) {
+    const r = w.run(iso, { alerts: [gfz(T(iso) - s0 >= 60 * MIN ? 'P3' : 'P4', s0)] });
+    const e = w.entry('alerts:provider:gfz')!;
+    if (r.comments.length === 0) continue;
+    assert.equal(r.comments[0]!.body.split('\n\n').length, 2, `${iso}: one item and the run line`);
+    assert.equal(e.escalated, false, iso);
+    assert.ok(e.episodeSinceMs! >= T('2026-10-20T22:00:00Z'), `${iso}: dated by this streak and the window's samples, not ${utcText(e.episodeSinceMs)}`);
+    assert.deepEqual(signal(r, 'gh-aging'), ['success']);
+  }
+  assert.equal(w.comments.length, 1);
+
+  // The first run after the rollout finds USGS failing for 6 h: past its 2 h line on entry, so one item says both.
+  const v = new World();
+  const r = v.run('2026-10-21T10:07:00Z', { alerts: [f('alerts:provider:usgs', { sinceMs: T('2026-10-21T04:07:00Z'), text: 'usgs ok:false: FDSN and the summary feed both fail' })] });
+  assert.equal(r.comments.length, 1);
+  const items = r.comments[0]!.body.split('\n\n');
+  assert.equal(items.length, 2, 'one item');
+  assert.equal(items[0], '**P3 · `alerts:provider:usgs`** USGS failing — usgs ok:false: FDSN and the summary feed both fail (since 2026-10-21 04:07Z, 6.0 h); past its 2.0 h escalation line');
+  assert.deepEqual(signal(r, 'gh-aging'), ['fail']);
+  assert.deepEqual(r.comments[0]!.keys, [{ key: 'alerts:provider:usgs', notified: null, escalationNotified: false }]);
+  assert.equal(v.run('2026-10-21T10:22:00Z', { alerts: [f('alerts:provider:usgs', { sinceMs: T('2026-10-21T04:07:00Z'), text: 'usgs ok:false' })] }).comments.length, 0);
+});
+
+test('a finding whose start is unknown (sinceMs null) is held for its rule\'s line from the first run that saw it, which dates its episode', () => {
+  const w = new World();
+  const never = (): Finding => f('feed:source:definite', { id: 'newsrc', sinceMs: null, members: ['fetch'], text: 'newsrc fetch failing, never fetched successfully (HTTP 404)' });
+  const first = T('2026-10-22T10:07:00Z');
+  for (const iso of every15('2026-10-22T10:07:00Z', '2026-10-22T11:52:00Z')) {
+    const r = w.run(iso, { feed: [never()] });
+    assert.equal(w.entry('feed:source:newsrc')!.open, false, iso);
+    assert.deepEqual(r.comments, [], iso);
+  }
+  assert.equal(w.entry('feed:source:newsrc')!.pending, 'holding 105 min of 2.0 h (its start is unknown)');
+  const r = w.run('2026-10-22T12:07:00Z', { feed: [never()] });
+  const e = w.entry('feed:source:newsrc')!;
+  assert.equal(e.open, true);
+  assert.equal(e.episodeSinceMs, first);
+  assert.match(r.comments[0]!.body, /\(since 2026-10-22 10:07Z, 2\.0 h\)$/m);
+  // Escalation at 24 h counted from that first sighting.
+  assert.equal(w.run('2026-10-23T09:52:00Z', { feed: [never()] }).comments.length, 0);
+  const esc = w.run('2026-10-23T10:07:00Z', { feed: [never()] });
+  assert.match(esc.comments[0]!.body, /— open for 24\.0 h: /);
+});
+
+test('red only on evidence: a P2 held open only by its resolve count is not red; a frozen one is', () => {
+  const w = new World();
+  const cov = f('alerts:coverage:two', { sinceMs: T('2026-10-21T10:00:00Z'), members: ['emsc', 'gfz'], text: 'emsc and gfz failing together for 7 min' });
+  assert.equal(w.run('2026-10-21T10:07:00Z', { alerts: [cov] }).exitCode, 1);
+  const after = w.run('2026-10-21T10:22:00Z', { alerts: [] });
+  assert.equal(w.entry('alerts:coverage:two')!.open, true, 'one healthy run of 2');
+  assert.equal(after.exitCode, 0, 'the outage is over: no red email about it');
+  assert.ok(after.annotations.some((a) => a.startsWith('::error title=P2 alerts%3Acoverage%3Atwo::')), 'still an open row');
+  assert.deepEqual(signal(after, 'gh-redundancy'), ['fail'], 'the ping holds until it resolves (no flapping push)');
+  w.run('2026-10-21T10:37:00Z', { alerts: [] });
+  assert.equal(w.entry('alerts:coverage:two'), undefined);
+  assert.equal(w.state('alerts')!.days['2026-10-21']!.red, 1);
+  // Back on the next run (still inside its first hour) it is red again; frozen (the alerts job failed) it stays red.
+  const v = new World();
+  v.run('2026-10-21T10:07:00Z', { alerts: [cov] });
+  assert.equal(v.run('2026-10-21T10:22:00Z', { alerts: null }).exitCode, 1, 'frozen: cannot tell');
+});
+
+test('inhibition holds a comment back only while the child\'s own finding is present: one that cleared under its parent never comments', () => {
+  // A feed outage with the gateway backstop failing too; on the recovery run both conditions are gone.
+  const w = new World();
+  const fresh = f('feed:freshness', { sinceMs: T('2026-10-21T10:00:00Z'), text: 'the v2 manifest is 45 min old' });
+  const backstop = f('alerts:provider:feed', { sinceMs: T('2026-10-21T09:35:00Z'), text: 'the gateway feed backstop is failing' });
+  for (const iso of every15('2026-10-21T10:07:00Z', '2026-10-21T11:07:00Z')) {
+    w.run(iso, { feed: [fresh], alerts: [backstop] });
+    assert.equal(w.entry('alerts:provider:feed')!.muted?.by, 'inhibited', iso);
+  }
+  const recovery = w.run('2026-10-21T11:22:00Z', {});
+  assert.equal(w.entry('alerts:provider:feed')!.open, true, 'held open by its 2-run resolve');
+  assert.equal(w.entry('alerts:provider:feed')!.muted, null);
+  assert.deepEqual(recovery.comments, []);
+  w.run('2026-10-21T11:37:00Z', {});
+  assert.equal(w.entry('alerts:provider:feed'), undefined);
+  assert.equal(w.comments.length, 0, 'never a comment for a muted child that cleared');
+
+  // The backstop still failing once the parent resolved: its delayed comment goes out on that run.
+  const v = new World();
+  v.run('2026-10-21T10:07:00Z', { feed: [fresh], alerts: [backstop] });
+  const r = v.run('2026-10-21T10:22:00Z', { alerts: [backstop] });
+  assert.match(r.comments[0]!.body, /`alerts:provider:feed`/);
+
+  // A silence that ends while its key is absent (held open by its resolve count) still posts, as before.
+  const s = new World();
+  const now = T('2026-10-21T10:00:00Z');
+  const silences = parseSilences('alerts:provider:feed=2026-10-21T10:30Z,backstop maintenance', now).silences;
+  s.run('2026-10-21T10:07:00Z', { alerts: [backstop] }, { silences });
+  s.run('2026-10-21T10:22:00Z', { alerts: [backstop] }, { silences });
+  const ended = s.run('2026-10-21T10:37:00Z', {}, { silences });
+  assert.match(ended.comments[0]!.body, /`alerts:provider:feed`/);
+});
+
+test('escalation only on a run where the finding is present: a recovering entry neither escalates nor fails gh-aging', () => {
+  // USGS down 18:00-19:55 (the logic review's t3): at 20:07 it is absent, its row open for 1 of 2 healthy runs.
+  const w = new World();
+  const S = T('2026-10-04T18:00:00Z');
+  const usgs = (nowMs: number): Finding => f('alerts:provider:usgs', { severity: nowMs - S >= 30 * MIN ? 'P3' : 'P4', sinceMs: S, text: 'usgs down' });
+  for (const iso of every15('2026-10-04T18:07:00Z', '2026-10-04T19:52:00Z')) w.run(iso, { alerts: [usgs(T(iso))] });
+  const r = w.run('2026-10-04T20:07:00Z', {});
+  assert.equal(w.entry('alerts:provider:usgs')!.open, true);
+  assert.equal(w.entry('alerts:provider:usgs')!.escalated, false);
+  assert.deepEqual(r.comments, []);
+  assert.deepEqual(signal(r, 'gh-aging'), ['success']);
+  // Back at 20:22 (present again, 2.4 h into the episode): it escalates now.
+  const back = w.run('2026-10-04T20:22:00Z', { alerts: [usgs(T('2026-10-04T20:22:00Z'))] });
+  assert.match(back.comments[0]!.body, /— open for 2\.3 h: /);
+});
+
+test('only an entry open after this run\'s holds inhibits: a pending first sample shown as P4 mutes nothing', () => {
+  const w = new World();
+  const unreachable = f('feed:freshness:unreachable', { members: ['v2'], text: 'v2/manifest.json unreachable after 4 tries' });
+  const r = w.run('2026-10-21T10:07:00Z', { feed: [unreachable, tmd()] });
+  assert.equal(w.entry('feed:freshness')!.pending, 'confirming 1/2');
+  assert.equal(w.entry('feed:source:tmd')!.muted, null);
+  assert.match(r.comments[0]!.body, /`feed:source:tmd`/);
+  // Confirmed on the second run, it inhibits (a new source entering then is muted).
+  w.run('2026-10-21T10:22:00Z', { feed: [unreachable, tmd(), f('feed:source:definite', { id: 'kagsr', sinceMs: T('2026-10-21T08:00:00Z'), text: 'kagsr HTTP 404' })] });
+  assert.deepEqual(w.entry('feed:source:kagsr')!.muted, { by: 'inhibited', note: 'inhibited by feed:freshness' });
+});
+
+test('gh-aging: an announced escalation keeps it failing through a mute, so the unmute pushes nothing new', () => {
+  const w = new World();
+  const S = T('2026-10-04T18:07:00Z');
+  const usgs = (nowMs: number): Finding => f('alerts:provider:usgs', { severity: nowMs - S >= 30 * MIN ? 'P3' : 'P4', sinceMs: S, text: 'usgs ok:false' });
+  const cov = f('alerts:coverage:two', { sinceMs: T('2026-10-04T20:15:00Z'), members: ['usgs', 'emsc'], text: 'usgs and emsc failing together' });
+  for (const iso of every15('2026-10-04T18:22:00Z', '2026-10-04T20:07:00Z')) w.run(iso, { alerts: [usgs(T(iso))] });
+  assert.equal(w.entry('alerts:provider:usgs')!.escalationNotified, true);
+  for (const iso of every15('2026-10-04T20:22:00Z', '2026-10-04T21:52:00Z')) {
+    const muted = T(iso) <= T('2026-10-04T21:07:00Z');
+    const r = w.run(iso, { alerts: muted ? [usgs(T(iso)), cov] : [usgs(T(iso))] });
+    assert.deepEqual(signal(r, 'gh-aging'), ['fail'], iso);
+    if (T(iso) <= T('2026-10-04T21:22:00Z')) assert.equal(w.entry('alerts:provider:usgs')!.muted?.by, 'inhibited', iso);
+  }
+  assert.equal(w.entry('alerts:provider:usgs')!.muted, null);
+  // gh-aging went to /fail once (20:07) and gh-redundancy once (20:22): two would-be pushes, not three.
+  assert.equal(w.state('alerts')!.days['2026-10-04']!.transitions, 2);
+});
+
+test('samples and confirmations go by time: a run within 10 min of the last shares its slot; a confirming run comes 10 min after the first', () => {
+  // An extra dispatch at 12:54 adds no sample: 4 of 8 is reached at 13:37, as without it (not at 13:22).
+  const w = new World();
+  const since = T('2026-10-21T12:50:00Z');
+  for (const iso of ['2026-10-21T12:52:00Z', '2026-10-21T12:54:00Z', '2026-10-21T13:07:00Z', '2026-10-21T13:22:00Z']) w.run(iso, { alerts: [gfz('P4', since)] });
+  assert.equal(w.entry('alerts:provider:gfz')!.samples, '111');
+  assert.equal(w.entry('alerts:provider:gfz')!.open, false);
+  w.run('2026-10-21T13:37:00Z', { alerts: [gfz('P4', since)] });
+  assert.equal(w.entry('alerts:provider:gfz')!.open, true);
+  // A slot is present when either run in it saw the key, dated by the run that saw it.
+  const v = new World();
+  v.run('2026-10-21T12:52:00Z', { alerts: [gfz('P4', since)] });
+  v.run('2026-10-21T13:07:00Z', {});
+  v.run('2026-10-21T13:11:00Z', { alerts: [gfz('P4', since)] });
+  assert.equal(v.entry('alerts:provider:gfz')!.samples, '11');
+  assert.deepEqual(v.entry('alerts:provider:gfz')!.sampleMs, [T('2026-10-21T12:52:00Z'), T('2026-10-21T13:11:00Z')]);
+
+  // A rerun 2 min later does not confirm a 2-run rule: status.json unreadable stays P4 (green) until 10:22.
+  const u = new World();
+  const unreadable = f('alerts:status:unreadable', { text: 'cannot read status.json: HTTP 522 after 3 attempt(s)' });
+  assert.equal(u.run('2026-10-21T10:07:00Z', { alerts: [unreadable] }, { unjudged: { alerts: ['alerts:*'] } }).exitCode, 0);
+  const quick = u.run('2026-10-21T10:09:00Z', { alerts: [unreadable] }, { unjudged: { alerts: ['alerts:*'] } });
+  assert.equal(quick.exitCode, 0);
+  assert.equal(u.entry('alerts:status:unreadable')!.pending, 'confirming 1/2');
+  assert.equal(u.run('2026-10-21T10:22:00Z', { alerts: [unreadable] }, { unjudged: { alerts: ['alerts:*'] } }).exitCode, 1);
+});
+
+test('selftest tracking: recorded on the boards; 35 days without one (boards older than that) opens watcher:selftest-overdue with one comment', () => {
+  const w = new World();
+  w.run('2026-10-01T10:07:00Z', {});
+  assert.equal(w.state('alerts')!.lastSelftestMs, null);
+  w.run('2026-11-05T10:07:00Z', {});
+  assert.equal(w.entry('watcher:selftest-overdue'), undefined, '35 days exactly is not over the line');
+  w.run('2026-11-05T10:22:00Z', {});
+  assert.equal(w.entry('watcher:selftest-overdue')!.pending, 'confirming 1/2');
+  assert.match(w.entry('watcher:selftest-overdue')!.text, /^no selftest since the boards were created at 2026-10-01 10:07Z \(35\.0 d; line 35\.0 d\): GitHub may have dropped the monthly selftest cron/);
+  const r = w.run('2026-11-05T10:37:00Z', {});
+  assert.equal(r.exitCode, 0, 'a watcher fault is never red');
+  assert.match(r.comments[0]!.body, /^\*\*P3 · `watcher:selftest-overdue`\*\* watcher fault — /);
+  assert.equal(w.run('2026-11-05T10:52:00Z', {}).comments.length, 0, 'one comment');
+  // A selftest run (red, as designed) records itself and resolves the row.
+  const st = w.run('2026-11-05T11:07:00Z', { alerts: [f('alerts:selftest', { text: 'forced by the selftest' })] });
+  assert.equal(st.exitCode, 1);
+  assert.equal(w.entry('watcher:selftest-overdue'), undefined);
+  assert.equal(w.state('feed')!.lastSelftestMs, T('2026-11-05T11:07:00Z'));
+  // 35 days after it, overdue again.
+  w.run('2026-12-10T11:22:00Z', {});
+  assert.match(w.entry('watcher:selftest-overdue')!.text, /^the last selftest ran at 2026-11-05 11:07Z/);
+  // At rollout nothing is overdue, whatever the clock says.
+  const v = new World();
+  v.run('2027-06-01T10:07:00Z', {});
+  v.run('2027-06-01T10:22:00Z', {});
+  assert.equal(v.entry('watcher:selftest-overdue'), undefined);
+});
+
+test('promotion: status.json unreadable for 60 min becomes P1 (red on every run, gh-detect) while every other alerts:* key stays frozen', () => {
+  const w = new World();
+  const unreadable = f('alerts:status:unreadable', { text: 'cannot read status.json: HTTP 404 after 3 attempt(s)' });
+  const run = (iso: string): ReconcileResult => w.run(iso, { alerts: [unreadable] }, { unjudged: { alerts: ['alerts:*'] } });
+  run('2026-10-21T10:07:00Z');
+  const want: Record<string, [Severity, number, string]> = {
+    '10:22': ['P2', 1, 'gh-platform'],
+    '10:37': ['P2', 1, 'gh-platform'],
+    '11:07': ['P2', 1, 'gh-platform'],
+    '11:22': ['P1', 1, 'gh-detect'],
+    '11:37': ['P1', 1, 'gh-detect'],
+    '13:37': ['P1', 1, 'gh-detect'],
+  };
+  for (const [hm, [sev, exit, check]] of Object.entries(want)) {
+    const r = run(`2026-10-21T${hm}:00Z`);
+    assert.equal(w.entry('alerts:status:unreadable')!.severity, sev, hm);
+    assert.equal(r.exitCode, exit, hm);
+    assert.deepEqual(failing(r), [check], hm);
+    // The promotion is silent: the red run tells the owner, the public board's watchers get no P1 comment.
+    assert.deepEqual(r.comments, [], hm);
+  }
+  assert.equal(w.run('2026-10-21T13:52:00Z', { alerts: [] }).exitCode, 0);
+  assert.equal(w.entry('alerts:status:unreadable'), undefined);
+});
+
+test('a P1/P2 held open by a P4 sample below its line is not red and fails no check, and stays one episode', () => {
+  // The verify replay's N5c: usgs, emsc and gfz down 10:00-10:20, then only usgs and gfz until 12:30. coverage:all stays
+  // open on its P4 samples (it resolves once two providers are ok), but all three are no longer down.
+  const w = new World();
+  const S = T('2026-10-22T10:00:00Z');
+  const all = f('alerts:coverage:all', { sinceMs: S, members: ['usgs', 'emsc', 'gfz'], text: 'all three direct providers have been failing together for 7 min' });
+  const below = f('alerts:coverage:all', { severity: 'P4', sinceMs: S, members: ['usgs', 'gfz'], text: '2 of the 3 direct providers are failing (usgs, gfz): below the all-three line' });
+  const r1 = w.run('2026-10-22T10:07:00Z', { alerts: [all] });
+  assert.equal(r1.exitCode, 1);
+  assert.deepEqual(signal(r1, 'gh-detect'), ['fail']);
+  for (const iso of every15('2026-10-22T10:22:00Z', '2026-10-22T12:22:00Z')) {
+    const r = w.run(iso, { alerts: [below] });
+    assert.equal(r.exitCode, 0, iso);
+    assert.deepEqual(signal(r, 'gh-detect'), ['success'], iso);
+    assert.deepEqual([w.entry('alerts:coverage:all')!.open, w.entry('alerts:coverage:all')!.severity], [true, 'P1'], `${iso}: open until it resolves`);
+  }
+  assert.match(w.bodies.alerts!, /below its line this run: not red, open until it resolves/);
+  // All three down again: red at once, in the same episode (one open event).
+  const again = w.run('2026-10-22T12:37:00Z', { alerts: [all] });
+  assert.equal(again.exitCode, 1);
+  assert.deepEqual(signal(again, 'gh-detect'), ['fail']);
+  w.run('2026-10-22T12:52:00Z', {});
+  assert.equal(w.entry('alerts:coverage:all'), undefined);
+  assert.equal(w.state('alerts')!.log.filter((x) => x.key === 'alerts:coverage:all' && x.event === 'open').length, 1);
+  assert.equal(w.comments.length, 0);
+
+  // A P2 in its P4 band (the budget projected between 0.65 and 0.75) is green inside its first hour too.
+  const v = new World();
+  const budget = (severity: Severity): Finding => f('alerts:budget', { severity, members: ['doRowsWritten'], text: `rows written projected (${severity})` });
+  assert.equal(v.run('2026-10-22T10:07:00Z', { alerts: [budget('P2')] }).exitCode, 1);
+  const band = v.run('2026-10-22T10:22:00Z', { alerts: [budget('P4')] });
+  assert.equal(band.exitCode, 0);
+  assert.deepEqual(signal(band, 'gh-capacity'), ['success']);
+  assert.equal(v.run('2026-10-22T10:37:00Z', { alerts: [budget('P2')] }).exitCode, 1, 'over the line again inside its first hour');
+});
+
+test('resolving goes by time too: an absent run within 10 min of the previous sample adds no healthy run', () => {
+  // The verify replay's t5 A: USGS down from 08:00; a 3-min recovery seen by the 10:07 run and by a second dispatch 40 s
+  // later. The episode goes on, and its 2 h escalation comes at 10:22 (it was resolved, then re-entered at 10:52).
+  const w = new World();
+  const S = T('2026-10-22T08:00:00Z');
+  const usgs = (iso: string, since = S): Finding => f('alerts:provider:usgs', { severity: T(iso) - since >= 30 * MIN ? 'P3' : 'P4', sinceMs: since, text: 'usgs down' });
+  for (const iso of every15('2026-10-22T08:07:00Z', '2026-10-22T09:52:00Z')) w.run(iso, { alerts: [usgs(iso)] });
+  w.run('2026-10-22T10:07:00Z', {});
+  w.run('2026-10-22T10:07:40Z', {});
+  assert.deepEqual([w.entry('alerts:provider:usgs')!.open, w.entry('alerts:provider:usgs')!.absentRuns], [true, 1], 'one healthy slot of the 2 it needs');
+  const back = w.run('2026-10-22T10:22:00Z', { alerts: [usgs('2026-10-22T10:22:00Z', T('2026-10-22T10:09:00Z'))] });
+  assert.match(back.comments[0]!.body, /^\*\*P3 · `alerts:provider:usgs`\*\* USGS failing — open for 2\.3 h: usgs down \(since 2026-10-22 08:00Z, 2\.3 h\)/);
+  assert.equal(w.comments.length, 2, 'the entry and its escalation, nothing else');
+
+  // A P2 open since 10:07: the runs at 10:37 and 10:38 are one healthy slot, so it resolves at 10:52, not at 10:38.
+  const v = new World();
+  const cov = f('alerts:coverage:two', { sinceMs: T('2026-10-22T10:03:00Z'), members: ['emsc', 'gfz'], text: 'emsc and gfz failing together' });
+  v.run('2026-10-22T10:07:00Z', { alerts: [cov] });
+  v.run('2026-10-22T10:22:00Z', { alerts: [cov] });
+  v.run('2026-10-22T10:37:00Z', {});
+  v.run('2026-10-22T10:38:00Z', {});
+  assert.equal(v.entry('alerts:coverage:two')!.open, true);
+  v.run('2026-10-22T10:52:00Z', {});
+  assert.equal(v.entry('alerts:coverage:two'), undefined);
+});
+
+test('a direct provider the gateway stopped polling is on the board, and with the others failing it is the P1 on every run', () => {
+  // The logic review's case: gfz missing from detector.providers while usgs, emsc and the feed backstop fail. It used
+  // to freeze every coverage row and give a P2 red for one hour, then green for good with nothing on any board.
+  const doc = JSON.parse(readFileSync(join(import.meta.dirname, 'fixtures', 'alerts-status', 'healthy.json'), 'utf8')) as Record<string, any>;
+  const at = (nowMs: number, failing: boolean): Record<string, any> => {
+    const d = structuredClone(doc);
+    const delta = nowMs - 15 * SEC - (d.generatedAtMs as number);
+    d.generatedAtMs += delta;
+    d.detector.providers = d.detector.providers.filter((p: { id: string }) => p.id !== 'gfz');
+    for (const p of d.detector.providers) {
+      if (!failing) continue;
+      Object.assign(p, { ok: false, consecutiveFailures: 40, lastError: 'timeout', failingSinceMs: T('2026-10-22T19:40:00Z') });
+    }
+    return d;
+  };
+  const w = new World();
+  const runs = every15('2026-10-22T19:52:00Z', '2026-10-22T22:52:00Z');
+  for (const iso of runs) {
+    const v = evaluateStatus(at(T(iso), true), { nowMs: T(iso), canary: null });
+    const r = w.run(iso, { alerts: v.findings }, { unjudged: { alerts: v.unjudged } });
+    assert.equal(r.exitCode, 1, iso);
+    assert.match(r.summary, /P1 `alerts:coverage:all`/, iso);
+    assert.deepEqual(signal(r, 'gh-detect'), ['fail'], iso);
+  }
+  const gfz = w.entry('alerts:provider:gfz')!;
+  assert.deepEqual([gfz.open, gfz.rule, gfz.severity], [true, 'alerts:provider:unlisted', 'P3']);
+  assert.deepEqual(gfz.muted, { by: 'inhibited', note: 'inhibited by alerts:coverage:all' }, 'one notice per group');
+  assert.match(w.bodies.alerts!, /`alerts:provider:gfz` \|[^\n]*direct provider not polled/);
+  // The providers back, gfz still not polled: its own P3 row comments once the coverage rows have resolved.
+  for (const iso of every15('2026-10-22T23:07:00Z', '2026-10-22T23:52:00Z')) {
+    const v = evaluateStatus(at(T(iso), false), { nowMs: T(iso), canary: null });
+    const r = w.run(iso, { alerts: v.findings }, { unjudged: { alerts: v.unjudged } });
+    assert.equal(r.exitCode, 0, iso);
+  }
+  assert.equal(w.entry('alerts:coverage:all'), undefined);
+  assert.deepEqual(w.comments.map((c) => `${c.at} ${c.body.split(' — ')[0]}`), [
+    '2026-10-22 20:22Z **P3 · `alerts:provider:feed`** gateway feed backstop failing',
+    '2026-10-22 23:22Z **P3 · `alerts:provider:gfz`** direct provider not polled',
+  ]);
+});
+
+test('body: 100 open rows still fit (the marker leaves out derived and blank fields; the tables shrink last), and round-trip', () => {
+  const ids = Array.from({ length: 100 }, (_, i) => `src${String(i).padStart(3, '0')}`);
+  const many = ids.map((id) => f('feed:source', { id, members: ['fetch'], sinceMs: T('2026-10-20T00:00:00Z'), text: `${id}: fetch failing for 34.1 h, error: ${'upstream connect error or disconnect/reset before headers '.repeat(4)}` }));
+  const w = new World();
+  for (const iso of every15('2026-10-21T10:07:00Z', '2026-10-21T11:52:00Z')) w.run(iso, { feed: many });
+  const st = w.state('feed')!;
+  assert.equal(Object.values(st.entries).filter((e) => e.open && e.notified === 'P3').length, 100, 'every row and its memory kept');
+  assert.match(w.bodies.feed!, /\n\d+ more row\(s\) are kept in the state only \(the run's job summary lists them\)\./);
+  const entries = w.bodies.feed!.slice(w.bodies.feed!.lastIndexOf('"entries":'));
+  assert.ok(!entries.includes('"board":') && !entries.includes('"class":') && !entries.includes('"frozen":null'), 'no derived or blank field');
+});
+
+// ---------------------------------------------------------------------------------------------------------
 // The I/O wrapper against a fake GitHub
 
 interface FakeIssue {
@@ -717,6 +1140,7 @@ interface FakeIssue {
   body: string;
   state: 'open' | 'closed';
   locked: boolean;
+  pinned: boolean;
   labels: string[];
   node_id: string;
   pull_request?: { url: string };
@@ -727,6 +1151,11 @@ interface Call {
   url: string;
   body: unknown;
 }
+interface FakeRun {
+  created_at: string;
+  status?: string;
+  conclusion?: string | null;
+}
 
 class FakeGitHub {
   issues: FakeIssue[] = [];
@@ -735,7 +1164,18 @@ class FakeGitHub {
   listStatus: number[] = [];
   patchStatus = 200;
   pingStatus = 200;
-  dispatched: string[] = [];
+  /** The status of the next comment POSTs, one per try (then 201). */
+  commentStatus: number[] = [];
+  /** Whether GITHUB_TOKEN may comment on a locked issue is unverified: 0 accepts it, 403 or 422 refuses it as locked. */
+  lockedRejectsComments: 0 | 403 | 422 = 0;
+  /** The same for editing a locked issue's body. */
+  lockedRejectsPatch: 0 | 403 | 422 = 0;
+  /** GitHub drops the labels of a new issue silently for a token without push access. */
+  dropLabelsOnCreate = false;
+  labelsStatus = 200;
+  lockStatus = 204;
+  graphqlStatus = 200;
+  dispatched: FakeRun[] = [];
   runsStatus = 200;
   nextNumber = 100;
 
@@ -763,14 +1203,14 @@ class FakeGitHub {
     }
     if (method === 'GET' && path.startsWith(`/repos/${REPO}/actions/workflows/health.yml/runs?event=workflow_dispatch`)) {
       if (this.runsStatus !== 200) return json({ message: 'boom' }, this.runsStatus);
-      return json({ workflow_runs: this.dispatched.map((created_at, i) => ({ id: i, event: 'workflow_dispatch', created_at })) });
+      return json({ workflow_runs: this.dispatched.map((r, i) => ({ id: i, event: 'workflow_dispatch', status: 'completed', conclusion: 'success', ...r })) });
     }
     if (method === 'POST' && path === `/repos/${REPO}/issues`) {
       const labels = (b!['labels'] as string[]) ?? [];
       if (labels.some((l) => !this.labels.has(l))) return json({ message: 'Validation Failed' }, 422);
-      const issue: FakeIssue = { number: this.nextNumber++, title: String(b!['title']), body: String(b!['body']), state: 'open', locked: false, labels, node_id: `I_${this.nextNumber}`, comments: [] };
+      const issue: FakeIssue = { number: this.nextNumber++, title: String(b!['title']), body: String(b!['body']), state: 'open', locked: false, pinned: false, labels: this.dropLabelsOnCreate ? [] : labels, node_id: `I_${this.nextNumber}`, comments: [] };
       this.issues.push(issue);
-      return json({ number: issue.number, node_id: issue.node_id }, 201);
+      return json({ number: issue.number, node_id: issue.node_id, labels: issue.labels.map((name) => ({ name })) }, 201);
     }
     if (method === 'POST' && path === `/repos/${REPO}/labels`) {
       const name = String(b!['name']);
@@ -778,25 +1218,45 @@ class FakeGitHub {
       this.labels.add(name);
       return json({ name }, 201);
     }
-    if (method === 'POST' && path === '/graphql') return json({ data: { pinIssue: { issue: { number: 1 } } } });
+    if (method === 'POST' && path === '/graphql') {
+      if (this.graphqlStatus !== 200) return json({ message: 'Resource not accessible by integration' }, this.graphqlStatus);
+      const query = String(b!['query']);
+      const vars = b!['variables'] as { issueId?: string; ids?: string[] };
+      if (query.includes('pinIssue')) {
+        const issue = this.issues.find((i) => i.node_id === vars.issueId);
+        if (issue) issue.pinned = true;
+        return json({ data: { pinIssue: { issue: { number: issue?.number ?? null } } } });
+      }
+      return json({ data: { nodes: (vars.ids ?? []).map((id) => this.issues.find((i) => i.node_id === id)).map((i) => (i ? { id: i.node_id, number: i.number, isPinned: i.pinned, locked: i.locked } : null)) } });
+    }
     const m = /^\/repos\/[^/]+\/[^/]+\/issues\/(\d+)(\/[a-z]+)?$/.exec(path);
     const issue = m ? this.issues.find((i) => i.number === Number(m[1])) : undefined;
     if (m && issue) {
       if (method === 'PATCH' && !m[2]) {
         if (this.patchStatus !== 200) return json({ message: 'boom' }, this.patchStatus);
+        if (this.lockedRejectsPatch !== 0 && issue.locked) return json({ message: 'Issue is locked' }, this.lockedRejectsPatch);
         if (typeof b?.['body'] === 'string') issue.body = b['body'];
         if (b?.['state'] === 'open' || b?.['state'] === 'closed') issue.state = b['state'];
         return json({ number: issue.number });
       }
       if (method === 'PUT' && m[2] === '/lock') {
+        if (this.lockStatus !== 204) return json({ message: 'boom' }, this.lockStatus);
         issue.locked = true;
         return new Response(null, { status: 204 });
       }
+      if (method === 'DELETE' && m[2] === '/lock') {
+        issue.locked = false;
+        return new Response(null, { status: 204 });
+      }
       if (method === 'PUT' && m[2] === '/labels') {
+        if (this.labelsStatus !== 200) return json({ message: 'boom' }, this.labelsStatus);
         issue.labels = [...(b!['labels'] as string[])];
         return json(issue.labels.map((name) => ({ name })));
       }
       if (method === 'POST' && m[2] === '/comments') {
+        const status = this.commentStatus.shift();
+        if (status !== undefined && status !== 201) return json({ message: 'boom' }, status);
+        if (this.lockedRejectsComments !== 0 && issue.locked) return json({ message: 'Unable to create comment because issue is locked.' }, this.lockedRejectsComments);
         issue.comments.push(String(b!['body']));
         return json({ id: 1 }, 201);
       }
@@ -808,6 +1268,8 @@ class FakeGitHub {
     return this.calls.filter((c) => c.method !== 'GET' && !c.url.startsWith(HC_PING_BASE));
   }
 }
+
+const callText = (c: Call): string => `${c.method} ${c.url.replace('https://api.github.com', '')}`;
 
 const ENV = { GH_TOKEN: 't', GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: '42', GITHUB_SERVER_URL: 'https://github.com', GITHUB_EVENT_NAME: 'workflow_dispatch' };
 
@@ -850,47 +1312,57 @@ async function runMain(gh: FakeGitHub, nowMs: number, findings: Findings, opts: 
   return { code, lines, sleeps, summary };
 }
 
-test('main: no boards and no findings creates nothing; the first finding creates its board, pins it, locks it, then comments', async () => {
+test('main: the first run creates all three boards, the labels first, each pinned and locked; a comment goes before its body; only a deleted board is created again', async () => {
   const gh = new FakeGitHub();
-  const quiet = await runMain(gh, T('2026-10-21T10:07:00Z'), {});
-  assert.equal(quiet.code, 0);
-  assert.deepEqual(gh.writes(), []);
-  assert.ok(quiet.lines.includes('pings skipped (HC_PING_KEY unset)'));
-  assert.ok(quiet.summary.join('').includes('**Run verdict: green.**'));
-
-  const first = await runMain(gh, T('2026-10-21T10:22:00Z'), { feed: [tmd()] });
+  gh.labels = new Set();
+  const first = await runMain(gh, T('2026-10-21T10:07:00Z'), {});
   assert.equal(first.code, 0);
-  assert.deepEqual(gh.writes().map((c) => `${c.method} ${c.url.replace('https://api.github.com', '')}`), [
-    `POST /repos/${REPO}/issues`,
-    'POST /graphql',
-    `PUT /repos/${REPO}/issues/100/lock`,
-    `POST /repos/${REPO}/issues/100/comments`,
+  assert.deepEqual(gh.writes().map(callText), [
+    ...LABEL_DEFS.map(() => `POST /repos/${REPO}/labels`),
+    ...[100, 101, 102].flatMap((n) => [`POST /repos/${REPO}/issues`, 'POST /graphql', `PUT /repos/${REPO}/issues/${n}/lock`]),
+  ]);
+  assert.deepEqual([...gh.labels].sort(), LABEL_DEFS.map((l) => l.name).sort());
+  assert.deepEqual(
+    gh.issues.map((i) => [i.number, i.title, i.locked, i.pinned, i.labels.join(' '), i.comments.length]),
+    [
+      [100, '[health] alert pipeline', true, true, 'health-board health:ok', 0],
+      [101, '[health] feed', true, true, 'health-board health:ok', 0],
+      [102, '[health] platform', true, true, 'health-board health:ok', 0],
+    ],
+  );
+  assert.equal(parseBoardState(gh.issues[0]!.body, 'alerts')!.createdMs, T('2026-10-21T10:07:00Z'));
+  assert.ok(first.lines.includes('pings skipped (HC_PING_KEY unset)'));
+  assert.ok(first.summary.join('').includes('**Run verdict: green.**'));
+
+  // A P3 entry: its comment first, then the bodies (and the new label); no board is created by a finding.
+  gh.calls = [];
+  const second = await runMain(gh, T('2026-10-21T10:22:00Z'), { feed: [tmd()] });
+  assert.equal(second.code, 0);
+  assert.deepEqual(gh.writes().map(callText), [
+    `POST /repos/${REPO}/issues/101/comments`,
+    `PATCH /repos/${REPO}/issues/100`,
+    `PATCH /repos/${REPO}/issues/101`,
+    `PUT /repos/${REPO}/issues/101/labels`,
+    `PATCH /repos/${REPO}/issues/102`,
   ]);
   const board = gh.board('[health] feed')!;
   assert.deepEqual(board.labels, ['health-board', 'health:p3']);
-  assert.equal(board.locked, true);
   assert.equal(board.comments.length, 1);
   assert.match(board.comments[0]!, /Run: https:\/\/github\.com\/TheShelterApp\/earthquakes-feed\/actions\/runs\/42$/);
-  assert.equal(parseBoardState(board.body, 'feed')!.entries['feed:source:tmd']!.open, true);
-  assert.deepEqual((gh.calls.find((c) => c.url.endsWith('/graphql'))!.body as { variables: unknown }).variables, { issueId: board.node_id });
+  assert.equal(parseBoardState(board.body, 'feed')!.entries['feed:source:tmd']!.notified, 'P3');
 
-  // The next run updates the same issue in place: no new issue, no new comment.
+  // A board deleted by hand comes back on the next run, whatever that run judges.
+  gh.issues = gh.issues.filter((i) => i.number !== 102);
   gh.calls = [];
   await runMain(gh, T('2026-10-21T10:37:00Z'), { feed: [tmd()] });
-  assert.deepEqual(gh.writes().map((c) => `${c.method} ${c.url.replace('https://api.github.com', '')}`), [`PATCH /repos/${REPO}/issues/100`]);
-  assert.equal(gh.issues.length, 1);
+  assert.equal(gh.calls.filter((c) => callText(c) === `POST /repos/${REPO}/issues`).length, 1);
+  assert.equal(gh.board('[health] platform')!.number, 103);
+  assert.equal(gh.issues.length, 3);
 });
 
-test('main: a refused label is created and the creation retried; duplicates use the lowest number; a closed board with an open entry reopens', async () => {
-  const gh = new FakeGitHub();
-  gh.labels = new Set();
-  await runMain(gh, T('2026-10-21T10:07:00Z'), { alerts: [f('alerts:degraded', { text: 'ladder active' })] });
-  assert.deepEqual([...gh.labels].sort(), LABEL_DEFS.map((l) => l.name).sort());
-  assert.equal(gh.calls.filter((c) => c.method === 'POST' && c.url.endsWith('/issues')).length, 2);
-  assert.ok(gh.board('[health] alert pipeline'));
-
+test('main: duplicates use the lowest number; a closed board with an open entry reopens; an unlocked board is locked again', async () => {
   const dup = new FakeGitHub();
-  const seed = (number: number, state: 'open' | 'closed', body = ''): FakeIssue => ({ number, title: '[health] feed', body, state, locked: true, labels: ['health-board', 'health:ok', 'documentation'], node_id: `I_${number}`, comments: [] });
+  const seed = (number: number, state: 'open' | 'closed', body = ''): FakeIssue => ({ number, title: '[health] feed', body, state, locked: true, pinned: true, labels: ['health-board', 'health:ok', 'documentation'], node_id: `I_${number}`, comments: [] });
   dup.issues.push(seed(7, 'open'), seed(3, 'closed'), { ...seed(5, 'open'), title: '[health] feed', pull_request: { url: 'x' } });
   const out = await runMain(dup, T('2026-10-21T10:07:00Z'), { feed: [tmd()] });
   const patch = dup.calls.find((c) => c.method === 'PATCH')!;
@@ -900,42 +1372,225 @@ test('main: a refused label is created and the creation retried; duplicates use 
   assert.deepEqual(dup.issues.find((i) => i.number === 3)!.labels, ['health-board', 'health:p3', 'documentation'], 'a hand-added label stays');
   assert.equal(dup.issues.find((i) => i.number === 3)!.comments.length, 1);
   assert.ok(out.lines.some((l) => l.startsWith('::warning title=Health reconcile::2 issues are titled "[health] feed" (#3, #7): using #3')));
+  assert.deepEqual(dup.issues.filter((i) => i.title !== '[health] feed').map((i) => i.title), ['[health] alert pipeline', '[health] platform'], 'the two missing boards');
 
-  // An unlocked board is locked again; a closed board without an open entry stays closed.
   const un = new FakeGitHub();
   un.issues.push({ ...seed(9, 'closed'), locked: false });
   await runMain(un, T('2026-10-21T10:07:00Z'), {});
   assert.equal(un.issues[0]!.locked, true);
-  assert.equal(un.issues[0]!.state, 'closed');
+  assert.equal(un.issues[0]!.state, 'closed', 'no open entry: it stays closed');
   assert.ok(parseBoardState(un.issues[0]!.body, 'feed'), 'the body was rewritten with a state marker');
 });
 
-test('main: unreadable boards write nothing and send no pings; red only for a P1 (or the selftest); a failed write is a warning', async () => {
+test('main: unreadable boards, or GH_TOKEN unset, write nothing, send no pings and exit 3, naming the P1/P2 findings present', async () => {
   const gh = new FakeGitHub();
   gh.listStatus = [502, 502, 502];
   const p3 = await runMain(gh, T('2026-10-21T10:07:00Z'), { feed: [tmd()] }, { env: { HC_PING_KEY: 'k3y-SECRET' } });
-  assert.equal(p3.code, 0);
+  assert.equal(p3.code, 3, 'alerting itself is broken: the prior state is unknown');
   assert.deepEqual(p3.sleeps, [2_000, 5_000]);
   assert.deepEqual(gh.writes(), []);
   assert.equal(gh.calls.filter((c) => c.url.startsWith(HC_PING_BASE)).length, 0);
   assert.ok(p3.lines.some((l) => l.startsWith('::error::boards unreadable (HTTP 502')));
   gh.listStatus = [500, 500, 500];
-  const p1 = await runMain(gh, T('2026-10-21T10:22:00Z'), { alerts: [f('alerts:policy', { text: 'fallback policy' })] });
-  assert.equal(p1.code, 1);
+  const urgent = await runMain(gh, T('2026-10-21T10:22:00Z'), { alerts: [f('alerts:policy', { text: 'fallback policy' })], platform: [f('platform:api', { text: 'api down' })] });
+  assert.equal(urgent.code, 3);
+  assert.match(urgent.summary.join(''), /the run is red \(exit 3: alerting itself is broken\); P1\/P2 findings present this run: P1 `alerts:policy`, P2 `platform:api`\./);
+  assert.ok(urgent.lines.some((l) => l.startsWith('::error title=P2 platform%3Aapi::api down')));
   gh.listStatus = [403];
-  const shadow = await runMain(gh, T('2026-10-21T10:37:00Z'), { alerts: [f('alerts:canary', { text: 'canary' })] });
-  assert.equal(shadow.code, 0);
+  assert.equal((await runMain(gh, T('2026-10-21T10:37:00Z'), { alerts: [f('alerts:canary', { text: 'canary' })] })).code, 3);
 
+  const unset = await runMain(new FakeGitHub(), T('2026-10-21T10:07:00Z'), {}, { env: { GH_TOKEN: '' } });
+  assert.equal(unset.code, 3);
+  assert.ok(unset.lines.some((l) => l.includes('boards unreadable (GH_TOKEN or GITHUB_REPOSITORY unset (misconfigured))')));
+});
+
+test('main: a body that cannot be saved after its retries exits 3; its comment went out first, so the next run may repeat it, never lose it', async () => {
   const w = new FakeGitHub();
   await runMain(w, T('2026-10-21T10:07:00Z'), { feed: [tmd()] });
+  assert.equal(w.board('[health] feed')!.comments.length, 1);
   w.patchStatus = 500;
   w.calls = [];
-  const kagsr = f('feed:source:definite', { id: 'kagsr', members: ['fetch'], text: 'kagsr HTTP 404 for 2.1 h' });
+  const kagsr = f('feed:source:definite', { id: 'kagsr', sinceMs: T('2026-10-21T08:15:00Z'), members: ['fetch'], text: 'kagsr HTTP 404 for 2.1 h' });
   const out = await runMain(w, T('2026-10-21T10:22:00Z'), { feed: [tmd(), kagsr] });
-  assert.equal(out.code, 0);
-  assert.equal(w.calls.filter((c) => c.method === 'PATCH').length, 3, 'retried on 5xx');
-  assert.equal(w.calls.filter((c) => c.url.endsWith('/comments')).length, 0, 'a failed body write skips the comments');
-  assert.ok(out.lines.some((l) => l.startsWith('::warning title=Health reconcile::cannot update board #100: HTTP 500')));
+  assert.equal(out.code, 3);
+  assert.equal(w.calls.filter((c) => callText(c) === `PATCH /repos/${REPO}/issues/101`).length, 3, 'retried on 5xx');
+  assert.equal(w.board('[health] feed')!.comments.length, 2, 'the kagsr comment went out before the body');
+  assert.ok(out.lines.some((l) => l.startsWith('::error title=Health reconcile::cannot update board #101: HTTP 500')));
+  assert.ok(out.lines.includes('reconcile: the run is red (a board could not be written)'));
+  w.patchStatus = 200;
+  const again = await runMain(w, T('2026-10-21T10:37:00Z'), { feed: [tmd(), kagsr] });
+  assert.equal(again.code, 0);
+  assert.equal(w.board('[health] feed')!.comments.length, 3, 'the saved state never recorded it: posted again');
+  assert.equal(parseBoardState(w.board('[health] feed')!.body, 'feed')!.entries['feed:source:kagsr']!.notified, 'P3');
+});
+
+test('main: a comment that still fails after 3 tries is an ::error::, rolled back so the next run posts it again (watcher:reconcile); failing on two runs in a row exits 3', async () => {
+  const gh = new FakeGitHub();
+  await runMain(gh, T('2026-10-21T10:07:00Z'), {});
+  gh.commentStatus = [502, 502, 502];
+  gh.calls = [];
+  const r1 = await runMain(gh, T('2026-10-21T10:22:00Z'), { feed: [tmd()] });
+  assert.equal(r1.code, 0, 'a comment is not the board state: the run keeps its verdict');
+  const order = gh.writes().map(callText);
+  assert.deepEqual(order.slice(0, 3), Array(3).fill(`POST /repos/${REPO}/issues/101/comments`));
+  assert.deepEqual(r1.sleeps, [2_000, 5_000]);
+  assert.ok(order.indexOf(`PATCH /repos/${REPO}/issues/101`) > 2, 'the body after the comment');
+  assert.ok(r1.lines.some((l) => l.startsWith('::error title=Health reconcile::cannot comment on board "[health] feed": HTTP 502') && l.includes('feed:source:tmd rolled back')));
+  const feed = parseBoardState(gh.board('[health] feed')!.body, 'feed')!;
+  assert.equal(feed.entries['feed:source:tmd']!.open, true);
+  assert.equal(feed.entries['feed:source:tmd']!.notified, null, 'rolled back');
+  assert.equal(feed.entries['feed:source:tmd']!.retryComment, true);
+  assert.equal(feed.days['2026-10-21']!.comments, 0);
+  assert.deepEqual(feed.log.map((x) => x.event), ['open'], 'the notify event is taken back');
+  assert.deepEqual(parseBoardState(gh.board('[health] platform')!.body, 'platform')!.faults, [{ ms: T('2026-10-21T10:22:00Z'), text: '"[health] feed": HTTP 502: {"message":"boom"}' }]);
+
+  // It fails again on the next run: watcher:reconcile is seen once (P4), the failure is recorded again, and the run is
+  // red (exit 3): watcher:reconcile's own comment could not reach anyone either.
+  gh.commentStatus = [502, 502, 502];
+  const r2 = await runMain(gh, T('2026-10-21T10:37:00Z'), { feed: [tmd()] });
+  assert.equal(r2.code, 3);
+  assert.ok(r2.lines.some((l) => l.startsWith('::error title=Health reconcile::board comments failed on two runs in a row (1 on the last run, 1 on this one)')));
+  assert.ok(r2.lines.includes('reconcile: the run is red (board comments failed on two runs in a row)'));
+  const watcher = parseBoardState(gh.board('[health] platform')!.body, 'platform')!.entries['watcher:reconcile']!;
+  assert.equal(watcher.pending, 'confirming 1/2');
+  assert.match(watcher.text, /^the last health run could not post a board comment \(rolled back, so this run posts it again\): "\[health\] feed": HTTP 502/);
+  assert.equal(gh.board('[health] feed')!.comments.length, 0);
+
+  // Comments work again: the tmd entry comment goes out, and watcher:reconcile (2 runs in a row) opens with its own.
+  const r3 = await runMain(gh, T('2026-10-21T10:52:00Z'), { feed: [tmd()] });
+  assert.equal(r3.code, 0, 'the watcher is never red');
+  assert.equal(gh.board('[health] feed')!.comments.length, 1);
+  assert.match(gh.board('[health] feed')!.comments[0]!, /^\*\*P3 · `feed:source:tmd`\*\*/);
+  assert.match(gh.board('[health] platform')!.comments[0]!, /^\*\*P3 · `watcher:reconcile`\*\* watcher fault — /);
+  const after = parseBoardState(gh.board('[health] platform')!.body, 'platform')!;
+  assert.deepEqual(after.faults, []);
+  assert.equal(parseBoardState(gh.board('[health] feed')!.body, 'feed')!.entries['feed:source:tmd']!.retryComment, false);
+  // The next run without a failure resolves it.
+  await runMain(gh, T('2026-10-21T11:07:00Z'), { feed: [tmd()] });
+  assert.equal(parseBoardState(gh.board('[health] platform')!.body, 'platform')!.entries['watcher:reconcile'], undefined);
+});
+
+test('main: a board locked against the bot\'s comment (403, or a 422 that says so) is unlocked, commented and locked again', async () => {
+  for (const status of [403, 422] as const) {
+    const gh = new FakeGitHub();
+    gh.lockedRejectsComments = status;
+    await runMain(gh, T('2026-10-21T10:07:00Z'), {});
+    gh.calls = [];
+    const r = await runMain(gh, T('2026-10-21T10:22:00Z'), { feed: [tmd()] });
+    assert.equal(r.code, 0, `${status}`);
+    assert.deepEqual(gh.writes().slice(0, 4).map(callText), [
+      `POST /repos/${REPO}/issues/101/comments`,
+      `DELETE /repos/${REPO}/issues/101/lock`,
+      `POST /repos/${REPO}/issues/101/comments`,
+      `PUT /repos/${REPO}/issues/101/lock`,
+    ], `${status}`);
+    const board = gh.board('[health] feed')!;
+    assert.equal(board.comments.length, 1, `${status}`);
+    assert.equal(board.locked, true, `${status}`);
+    assert.equal(parseBoardState(board.body, 'feed')!.entries['feed:source:tmd']!.notified, 'P3', `${status}`);
+  }
+  // GitHub accepts the comment on a locked board: no unlock at all.
+  const ok = new FakeGitHub();
+  await runMain(ok, T('2026-10-21T10:07:00Z'), {});
+  ok.calls = [];
+  await runMain(ok, T('2026-10-21T10:22:00Z'), { feed: [tmd()] });
+  assert.equal(ok.calls.filter((c) => c.method === 'DELETE').length, 0);
+  assert.equal(ok.board('[health] feed')!.comments.length, 1);
+  // The relock fails: a warning (the run stays green), and the next run locks the board again.
+  const gh = new FakeGitHub();
+  gh.lockedRejectsComments = 403;
+  await runMain(gh, T('2026-10-21T10:07:00Z'), {});
+  gh.lockStatus = 500;
+  const r = await runMain(gh, T('2026-10-21T10:22:00Z'), { feed: [tmd()] });
+  assert.equal(r.code, 0);
+  assert.equal(gh.board('[health] feed')!.comments.length, 1);
+  assert.ok(r.lines.some((l) => l.startsWith('::warning title=Health reconcile::cannot lock board #101 again (unlocked to comment): HTTP 500')));
+  assert.equal(gh.board('[health] feed')!.locked, false);
+  gh.lockStatus = 204;
+  const next = await runMain(gh, T('2026-10-21T10:37:00Z'), { feed: [tmd()] });
+  assert.ok(next.lines.includes('re-locked board #101'));
+  assert.equal(gh.board('[health] feed')!.locked, true);
+});
+
+test('main: a board locked against an edit of its body is unlocked, saved and locked again', async () => {
+  for (const status of [403, 422] as const) {
+    const gh = new FakeGitHub();
+    await runMain(gh, T('2026-10-21T10:07:00Z'), {});
+    gh.lockedRejectsPatch = status;
+    gh.calls = [];
+    const r = await runMain(gh, T('2026-10-21T10:22:00Z'), { feed: [tmd()] });
+    assert.equal(r.code, 0, `${status}`);
+    const feed = gh.writes().map(callText).filter((c) => c.includes('/issues/101'));
+    assert.deepEqual(feed.slice(0, 5), [
+      `POST /repos/${REPO}/issues/101/comments`,
+      `PATCH /repos/${REPO}/issues/101`,
+      `DELETE /repos/${REPO}/issues/101/lock`,
+      `PATCH /repos/${REPO}/issues/101`,
+      `PUT /repos/${REPO}/issues/101/lock`,
+    ], `${status}`);
+    assert.ok(r.lines.some((l) => l.startsWith('board #101 refused the write (save its body) while locked (HTTP')), `${status}`);
+    const board = gh.board('[health] feed')!;
+    assert.equal(board.locked, true, `${status}`);
+    assert.equal(parseBoardState(board.body, 'feed')!.entries['feed:source:tmd']!.notified, 'P3', `${status}: saved`);
+  }
+});
+
+test('main: labels GitHub dropped from a new board are set again; when that fails too the run exits 3 instead of creating boards on every run', async () => {
+  const gh = new FakeGitHub();
+  gh.dropLabelsOnCreate = true;
+  assert.equal((await runMain(gh, T('2026-10-21T10:07:00Z'), {})).code, 0);
+  assert.deepEqual(gh.issues.map((i) => i.labels.join(' ')), Array(3).fill('health-board health:ok'));
+  await runMain(gh, T('2026-10-21T10:22:00Z'), {});
+  assert.equal(gh.issues.length, 3, 'found again by their label: no duplicate');
+
+  const bad = new FakeGitHub();
+  bad.dropLabelsOnCreate = true;
+  bad.labelsStatus = 500;
+  const r = await runMain(bad, T('2026-10-21T10:07:00Z'), {});
+  assert.equal(r.code, 3);
+  assert.ok(r.lines.some((l) => l.startsWith('::error title=Health reconcile::cannot label the new board #100 health-board: HTTP 500')));
+});
+
+test('main: a board whose body cannot fit even shrunk is neither written nor commented on, so its comment never repeats; the run exits 3', async () => {
+  const gh = new FakeGitHub();
+  await runMain(gh, T('2026-10-21T10:07:00Z'), {});
+  const sources = Array.from({ length: 150 }, (_, i) => f('feed:source', { id: `src${String(i).padStart(3, '0')}`, members: ['fetch'], sinceMs: T('2026-10-20T00:00:00Z'), text: `src${i} fetch failing for 34 h` }));
+  for (const iso of ['2026-10-21T10:22:00Z', '2026-10-21T10:37:00Z']) {
+    gh.calls = [];
+    const r = await runMain(gh, T(iso), { feed: sources, alerts: [f('alerts:policy', { text: 'fallback policy' })] });
+    assert.equal(r.code, 3, iso);
+    assert.ok(r.lines.some((l) => /^::error title=Health reconcile::the body of "\[health\] feed" is \d+ characters even shrunk/.test(l)), iso);
+    assert.deepEqual(gh.writes().map(callText).filter((c) => c.includes('/issues/101')), [], `${iso}: nothing written to the feed board`);
+    assert.ok(gh.writes().some((c) => callText(c) === `PATCH /repos/${REPO}/issues/100`), `${iso}: the other boards are saved`);
+  }
+  assert.equal(gh.board('[health] feed')!.comments.length, 0);
+});
+
+test('main: once a day the boards\' pins and locks are checked through GraphQL and restored; a failure there is a warning only', async () => {
+  const gh = new FakeGitHub();
+  await runMain(gh, T('2026-10-21T10:07:00Z'), {});
+  gh.issues[0]!.pinned = false;
+  gh.calls = [];
+  await runMain(gh, T('2026-10-21T10:22:00Z'), {});
+  assert.equal(gh.calls.filter((c) => c.url.endsWith('/graphql')).length, 0, 'at most once a day');
+  assert.equal(gh.issues[0]!.pinned, false);
+  gh.calls = [];
+  const day = await runMain(gh, T('2026-10-22T10:08:00Z'), {});
+  const graphql = gh.calls.filter((c) => c.url.endsWith('/graphql')).map((c) => (c.body as { query: string; variables: unknown }));
+  assert.equal(graphql.length, 2);
+  assert.deepEqual(graphql[0]!.variables, { ids: gh.issues.map((i) => i.node_id) });
+  assert.deepEqual(graphql[1]!.variables, { issueId: gh.issues[0]!.node_id });
+  assert.equal(gh.issues[0]!.pinned, true);
+  assert.ok(day.lines.includes('pinned board #100 again'));
+  assert.equal(parseBoardState(gh.issues[1]!.body, 'feed')!.pinsCheckedMs, T('2026-10-22T10:08:00Z'));
+  // GraphQL refused (GITHUB_TOKEN without the right): a warning, never red; checked again a day later.
+  gh.graphqlStatus = 403;
+  const refused = await runMain(gh, T('2026-10-23T10:08:00Z'), { alerts: [f('alerts:policy', { text: 'fallback policy' })] });
+  assert.equal(refused.code, 1, 'the P1, nothing else');
+  assert.ok(refused.lines.some((l) => l.startsWith("::warning title=Health reconcile::cannot check the boards' pins: HTTP 403")));
+  const quiet = await runMain(gh, T('2026-10-23T10:22:00Z'), {});
+  assert.equal(quiet.code, 0);
+  assert.equal(parseBoardState(gh.issues[0]!.body, 'alerts')!.pinsCheckedMs, T('2026-10-23T10:08:00Z'));
 });
 
 test('main: pings are skipped without HC_PING_KEY; with it they are sent and the URL never reaches a log line', async () => {
@@ -993,7 +1648,7 @@ test('main: an unreadable findings file or no directory marks evaluators missing
   const local = await runMain(new FakeGitHub(), now, { feed: [tmd()] }, { argv: ['--findings-dir', 'findings', '--dry-run'], env: { GH_TOKEN: '' } });
   assert.equal(local.code, 0);
   const real = await runMain(new FakeGitHub(), now, { alerts: [f('alerts:policy', { text: 'fallback' })] }, { env: { GH_TOKEN: '' } });
-  assert.equal(real.code, 1);
+  assert.equal(real.code, 3);
   assert.equal(await main({ argv: ['--bogus'], env: ENV, log: () => {} }), 3);
 });
 
@@ -1014,10 +1669,12 @@ test('main --gate: writes run= and selftest= to GITHUB_OUTPUT; skips the fallbac
     return { code, out, summary };
   };
   const gh = new FakeGitHub();
-  gh.dispatched = ['2026-10-21T15:22:30Z'];
+  gh.dispatched = [{ created_at: '2026-10-21T15:22:30Z', status: 'in_progress', conclusion: null }];
   const skip = await gate(gh, { EVENT: 'schedule', SCHEDULE: HEALTH_FALLBACK_CRON });
   assert.deepEqual(skip, { code: 0, out: ['run=false\nselftest=0\n'], summary: [skip.summary[0]!] });
   assert.match(skip.summary[0]!, /Skipped: a workflow_dispatch health run was created 9 s ago/);
+  gh.dispatched = [{ created_at: '2026-10-21T15:22:30Z', status: 'completed', conclusion: 'cancelled' }];
+  assert.deepEqual((await gate(gh, { EVENT: 'schedule', SCHEDULE: HEALTH_FALLBACK_CRON })).out, ['run=true\nselftest=0\n'], 'a cancelled run does not count');
   gh.runsStatus = 500;
   assert.deepEqual((await gate(gh, { EVENT: 'schedule', SCHEDULE: HEALTH_FALLBACK_CRON })).out, ['run=true\nselftest=0\n']);
   const calls = gh.calls.length;
@@ -1056,12 +1713,16 @@ test('the copies on every board: the last applied document is the max per evalua
   const base = (board: Board, updatedMs: number, evaluators: BoardState['evaluators'], checks: BoardState['checks']): BoardState => ({
     v: 1,
     board,
+    createdMs: updatedMs - 2 * HOUR,
     updatedMs,
     runId: '1',
     runUrl: null,
     pings: 'skipped',
     evaluators,
     checks,
+    lastSelftestMs: null,
+    pinsCheckedMs: updatedMs - HOUR,
+    faults: [],
     entries: {},
     log: [],
     days: {},

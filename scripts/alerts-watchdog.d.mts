@@ -97,7 +97,9 @@ export function buildUsageRequest(
 export type UsageResult =
   | { ok: true; workersRequests: number; d1RowsWritten: number }
   | { ok: false; kind: 'auth' | 'graphql' | 'shape'; message: string };
-export function parseUsageResponse(json: unknown): UsageResult;
+/** `secrets` (the token, the account id) are redacted from the API's error messages before they are cut to length. */
+export function parseUsageResponse(json: unknown, opts?: { secrets?: ReadonlyArray<string | undefined> }): UsageResult;
+/** Every message of the result has the token and the account id redacted. */
 export function fetchUsage(opts: {
   token: string;
   accountTag: string;
@@ -105,6 +107,9 @@ export function fetchUsage(opts: {
   fetchImpl?: FetchImpl;
   sleep?: (ms: number) => Promise<void>;
 }): Promise<UsageResult>;
+
+/** `text` with each non-empty secret (any letter case) replaced by ***. */
+export function redact(text: string, secrets: ReadonlyArray<string | undefined> | null | undefined): string;
 
 export function annotation(level: 'error' | 'warning' | 'notice', title: string, message: string): string;
 

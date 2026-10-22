@@ -819,7 +819,8 @@ prints a warning once the day file passes 5 MB (`HISTORY_FILE_WARN_BYTES`, src/b
 fourfold. The `health` watchdog checks the same from outside every 15 minutes (round 17): it reads the `data` branch's
 tree from the API, logs the files under `status/history/` (count, total, largest, whatever their layout) and files
 `feed:size` on the "[health] feed" board while a status-history day file (`YYYY-MM-DD.ndjson`) is over 5 MB or any other
-file on the branch over 45 MB (resolved when none is; never a red run).
+file on the branch over 45 MB (resolved when none is; never a red run). A tree read that fails leaves `feed:size` as it
+was and files `watcher:feed-github`; a truncated listing is judged as far as it goes, with a `Data file size` warning.
 
 ## Repository size
 

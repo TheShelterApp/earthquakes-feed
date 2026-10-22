@@ -1319,16 +1319,24 @@ function findingsDir(docs: FindingsDocument[], extra: Record<string, string> = {
   };
 }
 
-/** The findings directory plus scripts/health-boards.json (absent when `numbers` is undefined). */
-function withNumbers(dir: ReturnType<typeof findingsDir>, numbers: string | undefined): ReturnType<typeof findingsDir> {
-  if (numbers === undefined) return dir;
-  return { ...dir, readFile: (p) => (p === BOARD_NUMBERS_FILE ? numbers : dir.readFile(p)) };
+/** The findings directory plus scripts/health-boards.json (null: the file is missing). */
+function withNumbers(dir: ReturnType<typeof findingsDir>, numbers: string | null): ReturnType<typeof findingsDir> {
+  return {
+    ...dir,
+    readFile: (p) => {
+      if (p !== BOARD_NUMBERS_FILE) return dir.readFile(p);
+      if (numbers === null) throw new Error(`ENOENT: ${p}`);
+      return numbers;
+    },
+  };
 }
 const NUMBERS = JSON.stringify({ alerts: 100, feed: 101, platform: 102 });
+/** Every board still to be made: the file of a first run. */
+const TO_MAKE = JSON.stringify({ alerts: null, feed: null, platform: null });
 
 const docsAt = (nowMs: number, findings: Findings): FindingsDocument[] => new World().docs(nowMs, findings);
 
-async function runMain(gh: FakeGitHub, nowMs: number, findings: Findings, opts: { env?: Record<string, string>; argv?: string[]; extra?: Record<string, string>; numbers?: string } = {}): Promise<{ code: number; lines: string[]; sleeps: number[]; summary: string[] }> {
+async function runMain(gh: FakeGitHub, nowMs: number, findings: Findings, opts: { env?: Record<string, string>; argv?: string[]; extra?: Record<string, string>; numbers?: string | null } = {}): Promise<{ code: number; lines: string[]; sleeps: number[]; summary: string[] }> {
   const lines: string[] = [];
   const sleeps: number[] = [];
   const summary: string[] = [];
@@ -1342,7 +1350,7 @@ async function runMain(gh: FakeGitHub, nowMs: number, findings: Findings, opts: 
     },
     log: (l) => lines.push(l),
     appendFile: (_p, s) => summary.push(s),
-    ...withNumbers(findingsDir(docsAt(nowMs, findings), opts.extra), opts.numbers),
+    ...withNumbers(findingsDir(docsAt(nowMs, findings), opts.extra), opts.numbers === undefined ? TO_MAKE : opts.numbers),
   });
   return { code, lines, sleeps, summary };
 }
@@ -1456,8 +1464,10 @@ test('main: a numbered board that is gone, or is another issue, or a broken numb
   const other = await runMain(gh, T('2026-10-22T16:22:00Z'), {}, { numbers: JSON.stringify({ alerts: 100, feed: 102, platform: 102 }) });
   assert.equal(other.code, 3);
   assert.ok(other.lines.some((l) => l.includes('issue #102 (scripts/health-boards.json) is not the board "[health] feed"')));
-  for (const bad of ['{', JSON.stringify({ feed: 'x' }), JSON.stringify({ feed: -1 })]) {
-    assert.equal((await runMain(gh, T('2026-10-22T16:37:00Z'), {}, { numbers: bad })).code, 3, bad);
+  for (const bad of [null, '{', '[]', '{}', JSON.stringify({ alerts: 100, feed: 'x', platform: 102 }), JSON.stringify({ alerts: 100, feed: -1, platform: 102 }), JSON.stringify({ alerts: 100, feed: 101 }), JSON.stringify({ alert: 100, alerts: 100, feed: 101, platform: 102 })]) {
+    const run = await runMain(gh, T('2026-10-22T16:37:00Z'), {}, { numbers: bad });
+    assert.equal(run.code, 3, String(bad));
+    assert.ok(run.lines.some((l) => l.startsWith('::error::boards unreadable (scripts/health-boards.json')), String(bad));
   }
   gh.issueStatus = [502, 502, 502];
   assert.equal((await runMain(gh, T('2026-10-22T16:52:00Z'), {}, { numbers: NUMBERS })).code, 3, 'a numbered board that cannot be read');
@@ -1786,12 +1796,12 @@ test('main: an unreadable findings file or no directory marks evaluators missing
   const now = T('2026-10-21T10:07:00Z');
   const lines: string[] = [];
   const dir = findingsDir(docsAt(now, { feed: null }), { 'feed.json': '{"schema":' });
-  await main({ argv: ['--findings-dir', 'findings'], env: ENV, fetchImpl: gh.fetchImpl, now: () => now, sleep: async () => {}, log: (l) => lines.push(l), appendFile: () => {}, ...dir });
+  await main({ argv: ['--findings-dir', 'findings'], env: ENV, fetchImpl: gh.fetchImpl, now: () => now, sleep: async () => {}, log: (l) => lines.push(l), appendFile: () => {}, ...withNumbers(dir, TO_MAKE) });
   const state = parseBoardState(gh.board('[health] platform')!.body, 'platform')!;
   assert.match(state.entries['watcher:evaluator:feed']!.text, /feed\.json is unreadable: /);
 
   const none = new FakeGitHub();
-  await main({ argv: ['--findings-dir', 'nowhere'], env: ENV, fetchImpl: none.fetchImpl, now: () => now, sleep: async () => {}, log: () => {}, appendFile: () => {}, ...findingsDir([]) });
+  await main({ argv: ['--findings-dir', 'nowhere'], env: ENV, fetchImpl: none.fetchImpl, now: () => now, sleep: async () => {}, log: () => {}, appendFile: () => {}, ...withNumbers(findingsDir([]), TO_MAKE) });
   const st = parseBoardState(none.board('[health] platform')!.body, 'platform')!;
   assert.deepEqual(Object.keys(st.entries), ['watcher:evaluator:alerts', 'watcher:evaluator:feed', 'watcher:evaluator:platform']);
 

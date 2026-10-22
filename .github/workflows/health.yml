@@ -190,8 +190,9 @@ jobs:
     # run cancelled by hand (it would record its stopped evaluators as missing).
     if: ${{ !cancelled() && needs.gate.outputs.run == 'true' }}
     runs-on: ubuntu-24.04
-    # A few GitHub API calls: one listing; on the first run the five labels and per board its creation, pin and lock;
-    # then per board at most one comment (3 tries on a network error, a 429 or a 5xx), its body and its labels (GET,
+    # A few GitHub API calls: each board read by its number (scripts/health-boards.json), the REST and the GraphQL label
+    # listings (duplicates, retired once: renamed, unpinned, closed, unlabelled); a board still to be made (null there):
+    # the five labels, its creation, pin and lock; then per board at most one comment (3 tries on a network error, a 429 or a 5xx), its body and its labels (GET,
     # PATCH and PUT retried twice; a board locked against the bot is unlocked and locked again around the write); once
     # a day one GraphQL query of the pins and locks. Pings only with HC_PING_KEY (unset: none).
     timeout-minutes: 10

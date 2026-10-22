@@ -306,8 +306,9 @@ itself never turn a run red. The shadow rules (`alerts:canary`, `alerts:provider
 repository's watchers), then pinned and locked; they are never closed. Their numbers are kept in
 `scripts/health-boards.json` (#124, #125, #126) and each board is read by its number: on 2026-10-22 the label listing
 of two runs answered without the boards made minutes earlier, and each of them made another set. A numbered board that
-was deleted makes every run red (exit 3) until it is restored or its replacement's number is put in the file; a board
-with no number there is created only when the REST and GraphQL label listings both answered without it. Two issues
+was deleted makes every run red (exit 3) until it is restored or its replacement's number is put in the file, and so
+does a missing or broken file; a board marked `null` there (still to be made) is created only when the REST and GraphQL
+label listings both answered without it. Two issues
 with a board's title: the numbered one (else the lower number) is the board, it continues from the newer state marker
 of the two, and the other is retired (renamed "… (duplicate of #N)", unlabelled, unpinned and closed). Once a day the pins and locks are checked again (`GITHUB_TOKEN` may lack the right to pin, which is a warning; the
 three boards take all three of the repository's pin slots). Each body lists the open rows, the rows still confirming or

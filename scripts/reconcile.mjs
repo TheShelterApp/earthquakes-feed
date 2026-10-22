@@ -1352,22 +1352,26 @@ const BOARDS_QUERY =
   'query($owner: String!, $name: String!, $label: String!) { repository(owner: $owner, name: $name) { issues(first: 50, labels: [$label], states: [OPEN, CLOSED], orderBy: {field: CREATED_AT, direction: ASC}) { nodes { id number title body state locked isPinned labels(first: 20) { nodes { name } } } } } }';
 
 /**
- * BOARD_NUMBERS_FILE's numbers ({ alerts, feed, platform }; a board without one is found by the listings). A file that
- * is missing gives none (the first run); one that does not parse is an error, since a board created again would be a
- * second one.
+ * BOARD_NUMBERS_FILE's numbers: exactly the keys alerts, feed and platform, each an issue number or null (a board still
+ * to be made, found by the listings or created when both answered without it). A file that is missing, does not parse
+ * or has another key is an error (exit 3): a board looked up by a listing alone could be made a second time.
  */
 export function parseBoardNumbers(text) {
-  if (text === null || text === undefined) return { numbers: {}, error: null };
+  if (text === null || text === undefined) return { numbers: {}, error: `${BOARD_NUMBERS_FILE} is missing (it names the boards; null for one still to be made)` };
   let raw;
   try {
     raw = JSON.parse(text);
   } catch (e) {
     return { numbers: {}, error: `${BOARD_NUMBERS_FILE} does not parse: ${errMsg(e)}` };
   }
+  if (!isObject(raw)) return { numbers: {}, error: `${BOARD_NUMBERS_FILE} is not an object` };
+  const extra = Object.keys(raw).filter((k) => !BOARD_IDS.includes(k));
+  if (extra.length > 0) return { numbers: {}, error: `${BOARD_NUMBERS_FILE}: unknown key "${extra[0]}" (the keys are ${BOARD_IDS.join(', ')})` };
   const numbers = {};
   for (const b of BOARD_IDS) {
-    const n = isObject(raw) ? raw[b] : undefined;
-    if (n === undefined || n === null) continue;
+    if (!Object.hasOwn(raw, b)) return { numbers: {}, error: `${BOARD_NUMBERS_FILE}: "${b}" is missing (null for a board still to be made)` };
+    const n = raw[b];
+    if (n === null) continue;
     if (!Number.isInteger(n) || n <= 0) return { numbers: {}, error: `${BOARD_NUMBERS_FILE}: "${b}" is not an issue number` };
     numbers[b] = n;
   }
@@ -1648,9 +1652,20 @@ async function writeBoards({ result, read, gh, repo, sleep, log, warn, error }) 
 
 const UNPIN_MUTATION = 'mutation($issueId: ID!) { unpinIssue(input: {issueId: $issueId}) { issue { number } } }';
 
-/** Retire a duplicate board: renamed "... (duplicate of #N)" and closed, then unlabelled and unpinned. */
+/**
+ * Retire a duplicate board: unpinned first (once renamed it is never found again, and a pin it kept would hold one of
+ * the three slots; a pin state the listing did not give is tried too), then renamed "... (duplicate of #N)" and closed,
+ * then unlabelled.
+ */
 async function retireDuplicate({ gh, repo, board, number, duplicate, log, warn }) {
   const n = duplicate.number;
+  if (duplicate.pinned !== false && duplicate.nodeId) {
+    const unpin = await gh.graphql(UNPIN_MUTATION, { issueId: duplicate.nodeId });
+    if (!unpin.ok && duplicate.pinned === true) {
+      warn(`cannot unpin the duplicate board #${n}: ${unpin.message} (the next run tries again)`);
+      return;
+    }
+  }
   const close = () => gh.call('PATCH', `/repos/${repo}/issues/${n}`, { title: `${BOARDS[board]} (duplicate of #${number})`, state: 'closed', state_reason: 'not_planned' });
   const r = await writeUnlocked({ gh, repo, issue: duplicate, what: 'retire it', write: close, log, warn });
   if (!r.ok) {
@@ -1659,10 +1674,6 @@ async function retireDuplicate({ gh, repo, board, number, duplicate, log, warn }
   }
   const labels = await gh.call('PUT', `/repos/${repo}/issues/${n}/labels`, { labels: duplicate.labels.filter((l) => !OUR_LABELS.has(l)) });
   if (!labels.ok) warn(`cannot unlabel the retired duplicate #${n}: ${labels.message}`);
-  if (duplicate.pinned === true && duplicate.nodeId) {
-    const unpin = await gh.graphql(UNPIN_MUTATION, { issueId: duplicate.nodeId });
-    if (!unpin.ok) warn(`cannot unpin the retired duplicate #${n}: ${unpin.message}`);
-  }
   log(`retired the duplicate board #${n} (the board is #${number})`);
 }
 

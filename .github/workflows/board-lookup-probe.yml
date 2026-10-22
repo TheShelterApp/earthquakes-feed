@@ -1,0 +1,41 @@
+name: board-lookup-probe
+
+# Temporary diagnostic (never merged): what GITHUB_TOKEN sees of the health boards through each listing.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/board-lookup-probe.yml
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: List the boards four ways
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -u
+          api() { curl -sS -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$@"; }
+          echo '== REST labels=health-board state=all'
+          api "https://api.github.com/repos/$REPO/issues?labels=health-board&state=all&per_page=100" | jq -c 'if type == "array" then map([.number, .title, .state]) else . end'
+          echo '== REST labels=health-board (default state=open)'
+          api "https://api.github.com/repos/$REPO/issues?labels=health-board&per_page=100" | jq -c 'if type == "array" then map(.number) else . end'
+          echo '== REST newest 30, unfiltered'
+          api "https://api.github.com/repos/$REPO/issues?state=all&sort=created&direction=desc&per_page=30" | jq -c 'if type == "array" then map([.number, .user.login]) else . end'
+          echo '== REST issue 124'
+          api "https://api.github.com/repos/$REPO/issues/124" | jq -c '{number, title, state, locked, labels: [.labels[]?.name]}'
+          echo '== GraphQL repository.issues(labels)'
+          api -X POST https://api.github.com/graphql -d '{"query":"query { repository(owner: \"TheShelterApp\", name: \"earthquakes-feed\") { issues(first: 50, labels: [\"health-board\"], states: [OPEN, CLOSED]) { nodes { number title } } } }"}' | jq -c .
+          echo '== GraphQL search'
+          api -X POST https://api.github.com/graphql -d '{"query":"query { search(query: \"repo:TheShelterApp/earthquakes-feed is:issue label:health-board\", type: ISSUE, first: 20) { nodes { ... on Issue { number title } } } }"}' | jq -c .
+          echo '== the same label listing with node fetch (as reconcile does)'
+          node -e '
+            const h = { authorization: `Bearer ${process.env.GH_TOKEN}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", "user-agent": "earthquakes-feed-health" };
+            fetch(`https://api.github.com/repos/${process.env.REPO}/issues?labels=health-board&state=all&per_page=100`, { headers: h }).then(async (r) => { const j = await r.json(); console.log(r.status, Array.isArray(j) ? JSON.stringify(j.map((i) => i.number)) : JSON.stringify(j).slice(0, 300)); });
+          '

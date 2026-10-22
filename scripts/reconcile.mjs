@@ -29,10 +29,12 @@
 // HC_PING_KEY secret is unset (no push channel for now). The last selftest is recorded on every board: 35 days without
 // one opens watcher:selftest-overdue.
 //
-// Boards: the first run that finds none creates all three at once, the labels first. That is a one-time rollout
-// notification to the repository's watchers; afterwards a board is created again only when one was deleted or renamed
-// by hand, never because of a finding (a P4 sample, a pending one or a shadow rule cannot open an issue). A key's
-// comment is posted before the body that records it: a comment GitHub refuses is rolled back and retried by the next
+// Boards: the first run that finds none creates all three at once, the labels first (a one-time rollout notification to
+// the repository's watchers), never because of a finding (a P4 sample, a pending one or a shadow rule cannot open an
+// issue). Their numbers then go into scripts/health-boards.json and each board is read by its number: on 2026-10-22 the
+// label listing missed fresh boards and two runs made second and third sets (readBoards). A numbered board that is gone
+// makes the run red (exit 3) instead of a new board; one without a number is made only when both label listings
+// answered without it. A duplicate is retired, and the board keeps the newest state of the two. A key's comment is posted before the body that records it: a comment GitHub refuses is rolled back and retried by the next
 // run, and a body that is not saved after its comment went out makes a rare duplicate rather than a lost comment. A
 // board locked against the bot's comment or body edit is unlocked around it and locked again. A body is shrunk to fit
 // (log rows, texts, closed rows, then rendered rows; the state keeps every open row); one that still does not fit is
@@ -1344,27 +1346,115 @@ function githubClient({ token, fetchImpl, sleep }) {
   return { call, graphql };
 }
 
-/** The three boards by exact title (pull requests dropped; duplicates: the lowest number, with a warning). */
-async function readBoards(gh, repo) {
+/** The board numbers, kept in the repository: a board is read by its number, never looked up by a listing alone. */
+export const BOARD_NUMBERS_FILE = 'scripts/health-boards.json';
+const BOARDS_QUERY =
+  'query($owner: String!, $name: String!, $label: String!) { repository(owner: $owner, name: $name) { issues(first: 50, labels: [$label], states: [OPEN, CLOSED], orderBy: {field: CREATED_AT, direction: ASC}) { nodes { id number title body state locked isPinned labels(first: 20) { nodes { name } } } } } }';
+
+/**
+ * BOARD_NUMBERS_FILE's numbers ({ alerts, feed, platform }; a board without one is found by the listings). A file that
+ * is missing gives none (the first run); one that does not parse is an error, since a board created again would be a
+ * second one.
+ */
+export function parseBoardNumbers(text) {
+  if (text === null || text === undefined) return { numbers: {}, error: null };
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    return { numbers: {}, error: `${BOARD_NUMBERS_FILE} does not parse: ${errMsg(e)}` };
+  }
+  const numbers = {};
+  for (const b of BOARD_IDS) {
+    const n = isObject(raw) ? raw[b] : undefined;
+    if (n === undefined || n === null) continue;
+    if (!Number.isInteger(n) || n <= 0) return { numbers: {}, error: `${BOARD_NUMBERS_FILE}: "${b}" is not an issue number` };
+    numbers[b] = n;
+  }
+  return { numbers, error: null };
+}
+
+/** A board issue from the REST API or the GraphQL listing, in one shape (null for anything else). */
+function boardIssue(i, source) {
+  if (!isObject(i) || i.pull_request || !Number.isInteger(i.number) || typeof i.title !== 'string') return null;
+  const labels = (source === 'graphql' ? (i.labels?.nodes ?? []) : Array.isArray(i.labels) ? i.labels : []).map((l) => (typeof l === 'string' ? l : l?.name)).filter((n) => typeof n === 'string');
+  const id = source === 'graphql' ? i.id : i.node_id;
+  return {
+    number: i.number,
+    title: i.title,
+    nodeId: typeof id === 'string' ? id : null,
+    body: typeof i.body === 'string' ? i.body.replace(/\r\n/g, '\n') : '',
+    state: String(i.state).toLowerCase() === 'closed' ? 'closed' : 'open',
+    locked: i.locked === true,
+    pinned: typeof i.isPinned === 'boolean' ? i.isPinned : null,
+    labels,
+  };
+}
+
+/**
+ * The three boards. A board with a number in BOARD_NUMBERS_FILE is read by that number (GET /issues/N); one that is gone
+ * or is not that board makes the boards unreadable (exit 3), never a new board. On 2026-10-22 the label listing of the
+ * runs at 16:00 and 16:07 UTC answered without the boards made at 15:53 (a probe at 16:13 listed them all, and the
+ * unfiltered listing answered an empty list), and each of those runs made three more. The listings (REST by label,
+ * GraphQL by label) only find duplicates and the boards that have no number yet; such a board is created only when both
+ * answered without it. Duplicates (the same title): the numbered board, else the lowest number, is the board; its
+ * state is the newest of their markers, with the earliest createdMs and the latest selftest, and writeBoards retires
+ * the others (renamed "... (duplicate of #N)", unlabelled, unpinned and closed).
+ */
+async function readBoards(gh, repo, numbers) {
+  const byNumber = {};
+  for (const b of BOARD_IDS) {
+    const n = numbers[b];
+    if (!n) continue;
+    const r = await gh.call('GET', `/repos/${repo}/issues/${n}`);
+    if (r.status === 404 || r.status === 410) return { ok: false, message: `board #${n} "${BOARDS[b]}" (${BOARD_NUMBERS_FILE}) is gone: restore it, or put the number of its replacement there` };
+    if (!r.ok || !isObject(r.json)) return { ok: false, message: `board #${n} "${BOARDS[b]}": ${r.ok ? 'not an issue' : r.message}` };
+    const i = boardIssue(r.json, 'rest');
+    if (!i || i.title !== BOARDS[b]) return { ok: false, message: `issue #${n} (${BOARD_NUMBERS_FILE}) is not the board "${BOARDS[b]}"` };
+    byNumber[b] = i;
+  }
+  const found = new Map();
+  const add = (i) => {
+    if (!i || !BOARD_IDS.some((b) => BOARDS[b] === i.title)) return;
+    const had = found.get(i.number);
+    found.set(i.number, had ? { ...had, nodeId: had.nodeId ?? i.nodeId, pinned: had.pinned ?? i.pinned } : i);
+  };
+  const failed = [];
   const r = await gh.call('GET', `/repos/${repo}/issues?labels=${BOARD_LABEL}&state=all&per_page=100`);
-  if (!r.ok || !Array.isArray(r.json)) return { ok: false, message: r.ok ? 'the issue listing is not a list' : r.message };
+  if (r.ok && Array.isArray(r.json)) for (const raw of r.json) add(boardIssue(raw, 'rest'));
+  else failed.push(`the label listing: ${r.ok ? 'not a list' : r.message}`);
+  const [owner, name] = repo.split('/');
+  const q = await gh.graphql(BOARDS_QUERY, { owner, name, label: BOARD_LABEL });
+  const nodes = q.json?.data?.repository?.issues?.nodes;
+  if (q.ok && Array.isArray(nodes)) for (const raw of nodes) add(boardIssue(raw, 'graphql'));
+  else failed.push(`GraphQL's label listing: ${q.ok ? 'no issue list' : q.message}`);
+
   const boards = {};
   const warnings = [];
   for (const b of BOARD_IDS) {
-    const matches = r.json.filter((i) => isObject(i) && !i.pull_request && i.title === BOARDS[b] && Number.isInteger(i.number)).sort((x, y) => x.number - y.number);
-    if (matches.length === 0) continue;
-    if (matches.length > 1) warnings.push(`${matches.length} issues are titled "${BOARDS[b]}" (#${matches.map((m) => m.number).join(', #')}): using #${matches[0].number}; close the others`);
-    const i = matches[0];
-    boards[b] = {
-      number: i.number,
-      nodeId: typeof i.node_id === 'string' ? i.node_id : null,
-      body: typeof i.body === 'string' ? i.body.replace(/\r\n/g, '\n') : '',
-      state: i.state === 'closed' ? 'closed' : 'open',
-      locked: i.locked === true,
-      labels: (Array.isArray(i.labels) ? i.labels : []).map((l) => (typeof l === 'string' ? l : l?.name)).filter((n) => typeof n === 'string'),
-    };
+    const matches = [...found.values()].filter((i) => i.title === BOARDS[b]).sort((x, y) => x.number - y.number);
+    const board = byNumber[b] ? { ...byNumber[b], pinned: found.get(byNumber[b].number)?.pinned ?? null } : matches[0];
+    if (!board) {
+      if (failed.length > 0) return { ok: false, message: `"${BOARDS[b]}" has no number in ${BOARD_NUMBERS_FILE} and a listing failed (${failed.join('; ')}): creating it could make a second one` };
+      continue;
+    }
+    if (!byNumber[b]) warnings.push(`board "${BOARDS[b]}" is #${board.number}: put that number in ${BOARD_NUMBERS_FILE}`);
+    const duplicates = matches.filter((i) => i.number !== board.number);
+    if (duplicates.length > 0) warnings.push(`${duplicates.length + 1} issues are titled "${BOARDS[b]}" (#${[board, ...duplicates].map((m) => m.number).join(', #')}): #${board.number} is the board, the others are retired`);
+    boards[b] = { ...board, duplicates, stateBodies: [board.body, ...duplicates.map((d) => d.body)] };
   }
+  if (failed.length > 0) warnings.push(`the boards' listings failed (${failed.join('; ')}): duplicates are not looked for this run`);
   return { ok: true, boards, warnings };
+}
+
+/** The state a board continues from: the newest marker of the board and its duplicates, with the earliest createdMs and the latest selftest. */
+export function mergedBoardState(states) {
+  const all = states.filter(Boolean);
+  if (all.length === 0) return null;
+  const newest = all.reduce((x, y) => ((y.updatedMs ?? -1) > (x.updatedMs ?? -1) ? y : x));
+  const created = all.map((s) => s.createdMs).filter(finite);
+  const selftests = all.map((s) => s.lastSelftestMs).filter(finite);
+  return { ...newest, createdMs: created.length > 0 ? Math.min(...created) : newest.createdMs, lastSelftestMs: selftests.length > 0 ? Math.max(...selftests) : newest.lastSelftestMs };
 }
 
 async function ensureLabels(gh, repo, warn) {
@@ -1547,9 +1637,33 @@ async function writeBoards({ result, read, gh, repo, sleep, log, warn, error }) 
     }
   }
 
-  // 4. The daily pin check.
+  // 4. Duplicates (readBoards), once every board is saved with the newest state: renamed, unlabelled, unpinned and
+  // closed, so no listing finds them again. A step that fails is a warning; the next run tries again.
+  if (saved) for (const b of BOARD_IDS) for (const d of issues[b]?.duplicates ?? []) await retireDuplicate({ gh, repo, board: b, number: issues[b].number, duplicate: { ...d }, log, warn });
+
+  // 5. The daily pin check.
   if (pinned.length > 0) await checkPins({ gh, repo, issues: pinned, log, warn });
   return { saved, failedComments: failed.length };
+}
+
+const UNPIN_MUTATION = 'mutation($issueId: ID!) { unpinIssue(input: {issueId: $issueId}) { issue { number } } }';
+
+/** Retire a duplicate board: renamed "... (duplicate of #N)" and closed, then unlabelled and unpinned. */
+async function retireDuplicate({ gh, repo, board, number, duplicate, log, warn }) {
+  const n = duplicate.number;
+  const close = () => gh.call('PATCH', `/repos/${repo}/issues/${n}`, { title: `${BOARDS[board]} (duplicate of #${number})`, state: 'closed', state_reason: 'not_planned' });
+  const r = await writeUnlocked({ gh, repo, issue: duplicate, what: 'retire it', write: close, log, warn });
+  if (!r.ok) {
+    warn(`cannot retire the duplicate board #${n}: ${r.message} (the next run tries again)`);
+    return;
+  }
+  const labels = await gh.call('PUT', `/repos/${repo}/issues/${n}/labels`, { labels: duplicate.labels.filter((l) => !OUR_LABELS.has(l)) });
+  if (!labels.ok) warn(`cannot unlabel the retired duplicate #${n}: ${labels.message}`);
+  if (duplicate.pinned === true && duplicate.nodeId) {
+    const unpin = await gh.graphql(UNPIN_MUTATION, { issueId: duplicate.nodeId });
+    if (!unpin.ok) warn(`cannot unpin the retired duplicate #${n}: ${unpin.message}`);
+  }
+  log(`retired the duplicate board #${n} (the board is #${number})`);
 }
 
 /** POST each ping (the reason as the body), 3 tries with a 10 s timeout each. The URL never reaches a log line. */
@@ -1687,8 +1801,16 @@ export async function main({
   log(`reconcile: findings from ${docs.map((d) => `${d.evaluator} (${d.findings.length})`).join(', ') || 'no evaluator'}`);
 
   const gh = token && repo ? githubClient({ token, fetchImpl, sleep }) : null;
+  let numbersText = null;
+  try {
+    numbersText = readFile(BOARD_NUMBERS_FILE);
+  } catch {
+    numbersText = null;
+  }
+  const { numbers, error: numbersError } = parseBoardNumbers(numbersText);
   let read;
-  if (gh) read = await readBoards(gh, repo);
+  if (numbersError) read = { ok: false, message: numbersError };
+  else if (gh) read = await readBoards(gh, repo, numbers);
   else if (opts.dryRun) read = { ok: true, boards: {}, warnings: ['GH_TOKEN or GITHUB_REPOSITORY unset: the dry run starts from empty boards'] };
   else read = { ok: false, message: 'GH_TOKEN or GITHUB_REPOSITORY unset (misconfigured)' };
 
@@ -1718,7 +1840,7 @@ export async function main({
   for (const w of read.warnings) warn(w);
 
   const prevState = {};
-  for (const b of BOARD_IDS) prevState[b] = read.boards[b] ? parseBoardState(read.boards[b].body, b) : null;
+  for (const b of BOARD_IDS) prevState[b] = read.boards[b] ? mergedBoardState(read.boards[b].stateBodies.map((body) => parseBoardState(body, b))) : null;
   for (const b of BOARD_IDS) if (read.boards[b] && prevState[b] === null) warn(`board #${read.boards[b].number} "${BOARDS[b]}" has no readable state marker: it starts empty`);
   const result = reconcile(prevState, docs, nowMs, silences, {
     runId,

@@ -20,6 +20,7 @@ import {
   type Severity,
 } from '../scripts/lib/findings.mjs';
 import {
+  BOARD_NUMBERS_FILE,
   LABEL_DEFS,
   LOG_MAX_EVENTS,
   MAX_BODY_CHARS,
@@ -1145,6 +1146,8 @@ interface FakeIssue {
   node_id: string;
   pull_request?: { url: string };
   comments: string[];
+  /** REST's user.login; the bot when absent. */
+  author?: string;
 }
 interface Call {
   method: string;
@@ -1162,6 +1165,12 @@ class FakeGitHub {
   calls: Call[] = [];
   labels = new Set<string>(LABEL_DEFS.map((l) => l.name));
   listStatus: number[] = [];
+  /** The label listing leaves these issues out (2026-10-22: it missed three boards created 8 minutes earlier). */
+  labelListingMisses = new Set<number>();
+  /** The status of the next GET of one issue, one per try (then 200 or 404). */
+  issueStatus: number[] = [];
+  /** GraphQL's label listing answers without these issues. */
+  graphqlListingMisses = new Set<number>();
   patchStatus = 200;
   pingStatus = 200;
   /** The status of the next comment POSTs, one per try (then 201). */
@@ -1189,18 +1198,16 @@ class FakeGitHub {
     if (url.startsWith('https://api.github.com') && typeof body === 'string') body = JSON.parse(body);
     this.calls.push({ method, url, body });
     const json = (value: unknown, status = 200): Response => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
+    const rest = (i: FakeIssue): unknown => ({ number: i.number, title: i.title, body: i.body, state: i.state, locked: i.locked, labels: i.labels.map((name) => ({ name })), node_id: i.node_id, user: { login: i.author ?? 'github-actions[bot]' }, ...(i.pull_request ? { pull_request: i.pull_request } : {}) });
     if (url.startsWith(HC_PING_BASE)) return new Response('OK', { status: this.pingStatus });
     const path = url.replace('https://api.github.com', '');
     const b = body as Record<string, unknown> | null;
     if (method === 'GET' && path === `/repos/${REPO}/issues?labels=health-board&state=all&per_page=100`) {
       const status = this.listStatus.shift() ?? 200;
       if (status !== 200) return json({ message: 'boom' }, status);
-      return json(
-        this.issues
-          .filter((i) => i.labels.includes('health-board'))
-          .map((i) => ({ number: i.number, title: i.title, body: i.body, state: i.state, locked: i.locked, labels: i.labels.map((name) => ({ name })), node_id: i.node_id, ...(i.pull_request ? { pull_request: i.pull_request } : {}) })),
-      );
+      return json(this.issues.filter((i) => i.labels.includes('health-board') && !this.labelListingMisses.has(i.number)).map(rest));
     }
+
     if (method === 'GET' && path.startsWith(`/repos/${REPO}/actions/workflows/health.yml/runs?event=workflow_dispatch`)) {
       if (this.runsStatus !== 200) return json({ message: 'boom' }, this.runsStatus);
       return json({ workflow_runs: this.dispatched.map((r, i) => ({ id: i, event: 'workflow_dispatch', status: 'completed', conclusion: 'success', ...r })) });
@@ -1221,7 +1228,19 @@ class FakeGitHub {
     if (method === 'POST' && path === '/graphql') {
       if (this.graphqlStatus !== 200) return json({ message: 'Resource not accessible by integration' }, this.graphqlStatus);
       const query = String(b!['query']);
-      const vars = b!['variables'] as { issueId?: string; ids?: string[] };
+      const vars = b!['variables'] as { issueId?: string; ids?: string[]; label?: string };
+      if (query.includes('issues(first: 50')) {
+        const nodes = this.issues
+          .filter((i) => !i.pull_request && i.labels.includes(String(vars.label)) && !this.graphqlListingMisses.has(i.number))
+          .sort((x, y) => x.number - y.number)
+          .map((i) => ({ id: i.node_id, number: i.number, title: i.title, body: i.body, state: i.state.toUpperCase(), locked: i.locked, isPinned: i.pinned, labels: { nodes: i.labels.map((name) => ({ name })) } }));
+        return json({ data: { repository: { issues: { nodes } } } });
+      }
+      if (query.includes('unpinIssue')) {
+        const issue = this.issues.find((i) => i.node_id === vars.issueId);
+        if (issue) issue.pinned = false;
+        return json({ data: { unpinIssue: { issue: { number: issue?.number ?? null } } } });
+      }
       if (query.includes('pinIssue')) {
         const issue = this.issues.find((i) => i.node_id === vars.issueId);
         if (issue) issue.pinned = true;
@@ -1231,11 +1250,16 @@ class FakeGitHub {
     }
     const m = /^\/repos\/[^/]+\/[^/]+\/issues\/(\d+)(\/[a-z]+)?$/.exec(path);
     const issue = m ? this.issues.find((i) => i.number === Number(m[1])) : undefined;
+    if (method === 'GET' && m && !m[2]) {
+      const status = this.issueStatus.shift() ?? (issue ? 200 : 404);
+      return status === 200 && issue ? json(rest(issue)) : json({ message: status === 404 ? 'Not Found' : 'boom' }, status);
+    }
     if (m && issue) {
       if (method === 'PATCH' && !m[2]) {
         if (this.patchStatus !== 200) return json({ message: 'boom' }, this.patchStatus);
         if (this.lockedRejectsPatch !== 0 && issue.locked) return json({ message: 'Issue is locked' }, this.lockedRejectsPatch);
         if (typeof b?.['body'] === 'string') issue.body = b['body'];
+        if (typeof b?.['title'] === 'string') issue.title = b['title'];
         if (b?.['state'] === 'open' || b?.['state'] === 'closed') issue.state = b['state'];
         return json({ number: issue.number });
       }
@@ -1264,10 +1288,14 @@ class FakeGitHub {
     return json({ message: 'Not Found' }, 404);
   };
 
+  /** Every call that changes something (GraphQL queries are reads). */
   writes(): Call[] {
-    return this.calls.filter((c) => c.method !== 'GET' && !c.url.startsWith(HC_PING_BASE));
+    return this.calls.filter((c) => c.method !== 'GET' && !c.url.startsWith(HC_PING_BASE) && !isGraphqlQuery(c));
   }
 }
+
+const isBoardListing = (c: Call): boolean => String((c.body as { query?: string } | null)?.query ?? '').includes('issues(first: 50');
+const isGraphqlQuery = (c: Call): boolean => c.url.endsWith('/graphql') && String((c.body as { query?: string } | null)?.query ?? '').startsWith('query');
 
 const callText = (c: Call): string => `${c.method} ${c.url.replace('https://api.github.com', '')}`;
 
@@ -1291,9 +1319,16 @@ function findingsDir(docs: FindingsDocument[], extra: Record<string, string> = {
   };
 }
 
+/** The findings directory plus scripts/health-boards.json (absent when `numbers` is undefined). */
+function withNumbers(dir: ReturnType<typeof findingsDir>, numbers: string | undefined): ReturnType<typeof findingsDir> {
+  if (numbers === undefined) return dir;
+  return { ...dir, readFile: (p) => (p === BOARD_NUMBERS_FILE ? numbers : dir.readFile(p)) };
+}
+const NUMBERS = JSON.stringify({ alerts: 100, feed: 101, platform: 102 });
+
 const docsAt = (nowMs: number, findings: Findings): FindingsDocument[] => new World().docs(nowMs, findings);
 
-async function runMain(gh: FakeGitHub, nowMs: number, findings: Findings, opts: { env?: Record<string, string>; argv?: string[]; extra?: Record<string, string> } = {}): Promise<{ code: number; lines: string[]; sleeps: number[]; summary: string[] }> {
+async function runMain(gh: FakeGitHub, nowMs: number, findings: Findings, opts: { env?: Record<string, string>; argv?: string[]; extra?: Record<string, string>; numbers?: string } = {}): Promise<{ code: number; lines: string[]; sleeps: number[]; summary: string[] }> {
   const lines: string[] = [];
   const sleeps: number[] = [];
   const summary: string[] = [];
@@ -1307,7 +1342,7 @@ async function runMain(gh: FakeGitHub, nowMs: number, findings: Findings, opts: 
     },
     log: (l) => lines.push(l),
     appendFile: (_p, s) => summary.push(s),
-    ...findingsDir(docsAt(nowMs, findings), opts.extra),
+    ...withNumbers(findingsDir(docsAt(nowMs, findings), opts.extra), opts.numbers),
   });
   return { code, lines, sleeps, summary };
 }
@@ -1360,7 +1395,7 @@ test('main: the first run creates all three boards, the labels first, each pinne
   assert.equal(gh.issues.length, 3);
 });
 
-test('main: duplicates use the lowest number; a closed board with an open entry reopens; an unlocked board is locked again', async () => {
+test('main: duplicates use the lowest number and retire the others; a closed board with an open entry reopens; an unlocked board is locked again', async () => {
   const dup = new FakeGitHub();
   const seed = (number: number, state: 'open' | 'closed', body = ''): FakeIssue => ({ number, title: '[health] feed', body, state, locked: true, pinned: true, labels: ['health-board', 'health:ok', 'documentation'], node_id: `I_${number}`, comments: [] });
   dup.issues.push(seed(7, 'open'), seed(3, 'closed'), { ...seed(5, 'open'), title: '[health] feed', pull_request: { url: 'x' } });
@@ -1371,8 +1406,12 @@ test('main: duplicates use the lowest number; a closed board with an open entry 
   assert.equal(dup.issues.find((i) => i.number === 3)!.state, 'open');
   assert.deepEqual(dup.issues.find((i) => i.number === 3)!.labels, ['health-board', 'health:p3', 'documentation'], 'a hand-added label stays');
   assert.equal(dup.issues.find((i) => i.number === 3)!.comments.length, 1);
-  assert.ok(out.lines.some((l) => l.startsWith('::warning title=Health reconcile::2 issues are titled "[health] feed" (#3, #7): using #3')));
-  assert.deepEqual(dup.issues.filter((i) => i.title !== '[health] feed').map((i) => i.title), ['[health] alert pipeline', '[health] platform'], 'the two missing boards');
+  assert.ok(out.lines.some((l) => l === '::warning title=Health reconcile::2 issues are titled "[health] feed" (#3, #7): #3 is the board, the others are retired'));
+  const retired = dup.issues.find((i) => i.number === 7)!;
+  assert.deepEqual([retired.title, retired.state, retired.labels, retired.locked], ['[health] feed (duplicate of #3)', 'closed', ['documentation'], true]);
+  assert.equal(retired.comments.length, 0);
+  assert.ok(out.lines.includes('retired the duplicate board #7 (the board is #3)'));
+  assert.deepEqual(dup.issues.filter((i) => !i.title.startsWith('[health] feed')).map((i) => i.title), ['[health] alert pipeline', '[health] platform'], 'the two missing boards');
 
   const un = new FakeGitHub();
   un.issues.push({ ...seed(9, 'closed'), locked: false });
@@ -1380,6 +1419,125 @@ test('main: duplicates use the lowest number; a closed board with an open entry 
   assert.equal(un.issues[0]!.locked, true);
   assert.equal(un.issues[0]!.state, 'closed', 'no open entry: it stays closed');
   assert.ok(parseBoardState(un.issues[0]!.body, 'feed'), 'the body was rewritten with a state marker');
+});
+
+test('main: numbered boards are read by number (2026-10-22: the label listing missed them and each run made another set)', async () => {
+  const gh = new FakeGitHub();
+  await runMain(gh, T('2026-10-22T15:52:00Z'), {});
+  assert.deepEqual(gh.issues.map((i) => i.number), [100, 101, 102]);
+  for (const misses of [gh.labelListingMisses, gh.graphqlListingMisses]) for (const n of [100, 101, 102]) misses.add(n);
+  gh.calls = [];
+  const run = await runMain(gh, T('2026-10-22T16:00:00Z'), {}, { numbers: NUMBERS });
+  assert.equal(run.code, 0);
+  assert.deepEqual(gh.writes().map(callText), [100, 101, 102].map((n) => `PATCH /repos/${REPO}/issues/${n}`), 'no second set');
+  assert.deepEqual(gh.calls.filter((c) => c.method === 'GET').slice(0, 3).map(callText), [100, 101, 102].map((n) => `GET /repos/${REPO}/issues/${n}`));
+  // Both listings failing only skips the search for duplicates.
+  gh.listStatus = [500, 500, 500];
+  gh.graphqlStatus = 502;
+  const blind = await runMain(gh, T('2026-10-22T16:07:00Z'), {}, { numbers: NUMBERS });
+  assert.equal(blind.code, 0);
+  assert.ok(blind.lines.some((l) => l.startsWith("::warning title=Health reconcile::the boards' listings failed (the label listing: HTTP 500")));
+  assert.equal(gh.issues.length, 3);
+  // Without the file the same listings would have made a second set; that is why the numbers are kept.
+  gh.graphqlStatus = 200;
+  await runMain(gh, T('2026-10-22T16:22:00Z'), {});
+  assert.equal(gh.issues.length, 6);
+});
+
+test('main: a numbered board that is gone, or is another issue, or a broken numbers file: exit 3 and nothing written, never a new board', async () => {
+  const gh = new FakeGitHub();
+  await runMain(gh, T('2026-10-22T15:52:00Z'), {});
+  gh.issues = gh.issues.filter((i) => i.number !== 101);
+  gh.calls = [];
+  const gone = await runMain(gh, T('2026-10-22T16:07:00Z'), {}, { numbers: NUMBERS });
+  assert.equal(gone.code, 3);
+  assert.deepEqual(gh.writes(), []);
+  assert.ok(gone.lines.some((l) => l.startsWith('::error::boards unreadable (board #101 "[health] feed" (scripts/health-boards.json) is gone: restore it, or put the number of its replacement there)')));
+  const other = await runMain(gh, T('2026-10-22T16:22:00Z'), {}, { numbers: JSON.stringify({ alerts: 100, feed: 102, platform: 102 }) });
+  assert.equal(other.code, 3);
+  assert.ok(other.lines.some((l) => l.includes('issue #102 (scripts/health-boards.json) is not the board "[health] feed"')));
+  for (const bad of ['{', JSON.stringify({ feed: 'x' }), JSON.stringify({ feed: -1 })]) {
+    assert.equal((await runMain(gh, T('2026-10-22T16:37:00Z'), {}, { numbers: bad })).code, 3, bad);
+  }
+  gh.issueStatus = [502, 502, 502];
+  assert.equal((await runMain(gh, T('2026-10-22T16:52:00Z'), {}, { numbers: NUMBERS })).code, 3, 'a numbered board that cannot be read');
+  assert.deepEqual(gh.writes(), []);
+});
+
+test('main: without a number, a board is created only when both label listings answered without it; a listing failing then writes nothing (exit 3)', async () => {
+  const gh = new FakeGitHub();
+  gh.graphqlStatus = 502;
+  const blind = await runMain(gh, T('2026-10-22T15:52:00Z'), {});
+  assert.equal(blind.code, 3);
+  assert.deepEqual(gh.writes(), []);
+  assert.ok(blind.lines.some((l) => l.startsWith('::error::boards unreadable ("[health] alert pipeline" has no number in scripts/health-boards.json and a listing failed (GraphQL')));
+  gh.graphqlStatus = 200;
+  gh.listStatus = [500, 500, 500];
+  assert.equal((await runMain(gh, T('2026-10-22T16:07:00Z'), {})).code, 3, 'the REST listing failing alone is enough');
+  assert.deepEqual(gh.writes(), []);
+  const made = await runMain(gh, T('2026-10-22T16:22:00Z'), {});
+  assert.equal(made.code, 0);
+  assert.deepEqual(gh.issues.map((i) => i.title), ['[health] alert pipeline', '[health] feed', '[health] platform']);
+  // One listing missing a board the other lists finds it (and asks for its number).
+  gh.labelListingMisses.add(101);
+  const found = await runMain(gh, T('2026-10-22T16:37:00Z'), {});
+  assert.equal(gh.issues.length, 3);
+  assert.ok(found.lines.some((l) => l === '::warning title=Health reconcile::board "[health] feed" is #101: put that number in scripts/health-boards.json'));
+});
+
+test('main: the 2026-10-22 sets (#100-#102 numbered, a selftest set, a third set): the duplicates are retired once; the boards continue from the newest state with the first createdMs and the selftest', async () => {
+  const gh = new FakeGitHub();
+  await runMain(gh, T('2026-10-22T15:52:00Z'), {});
+  const sets = [
+    { at: '2026-10-22T16:00:00Z', first: 103, alerts: [f('alerts:selftest', { text: 'forced by the selftest: this run must be red' })] },
+    { at: '2026-10-22T16:07:00Z', first: 106, alerts: [] },
+  ];
+  for (const set of sets) {
+    const other = new FakeGitHub();
+    other.nextNumber = set.first;
+    await runMain(other, T(set.at), { alerts: set.alerts });
+    gh.issues.push(...other.issues.map((i) => ({ ...i, pinned: false })));
+  }
+  gh.issues[0]!.pinned = true;
+  gh.issues[3]!.pinned = true;
+  gh.calls = [];
+  const merged = await runMain(gh, T('2026-10-22T16:22:00Z'), {}, { numbers: NUMBERS });
+  assert.equal(merged.code, 0);
+  const alerts = parseBoardState(gh.issues[0]!.body, 'alerts')!;
+  assert.equal(alerts.lastSelftestMs, T('2026-10-22T16:00:00Z'), 'the selftest of the second set');
+  assert.equal(alerts.createdMs, T('2026-10-22T15:52:00Z'), 'the first set');
+  assert.deepEqual(
+    gh.issues.map((i) => [i.number, i.title, i.state, i.labels.join(' '), i.pinned]),
+    [
+      [100, '[health] alert pipeline', 'open', 'health-board health:ok', true],
+      [101, '[health] feed', 'open', 'health-board health:ok', true],
+      [102, '[health] platform', 'open', 'health-board health:ok', true],
+      [103, '[health] alert pipeline (duplicate of #100)', 'closed', '', false],
+      [104, '[health] feed (duplicate of #101)', 'closed', '', false],
+      [105, '[health] platform (duplicate of #102)', 'closed', '', false],
+      [106, '[health] alert pipeline (duplicate of #100)', 'closed', '', false],
+      [107, '[health] feed (duplicate of #101)', 'closed', '', false],
+      [108, '[health] platform (duplicate of #102)', 'closed', '', false],
+    ],
+  );
+  assert.equal(gh.calls.filter((c) => callText(c) === `POST /repos/${REPO}/issues`).length, 0);
+  assert.equal(gh.issues.reduce((n, i) => n + i.comments.length, 0), 0, 'retiring comments nowhere');
+  gh.calls = [];
+  const after = await runMain(gh, T('2026-10-22T16:37:00Z'), {}, { numbers: NUMBERS });
+  assert.ok(!after.lines.some((l) => l.includes('duplicate')), 'retired once');
+  assert.deepEqual(gh.writes().map(callText), [100, 101, 102].map((n) => `PATCH /repos/${REPO}/issues/${n}`));
+
+  // Nothing is retired on a run whose bodies could not be saved; the next run does it.
+  const pin = new FakeGitHub();
+  await runMain(pin, T('2026-10-22T15:52:00Z'), {});
+  pin.issues.push({ ...pin.issues[1]!, number: 9, node_id: 'I_9', pinned: false, comments: [] });
+  pin.patchStatus = 500;
+  assert.equal((await runMain(pin, T('2026-10-22T16:07:00Z'), {}, { numbers: NUMBERS })).code, 3);
+  assert.equal(pin.issues.find((i) => i.number === 9)!.state, 'open');
+  pin.patchStatus = 200;
+  const ok = await runMain(pin, T('2026-10-22T16:22:00Z'), {}, { numbers: NUMBERS });
+  assert.ok(ok.lines.includes('retired the duplicate board #9 (the board is #101)'));
+  assert.equal(pin.issues.find((i) => i.number === 9)!.title, '[health] feed (duplicate of #101)');
 });
 
 test('main: unreadable boards, or GH_TOKEN unset, write nothing, send no pings and exit 3, naming the P1/P2 findings present', async () => {
@@ -1390,7 +1548,7 @@ test('main: unreadable boards, or GH_TOKEN unset, write nothing, send no pings a
   assert.deepEqual(p3.sleeps, [2_000, 5_000]);
   assert.deepEqual(gh.writes(), []);
   assert.equal(gh.calls.filter((c) => c.url.startsWith(HC_PING_BASE)).length, 0);
-  assert.ok(p3.lines.some((l) => l.startsWith('::error::boards unreadable (HTTP 502')));
+  assert.ok(p3.lines.some((l) => l.startsWith('::error::boards unreadable ("[health] alert pipeline" has no number in scripts/health-boards.json and a listing failed (the label listing: HTTP 502')));
   gh.listStatus = [500, 500, 500];
   const urgent = await runMain(gh, T('2026-10-21T10:22:00Z'), { alerts: [f('alerts:policy', { text: 'fallback policy' })], platform: [f('platform:api', { text: 'api down' })] });
   assert.equal(urgent.code, 3);
@@ -1572,11 +1730,11 @@ test('main: once a day the boards\' pins and locks are checked through GraphQL a
   gh.issues[0]!.pinned = false;
   gh.calls = [];
   await runMain(gh, T('2026-10-21T10:22:00Z'), {});
-  assert.equal(gh.calls.filter((c) => c.url.endsWith('/graphql')).length, 0, 'at most once a day');
+  assert.equal(gh.calls.filter((c) => c.url.endsWith('/graphql') && !isBoardListing(c)).length, 0, 'at most once a day');
   assert.equal(gh.issues[0]!.pinned, false);
   gh.calls = [];
   const day = await runMain(gh, T('2026-10-22T10:08:00Z'), {});
-  const graphql = gh.calls.filter((c) => c.url.endsWith('/graphql')).map((c) => (c.body as { query: string; variables: unknown }));
+  const graphql = gh.calls.filter((c) => c.url.endsWith('/graphql') && !isBoardListing(c)).map((c) => (c.body as { query: string; variables: unknown }));
   assert.equal(graphql.length, 2);
   assert.deepEqual(graphql[0]!.variables, { ids: gh.issues.map((i) => i.node_id) });
   assert.deepEqual(graphql[1]!.variables, { issueId: gh.issues[0]!.node_id });

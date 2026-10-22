@@ -202,6 +202,12 @@ export function reconcile(
 
 export function renderBody(board: Board, state: BoardState, view?: { logRows?: number; tableRows?: number }): string;
 export function parseBoardState(body: unknown, board?: Board): BoardState | null;
+/** The file that keeps the board numbers (`scripts/health-boards.json`). */
+export const BOARD_NUMBERS_FILE: string;
+/** That file's numbers; a missing file (null) gives none, a broken one an error. */
+export function parseBoardNumbers(text: string | null | undefined): { numbers: Partial<Record<Board, number>>; error: string | null };
+/** The newest of a board's states (its duplicates'), with the earliest createdMs and the latest selftest. */
+export function mergedBoardState(states: (BoardState | null)[]): BoardState | null;
 export function parseSilences(text: string | null | undefined, nowMs: number): { silences: Silence[]; errors: string[] };
 export function withFailedComments(
   result: ReconcileResult,

@@ -1,0 +1,85 @@
+{
+  "schema": "alerts-status/1",
+  "service": "alerts-gateway",
+  "generatedAtMs": 1792590720000,
+  "detector": {
+    "lastTickMs": 1792590720000,
+    "staleSec": 0,
+    "providers": [
+      {
+        "id": "usgs",
+        "lastPollMs": 1792590720000,
+        "ok": true,
+        "watermarkMs": 1792590227822,
+        "httpStatus": 200,
+        "latencyMs": 270,
+        "consecutiveFailures": 0
+      },
+      {
+        "id": "feed",
+        "lastPollMs": 1792590720000,
+        "ok": true,
+        "watermarkMs": 1792587936691,
+        "httpStatus": 200,
+        "latencyMs": 229,
+        "consecutiveFailures": 0
+      },
+      {
+        "id": "emsc",
+        "lastPollMs": 1792590720000,
+        "ok": true,
+        "watermarkMs": 1792590448093,
+        "httpStatus": 200,
+        "latencyMs": 227,
+        "consecutiveFailures": 0
+      },
+      {
+        "id": "gfz",
+        "lastPollMs": 1792590720000,
+        "ok": false,
+        "watermarkMs": 1792575244022,
+        "httpStatus": 0,
+        "latencyMs": 4000,
+        "consecutiveFailures": 20,
+        "failingSinceMs": 1792587000000,
+        "lastError": "timeout",
+        "consecutiveTimeouts": 20
+      }
+    ],
+    "recentEvents": 319
+  },
+  "lastEvent": {
+    "eventId": "ae_c6efc112c610a386",
+    "rev": 1,
+    "mag": 4,
+    "placeEn": "MINDANAO, PHILIPPINES",
+    "atMs": 1792590464520,
+    "seqKind": "new"
+  },
+  "policy": {
+    "source": "signed",
+    "sha": "ps_6de2c26499dc1c05",
+    "fallback": false,
+    "version": 19
+  },
+  "channelsTracked": 0,
+  "apns": {
+    "configured": true
+  },
+  "budget": {
+    "day": "2026-10-21",
+    "doRequests": 5906,
+    "d1Reads": 6400,
+    "pushes": 0,
+    "doRowsRead": 170988,
+    "doRowsWritten": 8394,
+    "doGbSec": 538,
+    "headroomPct": 92
+  },
+  "degraded": {
+    "level": "none",
+    "active": false,
+    "forced": false,
+    "reason": null
+  }
+}

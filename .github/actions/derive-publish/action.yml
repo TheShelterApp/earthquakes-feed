@@ -128,6 +128,9 @@ runs:
       # Skips with a warning until FEED_SIGNING_KEY exists — v1 keeps publishing either way.
       # The tiles pointer is fetched so the manifest can vouch for the offline bundle; if the
       # fetch fails the manifest says tiles: null rather than failing the run.
+      # The envelope is checked against the published key of its kid (envelopeKeyCheck): on a mismatch no v2 manifest
+      # is written, `v2_failed` is set, and the job fails in the last step, after the Pages deploy (as for R2).
+      id: sign
       shell: bash
       env:
         DATA_DIR: .data
@@ -180,4 +183,10 @@ runs:
       shell: bash
       run: |
         echo '::error::R2 publish failed (see the R2 step); the Pages deploy above ran'
+        exit 1
+    - name: Fail on a v2 signing key mismatch
+      if: steps.sign.outputs.v2_failed == '1'
+      shell: bash
+      run: |
+        echo '::error::the v2 manifest did not verify under the published key of its kid (see the sign step); v2/manifest.json was not published, the Pages deploy above ran'
         exit 1

@@ -1,10 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { Ed25519Signer, decodePkcs8 } from '@theshelter/signing';
 import { DATA_DIR, PUBLIC_DIR, SCHEMA_DIR } from './config.js';
-import { DEFAULT_KID, buildManifestV2, manifestV2Bytes, sha256Hex, signManifestV2, type ManifestV1, type TilesPointer } from './manifest-v2.js';
+import { DEFAULT_KID, buildManifestV2, envelopeKeyCheck, manifestV2Bytes, sha256Hex, signManifestV2, type ManifestV1, type TilesPointer } from './manifest-v2.js';
 
 /**
  * Post-commit step of derive.yml: the v2 manifest pins every immutable URL to the data commit,
@@ -24,7 +24,8 @@ if (!dataCommit) {
   console.error('::error::DATA_COMMIT is required to sign the v2 manifest');
   process.exit(1);
 }
-const kid = process.env.FEED_SIGNING_KID ?? DEFAULT_KID;
+// `||`, not `??`: an unset Actions variable reaches the step as "", which must fall back too.
+const kid = process.env.FEED_SIGNING_KID || DEFAULT_KID;
 
 const v1 = JSON.parse(readFileSync(join(PUBLIC_DIR, 'v1', 'manifest.json'), 'utf8')) as ManifestV1;
 const tilesFile = process.env.TILES_POINTER;
@@ -58,11 +59,23 @@ if (!validate(manifest)) {
 
 const signer = await Ed25519Signer.fromPkcs8(kid, 'feed', decodePkcs8(key));
 const envelope = await signManifestV2(manifest, signer);
+
+// The signature against the published key of its kid (FEED_PUBLIC_KEYS, APIs.md). A secret that does not belong to the
+// kid would publish a manifest every reader rejects: write none, record it for the step after the Pages deploy (which
+// fails the job, as an R2 error does) and let v1 publish. Only the kid is ever printed, never key material.
+const check = await envelopeKeyCheck(envelope);
+if (check === 'mismatch') {
+  console.error(`::error::v2 manifest signature does not verify under the published key of kid=${kid}: FEED_SIGNING_KEY and FEED_SIGNING_KID disagree; v2/manifest.json not written (v1 unaffected)`);
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, 'v2_failed=1\n');
+  process.exit(0);
+}
+if (check === 'unknown-kid') console.warn(`::warning::kid=${kid} has no published public key (src/manifest-v2.ts FEED_PUBLIC_KEYS, APIs.md); readers may reject the v2 manifest`);
+
 const outDir = join(PUBLIC_DIR, 'v2');
 mkdirSync(outDir, { recursive: true });
 writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(envelope) + '\n');
 
 const bytes = manifestV2Bytes(manifest);
 console.log(
-  `sign-manifest: v2/manifest.json kid=${kid} payload=${bytes.byteLength}B sha256=${sha256Hex(bytes).slice(0, 16)}… data_commit=${dataCommit.slice(0, 8)} partitions=${manifest.partitions.length} summaries=${Object.keys(manifest.summaries).length} tiles=${tiles ? tiles.version : 'none'}`,
+  `sign-manifest: v2/manifest.json kid=${kid} key=${check} payload=${bytes.byteLength}B sha256=${sha256Hex(bytes).slice(0, 16)}… data_commit=${dataCommit.slice(0, 8)} partitions=${manifest.partitions.length} summaries=${Object.keys(manifest.summaries).length} tiles=${tiles ? tiles.version : 'none'}`,
 );

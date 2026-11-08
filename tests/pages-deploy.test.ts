@@ -237,14 +237,19 @@ test('pages-deploy wiring: the Pages step runs the script with the job budget; R
   const r2 = names.indexOf('Publish artifacts to R2 (data origin, S3 API)');
   const pages = names.indexOf('Publish live feed to Cloudflare Pages (Direct Upload)');
   const r2fail = names.indexOf('Fail on an R2 publish error');
-  assert.ok(r2 >= 0 && pages > r2 && r2fail > pages, names.join(' | '));
-  assert.equal(r2fail, names.length - 1, 'the R2 failure is the last step');
+  const signFail = names.indexOf('Fail on a v2 signing key mismatch');
+  assert.ok(r2 >= 0 && pages > r2 && r2fail > pages && signFail > pages, names.join(' | '));
+  assert.deepEqual([r2fail, signFail].sort((a, b) => a - b), [names.length - 2, names.length - 1], 'the two failure steps are the last ones');
   const p = steps[pages]!;
   assert.equal(p.run.trim(), 'bash "$GITHUB_WORKSPACE/scripts/pages-deploy.sh"');
   assert.match(p.text, /JOB_STARTED_S: \$\{\{ inputs\.job-started-at \}\}/);
   assert.match(p.text, /JOB_TIMEOUT_MIN: \$\{\{ inputs\.job-timeout-minutes \}\}/);
   assert.match(steps[r2]!.text, /\n {6}id: r2\n/);
   assert.match(steps[r2fail]!.text, /\n {6}if: steps\.r2\.outputs\.failed == '1'\n/);
+  const sign = steps.find((s) => s.name.startsWith('Sign v2 manifest'))!;
+  assert.match(sign.text, /\n {6}id: sign\n/);
+  assert.match(steps[signFail]!.text, /\n {6}if: steps\.sign\.outputs\.v2_failed == '1'\n/);
+  assert.match(steps[signFail]!.run, /exit 1/);
   for (const s of steps) assert.doesNotMatch(s.text, /continue-on-error/, `${s.name}: the steps stay plain`);
 });
 

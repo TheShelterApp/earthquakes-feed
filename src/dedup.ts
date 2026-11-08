@@ -1363,6 +1363,12 @@ export class Resolver {
     node.chosenProvider = chosen.provider;
   }
 
+  /** Re-derive a node's representative from its rows as they are now, with nothing logged and no revision: rows a
+   *  caller corrected in place offline (src/row-normalize.ts). */
+  rederive(node: EventNode): void {
+    this.reposition(node);
+  }
+
   /** Re-derive the representative solution and keep the spatial index in step with it. */
   private reposition(node: EventNode): void {
     // Every change of an event's rows ends here (or in deindexGeo): the time-sorted cell index is stale from now on.

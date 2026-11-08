@@ -202,9 +202,34 @@ export function englishHalf(place: string): string {
   return place.slice(0, slashes[(slashes.length - 1) / 2]).trim() || place;
 }
 
+/** The ISC Bulletin's provider id. */
+export const ISC_PROVIDER = 'isc';
+/** Magnitude authors whose moment magnitude the feed does not take from an ISC row (APIs.md, *ISC*). ISC's
+ *  preliminary bulletin (the months its analysts have not reviewed: every ISC row from 2025-02 on, none of 2024-05)
+ *  gives as an event's magnitude whichever contributed one it prefers, and that is often Geoscience Australia's
+ *  (`AUST`) automatic Mw, which runs high, most of all in a large quake's aftershock sequence: ISC 644158618
+ *  (2025-09-18 19:08:09.91, DSN's hypocentre east of the Kuril Islands) is "Mw 8.22 AUST" where NEIC's mb is 5.2-5.8
+ *  and no M8 occurred (the Kamchatka mainshock, Mw 7.86 GCMT, was 18:58:14), and 643915176 (2025-08-22 05:18:56.64,
+ *  Drake Passage) is "Mw 7.02 AUST" for an mb 5.1 aftershock. Over the archives of 2025-08 and 2025-09, ISC's AUST Mw
+ *  of M4.5+ against ComCat's magnitude of the same quake (±10 s, 50 km; 73 of 90 matched): median +0.14, p90 +0.83,
+ *  19 rows +0.5 or more, 6 +1.0 or more; every other author's preferred magnitude there has p90 within +0.4 (NEIC mb,
+ *  NEIC Mw, GCMT Mw, NIED, IPGP, GFZ). The row keeps AUST's value in `fields` (`Magnitude`, `MagType`, `MagAuthor`). */
+export const ISC_UNTRUSTED_MW_AUTHORS: ReadonlySet<string> = new Set(['AUST']);
+
+/** Whether an ISC row's magnitude (by its own `fields`) is one the feed does not take (ISC_UNTRUSTED_MW_AUTHORS): a
+ *  moment magnitude (`Mw`, `Mww`, `Mwp`, …) by one of those authors. AUST's other magnitudes (ML of Australian quakes)
+ *  stay. */
+export function iscUntrustedMagnitude(provider: string, fields: Extra): boolean {
+  if (provider !== ISC_PROVIDER) return false;
+  const author = String(fields['MagAuthor'] ?? '').trim().toUpperCase();
+  const type = String(fields['MagType'] ?? '').trim();
+  return ISC_UNTRUSTED_MW_AUTHORS.has(author) && /^mw/i.test(type);
+}
+
 /**
  * FDSN "text" bulletin: one `|`-separated row per event under a `#` header line that names the columns
- * (FDSN_TEXT_COLUMNS). Every column is also kept verbatim in `fields` under its header name.
+ * (FDSN_TEXT_COLUMNS). Every column is also kept verbatim in `fields` under its header name. An ISC row whose
+ * magnitude is one the feed does not take (iscUntrustedMagnitude) is read without a magnitude and magnitude type.
  */
 export function parseFdsnText(body: string, provider: string, stats?: ParseStats): RawObs[] {
   const lines = body.split('\n');
@@ -241,6 +266,7 @@ export function parseFdsnText(body: string, provider: string, stats?: ParseStats
     // template it never filled ("###.# km ( ###.# mi) ESE (az= 121.8) from Fortuna Foothills, AZ"). `fields` keeps the original.
     const sent = (cell('place') ?? '').trim();
     const place = sent && !PLACEHOLDER_PLACE.test(sent) ? sent : null;
+    const untrusted = iscUntrustedMagnitude(provider, fields);
     out.push({
       provider,
       providerEventId,
@@ -250,8 +276,8 @@ export function parseFdsnText(body: string, provider: string, stats?: ParseStats
       lat,
       lon,
       depth: num(cell('depth')),
-      mag: num(cell('mag')),
-      magType: (cell('magType') ?? '').trim() || null,
+      mag: untrusted ? null : num(cell('mag')),
+      magType: untrusted ? null : (cell('magType') ?? '').trim() || null,
       place: place != null && bilingual ? englishHalf(place) : place,
       // NCEDC / SCEDC ids name ComCat's `nc…` / `ci…` event (config COMCAT_ID_PREFIX, PF-5d).
       knownAliasIds: knownAliasIdsOf(provider, providerEventId, fields),

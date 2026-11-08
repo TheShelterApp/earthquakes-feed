@@ -592,6 +592,20 @@
       "reason": "seam"
     },
     {
+      "provider": "geofon",
+      "day": "2026-06-29",
+      "tag": "remediation-2026",
+      "asset": "raw-geofon-2026-06-29.ndjson.gz",
+      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/remediation-2026/raw-geofon-2026-06-29.ndjson.gz",
+      "sha256": "aef4c3d1fddd5dc3376b138ee7fd29348f25cc514c290148fbaf673822e4592b",
+      "bytes": 1915,
+      "rows": 20,
+      "requests": 4,
+      "partial": false,
+      "fetched_at": "2026-11-08T12:12:22.847Z",
+      "reason": "seam"
+    },
+    {
       "provider": "geonet",
       "day": "2026-06-29",
       "tag": "remediation-2026",
@@ -785,6 +799,20 @@
       "requests": 4,
       "partial": false,
       "fetched_at": "2026-11-08T12:05:50.278Z",
+      "reason": "seam"
+    },
+    {
+      "provider": "geofon",
+      "day": "2026-06-30",
+      "tag": "remediation-2026",
+      "asset": "raw-geofon-2026-06-30.ndjson.gz",
+      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/remediation-2026/raw-geofon-2026-06-30.ndjson.gz",
+      "sha256": "8079a10f7a9d76b6aa71e5a0055c0c8a585ec8bcd6560869d9528f41bc993987",
+      "bytes": 2164,
+      "rows": 23,
+      "requests": 4,
+      "partial": false,
+      "fetched_at": "2026-11-08T12:12:22.847Z",
       "reason": "seam"
     },
     {
@@ -1994,11 +2022,252 @@
         }
       },
       "built_at": "2026-10-04T12:00:40.941Z"
+    },
+    {
+      "day": "2026-06-29",
+      "edition": 1,
+      "tag": "remediation-2026",
+      "asset": "events-2026-06-29.e1.ndjson.gz",
+      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/remediation-2026/events-2026-06-29.e1.ndjson.gz",
+      "sha256": "6909b475541d3b80be39969b11975d88dc1688b6cf2feec4df01544c46848db3",
+      "bytes": 220226,
+      "built_on": {
+        "tag": "archive-2026-06",
+        "asset": "events-2026-06.tar.zst",
+        "sha256": "49460d9fc0c1ce173daf967493381b653e56f0ce4819205fc15a1b7537cf140d"
+      },
+      "built_from": [
+        "raw-afad-2026-06-29.ndjson.gz",
+        "raw-auspass-2026-06-29.ndjson.gz",
+        "raw-emsc-2026-06-29.ndjson.gz",
+        "raw-ethz-2026-06-29.ndjson.gz",
+        "raw-geofon-2026-06-29.ndjson.gz",
+        "raw-geonet-2026-06-29.ndjson.gz",
+        "raw-ingv-2026-06-29.ndjson.gz",
+        "raw-kagsr-2026-06-29.ndjson.gz",
+        "raw-knmi-2026-06-29.ndjson.gz",
+        "raw-ncedc-2026-06-29.ndjson.gz",
+        "raw-noa-2026-06-29.ndjson.gz",
+        "raw-nrcan-2026-06-29.ndjson.gz",
+        "raw-resif-2026-06-29.ndjson.gz",
+        "raw-scedc-2026-06-29.ndjson.gz",
+        "raw-usgs-2026-06-29.ndjson.gz"
+      ],
+      "reason": "seam",
+      "context": {
+        "2026-06-28": {
+          "tag": "archive-2026-06",
+          "asset": "events-2026-06.tar.zst",
+          "sha256": "49460d9fc0c1ce173daf967493381b653e56f0ce4819205fc15a1b7537cf140d"
+        },
+        "2026-06-29": {
+          "tag": "archive-2026-06",
+          "asset": "events-2026-06.tar.zst",
+          "sha256": "49460d9fc0c1ce173daf967493381b653e56f0ce4819205fc15a1b7537cf140d"
+        },
+        "2026-06-30": {
+          "tag": "archive-2026-06",
+          "asset": "events-2026-06.tar.zst",
+          "sha256": "49460d9fc0c1ce173daf967493381b653e56f0ce4819205fc15a1b7537cf140d"
+        }
+      },
+      "stats": {
+        "archived_events": 158,
+        "events": 944,
+        "live_before": 158,
+        "live_after": 944,
+        "rows": 1149,
+        "changed": 1146,
+        "unchanged": 2,
+        "screened": 1,
+        "new_events": 786,
+        "retired": 0,
+        "off_day": 0,
+        "neighbour_joins": 0,
+        "afad_retimed": 0,
+        "afad_moved_out": 0,
+        "merged": 0,
+        "provider_rows": {
+          "emsc": {
+            "before": 1,
+            "after": 430
+          },
+          "usgs": {
+            "before": 1,
+            "after": 337
+          },
+          "ingv": {
+            "before": 0,
+            "after": 32
+          },
+          "noa": {
+            "before": 0,
+            "after": 85
+          },
+          "geonet": {
+            "before": 0,
+            "after": 61
+          },
+          "ncedc": {
+            "before": 0,
+            "after": 77
+          },
+          "resif": {
+            "before": 0,
+            "after": 44
+          },
+          "scedc": {
+            "before": 0,
+            "after": 38
+          },
+          "nrcan": {
+            "before": 0,
+            "after": 10
+          },
+          "geofon": {
+            "before": 0,
+            "after": 20
+          },
+          "auspass": {
+            "before": 0,
+            "after": 9
+          },
+          "kagsr": {
+            "before": 0,
+            "after": 4
+          },
+          "ethz": {
+            "before": 0,
+            "after": 1
+          }
+        }
+      },
+      "built_at": "2026-11-08T12:12:22.847Z"
+    },
+    {
+      "day": "2026-06-30",
+      "edition": 1,
+      "tag": "remediation-2026",
+      "asset": "events-2026-06-30.e1.ndjson.gz",
+      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/remediation-2026/events-2026-06-30.e1.ndjson.gz",
+      "sha256": "b06b3cfd949f1724f8f9cf351028e8941583dac2e0727b4f72587f72d8a2fa43",
+      "bytes": 246481,
+      "built_on": {
+        "tag": "archive-2026-06",
+        "asset": "events-2026-06.tar.zst",
+        "sha256": "49460d9fc0c1ce173daf967493381b653e56f0ce4819205fc15a1b7537cf140d"
+      },
+      "built_from": [
+        "raw-afad-2026-06-30.ndjson.gz",
+        "raw-auspass-2026-06-30.ndjson.gz",
+        "raw-emsc-2026-06-30.ndjson.gz",
+        "raw-ethz-2026-06-30.ndjson.gz",
+        "raw-geofon-2026-06-30.ndjson.gz",
+        "raw-geonet-2026-06-30.ndjson.gz",
+        "raw-ingv-2026-06-30.ndjson.gz",
+        "raw-kagsr-2026-06-30.ndjson.gz",
+        "raw-knmi-2026-06-30.ndjson.gz",
+        "raw-ncedc-2026-06-30.ndjson.gz",
+        "raw-noa-2026-06-30.ndjson.gz",
+        "raw-nrcan-2026-06-30.ndjson.gz",
+        "raw-resif-2026-06-30.ndjson.gz",
+        "raw-scedc-2026-06-30.ndjson.gz",
+        "raw-usgs-2026-06-30.ndjson.gz"
+      ],
+      "reason": "seam",
+      "context": {
+        "2026-06-29": {
+          "tag": "remediation-2026",
+          "asset": "events-2026-06-29.e1.ndjson.gz",
+          "sha256": "6909b475541d3b80be39969b11975d88dc1688b6cf2feec4df01544c46848db3"
+        },
+        "2026-06-30": {
+          "tag": "archive-2026-06",
+          "asset": "events-2026-06.tar.zst",
+          "sha256": "49460d9fc0c1ce173daf967493381b653e56f0ce4819205fc15a1b7537cf140d"
+        }
+      },
+      "stats": {
+        "archived_events": 191,
+        "events": 1007,
+        "live_before": 191,
+        "live_after": 1007,
+        "rows": 1199,
+        "changed": 1194,
+        "unchanged": 3,
+        "screened": 2,
+        "new_events": 816,
+        "retired": 0,
+        "off_day": 0,
+        "neighbour_joins": 0,
+        "afad_retimed": 0,
+        "afad_moved_out": 0,
+        "merged": 0,
+        "provider_rows": {
+          "emsc": {
+            "before": 2,
+            "after": 384
+          },
+          "usgs": {
+            "before": 1,
+            "after": 356
+          },
+          "ncedc": {
+            "before": 0,
+            "after": 68
+          },
+          "scedc": {
+            "before": 0,
+            "after": 43
+          },
+          "noa": {
+            "before": 0,
+            "after": 117
+          },
+          "resif": {
+            "before": 0,
+            "after": 51
+          },
+          "auspass": {
+            "before": 0,
+            "after": 10
+          },
+          "geofon": {
+            "before": 0,
+            "after": 23
+          },
+          "geonet": {
+            "before": 0,
+            "after": 73
+          },
+          "ethz": {
+            "before": 0,
+            "after": 16
+          },
+          "ingv": {
+            "before": 0,
+            "after": 36
+          },
+          "kagsr": {
+            "before": 0,
+            "after": 9
+          },
+          "nrcan": {
+            "before": 0,
+            "after": 10
+          },
+          "knmi": {
+            "before": 0,
+            "after": 1
+          }
+        }
+      },
+      "built_at": "2026-11-08T12:12:22.847Z"
     }
   ],
   "refill_queue": [
     {
-      "range": "2026-06-28..2026-06-30",
+      "range": "2026-06-28..2026-06-28",
       "providers": [
         "afad",
         "auspass",

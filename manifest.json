@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "generated": 1794162131875,
-  "generated_iso": "2026-11-08T18:22:11.875Z",
-  "head_seq": 294621,
-  "event_count": 49892,
+  "generated": 1794162431687,
+  "generated_iso": "2026-11-08T18:27:11.687Z",
+  "head_seq": 294626,
+  "event_count": 49894,
   "freshness": {
     "expected_interval_seconds": 300,
     "stale_after_seconds": 1800
@@ -15,7 +15,7 @@
     "all_hour": {
       "path": "v1/all_hour.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/all_hour.geojson",
-      "count": 27
+      "count": 28
     },
     "1.0_hour": {
       "path": "v1/1.0_hour.geojson",
@@ -25,7 +25,7 @@
     "2.5_hour": {
       "path": "v1/2.5_hour.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/2.5_hour.geojson",
-      "count": 6
+      "count": 7
     },
     "4.5_hour": {
       "path": "v1/4.5_hour.geojson",
@@ -45,7 +45,7 @@
     "1.0_day": {
       "path": "v1/1.0_day.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/1.0_day.geojson",
-      "count": 639
+      "count": 638
     },
     "2.5_day": {
       "path": "v1/2.5_day.geojson",
@@ -65,12 +65,12 @@
     "all_week": {
       "path": "v1/all_week.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/all_week.geojson",
-      "count": 6442
+      "count": 6441
     },
     "1.0_week": {
       "path": "v1/1.0_week.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/1.0_week.geojson",
-      "count": 5257
+      "count": 5256
     },
     "2.5_week": {
       "path": "v1/2.5_week.geojson",
@@ -90,22 +90,22 @@
     "all_month": {
       "path": "v1/all_month.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/all_month.geojson",
-      "count": 9850
+      "count": 9847
     },
     "1.0_month": {
       "path": "v1/1.0_month.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/1.0_month.geojson",
-      "count": 9850
+      "count": 9847
     },
     "2.5_month": {
       "path": "v1/2.5_month.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/2.5_month.geojson",
-      "count": 9850
+      "count": 9847
     },
     "4.5_month": {
       "path": "v1/4.5_month.geojson",
       "url": "https://earthquakes-feed.theshelter.app/v1/4.5_month.geojson",
-      "count": 844
+      "count": 842
     },
     "significant_month": {
       "path": "v1/significant_month.geojson",
@@ -1454,7 +1454,7 @@
       "url": "https://earthquakes-feed.theshelter.app/events/2026/11/07.ndjson",
       "pages_url": "https://earthquakes-feed.theshelter.app/v1/events/2026-11-07.geojson",
       "count": 829,
-      "bytes": 1774445,
+      "bytes": 1774439,
       "min_mag": -0.91,
       "max_mag": 5.8,
       "frozen": false
@@ -1464,8 +1464,8 @@
       "path": "events/2026/11/08.ndjson",
       "url": "https://earthquakes-feed.theshelter.app/events/2026/11/08.ndjson",
       "pages_url": "https://earthquakes-feed.theshelter.app/v1/events/2026-11-08.geojson",
-      "count": 565,
-      "bytes": 1204379,
+      "count": 567,
+      "bytes": 1207231,
       "min_mag": -0.659672,
       "max_mag": 4.8,
       "frozen": false
@@ -2575,10 +2575,10 @@
     {
       "period": "2025-03",
       "tag": "archive-2025-03",
-      "asset": "events-2025-03.e2.tar.zst",
-      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/archive-2025-03/events-2025-03.e2.tar.zst",
-      "bytes": 4330032,
-      "sha256": "6717e30eae1fac3f9f48b34ea9687721e2cc46c4fa518a6459512cb205870d64",
+      "asset": "events-2025-03.e3.tar.zst",
+      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/archive-2025-03/events-2025-03.e3.tar.zst",
+      "bytes": 4724502,
+      "sha256": "786047ad1d1e2997605bdab41386dc53781e86fb023aed09dd6012a298a43f5e",
       "count": 35470,
       "days": [
         "2025-03-01",
@@ -2614,8 +2614,57 @@
         "2025-03-31"
       ],
       "needs_reroll": false,
-      "edition": 2,
+      "edition": 3,
+      "merge_epoch": 1,
+      "merge_rules": 3,
+      "live": 27297,
+      "superseded": 8173,
+      "built_on": {
+        "asset": "events-2025-03.e2.tar.zst",
+        "sha256": "6717e30eae1fac3f9f48b34ea9687721e2cc46c4fa518a6459512cb205870d64",
+        "count": 35470
+      },
       "previous": [
+        {
+          "asset": "events-2025-03.e2.tar.zst",
+          "sha256": "6717e30eae1fac3f9f48b34ea9687721e2cc46c4fa518a6459512cb205870d64",
+          "bytes": 4330032,
+          "count": 35470,
+          "edition": 2,
+          "days": [
+            "2025-03-01",
+            "2025-03-02",
+            "2025-03-03",
+            "2025-03-04",
+            "2025-03-05",
+            "2025-03-06",
+            "2025-03-07",
+            "2025-03-08",
+            "2025-03-09",
+            "2025-03-10",
+            "2025-03-11",
+            "2025-03-12",
+            "2025-03-13",
+            "2025-03-14",
+            "2025-03-15",
+            "2025-03-16",
+            "2025-03-17",
+            "2025-03-18",
+            "2025-03-19",
+            "2025-03-20",
+            "2025-03-21",
+            "2025-03-22",
+            "2025-03-23",
+            "2025-03-24",
+            "2025-03-25",
+            "2025-03-26",
+            "2025-03-27",
+            "2025-03-28",
+            "2025-03-29",
+            "2025-03-30",
+            "2025-03-31"
+          ]
+        },
         {
           "asset": "events-2025-03.tar.zst",
           "sha256": "73eb37fb331f597fabae8f348a949a22f3722e9562803a92d8a44c7cec03e980",
@@ -2661,10 +2710,10 @@
     {
       "period": "2025-04",
       "tag": "archive-2025-04",
-      "asset": "events-2025-04.e2.tar.zst",
-      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/archive-2025-04/events-2025-04.e2.tar.zst",
-      "bytes": 4594161,
-      "sha256": "d570025892548e863e0eb1c255957783cc037c16e89d2efd372af22e3082025e",
+      "asset": "events-2025-04.e3.tar.zst",
+      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/archive-2025-04/events-2025-04.e3.tar.zst",
+      "bytes": 5014860,
+      "sha256": "c8183e9c2bf0f715e568f619e4b8267e95de603729c450699d46fdd2d033ecac",
       "count": 38424,
       "days": [
         "2025-04-01",
@@ -2699,8 +2748,63 @@
         "2025-04-30"
       ],
       "needs_reroll": false,
-      "edition": 2,
+      "edition": 3,
+      "merge_epoch": 1,
+      "merge_rules": 3,
+      "live": 29684,
+      "superseded": 8740,
+      "built_on": {
+        "asset": "events-2025-04.e2.tar.zst",
+        "sha256": "d570025892548e863e0eb1c255957783cc037c16e89d2efd372af22e3082025e",
+        "count": 38424
+      },
+      "remediation": [
+        {
+          "day": "2025-04-01",
+          "edition": 2,
+          "sha256": "5715a89dbb0e49564f8b3f352327632fa8e087c512777e7fdea82f6542a76d13"
+        }
+      ],
       "previous": [
+        {
+          "asset": "events-2025-04.e2.tar.zst",
+          "sha256": "d570025892548e863e0eb1c255957783cc037c16e89d2efd372af22e3082025e",
+          "bytes": 4594161,
+          "count": 38424,
+          "edition": 2,
+          "days": [
+            "2025-04-01",
+            "2025-04-02",
+            "2025-04-03",
+            "2025-04-04",
+            "2025-04-05",
+            "2025-04-06",
+            "2025-04-07",
+            "2025-04-08",
+            "2025-04-09",
+            "2025-04-10",
+            "2025-04-11",
+            "2025-04-12",
+            "2025-04-13",
+            "2025-04-14",
+            "2025-04-15",
+            "2025-04-16",
+            "2025-04-17",
+            "2025-04-18",
+            "2025-04-19",
+            "2025-04-20",
+            "2025-04-21",
+            "2025-04-22",
+            "2025-04-23",
+            "2025-04-24",
+            "2025-04-25",
+            "2025-04-26",
+            "2025-04-27",
+            "2025-04-28",
+            "2025-04-29",
+            "2025-04-30"
+          ]
+        },
         {
           "asset": "events-2025-04.tar.zst",
           "sha256": "c9faf5af0fb16ac55f1c947e0d39f92280b6235354c211f444ed927b831d68f3",
@@ -2745,10 +2849,10 @@
     {
       "period": "2025-05",
       "tag": "archive-2025-05",
-      "asset": "events-2025-05.e2.tar.zst",
-      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/archive-2025-05/events-2025-05.e2.tar.zst",
-      "bytes": 4295141,
-      "sha256": "5a4e5e9cf503f94170c5140167af0c4a60b8e3971bb05146665a7e114eb789cc",
+      "asset": "events-2025-05.e3.tar.zst",
+      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/archive-2025-05/events-2025-05.e3.tar.zst",
+      "bytes": 4696835,
+      "sha256": "9135c0619c9015edb30f6da447519dc4da69e8e112765b7c096fd2e465e321fc",
       "count": 35669,
       "days": [
         "2025-05-01",
@@ -2784,8 +2888,64 @@
         "2025-05-31"
       ],
       "needs_reroll": false,
-      "edition": 2,
+      "edition": 3,
+      "merge_epoch": 1,
+      "merge_rules": 3,
+      "live": 27373,
+      "superseded": 8296,
+      "built_on": {
+        "asset": "events-2025-05.e2.tar.zst",
+        "sha256": "5a4e5e9cf503f94170c5140167af0c4a60b8e3971bb05146665a7e114eb789cc",
+        "count": 35669
+      },
+      "remediation": [
+        {
+          "day": "2025-05-24",
+          "edition": 2,
+          "sha256": "c7a2b61bc021523b2df4a6027321c7aaf86d2cd7ce5de0660172b8af8f9e2fa3"
+        }
+      ],
       "previous": [
+        {
+          "asset": "events-2025-05.e2.tar.zst",
+          "sha256": "5a4e5e9cf503f94170c5140167af0c4a60b8e3971bb05146665a7e114eb789cc",
+          "bytes": 4295141,
+          "count": 35669,
+          "edition": 2,
+          "days": [
+            "2025-05-01",
+            "2025-05-02",
+            "2025-05-03",
+            "2025-05-04",
+            "2025-05-05",
+            "2025-05-06",
+            "2025-05-07",
+            "2025-05-08",
+            "2025-05-09",
+            "2025-05-10",
+            "2025-05-11",
+            "2025-05-12",
+            "2025-05-13",
+            "2025-05-14",
+            "2025-05-15",
+            "2025-05-16",
+            "2025-05-17",
+            "2025-05-18",
+            "2025-05-19",
+            "2025-05-20",
+            "2025-05-21",
+            "2025-05-22",
+            "2025-05-23",
+            "2025-05-24",
+            "2025-05-25",
+            "2025-05-26",
+            "2025-05-27",
+            "2025-05-28",
+            "2025-05-29",
+            "2025-05-30",
+            "2025-05-31"
+          ]
+        },
         {
           "asset": "events-2025-05.tar.zst",
           "sha256": "b19761f74077050802371c3157ace89ec3dabd82569cbce8bdbd9eaa15124ed2",
@@ -2831,10 +2991,10 @@
     {
       "period": "2025-06",
       "tag": "archive-2025-06",
-      "asset": "events-2025-06.e2.tar.zst",
-      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/archive-2025-06/events-2025-06.e2.tar.zst",
-      "bytes": 3937546,
-      "sha256": "f5a63b021f23c098c0062900953c9d69ae2bd7154b76999ab90b486ca23fd032",
+      "asset": "events-2025-06.e3.tar.zst",
+      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/archive-2025-06/events-2025-06.e3.tar.zst",
+      "bytes": 4309331,
+      "sha256": "e4e5bba6e2c28c4efc67b8e61d02785e75b1a6ee6f52d751d34d26ba38203af1",
       "count": 32106,
       "days": [
         "2025-06-01",
@@ -2869,8 +3029,56 @@
         "2025-06-30"
       ],
       "needs_reroll": false,
-      "edition": 2,
+      "edition": 3,
+      "merge_epoch": 1,
+      "merge_rules": 3,
+      "live": 24512,
+      "superseded": 7594,
+      "built_on": {
+        "asset": "events-2025-06.e2.tar.zst",
+        "sha256": "f5a63b021f23c098c0062900953c9d69ae2bd7154b76999ab90b486ca23fd032",
+        "count": 32106
+      },
       "previous": [
+        {
+          "asset": "events-2025-06.e2.tar.zst",
+          "sha256": "f5a63b021f23c098c0062900953c9d69ae2bd7154b76999ab90b486ca23fd032",
+          "bytes": 3937546,
+          "count": 32106,
+          "edition": 2,
+          "days": [
+            "2025-06-01",
+            "2025-06-02",
+            "2025-06-03",
+            "2025-06-04",
+            "2025-06-05",
+            "2025-06-06",
+            "2025-06-07",
+            "2025-06-08",
+            "2025-06-09",
+            "2025-06-10",
+            "2025-06-11",
+            "2025-06-12",
+            "2025-06-13",
+            "2025-06-14",
+            "2025-06-15",
+            "2025-06-16",
+            "2025-06-17",
+            "2025-06-18",
+            "2025-06-19",
+            "2025-06-20",
+            "2025-06-21",
+            "2025-06-22",
+            "2025-06-23",
+            "2025-06-24",
+            "2025-06-25",
+            "2025-06-26",
+            "2025-06-27",
+            "2025-06-28",
+            "2025-06-29",
+            "2025-06-30"
+          ]
+        },
         {
           "asset": "events-2025-06.tar.zst",
           "sha256": "788002d99ddb9aff9f8ab63c772cbeced1156b0e43de417f4261f98e2f8ee58b",
@@ -4376,7 +4584,7 @@
   "live": {
     "path": "v1/live/index.json",
     "url": "https://earthquakes-feed.theshelter.app/v1/live/index.json",
-    "head_seq": 294621,
+    "head_seq": 294626,
     "window_days": 8
   },
   "event_detail": {
@@ -4388,14 +4596,14 @@
   "live_month": {
     "path": "v1/live/month.json",
     "url": "https://earthquakes-feed.theshelter.app/v1/live/month.json",
-    "head_seq": 294621,
+    "head_seq": 294626,
     "min_mag": 2.5,
     "window_days": 30
   },
   "stats": {
     "path": "v1/stats/index.json",
     "url": "https://earthquakes-feed.theshelter.app/v1/stats/index.json",
-    "head_seq": 294621,
+    "head_seq": 294626,
     "format": 1
   }
 }

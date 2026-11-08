@@ -31,15 +31,54 @@ function seedEventMap(root: string): void {
   writeFileSync(dataPaths(root).head, JSON.stringify({ seq: 100, ingest_time: '2026-06-30T10:05:00Z' }) + '\n');
 }
 
-test('onboard: bootstrap seeds current sources as already-onboarded (no gap-fill for them)', async () => {
+test('onboard: bootstrap seeds a source whose live lookback reaches the live floor as onboarded (no gap-fill)', async () => {
   const root = mkdtempSync(join(tmpdir(), 'efd-onb-'));
   try {
-    const res = await onboardStep(root, ALL, ALL, '2026-06-30', NOW, '2026-07-05T12:00:00Z', async () => {
+    // The floor is today's start, inside every 2-day lookback.
+    const res = await onboardStep(root, ALL, ALL, '2026-07-05', NOW, '2026-07-05T12:00:00Z', async () => {
       throw new Error('must not fetch on bootstrap');
     });
     assert.equal(res.bootstrapped, true);
     const st = JSON.parse(readFileSync(dataPaths(root).onboardCursor, 'utf8'));
     assert.deepEqual(st.onboarded.sort(), ['emsc', 'usgs']);
+    assert.deepEqual(st.pending, {});
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('onboard: bootstrap queues a source whose lookback stops short of the floor (the 2026-07-05 seam), not one that reaches it', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'efd-onb-'));
+  try {
+    // A list source's week of rows set the floor about a week back (2026-06-29 00:00, 6.5 days before noon on 07-05);
+    // usgs asks 2 days, noa 7 (its lookbackDays). The floor is a day start: a lookback reaches it only when it reaches
+    // that midnight (7 days from 07-05 noon would not reach 06-28 00:00).
+    const all = [...ALL, { ...cfg('noa', 2), lookbackDays: 7 } as ProviderConfig];
+    const floor = '2026-06-29';
+    const res = await onboardStep(root, all, all, floor, NOW, '2026-07-05T12:00:00Z', async () => {
+      throw new Error('must not fetch on bootstrap');
+    });
+    assert.equal(res.bootstrapped, true);
+    const st = JSON.parse(readFileSync(dataPaths(root).onboardCursor, 'utf8'));
+    assert.deepEqual(st.onboarded, ['noa'], 'a 7-day lookback reaches the floor');
+    assert.deepEqual(Object.keys(st.pending).sort(), ['emsc', 'usgs']);
+    assert.deepEqual(st.pending.usgs, { recentBackTo: new Date(NOW - 2 * 86_400_000).toISOString().slice(0, 10), windowDays: 14 });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('onboard: an existing cursor is never re-bootstrapped', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'efd-onb-'));
+  try {
+    seedEventMap(root);
+    const before = JSON.stringify({ onboarded: ['usgs', 'emsc'], pending: {} }, null, 2) + '\n';
+    writeFileSync(dataPaths(root).onboardCursor, before);
+    const res = await onboardStep(root, ALL, ALL, '2026-06-28', NOW, '2026-07-05T12:00:00Z', async () => {
+      throw new Error('nothing pending: no fetch');
+    });
+    assert.equal(res.bootstrapped, undefined);
+    assert.equal(readFileSync(dataPaths(root).onboardCursor, 'utf8'), before);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

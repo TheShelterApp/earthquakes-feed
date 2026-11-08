@@ -194,10 +194,12 @@ open, reachable source appears.
   target in edition 2; era A takes the same 17 back to 2000-01-01) writes
   immutable `history-YYYY` Release assets only, and the `data` branch gains just `knowledge/index/history.json` and the
   walk's small `knowledge/index/history-state.json` ([APIs.md](APIs.md#deep-history-before-2023-07-06)).
-- **Saturated days:** a backfill day whose one-day window still filled a source's page cap
-  (`saturatedDays`) is asked again in sub-day windows by the manual `remediate` workflow and
-  published as an additive, immutable day edition in a `remediation-YYYY` Release; the
-  archived day is never rewritten ([APIs.md](APIs.md#saturated-days)).
+- **Remediation editions:** a backfill day whose one-day window still filled a source's page cap
+  (`saturatedDays`), and the 2026-06-28..07-03 seam that 15 sources never fetched, are asked
+  again in sub-day windows by the `remediate` workflow and published as one additive, immutable
+  edition per day in a `remediation-YYYY` Release; refills wait in a persistent queue until
+  their month is archived, and the archived day is never rewritten
+  ([APIs.md](APIs.md#remediation-editions-saturated-days-and-the-2026-07-seam)).
 - **Earliest solutions:** `first-solutions` collects the version histories that ComCat,
   GeoNet, INGV and several SeisComP nodes keep (every solution they still hold, with its
   publication time) into a side index of Release assets, one request per second per

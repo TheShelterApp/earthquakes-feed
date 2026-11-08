@@ -3,7 +3,7 @@ import { FETCH_LIMIT, QUERY_LOOKBACK_MS, dataPaths } from './config.js';
 import { backfillCfg } from './backfill-cfg.js';
 import { eventDayKey, loadEventMap, saveEventMap } from './bitemporal.js';
 import { Resolver } from './dedup.js';
-import { configMap, fetchProviderWindow, priorityMap, type WindowOutcome } from './providers.js';
+import { configMap, fetchProviderWindow, liveLookbackMs, priorityMap, type WindowOutcome } from './providers.js';
 import { byIngestOrder, emptyTally, screen } from './quality.js';
 import type { Head, ProviderConfig } from './types.js';
 
@@ -43,8 +43,13 @@ export interface OnboardResult {
  * (load-merge-save — never clobbers aggregate's concurrent live updates), save. Writes only
  * event_map shards ≥ liveDay (never moves the boundary); derive rebuilds their partitions.
  * Marker-seq only (no log append / seq advance), like deep backfill, so it can't bloat the
- * log or break the head.seq/M4 invariant. Bootstrap seeds the current sources as already-
- * onboarded (they grew with the live window from day one); only LATER additions get filled.
+ * log or break the head.seq/M4 invariant. Bootstrap seeds a current source as already-onboarded
+ * only when its live lookback reaches back to the live floor (liveDay): such a source grew with
+ * the live window from day one. A source whose lookback stops short of the floor is queued like a
+ * later addition, because backfill walks only below the floor and the live path only above
+ * now - lookback: on 2026-07-05 the forward-only list sources set the floor to 06-28 while the
+ * 48-hour sources reached back to 07-03 05:42 only, and [06-28, 07-03 05:42) stayed empty for the
+ * 15 sources seeded then (the seam, repaired by remediation editions; APIs.md, History and backfill).
  */
 export async function onboardStep(
   root: string,
@@ -60,7 +65,15 @@ export async function onboardStep(
   const eligible = providers.filter((p) => backfillCfg(p) != null).map((p) => p.id);
 
   if (!existsSync(f)) {
-    const st: OnboardState = { onboarded: eligible, pending: {} };
+    const ceilDay = eventDayKey(nowMs - QUERY_LOOKBACK_MS);
+    const st: OnboardState = { onboarded: [], pending: {} };
+    for (const id of eligible) {
+      const p = providers.find((x) => x.id === id)!;
+      // The live path asks [now - lookback, now]; backfill fills only below liveDay. A gap between the two is this
+      // source's to fill now, from the ceiling down to the floor.
+      if (dayStartMs(liveDay) < nowMs - liveLookbackMs(p)) st.pending[id] = { recentBackTo: ceilDay, windowDays: backfillCfg(p)!.initialWindowDays };
+      else st.onboarded.push(id);
+    }
     writeFileSync(f, JSON.stringify(st, null, 2) + '\n');
     return { bootstrapped: true };
   }

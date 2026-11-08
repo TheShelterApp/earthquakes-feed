@@ -51,6 +51,15 @@ each row carrying `license`, `attribution`, and `doi`.
 - **KOERI — Kandilli Observatory (Turkey)** (`koeri`) — KOERI-NC — Kandilli Observatory and Earthquake Research Institute (KOERI/RETMC), Boğaziçi University — non-commercial use with citation
 - **PHIVOLCS (Philippines)** (`phivolcs`) — PHIVOLCS-terms — DOST-PHIVOLCS (Philippine Institute of Volcanology and Seismology) — © all rights reserved, attribution requested
 
+## Catalogues reached through ComCat
+
+Some rows of a source are another catalogue's solution, named by the row's `fields.net`. Such a row carries that
+catalogue's `license`, `attribution` and `doi` instead of its source's (`catalogues` in the registry).
+
+- **ISC-GEM Global Instrumental Earthquake Catalogue** (net `iscgem`, `iscgemsup` of `usgs`) — CC-BY-SA-3.0, DOI [10.31905/D808B825](https://doi.org/10.31905/D808B825) — ISC-GEM Global Instrumental Earthquake Catalogue (International Seismological Centre and GEM Foundation), via U.S. Geological Survey (ANSS ComCat)
+
+Citation requested: Global CMT Project (moment magnitudes and a few preferred origins in ComCat records): Dziewonski, A. M., T.-A. Chou and J. H. Woodhouse (1981), J. Geophys. Res. 86, 2825-2852, doi:10.1029/JB086iB04p02825; Ekström, G., M. Nettles and A. M. Dziewonski (2012), Phys. Earth Planet. Inter. 200-201, 1-9, doi:10.1016/j.pepi.2012.04.002.
+
 ## Configured but inactive
 
 

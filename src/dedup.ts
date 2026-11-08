@@ -49,6 +49,7 @@ import { qualityCount } from './canonical.js';
 import { gatherCellKeys, gridKey, haversineKm } from './geo.js';
 import { finalsIndex, isPreliminary, supersedingFinal } from './preliminary.js';
 import { isCoordinateless } from './quality.js';
+import { rowLicense } from './row-license.js';
 import type { EventNode, Extra, Op, ProvenanceRow, ProviderConfig, RawObs } from './types.js';
 import { deterministicFeedId } from './ulid.js';
 import { catalogueIdOf, catalogueOf, comcatIdOf, knownAliasIdsOf, mirrorKeys, nativeIdOfComcat, sameCatalogueEvent, statusRank } from './util.js';
@@ -1215,9 +1216,7 @@ export class Resolver {
       depth: raw.depth,
       place: raw.place,
       chosen: false,
-      license: c?.license ?? 'unknown',
-      attribution: c?.attribution ?? raw.provider,
-      doi: c?.doi ?? null,
+      ...rowLicense(raw, c),
       fields: raw.fields,
     };
   }

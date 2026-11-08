@@ -70,6 +70,10 @@ import type { ProviderConfig, RawObs } from './types.js';
  *   HISTORY_ONLY_SOURCES dry runs only: fetch the months of these sources (comma-separated provider ids) and no other;
  *                        a month is sealed only once every source of its era is there, so such a run seals nothing
  *                        new unless the others are already fetched
+ *   HISTORY_REMERGE_EPOCH, HISTORY_REMERGE_ONLY (comma-separated YYYY-MM), HISTORY_REMERGE_NO_WAIT=1,
+ *   HISTORY_MAX_SECONDS  dry runs only: re-merge to this epoch although config REMERGE_EPOCH is lower, only these
+ *                        months, without waiting for the newer month to be merged (its published edition is the
+ *                        context), within this time budget (the re-merge's review before a campaign)
  *   HISTORY_FORCE=1      run although providers/history.json has enabled=false (local dry runs only)
  *   HISTORY_MAX_UNITS    override maxUnitsPerRun
  *
@@ -158,8 +162,13 @@ export interface Ctx {
   onlySources?: ReadonlySet<string>;
   /** Tests only: the HTTP layer and clock of fetchRange (production uses its defaults). */
   fetchOptions?: Pick<FetchRangeOptions, 'fetcher' | 'sleep' | 'now'>;
-  /** The re-merge epoch (config REMERGE_EPOCH; tests set it). */
+  /** The re-merge epoch (config REMERGE_EPOCH; tests and dry runs set it: HISTORY_REMERGE_EPOCH). */
   remergeEpoch?: number;
+  /** Dry runs only (HISTORY_REMERGE_ONLY): re-merge these months and no other. */
+  remergeOnly?: ReadonlySet<string>;
+  /** Dry runs only (HISTORY_REMERGE_NO_WAIT=1): a month does not wait for its newer neighbour to be merged; the
+   *  neighbour is read as published (to measure months out of order before the campaign). */
+  remergeNoWait?: boolean;
   /** Tests only: the archived days the re-merge's boundary context reads (production: readArchivedDays). */
   readArchive?: (entries: ArchiveRef[], days: Set<string>) => { days: Map<string, EventNode[]>; failedMonths: Set<string> };
 }
@@ -665,13 +674,15 @@ export function remergePeriods(ctx: Ctx): void {
   // The edition this run just wrote: the next (older) month's newer context, read from memory.
   let lastMerged: { asset: string; dayFiles: Map<string, string> } | null = null;
   for (const p of periodsToRemerge(ctx.cfg, ctx.idx, epoch)) {
-    const nb = remergeNeighbour(ctx.cfg, ctx.idx, ctx.archives, p, epoch);
+    if (ctx.remergeOnly && !ctx.remergeOnly.has(p.key)) continue;
+    const nb = remergeNeighbour(ctx.cfg, ctx.idx, ctx.archives, p, ctx.remergeNoWait ? 0 : epoch);
     if (nb.kind === 'wait') continue;
     if (Date.now() > ctx.deadline) {
       const entry = `re-merging ${p.key} on`;
       if (!ctx.report.budget.includes(entry)) ctx.report.budget.push(entry);
       break;
     }
+    const started = Date.now();
     const prevEntry = currentEdition(ctx.idx, p.key)!;
     const prev = loadCurrent(ctx, cache, prevEntry);
     const own: EventNode[] = [];
@@ -782,7 +793,7 @@ export function remergePeriods(ctx: Ctx): void {
     const m = meta.merge!;
     ctx.report.remerged.push(
       `${tag}/${asset}: ${m.live_before} -> ${m.live_after} live (${m.merges.length} folded, ${m.into_newer.length} into the newer month, ${m.off_unit.length} off the month) ` +
-        `from ${prevEntry.asset} in ${m.steps.windows} window(s), slowest ${res.steps.slowest_ms} ms; ${(bytes / 1e6).toFixed(2)} MB`,
+        `from ${prevEntry.asset} in ${m.steps.windows} window(s), slowest ${res.steps.slowest_ms} ms, ${((Date.now() - started) / 1000).toFixed(1)} s in all; ${(bytes / 1e6).toFixed(2)} MB`,
     );
     console.log(`history: re-merged ${p.key} -> ${tag}/${asset} (${m.live_before} -> ${m.live_after} live)`);
   }
@@ -872,6 +883,14 @@ async function main(): Promise<void> {
     ? new Set(process.env.HISTORY_ONLY_SOURCES.split(',').map((x) => x.trim()).filter(Boolean))
     : undefined;
   if (onlySources && !dryRun) throw new Error('HISTORY_ONLY_SOURCES is for dry runs only (a production run walks every source of the era)');
+  // Re-merge dry runs before the epoch is switched on (scripts/remerge-verify.ts --history reads the result).
+  const remergeEpoch = process.env.HISTORY_REMERGE_EPOCH?.trim() ? Number(process.env.HISTORY_REMERGE_EPOCH) : undefined;
+  const remergeOnly = process.env.HISTORY_REMERGE_ONLY?.trim() ? new Set(process.env.HISTORY_REMERGE_ONLY.split(',').map((x) => x.trim()).filter(Boolean)) : undefined;
+  const remergeNoWait = process.env.HISTORY_REMERGE_NO_WAIT === '1';
+  const maxSeconds = process.env.HISTORY_MAX_SECONDS?.trim() ? Number(process.env.HISTORY_MAX_SECONDS) : cfg.maxSecondsPerRun;
+  if ((remergeEpoch != null || remergeOnly || remergeNoWait || maxSeconds !== cfg.maxSecondsPerRun) && !dryRun) {
+    throw new Error('HISTORY_REMERGE_EPOCH, HISTORY_REMERGE_ONLY, HISTORY_REMERGE_NO_WAIT and HISTORY_MAX_SECONDS are for dry runs only');
+  }
   for (const s of onlySources ?? []) if (!cfg.eras.some((e) => e.sources.includes(s))) throw new Error(`HISTORY_ONLY_SOURCES: ${s} is a source of no era`);
   const work = mkdtempSync(join(tmpdir(), 'efd-history-'));
   const ctx: Ctx = {
@@ -884,12 +903,15 @@ async function main(): Promise<void> {
     work,
     archives,
     archivedDays,
-    deadline: Date.now() + cfg.maxSecondsPerRun * 1000,
+    deadline: Date.now() + maxSeconds * 1000,
     assetCache: new Map(),
     rawCache: new Map(),
     now: () => new Date().toISOString(),
     report: emptyReport(),
     ...(onlySources ? { onlySources } : {}),
+    ...(remergeEpoch != null ? { remergeEpoch } : {}),
+    ...(remergeOnly ? { remergeOnly } : {}),
+    ...(remergeNoWait ? { remergeNoWait } : {}),
   };
   console.log(
     `history: ${ctx.store.label}; index from ${before ? indexIn : 'scratch'}; ${idx.raw.length} raw assets, ${idx.editions.length} editions; ` +

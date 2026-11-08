@@ -115,6 +115,18 @@ export function correctionFloor(nowMs: number): { fromDay: string; floorMs: numb
   return { fromDay, floorMs: Date.parse(`${fromDay}T00:00:00Z`) };
 }
 
+/** An AFAD row as the pre-2026-10-01 parser stored it (PF-5e), read again from its own stored field vocabulary with
+ *  the fixed parser (parseAfad): the row lands exactly AFAD_LEGACY_OFFSET_MS later and is otherwise unchanged. Null for
+ *  any other row (another provider's, an AFAD row already at its real time, one its fields do not re-read to). */
+export function afadLegacyRow(r: ProvenanceRow): RawObs | null {
+  if (r.provider !== AFAD_PROVIDER) return null;
+  const again = parseAfad([r.fields], r.provider)[0];
+  if (!again || again.providerEventId !== r.nativeId) return null;
+  if (again.eventTimeMs - r.eventTimeMs !== AFAD_LEGACY_OFFSET_MS) return null;
+  if (again.lat !== r.lat || again.lon !== r.lon || again.depth !== r.depth || again.mag !== r.mag || again.magType !== r.magType || again.place !== r.place) return null;
+  return again;
+}
+
 /** Every live AFAD row of an event at or after `floorMs` that the pre-2026-10-01 parser stored: re-read from its own
  *  stored field vocabulary with the fixed parser (parseAfad), it lands exactly AFAD_LEGACY_OFFSET_MS later and
  *  otherwise unchanged. Deterministic order (corrected time, then id), so the log lines replay. */
@@ -123,12 +135,8 @@ export function afadCorrections(eventMap: Map<string, EventNode>, floorMs: numbe
   for (const node of eventMap.values()) {
     if (node.state !== 'live' || node.eventTimeMs < floorMs) continue;
     for (const r of node.provenance) {
-      if (r.provider !== AFAD_PROVIDER) continue;
-      const again = parseAfad([r.fields], r.provider)[0];
-      if (!again || again.providerEventId !== r.nativeId) continue;
-      if (again.eventTimeMs - r.eventTimeMs !== AFAD_LEGACY_OFFSET_MS) continue;
-      if (again.lat !== r.lat || again.lon !== r.lon || again.depth !== r.depth || again.mag !== r.mag || again.magType !== r.magType || again.place !== r.place) continue;
-      out.push(again);
+      const again = afadLegacyRow(r);
+      if (again) out.push(again);
     }
   }
   return out.sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.providerEventId < b.providerEventId ? -1 : a.providerEventId > b.providerEventId ? 1 : 0));

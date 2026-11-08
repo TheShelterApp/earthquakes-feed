@@ -1732,7 +1732,50 @@ its backfill) to 2026-09-19. The day partitions 2026-06-01…09-19 alone hold 9,
 live event 3 h later) and 20 AFAD rows sitting in another source's event. A consumer of
 that history can shift a feature's time by +3 h when its chosen provider is `afad` and its
 `feed.event_time` is exactly 3 h before the chosen provenance row's `fields.date` read as UTC, and
-drop EMSC's `auth: "AFAD"` copy of it.
+drop EMSC's `auth: "AFAD"` copy of it. The feed's own readers of that history (the offline re-merge, the statistics
+builder) apply this through `normalizeRows` (src/row-normalize.ts, below *ISC*): an AFAD row in an event of AFAD's
+rows only is re-timed; one that joined another source's event at its wrong time is left there.
+
+## ISC (International Seismological Centre)
+
+`isc` reads ISC's FDSN event service (`format=text`), one row per event: ISC's preferred hypocentre and magnitude.
+The live path does not ask it (`liveActive: false`: ISC publishes with a delay of months) and its backfill walk is
+paused (*History and backfill*), so ISC rows exist only in the archived months it walked: 2024-05, 2025-02 and
+2025-08-03 onward (until 2026-06 in the archives).
+
+**Two bulletins.** For the months ISC's analysts have reviewed, the preferred hypocentre is mostly ISC's own (`Author`
+`ISC`: 1,981 of the 4,160 ISC rows of 2024-05). For the later months ISC serves its preliminary bulletin: each event's
+hypocentre and magnitude are contributed agencies' (no `ISC`-authored row in 2025-02, 2025-08, 2025-09, 2025-12 or
+2026-03), the magnitude often from another agency than the hypocentre (`Author` / `MagAuthor`).
+
+**Geoscience Australia's Mw is not taken.** In the preliminary bulletin the preferred magnitude is often Geoscience
+Australia's automatic moment magnitude (`MagAuthor` `AUST`, `MagType` `Mw`/`Mww`), which runs high, most of all in a
+large quake's aftershock sequence. Checked 2026-11-08 against ISC's own answer (the stored row is ISC's answer byte for
+byte, the time included; ISC's QuakeML with all origins and magnitudes shows where the value comes from):
+
+| ISC event | Stored | What it is |
+|---|---|---|
+| 644158618 | 2025-09-18 19:08:09.91, DSN hypocentre east of the Kuril Islands, "Mw 8.22 AUST" | an aftershock NEIC puts at mb 5.2–5.8, 10 minutes after the Kamchatka mainshock (644156780, 18:58:14.94, Mw 7.86 GCMT); AUST's own origin is 19:08:24.82 |
+| 643915176 | 2025-08-22 05:18:56.64, GFZ hypocentre, "Mw 7.02 AUST" | a Drake Passage aftershock, three hours after the Mw 7.5 (02:16:18); ComCat us6000r2z8 mb 5.1, NEIC mb 5.1 in ISC's own event |
+| 643915158 | 2025-08-22 03:17:23.77, IDC hypocentre, "Mw 6.22 AUST" | ComCat us6000r2yx, mb 5.1 |
+| 644818774 | 2025-12-08 22:07:19.37, GFZ hypocentre, "Mw 7.20 AUST" | an aftershock of the Aomori Mw 7.6 of 14:15: ComCat us6000rtin, 22:07:18.80, mb 5.0 |
+
+Over the archives 2025-08 and 2025-09, ISC's preferred magnitudes of M4.5+ against ComCat's of the same quake (±10 s,
+50 km): AUST Mw (90 rows, 73 matched) median +0.14, p90 +0.83, 19 rows +0.5 or more, 6 +1.0 or more; NEIC mb (475) and
+NEIC Mw (119) p90 0.00, GCMT Mw (135) p90 +0.26, NIED, IPGP and GFZ within +0.4. The times are right: the ISC rows of
+large quakes that matched no ComCat event within 120 s were real (mostly aftershock) origins whose magnitude was AUST's.
+Since 2026-11-08 the parser reads such a row without `mag` and `magType` (`iscUntrustedMagnitude`, src/fdsn.ts); the
+row's `fields` keep `Magnitude`, `MagType` and `MagAuthor` as sent. The published archives keep the old rows; the
+re-merge and the statistics builder correct them as they read them (`normalizeRows`, src/row-normalize.ts: also AFAD's
+3 h, above). Per archive: 2025-02 28 rows (16 representing their event), 2025-08 64 (33), 2025-09 29 (19), 2025-12 16
+(4), 2026-03 35 (5), 2024-05 none; the live M6+ events of 2025-08 go from 76 to 72 and of 2025-09 from 50 to 44
+before any fold.
+
+**Split copies.** ISC's preliminary rows re-publish the contributing agency's origin: 110 of the 116 ISC-represented
+M5+ events of 2025-08 and 2025-09 have another live event within 60 s and 150 km, many at 0 km and 0.0 s (NEIC's
+origin beside ComCat's `us…` row, GFZ's beside GEOFON's). Backfill ingests with the merge pass off, so they stay two
+events until a re-merge folds them; an `Author`-named copy rule for ISC (as SCEDC's `Author` `US`,
+SOURCE_NETWORK_COPIES) is not in the rules yet.
 
 ## Canada (NRCan)
 

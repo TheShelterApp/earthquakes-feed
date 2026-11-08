@@ -8,15 +8,16 @@ import { gunzipSync } from 'node:zlib';
 import type { ArchiveEntry, Archives } from './archive.js';
 import { extractTarball } from './archive-io.js';
 import { eventDayKey, featureToNode, nodeToFeature } from './bitemporal.js';
-import { DATA_DIR, REMERGE_EPOCH, REMERGE_INGEST_TIME, REPO, dataPaths } from './config.js';
+import { DATA_DIR, REMERGE_EPOCH, REMERGE_INGEST_TIME, REMERGE_RULES, REPO, dataPaths } from './config.js';
 import { haversineKm } from './geo.js';
 import { ghRetry } from './gh.js';
 import { historyQueryUrl } from './history-fetch.js';
-import { type EditionEntry, type HistoryIndex, currentEdition as currentHistoryEdition } from './history-index.js';
+import { type EditionEntry, type HistoryIndex, currentEdition as currentHistoryEdition, editionIsMerged } from './history-index.js';
 import { frozenBefore } from './partitions.js';
 import { loadRegistry, priorityMap } from './providers.js';
 import { type EditionRef, type RemediationIndex, currentEdition as currentRemediationEdition, emptyRemediationIndex } from './remediation.js';
-import { RemergeError, remergeNodes } from './remerge.js';
+import { RemergeError, normalizeUnit, remergeNodes } from './remerge.js';
+import { archiveIsMerged } from './remerge-archives.js';
 import { STATS_STATE_PATH, type StatsConfig, loadStatsConfig } from './stats.js';
 import {
   AREA_COLUMNS,
@@ -154,16 +155,22 @@ export function inputLookup(idx: InputIndex, epoch = STATS_REMERGE_EPOCH): Input
  */
 export function chooseDayInput(day: string, lk: InputLookup): DayInput | null {
   const r = lk.remediationByDay.get(day);
-  if (r) return { kind: 'remediation', key: `${r.tag}/${r.asset}`, fp: r.sha256, tag: r.tag, asset: r.asset, era: null, minMag: null, merged: (r.stats.remerge?.epoch ?? 0) >= lk.epoch };
+  if (r) {
+    // Merged when it is merged to the epoch and built on the month's current asset, itself merged to the current rules
+    // (a refreshed edition of the archive re-merge).
+    const month = lk.archiveByDay.get(day);
+    const merged = (r.stats.remerge?.epoch ?? 0) >= lk.epoch && (!month || (month.sha256 === r.built_on.sha256 && archiveIsMerged(month, lk.epoch)));
+    return { kind: 'remediation', key: `${r.tag}/${r.asset}`, fp: r.sha256, tag: r.tag, asset: r.asset, era: null, minMag: null, merged };
+  }
   const oid = lk.idx.partitions.get(day);
   // A partition has no merge epoch: the days frozen before the live heal (2026-07 .. 09) hold split duplicates, and
   // the re-merge of a healed day changes (almost) nothing.
   if (oid) return { kind: 'partition', key: day, fp: oid, era: null, minMag: null, merged: false };
   const a = lk.archiveByDay.get(day);
-  if (a) return { kind: 'archive', key: `${a.tag}/${a.asset}`, fp: a.sha256, tag: a.tag, asset: a.asset, era: null, minMag: null, merged: (a.merge_epoch ?? 0) >= lk.epoch };
+  if (a) return { kind: 'archive', key: `${a.tag}/${a.asset}`, fp: a.sha256, tag: a.tag, asset: a.asset, era: null, minMag: null, merged: archiveIsMerged(a, lk.epoch) };
   const e = lk.editionByDay.get(day);
   // An edition of one source (era B, ComCat alone) has nothing to fold: never re-merged (eraIsRemerged), so read as is.
-  if (e) return { kind: 'edition', key: `${e.tag}/${e.asset}`, fp: e.sha256, tag: e.tag, asset: e.asset, era: e.era ?? null, minMag: e.min_magnitude ?? null, merged: (e.merge_epoch ?? 0) >= lk.epoch || (e.sources ?? []).length === 1 };
+  if (e) return { kind: 'edition', key: `${e.tag}/${e.asset}`, fp: e.sha256, tag: e.tag, asset: e.asset, era: e.era ?? null, minMag: e.min_magnitude ?? null, merged: editionIsMerged(e, lk.epoch) || (e.sources ?? []).length === 1 };
   return null;
 }
 
@@ -205,7 +212,7 @@ export function yearDigest(o: { builder: number; epoch: number; through: string;
   for (const i of o.inputs) if (i) uniq.set(`${i.kind}\u0000${i.key}\u0000${i.fp}`, inputRef(i));
   const inputs = [...uniq.values()].sort((a, b) => (a.kind + a.key < b.kind + b.key ? -1 : a.kind + a.key > b.kind + b.key ? 1 : a.fp < b.fp ? -1 : 1));
   const context = o.context.map((c) => ({ day: c.day, input: c.input ? inputRef(c.input) : null }));
-  return sha256Hex(canonicalJson({ builder: o.builder, rules: `${STATS_FORMAT}/reconcile-${RECONCILE_RULE}`, remerge_epoch: o.epoch, through: o.through, inputs, ...(context.length ? { context } : {}) }));
+  return sha256Hex(canonicalJson({ builder: o.builder, rules: `${STATS_FORMAT}/reconcile-${RECONCILE_RULE}`, remerge_epoch: o.epoch, remerge_rules: REMERGE_RULES, through: o.through, inputs, ...(context.length ? { context } : {}) }));
 }
 
 export function planYear(year: number, through: string, lk: InputLookup, builder: number): YearPlan {
@@ -687,6 +694,11 @@ export function buildYear(plan: YearPlan, reader: InputReader, o: { builder: num
     const older = ctx(Array.from({ length: CONTEXT_DAYS }, (_, k) => dayShift(first, k - CONTEXT_DAYS)));
     const newer = ctx(Array.from({ length: CONTEXT_DAYS }, (_, k) => dayShift(last, k + 1)));
     const anchored = new Set(older.intoNewer.filter((id) => memberDay.has(id)));
+    // The re-merge's input normalization (REMERGE_RULES; row-normalize.ts): the unit and both context windows, as the
+    // archive re-merge does (AFAD rows stored 3 h early re-timed, ISC magnitudes of untrusted authors dropped).
+    const norm = normalizeUnit(own, o.registry);
+    normalizeUnit(older.nodes, o.registry);
+    normalizeUnit(newer.nodes, o.registry);
     let res: ReturnType<typeof remergeNodes>;
     try {
       res = remergeNodes({
@@ -706,7 +718,7 @@ export function buildYear(plan: YearPlan, reader: InputReader, o: { builder: num
     }
     folds += res.merges.length;
     for (const n of own) acc.add(nodeToFeature(n), minMagOf.get(n.feedId) ?? null);
-    o.log?.(`stats: ${month} re-merged in memory: ${res.live_before} -> ${res.live_after} live, ${res.merges.length} fold(s), ${Math.round(performance.now() - t0)} ms`);
+    o.log?.(`stats: ${month} re-merged in memory: ${res.live_before} -> ${res.live_after} live, ${res.merges.length} fold(s), ${norm.events_changed} event(s) normalized (AFAD ${norm.afad_retimed}, ISC ${norm.isc_magnitude_dropped}), ${Math.round(performance.now() - t0)} ms`);
   }
   // The statistical reconciliation over the whole year, the day before and the day after it (when frozen) as context:
   // a quake's reports across midnight on New Year's Eve count once too.

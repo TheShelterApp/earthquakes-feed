@@ -343,15 +343,16 @@ day tables.
   day, the current deep-history edition that lists it (*Deep history*; era B editions carry `min_magnitude: 4.5`). A
   year with a day that has no input waits (the era B walk) and is not published.
 - **Rebuild:** a year is rebuilt when the digest of its inputs changes: sha256 of the canonical JSON of the builder
-  version, the format and reconciliation rule, the re-merge epoch, `through` and every input's `{kind, key, sha256 or blob}` (plus the inputs of
+  version, the format and reconciliation rule, the re-merge epoch and rules, `through` and every input's `{kind, key, sha256 or blob}` (plus the inputs of
   the 7 days on each side when the year is re-merged in memory). A new frozen day rebuilds the current year; a re-merged
   archive or edition, a new remediation edition or a re-roll rebuilds its year with no other action; a builder bump
   rebuilds them all. The current year and the two before it first, then newest first, at most `max_years_per_run` a run.
-- **The in-memory re-merge** (owner decision A6): an input below the re-merge epoch (an archive or edition without
-  `merge_epoch` ≥ 1 — except an edition of a single source, era B, which has nothing to fold —, a remediation edition
-  without `stats.remerge`, every frozen partition) still holds the split
+- **The in-memory re-merge** (owner decision A6): an input below the re-merge epoch or rules (an archive or edition
+  without `merge_epoch` ≥ 1 and `merge_rules` ≥ `REMERGE_RULES` — except an edition of a single source, era B, which has nothing to fold —, a remediation edition
+  not refreshed on its month's merged asset, every frozen partition) still holds the split
   duplicates the merge-off paths made. The builder runs the feed's own `remergeNodes` (*Re-merged history*) over each
-  such month in memory — the month's days as the unit, the 7 days before it as frozen and the 7 days after it as pinned
+  such month in memory, after the same input normalization (`normalizeRows`, *Re-merged history*: AFAD rows stored 3 h
+  early re-timed, untrusted ISC magnitudes dropped) — the month's days as the unit, the 7 days before it as frozen and the 7 days after it as pinned
   context, each read from its own input, the fixed `REMERGE_INGEST_TIME` — and counts the result. The ledger records
   `remerged_in_memory: true` for such a year; once the merged assets are published, their checksums change the digest
   and the year is rebuilt from them. The epoch the statistics count at is at least 1 whatever `REMERGE_EPOCH` says.

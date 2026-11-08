@@ -12,6 +12,7 @@ import { parseStatsConfig, type StatsConfig } from '../src/stats.js';
 import {
   type ComcatCount,
   type InputIndex,
+  type InputLookup,
   InputReader,
   type StatsIo,
   type StatsHistoryState,
@@ -138,7 +139,7 @@ test('chooseDayInput: remediation > partition > archive > edition; the 2023-07 s
   const idx: InputIndex = {
     remediation: remediation([remEdition('2025-08-11', 1), remEdition('2025-08-11', 2), remEdition('2026-07-01', 1)]),
     partitions: new Map([['2026-07-01', 'a'.repeat(40)], ['2026-07-02', 'b'.repeat(40)]]),
-    archives: [archive('2023-07', { days: monthDays('2023-07').slice(5) }), archive('2025-08', { merge_epoch: 1 })],
+    archives: [archive('2023-07', { days: monthDays('2023-07').slice(5) }), archive('2025-08', { merge_epoch: 1, merge_rules: 3 })],
     history: history([edition('2023-07', { edition: 2, era: 'pilot', days: monthDays('2023-07').slice(0, 5) }), edition('2023-07', { edition: 1, era: 'pilot', sha256: SHA('1') }), edition('1985-03', { era: 'B', min_magnitude: 4.5 })]),
   };
   const lk = inputLookup(idx, 1);
@@ -159,8 +160,12 @@ test('chooseDayInput: remediation > partition > archive > edition; the 2023-07 s
   assert.equal(chooseDayInput('1985-03-10', one)!.merged, true, 'a single-source edition is never re-merged (eraIsRemerged)');
   assert.equal(chooseDayInput('1985-04-01', lk), null, 'no input: a missing day');
   // Remediation editions merged at build time or refreshed by the archive re-merge carry their epoch.
-  const merged = inputLookup({ ...idx, remediation: remediation([{ ...remEdition('2025-08-11', 3), stats: { remerge: { epoch: 1, from_edition: 2 } } } as unknown as EditionRef]) }, 1);
-  assert.equal(chooseDayInput('2025-08-11', merged)!.merged, true);
+  const refreshed = (sha: string): InputLookup => inputLookup({ ...idx, remediation: remediation([{ ...remEdition('2025-08-11', 3), built_on: { tag: 'archive-2025-08', asset: 'events-2025-08.tar.zst', sha256: sha }, stats: { remerge: { epoch: 1, from_edition: 2 } } } as unknown as EditionRef]) }, 1);
+  assert.equal(chooseDayInput('2025-08-11', refreshed(SHA('8')))!.merged, true, 'refreshed on the merged month asset');
+  assert.equal(chooseDayInput('2025-08-11', refreshed(SHA('0')))!.merged, false, 'built on an earlier asset of the month');
+  // An archive merged under older rules (REMERGE_RULES: the input normalization) is re-merged in memory.
+  const oldRules = inputLookup({ ...idx, archives: [archive('2025-08', { merge_epoch: 1, merge_rules: 2 })] }, 1);
+  assert.equal(chooseDayInput('2025-08-12', oldRules)!.merged, false);
 });
 
 test('statsThrough: the last frozen day (frozenBefore - 1); yearDays stops there', () => {
@@ -172,7 +177,7 @@ test('statsThrough: the last frozen day (frozenBefore - 1); yearDays stops there
 // --- digest, staleness, order ---
 
 test('digest: changes with an input checksum, a partition blob, the builder or through; stable otherwise', () => {
-  const base: InputIndex = { remediation: remediation([]), partitions: new Map(), archives: monthsOf(2024).map((p) => archive(p, { merge_epoch: 1 })), history: null };
+  const base: InputIndex = { remediation: remediation([]), partitions: new Map(), archives: monthsOf(2024).map((p) => archive(p, { merge_epoch: 1, merge_rules: 3 })), history: null };
   const d0 = planYear(2024, '2026-10-28', inputLookup(base, 1), 1).digest;
   assert.equal(planYear(2024, '2026-10-28', inputLookup(base, 1), 1).digest, d0);
   assert.notEqual(planYear(2024, '2026-10-28', inputLookup(base, 1), 2).digest, d0, 'builder');
@@ -193,7 +198,7 @@ test('digest: changes with an input checksum, a partition blob, the builder or t
 const monthsOf = (y: number): string[] => Array.from({ length: 12 }, (_, i) => `${y}-${String(i + 1).padStart(2, '0')}`);
 
 test('staleReason: never built, inputs changed, a missing file, a failed gate on the same inputs, a waiting year', () => {
-  const lk = inputLookup({ remediation: remediation([]), partitions: new Map(), archives: monthsOf(2024).map((p) => archive(p, { merge_epoch: 1 })), history: null }, 1);
+  const lk = inputLookup({ remediation: remediation([]), partitions: new Map(), archives: monthsOf(2024).map((p) => archive(p, { merge_epoch: 1, merge_rules: 3 })), history: null }, 1);
   const plan = planYear(2024, '2026-10-28', lk, 1);
   const files = { fileExists: () => true, wantsYearFile: true, forced: false };
   assert.equal(staleReason(plan, undefined, files), 'never built');
@@ -299,7 +304,7 @@ function splitM6(t: number): F[] {
 }
 
 function yearOf2024(mergeEpoch: number | undefined, june: F[]): { idx: InputIndex; io: ReturnType<typeof fakeIo> } {
-  const archives = monthsOf(2024).map((p) => archive(p, mergeEpoch == null ? {} : { merge_epoch: mergeEpoch }));
+  const archives = monthsOf(2024).map((p) => archive(p, mergeEpoch == null ? {} : { merge_epoch: mergeEpoch, merge_rules: 3 }));
   const byDay = new Map<string, F[]>();
   for (const f of june) {
     const d = new Date((f['properties'] as { time: number }).time).toISOString().slice(0, 10);
@@ -411,7 +416,7 @@ test('verify: the sample takes the last 13 months and 6 older ones; a month pass
 // --- the run ---
 
 function run2024(o: { state: StatsHistoryState; io: StatsIo; comcat: ComcatCount; fileExists?: (p: string) => boolean; forced?: Set<number>; maxYears?: number; mergeEpoch?: number }) {
-  const archives = [...monthsOf(2023), ...monthsOf(2024)].map((p) => archive(p, { merge_epoch: o.mergeEpoch ?? 1, sha256: SHA(p.slice(2, 4)) }));
+  const archives = [...monthsOf(2023), ...monthsOf(2024)].map((p) => archive(p, { merge_epoch: o.mergeEpoch ?? 1, merge_rules: 3, sha256: SHA(p.slice(2, 4)) }));
   const lookup = inputLookup({ remediation: remediation([]), partitions: new Map(), archives, history: null }, 1);
   return runStatsHistory({
     nowMs: Date.parse('2025-01-11T12:00:00Z'),

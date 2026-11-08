@@ -386,6 +386,14 @@ test('refill queue: persistent, deduplicated; archived days are taken, the other
   assert.deepEqual(plan.editionOnly, ['2026-06-29']);
   assert.deepEqual(pruneQueue(idx), []);
   assert.equal(idx.refill_queue![0]!.range, '2026-06-29..2026-07-03', 'the done day left the range');
+  // The same dispatch again: its days are done or still queued, so no second entry.
+  assert.equal(enqueueRefill(idx, '2026-06-28..2026-07-03', ['usgs', 'emsc'], 'seam', '2026-11-10T00:00:00.000Z'), false);
+  assert.equal(enqueueRefill(idx, '2026-06-28..2026-07-04', ['usgs', 'emsc'], 'seam', '2026-11-10T00:00:00.000Z'), true, 'a new day is queued');
+  idx.refill_queue!.pop();
+  // A queue written with the same refill twice collapses to one entry.
+  idx.refill_queue!.push({ ...idx.refill_queue![0]!, range: '2026-06-28..2026-07-03' });
+  pruneQueue(idx);
+  assert.deepEqual(idx.refill_queue!.map((e) => e.range), ['2026-06-29..2026-07-03']);
   // July rolls: its days are taken. Everything done: the entry leaves the queue.
   const julyToo = new Set([...june, '2026-07-01', '2026-07-02', '2026-07-03', '2026-07-04']);
   assert.deepEqual(queuePlan(idx, julyToo).waiting, []);

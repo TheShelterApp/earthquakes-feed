@@ -482,12 +482,14 @@ export function indexText(idx: RemediationIndex): string {
   return JSON.stringify({ version: 1, raw, editions, refill_queue: idx.refill_queue ?? [] }, null, 2) + '\n';
 }
 
-/** Add a refill to the queue (an entry with the same range, providers and reason is not added twice). */
+/** Add a refill to the queue. Nothing is added when every day of the range is already done for these providers or
+ *  queued for them with the same reason (a dispatch repeated after the queue shrank the range adds no second entry). */
 export function enqueueRefill(idx: RemediationIndex, range: string, providers: readonly string[], reason: RemediationReason, nowIso: string): boolean {
-  rangeDays(range);
+  const days = rangeDays(range);
   const q = (idx.refill_queue ??= []);
   const ps = [...new Set(providers)].sort();
-  if (q.some((e) => e.range === range && e.reason === reason && e.providers.join(',') === ps.join(','))) return false;
+  const covers = (e: RefillEntry, day: string): boolean => e.reason === reason && ps.every((p) => e.providers.includes(p)) && rangeDays(e.range).includes(day);
+  if (days.every((d) => queuedDayDone(idx, d, ps) || q.some((e) => covers(e, d)))) return false;
   q.push({ range, providers: ps, reason, queued_at: nowIso });
   return true;
 }
@@ -554,8 +556,14 @@ export function pruneQueue(idx: RemediationIndex): RefillEntry[] {
     let b = days.length - 1;
     while (a <= b && queuedDayDone(idx, days[a]!, e.providers)) a++;
     while (b >= a && queuedDayDone(idx, days[b]!, e.providers)) b--;
-    if (a > b) left.push(e);
-    else keep.push({ ...e, range: a === b ? `${days[a]}..${days[a]}` : `${days[a]}..${days[b]}` });
+    if (a > b) {
+      left.push(e);
+      continue;
+    }
+    const range = `${days[a]}..${days[b]}`;
+    // The same refill twice (a queue written before enqueueRefill looked at the shrunk ranges): one entry, the first.
+    if (keep.some((k) => k.range === range && k.reason === e.reason && k.providers.join(',') === e.providers.join(','))) continue;
+    keep.push({ ...e, range });
   }
   idx.refill_queue = keep;
   return left;

@@ -739,7 +739,9 @@ export function remergePeriods(ctx: Ctx): void {
     let res: ReturnType<typeof remergeNodes>;
     let normalized: ReturnType<typeof normalizeUnit>;
     try {
-      normalized = normalizeUnit(own, ctx.registry, REMERGE_INGEST_TIME);
+      normalized = normalizeUnit(own, ctx.registry);
+      normalizeUnit(older, ctx.registry);
+      normalizeUnit(newer, ctx.registry);
       res = remergeNodes({ own, memberDay, startMs: p.startMs, endMs: p.endMs, older, newer, anchored, registry: ctx.registry, ingestTime: REMERGE_INGEST_TIME });
     } catch (e) {
       ctx.report.blocked.push(`history: re-merge of ${p.key} blocked: ${e instanceof Error ? e.message : String(e)}`);

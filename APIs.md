@@ -895,8 +895,10 @@ history from 2023-07 back. Above 0:
   `built_from` stays (the month is not re-sealed). A month sealed while the epoch is above 0 is merged as it is built.
   A single-source era (era B, ComCat alone; `eraIsRemerged` in [`src/history-index.ts`](src/history-index.ts)) is never
   re-merged: there is nothing to fold (the identity resolution keeps two ids of one source apart, so two ComCat events
-  stay two), and its months keep the edition they were sealed with, whatever the epoch was then. Its newest month,
-  1999-12, is still sealed only against a merged 2000-01.
+  stay two), and its months keep the edition they were sealed with, whatever the epoch was then; such an edition is
+  final, so the next older month is sealed against it without waiting for a merge. Only the seam waits: with the epoch
+  above 0, 1999-12 is sealed against a merged 2000-01. (The walk sealed 1999-12 back to 1981-04 at epoch 0 on 2026-11-08,
+  1999-12 against 2000-01 `e1`, joining 0 rows; the older months were sealed after epoch 1 landed.)
 - *Archives:* `remerge.yml` (every 6 h and by hand, outside the writer lock; `src/remerge-archives.ts`) gives each
   archive month below the epoch a new asset `events-YYYY-MM.e<N>.tar.zst` in its `archive-YYYY-MM` Release, newest
   first, holding the day files and `_archive.json` (`kind: "earthquakes-feed/archive-edition"`: `built_on` the asset it

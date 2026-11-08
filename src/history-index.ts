@@ -211,12 +211,16 @@ export interface ArchiveIndexEntry {
 }
 
 /** The newer neighbour of a month the re-merge (or, with the epoch above 0, the seal) may use, or `wait`: an `edition`
- *  neighbour must be merged to the epoch first (the walk goes newest first), and the boundary month waits until the
- *  archive holding the boundary day is merged. With the epoch at 0 it is newerNeighbour. */
+ *  neighbour of a multi-source era must be merged to the epoch first (the walk goes newest first; a single-source era's
+ *  edition is final), and the boundary month waits until the archive holding the boundary day is merged. With the epoch
+ *  at 0 it is newerNeighbour. */
 export function remergeNeighbour(cfg: HistoryConfig, idx: HistoryIndex, archives: readonly ArchiveIndexEntry[], p: Period, epoch: number = REMERGE_EPOCH): Neighbour {
   const nb = newerNeighbour(cfg, idx, p);
   if (epoch <= 0) return nb;
-  if (nb.kind === 'edition' && !editionIsMerged(nb.edition, epoch)) return { kind: 'wait' };
+  // A single-source era's edition is never re-merged (eraIsRemerged), so it is final whatever epoch it was sealed at: an
+  // era-B month sealed while the epoch was 0 must not hold its older neighbour forever.
+  const nbEra = nb.kind === 'edition' ? cfg.eras.find((x) => x.id === nb.edition.era) : undefined;
+  if (nb.kind === 'edition' && (!nbEra || eraIsRemerged(nbEra)) && !editionIsMerged(nb.edition, epoch)) return { kind: 'wait' };
   if (nb.kind === 'boundary') {
     const a = archives.find((x) => (x.days ?? []).includes(nb.day));
     if (!a || !editionIsMerged(a, epoch) || a.needs_reroll) return { kind: 'wait' };

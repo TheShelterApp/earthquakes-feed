@@ -230,4 +230,12 @@ test('re-merge: era B months are never re-merged, at any epoch, and never re-sea
   const nb = remergeNeighbour(cfg, idx, [], dec, 1);
   assert.equal(nb.kind, 'edition');
   if (nb.kind === 'edition') assert.equal(nb.edition.asset, 'events-2000-01.e2.tar.zst');
+  // An era-B month sealed while the epoch was 0 is final: its older neighbour is sealed against it at any epoch (the walk
+  // sealed 1999-12..1981-04 at epoch 0 before epoch 1 landed; the rest must not wait forever).
+  const older = all.find((p) => p.key === '1980-12')!;
+  for (const epoch of [1, 2]) {
+    const n = remergeNeighbour(cfg, idx, [], older, epoch);
+    assert.equal(n.kind, 'edition', `epoch ${epoch}`);
+    if (n.kind === 'edition') assert.equal(n.edition.asset, 'events-1981-01.e1.tar.zst');
+  }
 });

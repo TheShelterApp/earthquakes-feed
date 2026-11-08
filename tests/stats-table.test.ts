@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { loadRegistry, priorityMap } from '../src/providers.js';
 import {
   AREA_COLUMNS,
   CELL_COUNT,
@@ -10,10 +11,13 @@ import {
   buildEventTable,
   cellCentre,
   cellOf,
+  dayRows,
+  dayTableFromRows,
   dayTableJson,
   isNonEarthquake,
   magBin,
   parseNdjson,
+  reconcileRows,
   statsEventOf,
   tableTimes,
   type StatsEvent,
@@ -110,6 +114,7 @@ test('row rule: integer scales, rounding and the derived columns', () => {
     nst: 12,
     rmsE3: 457,
     delay: 95,
+    sources: ['usgs'],
   });
   // cdi when there is no mmi; no depth without a third coordinate.
   const c = statsEventOf(feat(3, { props: { cdi: 3.14 }, coords: [1, 2] })) as { ev: StatsEvent };
@@ -169,12 +174,12 @@ test('day table: the count invariant, byte determinism, another day is an error'
     feat(7),
   ];
   const a = dayTableJson(DAY, feats);
-  assert.deepEqual([a.count, a.filtered, a.skipped], [2, 2, 1]);
+  assert.deepEqual([a.count, a.filtered, a.skipped, a.collapsed], [2, 2, 1, 0]);
   const live = feats.filter((f) => (f.properties['feed'] as { state: string }).state === 'live' && (f.properties['feed'] as { tombstone: boolean }).tombstone !== true).length;
-  assert.equal(a.count + a.filtered + a.skipped, live);
+  assert.equal(a.count + a.filtered + a.skipped + a.collapsed, live);
   const doc = JSON.parse(a.body) as Record<string, unknown>;
   assert.deepEqual(Object.keys(doc).slice(0, 4), ['format', 'kind', 'date', 't0']);
-  assert.deepEqual(Object.keys(doc).slice(-3), ['filtered', 'skipped', 'attribution']);
+  assert.deepEqual(Object.keys(doc).slice(-4), ['filtered', 'skipped', 'collapsed', 'attribution']);
   assert.deepEqual(doc['filtered'], [120_000, 360_000]);
   assert.equal(dayTableJson(DAY, [...feats].reverse()).body, a.body, 'input order does not matter');
   assert.throws(() => dayTableJson('2026-11-05', feats), /another day/);
@@ -182,12 +187,12 @@ test('day table: the count invariant, byte determinism, another day is an error'
 
 test('golden: 189 real lines of 2026-11-06 give the committed table byte for byte', () => {
   const feats = parseNdjson(readFileSync('tests/fixtures/stats-2026-11-06.ndjson', 'utf8'));
-  const got = dayTableJson(DAY, feats);
+  const got = dayTableJson(DAY, feats, priorityMap(loadRegistry('providers/registry.json')));
   const want = readFileSync('tests/fixtures/stats-2026-11-06.expected.json', 'utf8');
   assert.equal(got.body, want);
   let live = 0;
   for (const f of feats as { properties: { feed: { state: string; tombstone?: boolean } } }[]) if (f.properties.feed.state === 'live' && f.properties.feed.tombstone !== true) live++;
-  assert.equal(got.count + got.filtered + got.skipped, live);
+  assert.equal(got.count + got.filtered + got.skipped + got.collapsed, live);
   assert.ok(got.filtered > 0 && got.skipped > 0 && live < feats.length, 'the fixture covers filtered, skipped and retired lines');
   const doc = JSON.parse(want) as { status: (number | null)[]; upd: number[]; providers: string[] };
   assert.ok(doc.status.includes(0) && doc.status.includes(1) && doc.status.includes(null));
@@ -211,4 +216,68 @@ test('cellOf: poles, antimeridian and the centre', () => {
   const c = cellOf(355_000, 1_397_000);
   const { lat, lon } = cellCentre(c);
   assert.ok(Math.abs(lat - 35.55) < 1e-9 && Math.abs(lon - 139.75) < 1e-9, `${lat},${lon}`);
+});
+
+// --- the statistical reconciliation (rule v1) ---
+
+const KM = 1 / 111.195;
+function row(n: number, provider: string, o: { dt?: number; dkm?: number; mag?: number; sources?: string[] } = {}): StatsEvent {
+  const ev = (statsEventOf(feat(n, { props: { mag: o.mag ?? 5.0, time: T0 + 3_600_000 + (o.dt ?? 0) }, coords: [120, 10 + (o.dkm ?? 0) * KM, 10], feed: { chosen_provider: provider, provenance: (o.sources ?? [provider]).map((p, i) => ({ provider: p, status: 'reviewed', chosen: i === 0, fields: {} })) } })) as { ev: StatsEvent }).ev;
+  return ev;
+}
+const prio = new Map([['usgs', 0], ['emsc', 1], ['geofon', 2], ['jma', 3]]);
+
+test('reconcile: one quake reported by two catalogues counts once; the usgs holder is the representative', () => {
+  const a = row(1, 'emsc', { mag: 6.2 });
+  const b = row(2, 'geofon', { dt: 3_000, dkm: 20, mag: 6.0, sources: ['geofon', 'usgs'] });
+  const d = reconcileRows([a, b], prio);
+  assert.deepEqual([...d], [[a.id, b.id]], 'the member with a usgs row stays even though emsc ranks first');
+});
+
+test('reconcile: the limits (60 s, 100 km, |dM| 1.0, one member M4.5+) and never two events of one provider', () => {
+  const base = row(1, 'usgs', { mag: 5.0 });
+  const link = (o: Parameters<typeof row>[2]): number => reconcileRows([base, row(2, 'emsc', o)], prio).size;
+  assert.equal(link({ dt: 60_000 }), 1);
+  assert.equal(link({ dt: 60_001 }), 0);
+  assert.equal(link({ dkm: 99.9 }), 1);
+  assert.equal(link({ dkm: 100.5 }), 0);
+  assert.equal(link({ mag: 4.0 }), 1, '|dM| exactly 1.0');
+  assert.equal(link({ mag: 3.99 }), 0);
+  assert.equal(reconcileRows([row(1, 'usgs', { mag: 4.49 }), row(2, 'emsc', { mag: 4.4 })], prio).size, 0, 'no member M4.5+');
+  assert.equal(reconcileRows([row(1, 'usgs', { mag: 4.5 }), row(2, 'emsc', { mag: 3.5 })], prio).size, 1);
+  assert.equal(link({ sources: ['emsc', 'usgs'] }), 0, 'they share a provider');
+  assert.equal(reconcileRows([row(1, 'emsc'), row(2, 'emsc', { dt: 5_000 })], prio).size, 0, 'one catalogue is self-consistent');
+});
+
+test('reconcile: single link under the shared-provider constraint; without usgs the provider priority, then time, then id', () => {
+  // usgs A, emsc B 10 s later, usgs C 20 s after A: B joins A (closest first); C shares usgs with the group and stays.
+  const a = row(1, 'usgs');
+  const b = row(2, 'emsc', { dt: 10_000 });
+  const c = row(3, 'usgs', { dt: 20_000 });
+  assert.deepEqual([...reconcileRows([c, b, a], prio)], [[b.id, a.id]]);
+  // Chains: jma - geofon - emsc, each pair 30 s apart: one group, emsc ranks first.
+  const j = row(4, 'jma');
+  const g = row(5, 'geofon', { dt: 30_000 });
+  const e = row(6, 'emsc', { dt: 60_000 });
+  const d = reconcileRows([j, g, e], prio);
+  assert.deepEqual([...d].sort(), [[g.id, e.id], [j.id, e.id]].sort());
+  // Two unranked providers: the earlier origin stays.
+  const x = row(7, 'aaa', { dt: 1_000 });
+  const y = row(8, 'bbb');
+  assert.deepEqual([...reconcileRows([x, y], prio)], [[x.id, y.id]]);
+  assert.deepEqual([...reconcileRows([y, x], prio)], [[x.id, y.id]], 'input order does not matter');
+});
+
+test('reconcile: across midnight in the window; the day table counts collapsed and keeps the invariant', () => {
+  const late = feat(1, { props: { mag: 5.5, time: T0 + 86_399_000 }, feed: { chosen_provider: 'emsc', provenance: [{ provider: 'emsc', chosen: true, fields: {} }] } });
+  const nextDay = '2026-11-07';
+  const early = feat(2, { props: { mag: 5.6, time: T0 + 86_400_000 + 5_000 } });
+  const d1 = dayRows(DAY, [late, feat(3)]);
+  const d2 = dayRows(nextDay, [early]);
+  const dropped = reconcileRows([...d1.rows, ...d2.rows], prio);
+  const t1 = dayTableFromRows(d1, dropped);
+  const t2 = dayTableFromRows(d2, dropped);
+  assert.deepEqual([t1.count, t1.collapsed, t2.count, t2.collapsed], [1, 1, 1, 0], 'the usgs report on the 7th stays');
+  assert.equal(t1.count + t1.filtered + t1.skipped + t1.collapsed, 2);
+  assert.equal((JSON.parse(t1.body) as { collapsed: number }).collapsed, 1);
 });

@@ -236,6 +236,8 @@ test('accumulator: bins and the M4.5/M5/M6 cuts on mag x 100, mmax per cell, fil
   acc.add(feat(t, 3, { state: 'superseded' }), null);
   acc.add(feat(t, 11), null);
   acc.add(feat(Date.parse('2024-01-03T00:00:00Z'), 3), null);
+  assert.equal(acc.pending.length, 7, 'M3.5+ rows wait for the reconciliation');
+  acc.finish(new Map());
   assert.deepEqual(acc.bins[0], [1, 1, 0, 0, 0, 0, 3, 2, 1, 1], '4.496 rounds to 450: M4.5+; 4.99 to 499: under M5');
   assert.equal(acc.total[0], 9);
   assert.equal(acc.filtered[0], 1);
@@ -251,6 +253,7 @@ test('accumulator: bins and the M4.5/M5/M6 cuts on mag x 100, mmax per cell, fil
   const tb = Date.parse('1985-01-01T03:00:00Z');
   for (const m of [4.4, 4.5, 6.1]) b.add(feat(tb, m), 4.5);
   b.add(feat(tb, 5, { type: 'explosion' }), 4.5);
+  b.finish(new Map());
   assert.equal(b.belowFloor, 1);
   assert.deepEqual([...b.area.values()][0], [2, 2, 610]);
 });
@@ -332,7 +335,9 @@ test('in-memory re-merge: an unmerged archive month counts one M6 quake once (re
     const plan = planYear(2024, '2024-12-31', lk, 1);
     assert.equal(plan.unmergedMonths.length, 0);
     const b = buildYear(plan, new InputReader(io), { builder: 1, detailed: false, registry, lookup: lk, through: '2024-12-31' });
-    assert.equal(b.acc.m6.length, 2, 'merged inputs are counted as published (two M6+ lines, one M5.9)');
+    assert.equal(b.acc.collapsed.reduce((a, x) => a + x, 0), 2, 'merged inputs are read as published; the reconciliation collapses the split lines');
+    assert.equal(b.acc.m6.length, 1);
+    assert.equal(b.acc.m6[0]!.provider, 'usgs', 'the representative holds the usgs row');
     assert.equal(b.yearBody, null);
   }
 });
@@ -495,13 +500,14 @@ test('runStatsHistory: digest change when the merged assets land rebuilds the ye
   const unmerged = await run2024({ state: emptyState(1), io, comcat: counter(1, 1, 2024), mergeEpoch: 0, forced: new Set([2024]) });
   assert.equal(unmerged.state.years['2024']!.remerged_in_memory, true);
   assert.equal(unmerged.state.years['2024']!.area!.m6, 1);
-  // (These test inputs are the same split lines, now listed as merged: two M6+ lines, three M4.5+.)
-  const merged = await run2024({ state: unmerged.state, io, comcat: counter(2, 3, 2024), mergeEpoch: 1 });
+  // (These test inputs are the same split lines, now listed as merged: the reconciliation leaves one.)
+  const merged = await run2024({ state: unmerged.state, io, comcat: counter(1, 1, 2024), mergeEpoch: 1 });
   const rep = merged.reports.find((x) => x.year === 2024)!;
   assert.equal(rep.reason, 'inputs changed');
   assert.equal(rep.result, 'built');
   assert.equal(merged.state.years['2024']!.remerged_in_memory, false);
-  assert.equal(merged.state.years['2024']!.area!.m6, 2);
+  assert.equal(merged.state.years['2024']!.area!.m6, 1);
+  assert.equal(merged.state.years['2024']!.collapsed, 2);
 });
 
 test('InputReader: a month\'s remediated days never push its archive out of the cache; partition blobs are prefetched in one go', () => {

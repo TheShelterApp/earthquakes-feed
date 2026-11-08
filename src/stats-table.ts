@@ -1,3 +1,4 @@
+import { gatherCellKeys, gridKey, haversineKm } from './geo.js';
 import { reviewStatusOfRow } from './review-status.js';
 import type { Extra } from './types.js';
 
@@ -16,8 +17,8 @@ import type { Extra } from './types.js';
 export const STATS_FORMAT = 1;
 /** Day tables published by derive: today - 60 .. today (UTC). */
 export const STATS_DAYS = 61;
-/** The year and area builder's version: bumping it rebuilds every year (stats.yml). */
-export const STATS_BUILDER_VERSION = 1;
+/** The year and area builder's version: bumping it rebuilds every year (stats.yml). 2: the statistical reconciliation. */
+export const STATS_BUILDER_VERSION = 2;
 /** Every stats product lives under this path, on Pages and (year and area files) on the `data` branch. */
 export const STATS_DIR = 'v1/stats';
 /** The app's "revised later" line (StatisticsLogic.revisionDelay): `updated - time` strictly above one hour. */
@@ -110,6 +111,8 @@ export interface StatsEvent {
   nst: number | null;
   rmsE3: number | null;
   delay: number | null;
+  /** The providers of the event's provenance rows, sorted and unique (the reconciliation's input; never a column). */
+  sources: string[];
 }
 
 export type StatsRow = { kind: 'filtered'; timeMs: number } | { kind: 'skip' } | { kind: 'event'; ev: StatsEvent };
@@ -178,6 +181,7 @@ export function statsEventOf(feature: unknown): StatsRow | null {
       nst: scaled(p['nst'], 1),
       rmsE3: scaled(p['rms'], 1000),
       delay: Number.isFinite(firstIngest) ? Math.round((firstIngest - timeMs) / 1000) : null,
+      sources: [...new Set(prov.map((r) => String(r['provider'] ?? '')).filter(Boolean))].sort(),
     },
   };
 }
@@ -286,17 +290,27 @@ export interface DayTableResult {
   count: number;
   filtered: number;
   skipped: number;
+  /** Rows left out by the statistical reconciliation (reconcileRows). */
+  collapsed: number;
 }
 
 export const dayStartMs = (date: string): number => Date.parse(`${date}T00:00:00Z`);
 export const dayTablePath = (date: string): string => `${STATS_DIR}/days/${date}.json`;
 
+/** One UTC day's rows before the reconciliation: what the day table is serialized from. */
+export interface DayRows {
+  date: string;
+  rows: StatsEvent[];
+  /** Times of the filtered events, ms from the day's start. */
+  filtered: number[];
+  skipped: number;
+}
+
 /**
- * The day table of one UTC day from that day's full-fat features (any states, any order): the bytes and the counts the
- * index lists. Invariant: count + filtered + skipped = the day's live, non-tombstoned features. A feature of another
- * day is an error (the caller passes one day's partition).
+ * The rows of one UTC day from that day's full-fat features (any states, any order). A feature of another day is an
+ * error (the caller passes one day's partition).
  */
-export function dayTableJson(date: string, features: Iterable<unknown>): DayTableResult {
+export function dayRows(date: string, features: Iterable<unknown>): DayRows {
   const t0 = dayStartMs(date);
   if (!Number.isFinite(t0)) throw new Error(`stats day table: bad date ${date}`);
   const rows: StatsEvent[] = [];
@@ -314,11 +328,131 @@ export function dayTableJson(date: string, features: Iterable<unknown>): DayTabl
     if (r.kind === 'filtered') filtered.push(at - t0);
     else rows.push(r.ev);
   }
-  const table = buildEventTable('day', t0, rows, DAY_COLUMNS);
+  return { date, rows, filtered: filtered.sort((a, b) => a - b), skipped };
+}
+
+/**
+ * The day table `v1/stats/days/<date>.json` of a day's rows, without the rows the reconciliation dropped (`dropped`,
+ * feed ids): the bytes and the counts the index lists. Invariant: count + filtered + skipped + collapsed = the day's
+ * live, non-tombstoned features.
+ */
+export function dayTableFromRows(d: DayRows, dropped: ReadonlySet<string> | ReadonlyMap<string, string> = new Set()): DayTableResult {
+  const t0 = dayStartMs(d.date);
+  const kept = d.rows.filter((r) => !dropped.has(r.id));
+  const collapsed = d.rows.length - kept.length;
+  const table = buildEventTable('day', t0, kept, DAY_COLUMNS);
   // Key order of the file: format, kind, date, then the table, then the day's extras.
   const { format, kind, ...rest } = table;
-  const day = { format, kind, date, ...rest, filtered: filtered.sort((a, b) => a - b), skipped, attribution: STATS_ATTRIBUTION };
-  return { body: JSON.stringify(day), count: table.count, filtered: filtered.length, skipped };
+  const day = { format, kind, date: d.date, ...rest, filtered: d.filtered, skipped: d.skipped, collapsed, attribution: STATS_ATTRIBUTION };
+  return { body: JSON.stringify(day), count: table.count, filtered: d.filtered.length, skipped: d.skipped, collapsed };
+}
+
+/** The day table of one day's features, reconciled within the day only (derive reconciles across its whole window
+ *  first: writeStats). */
+export function dayTableJson(date: string, features: Iterable<unknown>, priority: ReadonlyMap<string, number> = new Map()): DayTableResult {
+  const d = dayRows(date, features);
+  return dayTableFromRows(d, reconcileRows(d.rows, priority));
+}
+
+// --- the statistical reconciliation (APIs.md, Statistics: "Reconciliation") ---
+
+/** The rule's version, named in the files (`reconciled.rule`) and in the stats builder's digest. */
+export const RECONCILE_RULE = 'v1';
+export const RECONCILE_DT_MS = 60_000;
+export const RECONCILE_KM = 100;
+/** |delta mag| x 100 at most. */
+export const RECONCILE_DMAG_E2 = 100;
+/** A pair links only when one of the two is M4.5+ (x 100). */
+export const RECONCILE_MIN_E2 = 450;
+/** Rows below this (x 100) can never link: RECONCILE_MIN_E2 - RECONCILE_DMAG_E2. */
+export const RECONCILE_CANDIDATE_E2 = RECONCILE_MIN_E2 - RECONCILE_DMAG_E2;
+const RECONCILE_CELL_DEG = 1;
+
+/**
+ * The statistical reconciliation (statistics products only; the feed's own dedup stays the event identity and the live
+ * map is untouched): a catalogue-level collapse of the reports of one quake that the feed still keeps as several events.
+ * Two rows link when they share no provenance provider (a provider's own catalogue is self-consistent), their origin
+ * times are within 60 s, their epicentres within 100 km, their magnitudes within 1.0, and one of them is M4.5+ (all on
+ * the scaled integers). Links are taken closest first (time gap, then distance, then ids) and join two groups only while
+ * the groups still share no provider (single link under that constraint). Each group keeps one representative: the
+ * member holding a `usgs` provenance row (ComCat's magnitude is the reference), else the member whose chosen provider
+ * ranks first in the feed's provider priority (`priority`, lower first, as the Resolver ranks), then the earliest origin,
+ * then the smallest id. Returns the dropped rows: id -> its representative's id. O(n log n): a time-sorted sweep with
+ * 1-degree cells (gatherCellKeys). Rows of context (outside the caller's unit) take part like any other; the caller
+ * counts only its own.
+ */
+export function reconcileRows(rows: readonly StatsEvent[], priority: ReadonlyMap<string, number>): Map<string, string> {
+  const cand = rows.filter((r) => r.magE2 >= RECONCILE_CANDIDATE_E2).sort(compareEvents);
+  const n = cand.length;
+  const out = new Map<string, string>();
+  if (n < 2) return out;
+  const lat = cand.map((r) => r.latE4 / 1e4);
+  const lon = cand.map((r) => r.lonE4 / 1e4);
+  const key = cand.map((_, i) => gridKey(lat[i]!, lon[i]!, RECONCILE_CELL_DEG));
+  const cells = new Map<string, number[]>();
+  const edges: { dt: number; km: number; a: number; b: number }[] = [];
+  let lo = 0;
+  for (let i = 0; i < n; i++) {
+    const x = cand[i]!;
+    while (cand[lo]!.timeMs < x.timeMs - RECONCILE_DT_MS) {
+      const list = cells.get(key[lo]!)!;
+      list.splice(list.indexOf(lo), 1);
+      lo++;
+    }
+    for (const k of gatherCellKeys(lat[i]!, lon[i]!, RECONCILE_KM, RECONCILE_CELL_DEG)) {
+      for (const j of cells.get(k) ?? []) {
+        const y = cand[j]!;
+        if (Math.abs(x.magE2 - y.magE2) > RECONCILE_DMAG_E2 || Math.max(x.magE2, y.magE2) < RECONCILE_MIN_E2) continue;
+        if (x.sources.some((p) => y.sources.includes(p))) continue;
+        const km = haversineKm(lat[i]!, lon[i]!, lat[j]!, lon[j]!);
+        if (km > RECONCILE_KM) continue;
+        edges.push({ dt: x.timeMs - y.timeMs, km, a: j, b: i });
+      }
+    }
+    if (!cells.has(key[i]!)) cells.set(key[i]!, []);
+    cells.get(key[i]!)!.push(i);
+  }
+  if (!edges.length) return out;
+  const id = (i: number): string => cand[i]!.id;
+  edges.sort((p, q) => p.dt - q.dt || p.km - q.km || (id(p.a) < id(q.a) ? -1 : id(p.a) > id(q.a) ? 1 : id(p.b) < id(q.b) ? -1 : id(p.b) > id(q.b) ? 1 : 0));
+  const parent = cand.map((_, i) => i);
+  const srcs = cand.map((r) => new Set(r.sources));
+  const find = (i: number): number => {
+    while (parent[i] !== i) i = parent[i] = parent[parent[i]!]!;
+    return i;
+  };
+  for (const e of edges) {
+    let ra = find(e.a);
+    let rb = find(e.b);
+    if (ra === rb) continue;
+    const sa = srcs[ra]!;
+    const sb = srcs[rb]!;
+    let shared = false;
+    for (const p of sb) if (sa.has(p)) shared = true;
+    if (shared) continue;
+    if (sa.size < sb.size) [ra, rb] = [rb, ra];
+    parent[rb] = ra;
+    for (const p of srcs[rb]!) srcs[ra]!.add(p);
+  }
+  const groups = new Map<number, number[]>();
+  for (let i = 0; i < n; i++) {
+    const r = find(i);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r)!.push(i);
+  }
+  const rank = (p: string): number => priority.get(p) ?? 9999;
+  for (const members of groups.values()) {
+    if (members.length < 2) continue;
+    const ms = members.map((i) => cand[i]!);
+    ms.sort((a, b) => {
+      const ua = a.sources.includes('usgs') ? 0 : 1;
+      const ub = b.sources.includes('usgs') ? 0 : 1;
+      return ua - ub || rank(a.provider) - rank(b.provider) || compareEvents(a, b);
+    });
+    const rep = ms[0]!.id;
+    for (const m of ms.slice(1)) out.set(m.id, rep);
+  }
+  return out;
 }
 
 /** Parses an NDJSON partition's text into features (blank lines ignored). */

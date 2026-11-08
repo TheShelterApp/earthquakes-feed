@@ -14,7 +14,7 @@ import { ghRetry } from './gh.js';
 import { historyQueryUrl } from './history-fetch.js';
 import { type EditionEntry, type HistoryIndex, currentEdition as currentHistoryEdition } from './history-index.js';
 import { frozenBefore } from './partitions.js';
-import { loadRegistry } from './providers.js';
+import { loadRegistry, priorityMap } from './providers.js';
 import { type EditionRef, type RemediationIndex, currentEdition as currentRemediationEdition, emptyRemediationIndex } from './remediation.js';
 import { RemergeError, remergeNodes } from './remerge.js';
 import { STATS_STATE_PATH, type StatsConfig, loadStatsConfig } from './stats.js';
@@ -22,6 +22,8 @@ import {
   AREA_COLUMNS,
   CELL_DEG,
   MAG_EDGES_E2,
+  RECONCILE_CANDIDATE_E2,
+  RECONCILE_RULE,
   STATS_ATTRIBUTION,
   STATS_DIR,
   STATS_FORMAT,
@@ -31,6 +33,7 @@ import {
   cellOf,
   dayStartMs,
   magBin,
+  reconcileRows,
   statsEventOf,
 } from './stats-table.js';
 import type { EventNode, ProviderConfig } from './types.js';
@@ -202,7 +205,7 @@ export function yearDigest(o: { builder: number; epoch: number; through: string;
   for (const i of o.inputs) if (i) uniq.set(`${i.kind}\u0000${i.key}\u0000${i.fp}`, inputRef(i));
   const inputs = [...uniq.values()].sort((a, b) => (a.kind + a.key < b.kind + b.key ? -1 : a.kind + a.key > b.kind + b.key ? 1 : a.fp < b.fp ? -1 : 1));
   const context = o.context.map((c) => ({ day: c.day, input: c.input ? inputRef(c.input) : null }));
-  return sha256Hex(canonicalJson({ builder: o.builder, rules: STATS_FORMAT, remerge_epoch: o.epoch, through: o.through, inputs, ...(context.length ? { context } : {}) }));
+  return sha256Hex(canonicalJson({ builder: o.builder, rules: `${STATS_FORMAT}/reconcile-${RECONCILE_RULE}`, remerge_epoch: o.epoch, through: o.through, inputs, ...(context.length ? { context } : {}) }));
 }
 
 export function planYear(year: number, through: string, lk: InputLookup, builder: number): YearPlan {
@@ -274,6 +277,8 @@ export interface YearState {
   year?: { bytes: number; sha256: string };
   check?: GateCheck;
   remerged_in_memory: boolean;
+  /** Rows the statistical reconciliation left out (APIs.md, Statistics: Reconciliation). */
+  collapsed?: number;
   inputs: Record<InputKind, number> & { unmerged_months: number };
   dup_suspects?: { count: number; n45: number; ratio: number; sample: { a: string; b: string; dt_s: number; km: number }[] };
   months?: Record<string, MonthCounts>;
@@ -364,6 +369,7 @@ export class YearAccumulator {
     this.filtered = days.map(() => 0);
     this.bins = days.map(() => new Array<number>(10).fill(0));
     this.providers = days.map(() => new Set<string>());
+    this.collapsed = days.map(() => 0);
     this.t0 = days.length ? dayStartMs(days[0]!) : 0;
     this.tEnd = days.length ? dayStartMs(days[days.length - 1]!) + DAY : 0;
   }
@@ -392,6 +398,33 @@ export class YearAccumulator {
       this.belowFloor++;
       return;
     }
+    // A row the reconciliation may leave out waits for it (finish).
+    if (ev.magE2 >= RECONCILE_CANDIDATE_E2) this.pending.push(ev);
+    else this.count(ev, di);
+  }
+
+  /** The rows that wait for the reconciliation (M3.5+: the only ones that can link). */
+  readonly pending: StatsEvent[] = [];
+  /** Per day: rows the reconciliation left out. */
+  readonly collapsed: number[];
+  collapsedTotal = 0;
+  private finished = false;
+
+  /** Counts the waiting rows the reconciliation kept (`dropped`: id -> representative) and the ones it left out. */
+  finish(dropped: ReadonlyMap<string, string>): void {
+    if (this.finished) throw new Error('YearAccumulator.finish called twice');
+    this.finished = true;
+    for (const ev of this.pending) {
+      const di = this.dayIndex.get(eventDayKey(ev.timeMs))!;
+      if (dropped.has(ev.id)) {
+        this.collapsed[di]!++;
+        this.collapsedTotal++;
+      } else this.count(ev, di);
+    }
+    this.pending.length = 0;
+  }
+
+  private count(ev: StatsEvent, di: number): void {
     this.rows++;
     const cell = cellOf(ev.latE4, ev.lonE4);
     const rec = this.area.get(cell);
@@ -402,7 +435,7 @@ export class YearAccumulator {
       if (ev.magE2 > rec[2]) rec[2] = ev.magE2;
     } else this.area.set(cell, [1, m45, ev.magE2]);
     if (ev.magE2 >= 600) this.m6.push(ev);
-    const month = day.slice(0, 7);
+    const month = eventDayKey(ev.timeMs).slice(0, 7);
     let mc = this.months.get(month);
     if (!mc) this.months.set(month, (mc = { n45: 0, m6: 0 }));
     if (m45) {
@@ -462,6 +495,7 @@ export function areaFileJson(acc: YearAccumulator, plan: YearPlan, builder: numb
     m45: cells.map((c) => acc.area.get(c)![1]),
     mmax: cells.map((c) => acc.area.get(c)![2]),
     m6: buildEventTable('area', t0, acc.m6, AREA_COLUMNS),
+    reconciled: { rule: RECONCILE_RULE, collapsed: acc.collapsedTotal },
     inputs_digest: plan.digest,
     attribution: STATS_ATTRIBUTION,
   };
@@ -486,11 +520,13 @@ export function yearFileJson(acc: YearAccumulator, plan: YearPlan, builder: numb
     days: {
       total: acc.total,
       filtered: acc.filtered,
+      collapsed: acc.collapsed,
       bins: acc.bins,
       providers: acc.providers.map((s) => [...s].map((p) => pIndex.get(p)!).sort((a, b) => a - b)),
       missing: plan.days.flatMap((d, i) => (missing.has(d) ? [i] : [])),
     },
     events: buildEventTable('year', Date.UTC(plan.year, 0, 1), acc.m5, YEAR_COLUMNS),
+    reconciled: { rule: RECONCILE_RULE, collapsed: acc.collapsedTotal },
     inputs_digest: plan.digest,
     attribution: STATS_ATTRIBUTION,
   };
@@ -586,6 +622,7 @@ export interface YearBuild {
  * invariant (the caller keeps the year's previous files).
  */
 export function buildYear(plan: YearPlan, reader: InputReader, o: { builder: number; detailed: boolean; registry: ProviderConfig[]; lookup: InputLookup; through: string; log?: (m: string) => void }): YearBuild {
+  const priority = priorityMap(o.registry);
   const started = performance.now();
   const acc = new YearAccumulator(plan.year, plan.days, o.detailed);
   const byMonth = new Map<string, number[]>();
@@ -671,6 +708,26 @@ export function buildYear(plan: YearPlan, reader: InputReader, o: { builder: num
     for (const n of own) acc.add(nodeToFeature(n), minMagOf.get(n.feedId) ?? null);
     o.log?.(`stats: ${month} re-merged in memory: ${res.live_before} -> ${res.live_after} live, ${res.merges.length} fold(s), ${Math.round(performance.now() - t0)} ms`);
   }
+  // The statistical reconciliation over the whole year, the day before and the day after it (when frozen) as context:
+  // a quake's reports across midnight on New Year's Eve count once too.
+  const context: StatsEvent[] = [];
+  if (plan.days.length) {
+    for (const d of [dayShift(plan.days[0]!, -1), dayShift(plan.days[plan.days.length - 1]!, 1)]) {
+      if (d > o.through) continue;
+      const inp = chooseDayInput(d, o.lookup);
+      if (!inp) continue;
+      const floor = inp.minMag == null ? -Infinity : Math.round(inp.minMag * 100);
+      for (const l of lines(reader.dayText(d, inp))) {
+        const r = statsEventOf(JSON.parse(l));
+        if (r?.kind === 'event' && r.ev.magE2 >= RECONCILE_CANDIDATE_E2 && r.ev.magE2 >= floor) context.push(r.ev);
+      }
+    }
+  }
+  const own = new Set(acc.pending.map((e) => e.id));
+  const r0 = performance.now();
+  const dropped = reconcileRows([...acc.pending, ...context.filter((e) => !own.has(e.id))], priority);
+  acc.finish(dropped);
+  o.log?.(`stats: ${plan.year} reconciled: ${acc.collapsedTotal} row(s) collapsed, ${Math.round(performance.now() - r0)} ms`);
   return {
     acc,
     areaBody: areaFileJson(acc, plan, o.builder),
@@ -801,6 +858,7 @@ export interface YearReport {
   inputs?: YearState['inputs'];
   remerged_months?: number;
   folds?: number;
+  collapsed?: number;
   area_bytes?: number;
   year_bytes?: number;
   records?: number;
@@ -911,11 +969,12 @@ export async function runStatsHistory(o: RunOptions): Promise<RunResult> {
       complete: plan.complete,
       check,
       remerged_in_memory: built.remergedMonths.length > 0,
+      collapsed: acc.collapsedTotal,
       inputs,
       dup_suspects: { count: dup.count, n45: feed.m45, ratio: feed.m45 ? Math.round((dup.count / feed.m45) * 10_000) / 10_000 : 0, sample: dup.pairs.slice(0, 10).map(({ a, b, dt_s, km }) => ({ a, b, dt_s, km })) },
       months,
     };
-    const rep: YearReport = { year: y, reason, result: 'built', months, inputs, remerged_months: built.remergedMonths.length, folds: built.folds, area_bytes: Buffer.byteLength(built.areaBody), ...(built.yearBody ? { year_bytes: Buffer.byteLength(built.yearBody) } : {}), records: acc.area.size, ms: built.ms, check };
+    const rep: YearReport = { year: y, reason, result: 'built', months, inputs, remerged_months: built.remergedMonths.length, folds: built.folds, collapsed: acc.collapsedTotal, area_bytes: Buffer.byteLength(built.areaBody), ...(built.yearBody ? { year_bytes: Buffer.byteLength(built.yearBody) } : {}), records: acc.area.size, ms: built.ms, check };
     if (check.gate === 'fail' || check.gate === 'error') {
       // Keep the previous files and their ledger entry; a gate failure is not retried on the same inputs.
       log(`::warning::stats: ${y}: ComCat gate ${check.gate}: ${check.message ?? ''}; the previous files stay`);
@@ -1064,13 +1123,13 @@ export function reportMarkdown(r: RunResult, o: { dryRun: boolean; verify: Verif
   out.push(`# Stats builder run${o.dryRun ? ' (dry run)' : ''}`, '');
   out.push(`through ${r.through}; ${r.stale.length} stale year(s); built ${r.reports.filter((x) => x.result === 'built').length}; ${o.downloads} asset download(s); ${Math.round(o.ms / 1000)} s`, '');
   if (r.reports.length) {
-    out.push('| Year | Reason | Result | Inputs (rem/part/arch/ed) | Re-merged months | Folds | Cells | Area bytes | Year bytes | Feed M6+ / ComCat | Feed M4.5+ / ComCat | Ratios M6 / M4.5 | Gate | s |');
-    out.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+    out.push('| Year | Reason | Result | Inputs (rem/part/arch/ed) | Re-merged months | Folds | Collapsed | Cells | Area bytes | Year bytes | Feed M6+ / ComCat | Feed M4.5+ / ComCat | Ratios M6 / M4.5 | Gate | s |');
+    out.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
     for (const x of r.reports) {
       const i = x.inputs;
       const c = x.check;
       out.push(
-        `| ${x.year} | ${x.reason} | ${x.result}${x.error ? `: ${x.error.slice(0, 120)}` : ''} | ${i ? `${i.remediation}/${i.partition}/${i.archive}/${i.edition}` : ''} | ${x.remerged_months ?? ''} | ${x.folds ?? ''} | ${x.records ?? ''} | ${x.area_bytes ?? ''} | ${x.year_bytes ?? ''} | ${c ? `${c.feed.m6} / ${c.comcat?.m6 ?? '–'}` : ''} | ${c ? `${c.feed.m45} / ${c.comcat?.m45 ?? '–'}` : ''} | ${c ? `${fmtRatio(c.ratio?.m6)} / ${fmtRatio(c.ratio?.m45)}` : ''} | ${c?.gate ?? ''} | ${x.ms != null ? Math.round(x.ms / 1000) : ''} |`,
+        `| ${x.year} | ${x.reason} | ${x.result}${x.error ? `: ${x.error.slice(0, 120)}` : ''} | ${i ? `${i.remediation}/${i.partition}/${i.archive}/${i.edition}` : ''} | ${x.remerged_months ?? ''} | ${x.folds ?? ''} | ${x.collapsed ?? ''} | ${x.records ?? ''} | ${x.area_bytes ?? ''} | ${x.year_bytes ?? ''} | ${c ? `${c.feed.m6} / ${c.comcat?.m6 ?? '–'}` : ''} | ${c ? `${c.feed.m45} / ${c.comcat?.m45 ?? '–'}` : ''} | ${c ? `${fmtRatio(c.ratio?.m6)} / ${fmtRatio(c.ratio?.m45)}` : ''} | ${c?.gate ?? ''} | ${x.ms != null ? Math.round(x.ms / 1000) : ''} |`,
       );
     }
     out.push('');

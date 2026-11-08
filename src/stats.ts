@@ -15,11 +15,14 @@ import {
   STATS_FORMAT,
   OPTIONAL_COLUMNS,
   dayStartMs,
-  dayTableJson,
+  dayRows,
+  dayTableFromRows,
   dayTablePath,
   parseNdjson,
-  type DayTableResult,
+  reconcileRows,
+  type DayRows,
 } from './stats-table.js';
+import { loadRegistry, priorityMap } from './providers.js';
 import { isoFromMs } from './util.js';
 
 /**
@@ -203,6 +206,9 @@ export interface StatsWrite {
   /** Bytes of every file under v1/stats, the index included. */
   bytes: number;
   ms: number;
+  /** The reconciliation over the window: rows left out, and its time. */
+  collapsed: number;
+  reconcileMs: number;
 }
 
 const sha256Hex = (b: string | Buffer): string => createHash('sha256').update(b).digest('hex');
@@ -235,14 +241,16 @@ export function readStatsState(dataDir: string, warn: (m: string) => void = () =
 }
 
 /**
- * Writes the run's stats under `publicDir/v1/stats/` and checks them. `tables` holds the day tables derive built from
- * the event map inside its partition loop; every other window day is read from the data checkout's partition, and a
- * day with neither is listed in `missing_days`. Year and area files are copied byte for byte from the data checkout
- * when their sha256 is the one the ledger names. Files under `v1/stats/` that this run did not write are removed.
+ * Writes the run's stats under `publicDir/v1/stats/` and checks them. `tables` holds the rows of the days derive built
+ * from the event map inside its partition loop; every other window day is read from the data checkout's partition, and
+ * a day with neither is listed in `missing_days`. The rows of the whole window are reconciled together (reconcileRows:
+ * a quake's reports across midnight count once) before each day table is written. Year and area files are copied byte
+ * for byte from the data checkout when their sha256 is the one the ledger names. Files under `v1/stats/` that this run
+ * did not write are removed.
  */
 export function writeStats(
-  tables: ReadonlyMap<string, DayTableResult>,
-  opts: { publicDir: string; dataDir: string; nowMs: number; headSeq: number; config: StatsConfig; warn?: (m: string) => void },
+  tables: ReadonlyMap<string, DayRows>,
+  opts: { publicDir: string; dataDir: string; nowMs: number; headSeq: number; config: StatsConfig; priority?: ReadonlyMap<string, number>; warn?: (m: string) => void },
 ): StatsWrite {
   const started = performance.now();
   const { publicDir, dataDir, nowMs, headSeq, config } = opts;
@@ -255,31 +263,45 @@ export function writeStats(
     written.add(path);
   };
 
-  // 1-2. Day tables.
-  const days: StatsIndexDay[] = [];
+  // 1. The window's rows.
   const missing: string[] = [];
   const fromData: string[] = [];
+  const window: DayRows[] = [];
   for (const date of statsDays(nowMs)) {
-    let t = tables.get(date);
-    if (!t) {
+    let d = tables.get(date);
+    if (!d) {
       const f = dayPartitionFile(dataDir, date);
       if (!existsSync(f)) {
         missing.push(date);
         continue;
       }
-      t = dayTableJson(date, parseNdjson(readFileSync(f, 'utf8')));
+      d = dayRows(date, parseNdjson(readFileSync(f, 'utf8')));
       fromData.push(date);
     }
-    const path = dayTablePath(date);
+    window.push(d);
+  }
+  // 2. The reconciliation over the whole window, then the day tables.
+  const r0 = performance.now();
+  const dropped = reconcileRows(
+    window.flatMap((d) => d.rows),
+    opts.priority ?? priorityMap(loadRegistry()),
+  );
+  const reconcileMs = performance.now() - r0;
+  const days: StatsIndexDay[] = [];
+  let collapsed = 0;
+  for (const d of window) {
+    const t = dayTableFromRows(d, dropped);
+    collapsed += t.collapsed;
+    const path = dayTablePath(d.date);
     put(path, t.body);
-    days.push({ date, path, count: t.count, filtered: t.filtered, bytes: Buffer.byteLength(t.body), sha256: sha256Hex(t.body) });
+    days.push({ date: d.date, path, count: t.count, filtered: t.filtered, bytes: Buffer.byteLength(t.body), sha256: sha256Hex(t.body) });
   }
 
   // 3. Year and area files from the data checkout, verified against the ledger.
   const state = readStatsState(dataDir, warn);
   const years: StatsIndexYear[] = [];
   const area: StatsIndexArea[] = [];
-  const dropped: string[] = [];
+  const notPublished: string[] = [];
   const listed = new Set<string>();
   if (state) {
     for (const y of Object.keys(state.years ?? {}).sort()) {
@@ -322,7 +344,7 @@ export function writeStats(
           return null;
         })();
         if (why) {
-          dropped.push(path);
+          notPublished.push(path);
           warn(`stats: ${path} not published: ${why}`);
         }
       }
@@ -367,9 +389,11 @@ export function writeStats(
     pointer: { path: STATS_INDEX_PATH, url: `https://${DOMAIN}/${STATS_INDEX_PATH}`, head_seq: headSeq, format: STATS_FORMAT },
     errors,
     fromData,
-    dropped,
+    dropped: notPublished,
     bytes,
     ms: performance.now() - started,
+    collapsed,
+    reconcileMs,
   };
 }
 
@@ -513,6 +537,10 @@ export function checkStats(publicDir: string, nowMs: number, schemaDir = SCHEMA_
       continue;
     }
     if (doc['year'] !== y.year) errs.push(`year ${y.path}: year ${String(doc['year'])}`);
+    const yd = doc['days'] as Record<string, unknown[]>;
+    for (const col of ['filtered', 'collapsed', 'bins', 'providers'] as const) {
+      if (yd[col]!.length !== yd['total']!.length) errs.push(`year ${y.path}: days.${col} has ${yd[col]!.length} values, days.total ${yd['total']!.length}`);
+    }
     if (isObj(doc['events'])) errs.push(...checkEventTable(doc['events'], `year ${y.path} events`, { from: Date.parse(`${y.year}-01-01T00:00:00Z`), to: Date.parse(`${y.year + 1}-01-01T00:00:00Z`) }));
   }
   for (const a of index.area) {
@@ -569,7 +597,7 @@ export function safeStats<T extends { errors: string[]; ms: number }>(
 export function deriveStats(input: {
   mode: DerivePublish;
   config: StatsConfig | null;
-  tables: ReadonlyMap<string, DayTableResult>;
+  tables: ReadonlyMap<string, DayRows>;
   loopError?: unknown;
   loopMs?: number;
   publicDir: string;

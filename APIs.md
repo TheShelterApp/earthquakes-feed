@@ -283,7 +283,7 @@ null without `updated`), `delay` the seconds from origin to the feed's `first_in
 files count an input that is not yet re-merged after running that same merge over it (below). The statistics products
 then apply one more step of their own, the reconciliation.
 
-**Reconciliation** (rule `v2`, `reconcileRows` in `src/stats-table.ts`; statistics products only). Even merged, the
+**Reconciliation** (rule `v3`, `reconcileRows` in `src/stats-table.ts`; statistics products only). Even merged, the
 feed keeps some quakes as several events: agencies place and size one quake differently, and the merge (an identity
 rule: it must never join two real quakes) leaves such reports apart. Counted as they are, they put M6+ 1.2–1.7× above
 USGS ComCat. The statistics collapse them at catalogue level, which is explicitly not event identity: the events, the
@@ -292,15 +292,29 @@ they share no provenance provider (a provider's own catalogue is self-consistent
 collapse), their origin times are at most 60 s apart, and one of them is M4.5+, with limits in two tiers by the larger
 magnitude of the two: below M7.0 epicentres at most 100 km and magnitudes at most 1.0 apart; M7.0 and above (great
 quakes, whose locations and magnitudes scatter more between agencies) at most 200 km and 1.5 apart (all on the scaled
-integers: `mag × 100`). Rule `v1` (2026-11-08) had the first tier only. Links are taken closest first (time gap,
+integers: `mag × 100`). Rule `v1` (2026-11-08) had the first tier only.
+
+Before any link, rule `v3` applies the **authoritative-region filter**, USGS ComCat's own catalogue practice (a
+regional network is authoritative for its own region, a global network everywhere; ComCat prefers a contributing
+network's solution only inside that network's authoritative region): an M4.5+ row is left out, counted as
+`out_of_region`, when none of its provenance providers is a global network (`usgs`, `emsc`, `isc`, `geofon`; config
+`STATS_GLOBAL_PROVIDERS`) and its epicentre lies outside the authoritative region of every provider that reported it.
+The regions (config `AUTHORITY_REGIONS`, keyed by catalogue, so RESIF and IPGP are judged by RéNaSS's) are the alerts
+gateway's national boxes, plus coarse national boxes for the catalogues the gateway trusts nowhere (RéNaSS: France,
+the Lesser Antilles, Réunion and Mayotte; ETHZ, KNMI, LMU, USP, GeoSphere), each widened by 5° on every side so that
+an event near a border stays. A provider with no region counts as global. So a row holding a ComCat solution is never
+left out, and nothing below M4.5 is (a local network is authoritative for its small quakes). These rows are regional
+networks' teleseismic solutions of quakes far outside their networks: in 2013 RéNaSS/RESIF solutions of the Santa Cruz
+Islands aftershocks at M6.1–6.6 that ComCat lists smaller, or a 2013-10-25 M7.8 twenty minutes off ComCat's M7.1. Links are taken closest first (time gap,
 then distance, then ids) and join two groups only while the groups share no provider (single link under that
 constraint). Each group keeps one row, its representative: the member holding a `usgs` provenance row (ComCat's
 magnitude is the reference), else the member whose chosen provider ranks first in the registry's provider `priority`
 (as the merge ranks), then the earliest origin, then the smallest feed id; the others are left out and counted. derive
 reconciles the rows of its whole 61-day window together before writing the day tables, so a pair across midnight
 counts once; the stats builder reconciles each year with the day before and the day after it as context. Counters:
-`collapsed` in each day table, `days.collapsed` per day and `reconciled: {rule, collapsed}` in a year file,
-`reconciled: {rule, collapsed}` in an area file.
+`collapsed` and `out_of_region` in each day table, `days.collapsed` and `days.out_of_region` per day and
+`reconciled: {rule, collapsed, out_of_region}` in a year file, `reconciled: {rule, collapsed, out_of_region}` in an
+area file.
 
 **Event table** (format 1, shared by the three file kinds): `{format, kind, t0, count, providers, id, t, lat, lon, mag,
 …optional columns}`, rows sorted by (time, id). `id` is the feed id (`efd_…`, the feature id). `t` holds ms deltas:
@@ -312,16 +326,16 @@ of them, a year table all but `delay`, an area table `depth`, `place`, `prov`.
 
 **Day table** (`v1/stats/days/YYYY-MM-DD.json`): the event table of `kind: "day"` with `date` (after `kind`),
 `t0` = the day's 00:00 UTC, plus `filtered` (the filtered events' times, ms from `t0` each, ascending), `skipped` (a
-count), `collapsed` (a count: rows the reconciliation left out) and `attribution`. `count + filtered.length + skipped +
-collapsed` = the day's live, non-tombstoned features. The day tables
+count), `collapsed` and `out_of_region` (counts: rows the reconciliation left out) and `attribution`. `count +
+filtered.length + skipped + collapsed + out_of_region` = the day's live, non-tombstoned features. The day tables
 of the 45 event-map days are built from the run's own events; today − 60 … today − 46 from the frozen partitions on
 `data`. A day's bytes change only when its events do: ~140 KB a day, 8.6 MB for the 61 days on 2026-11-08 (2.8 MB at brotli
 quality 4: the random part of the feed ids does not compress), so a first sync is a few MB and a refresh moves the index
 and the days that changed (today, yesterday, a revised day).
 
 **Year file** (`v1/stats/year/YYYY.json`): `{format, kind: "year", year, builder, first, through, complete,
-mag_edges_e2: [200, 250, 300, 350, 400, 450, 500, 600, 700], provider_names, days: {total, filtered, collapsed, bins,
-providers, missing}, events, reconciled, inputs_digest, attribution}`. Per day of the year from `first` through `through`: `total` rows,
+mag_edges_e2: [200, 250, 300, 350, 400, 450, 500, 600, 700], provider_names, days: {total, filtered, collapsed, out_of_region,
+bins, providers, missing}, events, reconciled, inputs_digest, attribution}`. Per day of the year from `first` through `through`: `total` rows,
 `filtered`, `bins` (10 counts: < 2, [2, 2.5), … [6, 7), ≥ 7; `atLeast[m]` is the sum of the bins whose lower edge is
 ≥ m), `providers` (indexes into `provider_names`), and `missing` (day indexes with no input). `events` is an event table
 of the M5+ rows. Days after `through` come from the day tables.

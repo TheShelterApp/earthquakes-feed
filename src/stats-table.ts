@@ -1,4 +1,6 @@
+import { AUTHORITY_REGIONS, STATS_GLOBAL_PROVIDERS, STATS_REGION_CATALOGUE, STATS_REGION_MARGIN_DEG } from './config.js';
 import { gatherCellKeys, gridKey, haversineKm } from './geo.js';
+import { catalogueOf } from './util.js';
 import { reviewStatusOfRow } from './review-status.js';
 import type { Extra } from './types.js';
 
@@ -290,8 +292,9 @@ export interface DayTableResult {
   count: number;
   filtered: number;
   skipped: number;
-  /** Rows left out by the statistical reconciliation (reconcileRows). */
+  /** Rows left out by the statistical reconciliation (reconcileRows): collapsed into another row, or out of region. */
   collapsed: number;
+  out_of_region: number;
 }
 
 export const dayStartMs = (date: string): number => Date.parse(`${date}T00:00:00Z`);
@@ -336,15 +339,21 @@ export function dayRows(date: string, features: Iterable<unknown>): DayRows {
  * feed ids): the bytes and the counts the index lists. Invariant: count + filtered + skipped + collapsed = the day's
  * live, non-tombstoned features.
  */
-export function dayTableFromRows(d: DayRows, dropped: ReadonlySet<string> | ReadonlyMap<string, string> = new Set()): DayTableResult {
+export function dayTableFromRows(d: DayRows, rec: Reconciliation = EMPTY_RECONCILIATION): DayTableResult {
   const t0 = dayStartMs(d.date);
-  const kept = d.rows.filter((r) => !dropped.has(r.id));
-  const collapsed = d.rows.length - kept.length;
+  let collapsed = 0;
+  let outOfRegion = 0;
+  const kept = d.rows.filter((r) => {
+    if (rec.outOfRegion.has(r.id)) outOfRegion++;
+    else if (rec.dropped.has(r.id)) collapsed++;
+    else return true;
+    return false;
+  });
   const table = buildEventTable('day', t0, kept, DAY_COLUMNS);
   // Key order of the file: format, kind, date, then the table, then the day's extras.
   const { format, kind, ...rest } = table;
-  const day = { format, kind, date: d.date, ...rest, filtered: d.filtered, skipped: d.skipped, collapsed, attribution: STATS_ATTRIBUTION };
-  return { body: JSON.stringify(day), count: table.count, filtered: d.filtered.length, skipped: d.skipped, collapsed };
+  const day = { format, kind, date: d.date, ...rest, filtered: d.filtered, skipped: d.skipped, collapsed, out_of_region: outOfRegion, attribution: STATS_ATTRIBUTION };
+  return { body: JSON.stringify(day), count: table.count, filtered: d.filtered.length, skipped: d.skipped, collapsed, out_of_region: outOfRegion };
 }
 
 /** The day table of one day's features, reconciled within the day only (derive reconciles across its whole window
@@ -357,7 +366,7 @@ export function dayTableJson(date: string, features: Iterable<unknown>, priority
 // --- the statistical reconciliation (APIs.md, Statistics: "Reconciliation") ---
 
 /** The rule's version, named in the files (`reconciled.rule`) and in the stats builder's digest. */
-export const RECONCILE_RULE = 'v2';
+export const RECONCILE_RULE = 'v3';
 export const RECONCILE_DT_MS = 60_000;
 export const RECONCILE_KM = 100;
 /** |delta mag| x 100 at most. */
@@ -374,6 +383,38 @@ export const RECONCILE_MIN_E2 = 450;
 export const RECONCILE_CANDIDATE_E2 = RECONCILE_MIN_E2 - RECONCILE_DMAG_E2;
 const RECONCILE_CELL_DEG = 1;
 
+/** What the reconciliation leaves out: rows collapsed into their group's representative (id -> representative id) and
+ *  rows outside every reporting catalogue's authoritative region (rule v3). */
+export interface Reconciliation {
+  dropped: ReadonlyMap<string, string>;
+  outOfRegion: ReadonlySet<string>;
+}
+export const EMPTY_RECONCILIATION: Reconciliation = { dropped: new Map(), outOfRegion: new Set() };
+
+const inBox = (lat: number, lon: number, [latMin, latMax, lonMin, lonMax]: readonly [number, number, number, number], m: number): boolean =>
+  lat >= latMin - m && lat <= latMax + m && [lon, lon - 360, lon + 360].some((x) => x >= lonMin - m && x <= lonMax + m);
+
+/**
+ * The authoritative-region filter (rule v3, ComCat's own practice: a regional network is authoritative for its own
+ * region, a global network everywhere): an M4.5+ row is out of region when none of its provenance providers is a global
+ * network (STATS_GLOBAL_PROVIDERS) and its epicentre lies outside the region (AUTHORITY_REGIONS, by catalogue, plus
+ * STATS_REGION_MARGIN_DEG on every side) of every provider that reported it. A provider with no region is treated as
+ * global. A row holding a `usgs` row is therefore never out of region; nothing below M4.5 ever is.
+ */
+export function isOutOfRegion(ev: Pick<StatsEvent, 'magE2' | 'latE4' | 'lonE4' | 'sources'>): boolean {
+  if (ev.magE2 < RECONCILE_MIN_E2 || ev.sources.length === 0) return false;
+  const lat = ev.latE4 / 1e4;
+  const lon = ev.lonE4 / 1e4;
+  for (const p of ev.sources) {
+    if (STATS_GLOBAL_PROVIDERS.has(p)) return false;
+    const cat = STATS_REGION_CATALOGUE.get(p) ?? catalogueOf(p);
+    const boxes = AUTHORITY_REGIONS[cat];
+    if (!boxes) return false;
+    if (boxes.some((b) => inBox(lat, lon, b, STATS_REGION_MARGIN_DEG))) return false;
+  }
+  return true;
+}
+
 /**
  * The statistical reconciliation (statistics products only; the feed's own dedup stays the event identity and the live
  * map is untouched): a catalogue-level collapse of the reports of one quake that the feed still keeps as several events.
@@ -383,15 +424,18 @@ const RECONCILE_CELL_DEG = 1;
  * the groups still share no provider (single link under that constraint). Each group keeps one representative: the
  * member holding a `usgs` provenance row (ComCat's magnitude is the reference), else the member whose chosen provider
  * ranks first in the feed's provider priority (`priority`, lower first, as the Resolver ranks), then the earliest origin,
- * then the smallest id. Returns the dropped rows: id -> its representative's id. O(n log n): a time-sorted sweep with
+ * then the smallest id. Before linking, rows out of region (isOutOfRegion, rule v3) are left out. Returns the rows
+ * left out: collapsed (id -> its representative's id) and out of region. O(n log n): a time-sorted sweep with
  * 1-degree cells (gatherCellKeys). Rows of context (outside the caller's unit) take part like any other; the caller
  * counts only its own.
  */
-export function reconcileRows(rows: readonly StatsEvent[], priority: ReadonlyMap<string, number>): Map<string, string> {
-  const cand = rows.filter((r) => r.magE2 >= RECONCILE_CANDIDATE_E2).sort(compareEvents);
+export function reconcileRows(rows: readonly StatsEvent[], priority: ReadonlyMap<string, number>): Reconciliation {
+  const outOfRegion = new Set<string>();
+  for (const r of rows) if (isOutOfRegion(r)) outOfRegion.add(r.id);
+  const cand = rows.filter((r) => r.magE2 >= RECONCILE_CANDIDATE_E2 && !outOfRegion.has(r.id)).sort(compareEvents);
   const n = cand.length;
   const out = new Map<string, string>();
-  if (n < 2) return out;
+  if (n < 2) return { dropped: out, outOfRegion };
   const lat = cand.map((r) => r.latE4 / 1e4);
   const lon = cand.map((r) => r.lonE4 / 1e4);
   const key = cand.map((_, i) => gridKey(lat[i]!, lon[i]!, RECONCILE_CELL_DEG));
@@ -422,7 +466,7 @@ export function reconcileRows(rows: readonly StatsEvent[], priority: ReadonlyMap
     if (!cells.has(key[i]!)) cells.set(key[i]!, []);
     cells.get(key[i]!)!.push(i);
   }
-  if (!edges.length) return out;
+  if (!edges.length) return { dropped: out, outOfRegion };
   const id = (i: number): string => cand[i]!.id;
   edges.sort((p, q) => p.dt - q.dt || p.km - q.km || (id(p.a) < id(q.a) ? -1 : id(p.a) > id(q.a) ? 1 : id(p.b) < id(q.b) ? -1 : id(p.b) > id(q.b) ? 1 : 0));
   const parent = cand.map((_, i) => i);
@@ -462,7 +506,7 @@ export function reconcileRows(rows: readonly StatsEvent[], priority: ReadonlyMap
     const rep = ms[0]!.id;
     for (const m of ms.slice(1)) out.set(m.id, rep);
   }
-  return out;
+  return { dropped: out, outOfRegion };
 }
 
 /** Parses an NDJSON partition's text into features (blank lines ignored). */

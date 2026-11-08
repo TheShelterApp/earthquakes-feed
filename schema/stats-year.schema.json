@@ -17,11 +17,12 @@
     "provider_names": { "type": "array", "items": { "type": "string" } },
     "days": {
       "type": "object",
-      "required": ["total", "filtered", "collapsed", "bins", "providers", "missing"],
+      "required": ["total", "filtered", "collapsed", "out_of_region", "bins", "providers", "missing"],
       "properties": {
         "total": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
         "filtered": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
-        "collapsed": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "description": "rows the statistical reconciliation left out, per day" },
+        "collapsed": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "description": "rows the statistical reconciliation collapsed into another row, per day" },
+        "out_of_region": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "description": "rows outside every reporting catalogue's authoritative region, per day" },
         "bins": { "type": "array", "items": { "type": "array", "minItems": 10, "maxItems": 10, "items": { "type": "integer", "minimum": 0 } } },
         "providers": { "type": "array", "items": { "type": "array", "items": { "type": "integer", "minimum": 0 } } },
         "missing": { "type": "array", "items": { "type": "integer", "minimum": 0 } }
@@ -31,7 +32,7 @@
       "allOf": [{ "$ref": "stats-table.schema.json#/$defs/eventTable" }],
       "properties": { "kind": { "const": "year" } }
     },
-    "reconciled": { "type": "object", "required": ["rule", "collapsed"], "additionalProperties": false, "properties": { "rule": { "const": "v2" }, "collapsed": { "type": "integer", "minimum": 0 } }, "description": "the statistical reconciliation: its rule and the rows it left out (APIs.md, Statistics, Reconciliation)" },
+    "reconciled": { "type": "object", "required": ["rule", "collapsed", "out_of_region"], "additionalProperties": false, "properties": { "rule": { "const": "v3" }, "collapsed": { "type": "integer", "minimum": 0 }, "out_of_region": { "type": "integer", "minimum": 0 } }, "description": "the statistical reconciliation: its rule and the rows it left out, collapsed into another row or outside every reporting catalogue's authoritative region (APIs.md, Statistics, Reconciliation)" },
     "inputs_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "attribution": { "type": "string" }
   }

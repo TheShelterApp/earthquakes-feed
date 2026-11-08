@@ -877,3 +877,66 @@ export function dataPaths(root = DATA_DIR) {
     statusHistoryDir: join(root, 'status', 'history'),
   };
 }
+
+/** [latMin, latMax, lonMin, lonMax] in degrees; lonMin <= lonMax (no box crosses the antimeridian). */
+export type AuthorityBox = readonly [number, number, number, number];
+
+/**
+ * Global networks for the statistics' authoritative-region filter (APIs.md, Statistics, Reconciliation): a solution
+ * from one of them is authoritative anywhere. The alerts gateway's GLOBAL_PROVIDERS (platform
+ * services/alerts-gateway/src/detect/regional.ts; `gfz` is GEOFON's id there).
+ */
+export const STATS_GLOBAL_PROVIDERS: ReadonlySet<string> = new Set(['usgs', 'emsc', 'isc', 'geofon', 'gfz', 'gcmt']);
+
+/**
+ * The region each regional agency's catalogue is authoritative for, keyed by catalogue (catalogueOf; IPGP's solutions
+ * are carried by RéNaSS's catalogue). Copied from the alerts gateway's AUTHORITY_REGIONS (platform
+ * services/alerts-gateway/src/detect/regional.ts, generous national boxes), plus the catalogues the gateway leaves
+ * authoritative nowhere (it never lets them alert alone), which the statistics need a region for, in the same coarse
+ * national style: RéNaSS (metropolitan France with Corsica, the Lesser Antilles, Réunion and Mayotte: the observatories
+ * whose solutions it carries), ETHZ (Switzerland), KNMI (the Netherlands and the Caribbean Netherlands), LMU (Germany),
+ * USP (Brazil), GeoSphere (Austria). A provider with no entry here and not in STATS_GLOBAL_PROVIDERS is treated as
+ * global (never excluded). The filter adds STATS_REGION_MARGIN_DEG on every side.
+ */
+export const AUTHORITY_REGIONS: Readonly<Record<string, readonly AuthorityBox[]>> = {
+  kagsr: [[46, 62, 150, 175]],
+  cenc: [[18, 54, 73, 135]],
+  jma: [[24, 46, 122, 154]],
+  cwa: [[21, 26.5, 119, 123]],
+  bmkg: [[-11, 6, 95, 141]],
+  phivolcs: [[4.5, 21.5, 116, 127]],
+  geonet: [[-48, -34, 165, 179.99]],
+  ingv: [[35, 48, 6, 19]],
+  noa: [[34, 42, 19, 30]],
+  afad: [[35.5, 42.5, 25.5, 45]],
+  koeri: [[35.5, 42.5, 25.5, 45]],
+  ign: [[27, 44, -19, 5]],
+  ipma: [[36, 42.5, -10, -6], [36, 40, -32, -24], [32, 33.5, -17.5, -16]],
+  imo: [[63, 67, -25, -13]],
+  csn: [[-56, -17, -76, -66]],
+  igp: [[-18.5, 0, -82, -68]],
+  igepn: [[-5, 2, -92, -75]],
+  mexico: [[14, 33, -118, -86]],
+  ovsicori: [[8, 11.5, -86, -82.5]],
+  inpres: [[-55, -21, -73.5, -53]],
+  nrcan: [[41, 84, -141, -52]],
+  ncedc: [[36, 42, -125, -119]],
+  scedc: [[32, 36.5, -121, -114]],
+  aec: [[51, 72, -180, -129]],
+  ga: [[-44, -10, 112, 154]],
+  ncs: [[6, 37, 68, 98]],
+  tmd: [[5.5, 21, 97, 106]],
+  egypt: [[22, 32, 24, 37]],
+  bgs: [[49, 61, -9, 2]],
+  // Not in the gateway's table (authoritative nowhere there):
+  renass: [[41, 51.5, -5.5, 10], [14, 18.5, -63, -60], [-22, -11, 43, 57]],
+  ethz: [[45.5, 48, 5.5, 10.8]],
+  knmi: [[50.5, 54, 3, 7.5], [17, 18.5, -63.5, -62.5]],
+  lmu: [[47, 55.5, 5.5, 15.5]],
+  usp: [[-34, 6, -74, -34]],
+  geosphere: [[46, 49.5, 9.5, 17.5]],
+};
+/** IPGP's solutions are carried by RéNaSS's catalogue (the gateway's CATALOGUE_COPIES): judged by RéNaSS's region. */
+export const STATS_REGION_CATALOGUE: ReadonlyMap<string, string> = new Map([['ipgp', 'renass']]);
+/** Degrees added on every side of an authority box, so a near-border event stays. */
+export const STATS_REGION_MARGIN_DEG = 5;

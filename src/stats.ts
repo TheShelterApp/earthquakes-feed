@@ -208,6 +208,7 @@ export interface StatsWrite {
   ms: number;
   /** The reconciliation over the window: rows left out, and its time. */
   collapsed: number;
+  outOfRegion: number;
   reconcileMs: number;
 }
 
@@ -282,16 +283,18 @@ export function writeStats(
   }
   // 2. The reconciliation over the whole window, then the day tables.
   const r0 = performance.now();
-  const dropped = reconcileRows(
+  const rec = reconcileRows(
     window.flatMap((d) => d.rows),
     opts.priority ?? priorityMap(loadRegistry()),
   );
   const reconcileMs = performance.now() - r0;
   const days: StatsIndexDay[] = [];
   let collapsed = 0;
+  let outOfRegion = 0;
   for (const d of window) {
-    const t = dayTableFromRows(d, dropped);
+    const t = dayTableFromRows(d, rec);
     collapsed += t.collapsed;
+    outOfRegion += t.out_of_region;
     const path = dayTablePath(d.date);
     put(path, t.body);
     days.push({ date: d.date, path, count: t.count, filtered: t.filtered, bytes: Buffer.byteLength(t.body), sha256: sha256Hex(t.body) });
@@ -393,6 +396,7 @@ export function writeStats(
     bytes,
     ms: performance.now() - started,
     collapsed,
+    outOfRegion,
     reconcileMs,
   };
 }
@@ -538,7 +542,7 @@ export function checkStats(publicDir: string, nowMs: number, schemaDir = SCHEMA_
     }
     if (doc['year'] !== y.year) errs.push(`year ${y.path}: year ${String(doc['year'])}`);
     const yd = doc['days'] as Record<string, unknown[]>;
-    for (const col of ['filtered', 'collapsed', 'bins', 'providers'] as const) {
+    for (const col of ['filtered', 'collapsed', 'out_of_region', 'bins', 'providers'] as const) {
       if (yd[col]!.length !== yd['total']!.length) errs.push(`year ${y.path}: days.${col} has ${yd[col]!.length} values, days.total ${yd['total']!.length}`);
     }
     if (isObj(doc['events'])) errs.push(...checkEventTable(doc['events'], `year ${y.path} events`, { from: Date.parse(`${y.year}-01-01T00:00:00Z`), to: Date.parse(`${y.year + 1}-01-01T00:00:00Z`) }));

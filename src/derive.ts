@@ -259,7 +259,7 @@ function main(): void {
       (stats
         ? ` days=${stats.index.days.length} missing=${stats.index.missing_days.length} from_data=${stats.fromData.length}` +
           ` years=${stats.index.years.length} area=${stats.index.area.length} through=${stats.index.through ?? 'null'}` +
-          ` bytes=${stats.bytes} ms=${Math.round(stats.ms + statsLoopMs)} (rows in the loop ${Math.round(statsLoopMs)}, reconciliation ${Math.round(stats.reconcileMs)}: ${stats.collapsed} collapsed)` +
+          ` bytes=${stats.bytes} ms=${Math.round(stats.ms + statsLoopMs)} (rows in the loop ${Math.round(statsLoopMs)}, reconciliation ${Math.round(stats.reconcileMs)}: ${stats.collapsed} collapsed, ${stats.outOfRegion} out of region)` +
           (stats.dropped.length ? ` not_published=${stats.dropped.length}` : '')
         : statsOn ? ' dropped' : ''),
   );

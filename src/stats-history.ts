@@ -34,6 +34,7 @@ import {
   cellOf,
   dayStartMs,
   magBin,
+  type Reconciliation,
   reconcileRows,
   statsEventOf,
 } from './stats-table.js';
@@ -294,6 +295,7 @@ export interface YearState {
   remerged_in_memory: boolean;
   /** Rows the statistical reconciliation left out (APIs.md, Statistics: Reconciliation). */
   collapsed?: number;
+  out_of_region?: number;
   inputs: Record<InputKind, number> & { unmerged_months: number };
   dup_suspects?: { count: number; n45: number; ratio: number; sample: { a: string; b: string; dt_s: number; km: number }[] };
   months?: Record<string, MonthCounts>;
@@ -385,6 +387,7 @@ export class YearAccumulator {
     this.bins = days.map(() => new Array<number>(10).fill(0));
     this.providers = days.map(() => new Set<string>());
     this.collapsed = days.map(() => 0);
+    this.outOfRegion = days.map(() => 0);
     this.t0 = days.length ? dayStartMs(days[0]!) : 0;
     this.tEnd = days.length ? dayStartMs(days[days.length - 1]!) + DAY : 0;
   }
@@ -423,15 +426,21 @@ export class YearAccumulator {
   /** Per day: rows the reconciliation left out. */
   readonly collapsed: number[];
   collapsedTotal = 0;
+  /** Per day: rows outside every reporting catalogue's authoritative region (rule v3). */
+  readonly outOfRegion: number[];
+  outOfRegionTotal = 0;
   private finished = false;
 
-  /** Counts the waiting rows the reconciliation kept (`dropped`: id -> representative) and the ones it left out. */
-  finish(dropped: ReadonlyMap<string, string>): void {
+  /** Counts the waiting rows the reconciliation kept and the ones it left out (collapsed, out of region). */
+  finish(rec: Reconciliation): void {
     if (this.finished) throw new Error('YearAccumulator.finish called twice');
     this.finished = true;
     for (const ev of this.pending) {
       const di = this.dayIndex.get(eventDayKey(ev.timeMs))!;
-      if (dropped.has(ev.id)) {
+      if (rec.outOfRegion.has(ev.id)) {
+        this.outOfRegion[di]!++;
+        this.outOfRegionTotal++;
+      } else if (rec.dropped.has(ev.id)) {
         this.collapsed[di]!++;
         this.collapsedTotal++;
       } else this.count(ev, di);
@@ -510,7 +519,7 @@ export function areaFileJson(acc: YearAccumulator, plan: YearPlan, builder: numb
     m45: cells.map((c) => acc.area.get(c)![1]),
     mmax: cells.map((c) => acc.area.get(c)![2]),
     m6: buildEventTable('area', t0, acc.m6, AREA_COLUMNS),
-    reconciled: { rule: RECONCILE_RULE, collapsed: acc.collapsedTotal },
+    reconciled: { rule: RECONCILE_RULE, collapsed: acc.collapsedTotal, out_of_region: acc.outOfRegionTotal },
     inputs_digest: plan.digest,
     attribution: STATS_ATTRIBUTION,
   };
@@ -536,12 +545,13 @@ export function yearFileJson(acc: YearAccumulator, plan: YearPlan, builder: numb
       total: acc.total,
       filtered: acc.filtered,
       collapsed: acc.collapsed,
+      out_of_region: acc.outOfRegion,
       bins: acc.bins,
       providers: acc.providers.map((s) => [...s].map((p) => pIndex.get(p)!).sort((a, b) => a - b)),
       missing: plan.days.flatMap((d, i) => (missing.has(d) ? [i] : [])),
     },
     events: buildEventTable('year', Date.UTC(plan.year, 0, 1), acc.m5, YEAR_COLUMNS),
-    reconciled: { rule: RECONCILE_RULE, collapsed: acc.collapsedTotal },
+    reconciled: { rule: RECONCILE_RULE, collapsed: acc.collapsedTotal, out_of_region: acc.outOfRegionTotal },
     inputs_digest: plan.digest,
     attribution: STATS_ATTRIBUTION,
   };
@@ -745,9 +755,9 @@ export function buildYear(plan: YearPlan, reader: InputReader, o: { builder: num
   }
   const own = new Set(acc.pending.map((e) => e.id));
   const r0 = performance.now();
-  const dropped = reconcileRows([...acc.pending, ...context.filter((e) => !own.has(e.id))], priority);
-  acc.finish(dropped);
-  o.log?.(`stats: ${plan.year} reconciled: ${acc.collapsedTotal} row(s) collapsed, ${Math.round(performance.now() - r0)} ms`);
+  const rec = reconcileRows([...acc.pending, ...context.filter((e) => !own.has(e.id))], priority);
+  acc.finish(rec);
+  o.log?.(`stats: ${plan.year} reconciled: ${acc.collapsedTotal} row(s) collapsed, ${acc.outOfRegionTotal} out of region, ${Math.round(performance.now() - r0)} ms`);
   return {
     acc,
     areaBody: areaFileJson(acc, plan, o.builder),
@@ -879,6 +889,7 @@ export interface YearReport {
   remerged_months?: number;
   folds?: number;
   collapsed?: number;
+  out_of_region?: number;
   area_bytes?: number;
   year_bytes?: number;
   records?: number;
@@ -990,11 +1001,12 @@ export async function runStatsHistory(o: RunOptions): Promise<RunResult> {
       check,
       remerged_in_memory: built.remergedMonths.length > 0,
       collapsed: acc.collapsedTotal,
+      out_of_region: acc.outOfRegionTotal,
       inputs,
       dup_suspects: { count: dup.count, n45: feed.m45, ratio: feed.m45 ? Math.round((dup.count / feed.m45) * 10_000) / 10_000 : 0, sample: dup.pairs.slice(0, 10).map(({ a, b, dt_s, km }) => ({ a, b, dt_s, km })) },
       months,
     };
-    const rep: YearReport = { year: y, reason, result: 'built', months, inputs, remerged_months: built.remergedMonths.length, folds: built.folds, collapsed: acc.collapsedTotal, area_bytes: Buffer.byteLength(built.areaBody), ...(built.yearBody ? { year_bytes: Buffer.byteLength(built.yearBody) } : {}), records: acc.area.size, ms: built.ms, check };
+    const rep: YearReport = { year: y, reason, result: 'built', months, inputs, remerged_months: built.remergedMonths.length, folds: built.folds, collapsed: acc.collapsedTotal, out_of_region: acc.outOfRegionTotal, area_bytes: Buffer.byteLength(built.areaBody), ...(built.yearBody ? { year_bytes: Buffer.byteLength(built.yearBody) } : {}), records: acc.area.size, ms: built.ms, check };
     if (check.gate === 'fail' || check.gate === 'error') {
       // Keep the previous files and their ledger entry; a gate failure is not retried on the same inputs.
       log(`::warning::stats: ${y}: ComCat gate ${check.gate}: ${check.message ?? ''}; the previous files stay`);
@@ -1143,13 +1155,13 @@ export function reportMarkdown(r: RunResult, o: { dryRun: boolean; verify: Verif
   out.push(`# Stats builder run${o.dryRun ? ' (dry run)' : ''}`, '');
   out.push(`through ${r.through}; ${r.stale.length} stale year(s); built ${r.reports.filter((x) => x.result === 'built').length}; ${o.downloads} asset download(s); ${Math.round(o.ms / 1000)} s`, '');
   if (r.reports.length) {
-    out.push('| Year | Reason | Result | Inputs (rem/part/arch/ed) | Re-merged months | Folds | Collapsed | Cells | Area bytes | Year bytes | Feed M6+ / ComCat | Feed M4.5+ / ComCat | Ratios M6 / M4.5 | Gate | s |');
-    out.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+    out.push('| Year | Reason | Result | Inputs (rem/part/arch/ed) | Re-merged months | Folds | Collapsed | Out of region | Cells | Area bytes | Year bytes | Feed M6+ / ComCat | Feed M4.5+ / ComCat | Ratios M6 / M4.5 | Gate | s |');
+    out.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
     for (const x of r.reports) {
       const i = x.inputs;
       const c = x.check;
       out.push(
-        `| ${x.year} | ${x.reason} | ${x.result}${x.error ? `: ${x.error.slice(0, 120)}` : ''} | ${i ? `${i.remediation}/${i.partition}/${i.archive}/${i.edition}` : ''} | ${x.remerged_months ?? ''} | ${x.folds ?? ''} | ${x.collapsed ?? ''} | ${x.records ?? ''} | ${x.area_bytes ?? ''} | ${x.year_bytes ?? ''} | ${c ? `${c.feed.m6} / ${c.comcat?.m6 ?? '–'}` : ''} | ${c ? `${c.feed.m45} / ${c.comcat?.m45 ?? '–'}` : ''} | ${c ? `${fmtRatio(c.ratio?.m6)} / ${fmtRatio(c.ratio?.m45)}` : ''} | ${c?.gate ?? ''} | ${x.ms != null ? Math.round(x.ms / 1000) : ''} |`,
+        `| ${x.year} | ${x.reason} | ${x.result}${x.error ? `: ${x.error.slice(0, 120)}` : ''} | ${i ? `${i.remediation}/${i.partition}/${i.archive}/${i.edition}` : ''} | ${x.remerged_months ?? ''} | ${x.folds ?? ''} | ${x.collapsed ?? ''} | ${x.out_of_region ?? ''} | ${x.records ?? ''} | ${x.area_bytes ?? ''} | ${x.year_bytes ?? ''} | ${c ? `${c.feed.m6} / ${c.comcat?.m6 ?? '–'}` : ''} | ${c ? `${c.feed.m45} / ${c.comcat?.m45 ?? '–'}` : ''} | ${c ? `${fmtRatio(c.ratio?.m6)} / ${fmtRatio(c.ratio?.m45)}` : ''} | ${c?.gate ?? ''} | ${x.ms != null ? Math.round(x.ms / 1000) : ''} |`,
       );
     }
     out.push('');

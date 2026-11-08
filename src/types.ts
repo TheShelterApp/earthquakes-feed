@@ -93,6 +93,15 @@ export interface Observation {
   superseded_by?: string;
 }
 
+/** Another catalogue's solutions served by a provider (ProviderConfig.catalogues). */
+export interface ProviderCatalogue {
+  /** Display name, for NOTICE and ATTRIBUTIONS.md. */
+  name: string;
+  license: string;
+  attribution: string;
+  doi: string | null;
+}
+
 export interface ProviderConfig {
   id: string;
   name: string;
@@ -130,6 +139,10 @@ export interface ProviderConfig {
   license: string;
   attribution: string;
   doi: string | null;
+  /** Catalogues this provider distributes whose rows carry their own licence, keyed by the row's `fields.net` in
+   *  lower case (ComCat: ISC-GEM's `iscgem`, `iscgemsup`). src/row-license.ts applies them; scripts/gen-attributions.mjs
+   *  lists them in NOTICE and ATTRIBUTIONS.md. */
+  catalogues?: Record<string, ProviderCatalogue>;
   contact: string;
   params?: Record<string, string>;
   notes?: string;

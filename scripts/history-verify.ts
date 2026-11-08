@@ -2,12 +2,14 @@
  * Verify deep-history assets (PF-5j) independently of the run that made them (read-only).
  *
  * Usage:
- *   npx tsx scripts/history-verify.ts <releases dir> <history.json> [--recount]
+ *   npx tsx scripts/history-verify.ts <releases dir> <history.json> [--era <id>] [--recount]
  *
  *   <releases dir>  assets laid out as <tag>/<asset>: a dry run's HISTORY_OUT/releases, or the `history-YYYY`
  *                   Releases downloaded with `gh release download history-YYYY -D <dir>/history-YYYY`
  *   <history.json>  the index that lists them (HISTORY_OUT/history.json, or the data branch's
  *                   knowledge/index/history.json)
+ *   --era <id>      verify one era alone (its raw assets and current editions; only they need to be on disk), e.g.
+ *                   `--era B` after downloading history-1973..history-1999; cross-edition uniqueness then runs within it
  *   --recount       ask each source with a count service (ComCat, EMSC) again, one request per raw asset 1.1 s apart, for
  *                   its count of the asset's range today, and compare it with the count recorded at fetch time
  *
@@ -22,7 +24,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type EditionMeta, type RawInput, parseRawText } from '../src/history-build.js';
-import { allPeriods, loadHistoryConfig } from '../src/history-config.js';
+import { type Period, allPeriods, loadHistoryConfig } from '../src/history-config.js';
 import { HISTORY_USER_AGENT, historyQueryUrl } from '../src/history-fetch.js';
 import { currentEdition, parseIndex } from '../src/history-index.js';
 import { verifyEdition } from '../src/history-verify.js';
@@ -30,19 +32,29 @@ import { loadRegistry } from '../src/providers.js';
 
 const [dir, indexPath, ...flags] = process.argv.slice(2);
 if (!dir || !indexPath) {
-  console.error('usage: npx tsx scripts/history-verify.ts <releases dir> <history.json> [--recount]');
+  console.error('usage: npx tsx scripts/history-verify.ts <releases dir> <history.json> [--era <id>] [--recount]');
   process.exit(2);
 }
 const recount = flags.includes('--recount');
+const eraAt = flags.indexOf('--era');
+const eraId = eraAt >= 0 ? flags[eraAt + 1] : undefined;
 const cfg = loadHistoryConfig();
 const registry = loadRegistry();
+if (eraAt >= 0 && !cfg.eras.some((e) => e.id === eraId)) {
+  console.error(`--era ${eraId ?? ''}: no such era in the history config (${cfg.eras.map((e) => e.id).join(', ')})`);
+  process.exit(2);
+}
+const periods: Period[] = allPeriods(cfg).filter((p) => eraId == null || p.eraId === eraId);
+const periodKeys = new Set(periods.map((p) => p.key));
 const idx = parseIndex(readFileSync(indexPath, 'utf8'));
+// One era: only its raw assets are read (and recounted); the other eras' assets need not be on disk.
+const rawEntries = idx.raw.filter((r) => periodKeys.has(r.period));
 const sha = (f: string): string => createHash('sha256').update(readFileSync(f)).digest('hex');
 const errors: string[] = [];
 const work = mkdtempSync(join(tmpdir(), 'efd-history-verify-'));
 
 const raws = new Map<string, RawInput>();
-for (const r of idx.raw) {
+for (const r of rawEntries) {
   const f = join(dir, r.tag, r.asset);
   const s = sha(f);
   if (s !== r.sha256) errors.push(`${r.asset}: checksum ${s}, the index says ${r.sha256}`);
@@ -54,7 +66,7 @@ for (const r of idx.raw) {
 const allIds = new Map<string, string>();
 const allKeys = new Map<string, string>();
 let totalEvents = 0;
-for (const p of allPeriods(cfg)) {
+for (const p of periods) {
   const e = currentEdition(idx, p.key);
   if (!e) continue;
   const f = join(dir, e.tag, e.asset);
@@ -94,7 +106,7 @@ rmSync(work, { recursive: true, force: true });
 
 if (recount) {
   const byId = new Map(registry.map((p) => [p.id, p]));
-  for (const r of idx.raw) {
+  for (const r of rawEntries) {
     if (r.provider_count == null) continue;
     const p = byId.get(r.source)!;
     const url = historyQueryUrl(p, Date.parse(r.start), Date.parse(r.end), { limit: 0, minMagnitude: r.fetch_min_magnitude, count: true });
@@ -107,7 +119,8 @@ if (recount) {
   }
 }
 
-console.log(`history-verify: ${idx.editions.length} edition(s), ${totalEvents} events in the current editions, ${idx.raw.length} raw asset(s), ${errors.length} error(s)`);
+const editions = idx.editions.filter((e) => periodKeys.has(e.period)).length;
+console.log(`history-verify${eraId ? ` (era ${eraId})` : ''}: ${editions} edition(s), ${totalEvents} events in the current editions, ${rawEntries.length} raw asset(s), ${errors.length} error(s)`);
 if (errors.length) {
   for (const m of errors.slice(0, 50)) console.error(`✗ ${m}`);
   process.exit(1);

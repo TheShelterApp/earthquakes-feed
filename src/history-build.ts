@@ -1,7 +1,7 @@
 import { nodeToFeature } from './bitemporal.js';
 import { Resolver } from './dedup.js';
 import { haversineKm } from './geo.js';
-import { FETCH_MARGIN_MAG, type HistoryEra, type Period, dayKeyOf, periodDays } from './history-config.js';
+import { type HistoryEra, type Period, dayKeyOf, fetchFloorOf, periodDays } from './history-config.js';
 import type { WindowLog } from './history-fetch.js';
 import { configMap, priorityMap } from './providers.js';
 import { byIngestOrder, emptyTally, screen } from './quality.js';
@@ -176,7 +176,7 @@ export function buildEdition(input: BuildInput): { dayFiles: Map<string, string>
     if (d >= boundary) fail(`day ${d} is not before the boundary ${boundary}`);
     if (archivedDays.has(d)) fail(`day ${d} is already in an archive-YYYY-MM Release`);
   }
-  const fetchFloor = era.minMagnitude == null ? null : era.minMagnitude - FETCH_MARGIN_MAG;
+  const fetchFloor = fetchFloorOf(era);
   const bySource = new Map<string, RawInput>();
   for (const r of raws) {
     const h = r.header;

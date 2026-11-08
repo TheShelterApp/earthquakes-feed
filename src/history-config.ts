@@ -34,8 +34,16 @@ export interface HistoryEra {
   /** First UTC day after the era (exclusive), YYYY-MM-DD. */
   to: string;
   /** An event is kept when the largest magnitude any of its sources gives reaches this; null keeps every event. Rows
-   *  are fetched from this minus FETCH_MARGIN_MAG, so every agency's row of a qualifying event is there. */
+   *  are fetched from this minus the era's fetch margin (fetchFloorOf), so every agency's row of a qualifying event
+   *  is there. */
   minMagnitude: number | null;
+  /** How far under minMagnitude rows are fetched; FETCH_MARGIN_MAG when absent; 0 to 1; requires a minMagnitude. Only
+   *  a multi-source era needs a margin (a quake one agency puts at 4.6 and another at 4.4 must keep both rows); a
+   *  single-source era fetches from its floor, because an event's largest magnitude is then its only row's. */
+  fetchMarginMag?: number;
+  /** Every month of the era has rows: an empty answer is a fault, so the month fails and is asked again next run, and
+   *  the empty-month probe does not run (a sealed month is never fetched again, so an empty seal would be final). */
+  expectRows?: boolean;
   /** Provider ids (providers/registry.json) walked in this era, in order. */
   sources: string[];
 }
@@ -61,6 +69,11 @@ export interface HistoryConfig {
 export const FETCH_LIMIT_DEFAULT = 5000;
 /** The fetch floor sits this far under an era's magnitude floor (see HistoryEra.minMagnitude). */
 export const FETCH_MARGIN_MAG = 0.5;
+
+/** The minmagnitude a source month of the era is fetched with (the raw header's `fetch_min_magnitude`); null for an
+ *  era without a floor. Rounded to 0.01 so 4.5 - 0.5 is exactly 4 (the raw header check compares with ===). */
+export const fetchFloorOf = (era: HistoryEra): number | null =>
+  era.minMagnitude == null ? null : Math.round((era.minMagnitude - (era.fetchMarginMag ?? FETCH_MARGIN_MAG)) * 100) / 100;
 
 export interface Period {
   /** YYYY-MM */
@@ -104,6 +117,11 @@ export function configProblems(cfg: HistoryConfig, registry: ProviderConfig[]): 
     if (!era.to.endsWith('-01') && era.to !== cfg.boundary) out.push(`era ${era.id}: to ${era.to} is neither the first day of a month nor the boundary`);
     if (isDay(cfg.boundary) && dayMs(era.to) > dayMs(cfg.boundary)) out.push(`era ${era.id}: to ${era.to} is after the boundary ${cfg.boundary}`);
     if (era.minMagnitude != null && typeof era.minMagnitude !== 'number') out.push(`era ${era.id}: minMagnitude must be a number or null`);
+    if (era.fetchMarginMag !== undefined) {
+      if (typeof era.fetchMarginMag !== 'number' || !(era.fetchMarginMag >= 0 && era.fetchMarginMag <= 1)) out.push(`era ${era.id}: fetchMarginMag must be a number from 0 to 1`);
+      if (era.minMagnitude == null) out.push(`era ${era.id}: fetchMarginMag needs a minMagnitude`);
+    }
+    if (era.expectRows !== undefined && typeof era.expectRows !== 'boolean') out.push(`era ${era.id}: expectRows must be a boolean`);
     if (!Array.isArray(era.sources) || !era.sources.length) out.push(`era ${era.id}: no sources`);
     for (const s of era.sources ?? []) {
       const p = byId.get(s);

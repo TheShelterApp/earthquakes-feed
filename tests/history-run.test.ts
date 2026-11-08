@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -557,4 +557,103 @@ test('stall: a month whose fetch the time budget cuts short, and a seal the budg
   assert.deepEqual(r2.ctx.report.budget, ['sealing 2022-12 on'], 'listed once, though the walk tried to seal twice');
   assert.deepEqual(r2.ctx.report.sealed, []);
   assert.deepEqual(parseState(r2.files.state!).stall, { since: hourIso(0), runs: 2, unexplained: 0, alarmed_at: null });
+});
+
+// Era B (platform plan 2026-11-08, streams/eraB.md): an era whose every month has rows (`expectRows`) takes an empty
+// answer as a fault without the empty-month probe; an idle run lists no Release; history-verify --era reads one era.
+
+test('expectRows: an empty answer fails the month with no probe request and no upload; it is asked again next run', { skip: !hasZstd && 'zstd not installed' }, async () => {
+  const era: HistoryEra = { ...ERA, sources: ['geofon'], minMagnitude: 4.5, fetchMarginMag: 0, expectRows: true };
+  const ctx = ctxOf({ cfg: { ...CFG, eras: [era] } });
+  geofonDecemberFetched(ctx);
+  // Without expectRows this very setup probes December again (the test above counts 3 requests).
+  const h = http(() => ({ status: 204, body: '', latencyMs: 1, retryAfterMs: null }));
+  ctx.fetchOptions = h.fetchOptions;
+  // December is indexed already, so November is the one pending month.
+  await fetchUnits(ctx, 4);
+  assert.equal(h.calls.length, 1, h.calls.join(' '));
+  assert.match(h.calls[0]!, /starttime=2022-11-01T00(%3A|:)00(%3A|:)00.*minmagnitude=4\.5/);
+  assert.deepEqual(ctx.idx.raw.map((r) => r.period), ['2022-12']);
+  assert.deepEqual(ctx.store.list('history-2022').map((a) => a.name), ['raw-geofon-2022-12.ndjson.zst'], 'nothing uploaded');
+  assert.deepEqual(ctx.report.empty_after_rows, []);
+  assert.equal(ctx.idx.attempts['geofon:2022-11']?.failures, 1);
+  assert.match(ctx.idx.attempts['geofon:2022-11']!.last_error, /geofon:2022-11 answered no rows \(count n\/a\) where every month of era pilot has rows/);
+});
+
+test('expectRows: a count service answering 0 fails the month after the count alone (no query, no probe)', async () => {
+  const era: HistoryEra = { ...ERA, from: '2022-12-01', minMagnitude: 4.5, fetchMarginMag: 0, expectRows: true };
+  const h = http((url) => (url.includes('/count?') ? { status: 200, body: '{"count":0}', latencyMs: 1, retryAfterMs: null } : { status: 500, body: 'unexpected', latencyMs: 1, retryAfterMs: null }));
+  const ctx = ctxOf({ cfg: { ...CFG, eras: [era] }, fetchOptions: h.fetchOptions });
+  await fetchUnits(ctx, 4);
+  assert.ok(h.calls.length > 0 && h.calls.every((u) => u.includes('/count?') && u.includes('minmagnitude=4.5')), h.calls.join(' '));
+  assert.deepEqual(ctx.idx.raw, []);
+  assert.equal(ctx.idx.attempts['usgs:2022-12']?.failures, 1);
+  assert.match(ctx.idx.attempts['usgs:2022-12']!.last_error, /usgs:2022-12 answered no rows \(count 0\) where every month of era pilot has rows/);
+});
+
+test('takeover: an idle run (nothing pending, nothing to seal) lists no Release; a run with work left does', { skip: !hasZstd && 'zstd not installed' }, async () => {
+  const store = new LocalStore(join(mkdtempSync(join(tmpdir(), 'history-idle-')), 'releases'));
+  const listed: string[] = [];
+  const counting: HistoryStore = Object.assign(Object.create(store) as HistoryStore, {
+    list: (tag: string) => {
+      listed.push(tag);
+      return store.list(tag);
+    },
+  });
+  // Work left: listed.
+  const busy = ctxOf({ store: counting });
+  adoptOrphans(busy);
+  assert.deepEqual(listed, ['history-2022']);
+  // Walk the era to its end, then an idle run.
+  const done = await hourly(store, { index: indexText(emptyIndex(CFG.boundary)), state: null }, hourIso(0), answering());
+  assert.equal(done.run.pending + done.run.unsealed, 0);
+  listed.length = 0;
+  const idle = ctxOf({ store: counting, idx: parseIndex(done.files.index) });
+  adoptOrphans(idle);
+  assert.deepEqual(listed, []);
+  assert.deepEqual(idle.report.adopted, []);
+});
+
+test('history-verify --era: one era is verified with only its own assets on disk; without --era the missing assets fail', { skip: !hasZstd && 'zstd not installed' }, async () => {
+  // A synthetic pair of eras: A (2022-12, every magnitude) and B (2022-11, M4.5 from its floor), both ComCat.
+  const A2: HistoryEra = { id: 'A', from: '2022-12-01', to: '2023-01-01', minMagnitude: null, sources: ['usgs'] };
+  const B2: HistoryEra = { id: 'B', from: '2022-11-01', to: '2022-12-01', minMagnitude: 4.5, fetchMarginMag: 0, expectRows: true, sources: ['usgs'] };
+  const cfg: HistoryConfig = { ...CFG, eras: [A2, B2] };
+  const events = [
+    { t: Date.UTC(2022, 11, 10, 5), mag: 2.1, lat: 10 },
+    { t: Date.UTC(2022, 10, 10, 5), mag: 4.5, lat: 20 },
+    { t: Date.UTC(2022, 10, 20, 7), mag: 6.0, lat: -30 },
+  ];
+  const h = http((url) => {
+    const q = new URL(url).searchParams;
+    const s = Date.parse(`${q.get('starttime')}Z`);
+    const e = Date.parse(`${q.get('endtime')}Z`);
+    const min = q.has('minmagnitude') ? Number(q.get('minmagnitude')) : -Infinity;
+    const hit = events.filter((x) => x.t >= s && x.t < e && x.mag >= min);
+    if (url.includes('/count?')) return { status: 200, body: JSON.stringify({ count: hit.length }), latencyMs: 1, retryAfterMs: null };
+    const features = hit.map((x) => ({ id: `us${x.t}`, properties: { time: x.t, mag: x.mag, place: 'x', updated: x.t, net: 'us', type: 'earthquake' }, geometry: { coordinates: [10, x.lat, 5] } }));
+    return { status: 200, body: JSON.stringify({ type: 'FeatureCollection', metadata: { count: hit.length }, features }), latencyMs: 1, retryAfterMs: null };
+  });
+  const ctx = ctxOf({ cfg, fetchOptions: h.fetchOptions });
+  const run = await runWalk(ctx, emptyState(), 10);
+  assert.equal(run.fatal, null);
+  assert.deepEqual(ctx.report.failed, []);
+  assert.deepEqual(ctx.idx.editions.map((e) => [e.period, e.era, e.events, e.min_magnitude]), [['2022-12', 'A', 1, null], ['2022-11', 'B', 2, 4.5]]);
+  assert.deepEqual(ctx.idx.raw.map((r) => [r.period, r.fetch_min_magnitude]).sort(), [['2022-11', 4.5], ['2022-12', null]]);
+  const releases = join(ctx.work, '..', 'releases');
+  // Only era B's assets on disk.
+  for (const a of ctx.store.list('history-2022')) if (a.name.includes('2022-12')) rmSync(join(releases, 'history-2022', a.name));
+  const files = mkdtempSync(join(tmpdir(), 'history-verify-era-'));
+  writeFileSync(join(files, 'history.json'), indexText(ctx.idx));
+  writeFileSync(join(files, 'history-config.json'), JSON.stringify(cfg));
+  const verify = (...flags: string[]) =>
+    spawnSync(process.execPath, ['--import', 'tsx', 'scripts/history-verify.ts', releases, join(files, 'history.json'), ...flags], {
+      env: { ...process.env, HISTORY_CONFIG: join(files, 'history-config.json') },
+      encoding: 'utf8',
+    });
+  const one = verify('--era', 'B');
+  assert.equal(one.status, 0, one.stderr + one.stdout);
+  assert.match(one.stdout, /history-verify \(era B\): 1 edition\(s\), 2 events in the current editions, 1 raw asset\(s\), 0 error\(s\)/);
+  assert.notEqual(verify().status, 0, 'every era: era A\'s assets are missing');
+  assert.equal(verify('--era', 'C').status, 2, 'an unknown era is a usage error');
 });

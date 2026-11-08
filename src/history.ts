@@ -10,13 +10,13 @@ import { DATA_DIR, dataPaths } from './config.js';
 import { type ContextInput, type EditionMeta, type RawHeader, type RawInput, EDITION_KIND, RAW_KIND, buildEdition, parseRawText, rawFileText } from './history-build.js';
 import {
   FETCH_LIMIT_DEFAULT,
-  FETCH_MARGIN_MAG,
   type HistoryConfig,
   type HistoryEra,
   type Period,
   allPeriods,
   configProblems,
   editionAssetName,
+  fetchFloorOf,
   historyTag,
   loadHistoryConfig,
   nextEdition,
@@ -153,7 +153,6 @@ export interface Ctx {
 }
 
 const eraOf = (cfg: HistoryConfig, p: Period): HistoryEra => cfg.eras.find((e) => e.id === p.eraId)!;
-const fetchFloorOf = (era: HistoryEra): number | null => (era.minMagnitude == null ? null : era.minMagnitude - FETCH_MARGIN_MAG);
 
 function assets(ctx: Ctx, tag: string): AssetInfo[] {
   let a = ctx.assetCache.get(tag);
@@ -243,6 +242,14 @@ function markUnused(ctx: Ctx, tag: string, asset: string, why: string): void {
  * is listed as unused and its name is never used again.
  */
 export function adoptOrphans(ctx: Ctx): void {
+  // Idle run: nothing to fetch and nothing to seal means no orphan can exist, so the Releases are not listed (one
+  // listing per history-* tag, about 100 REST calls of the shared hourly budget with 51 tags). Proof: the walk uploads
+  // only a raw asset of a pending unit (fetchUnits) and only an edition of a period to seal (sealPeriods), and it
+  // indexes both in the same run. An orphan is the upload of a run whose index never landed, so the committed index
+  // this run read still holds that unit pending or that period unsealed. An orphan that sits beside an indexed copy
+  // (a later run fetched the month again) is never adopted anyway: it only stays out of `unused`, and no name is reused
+  // because new names are chosen from a fresh listing (nextRawGeneration, nextEdition).
+  if (pendingUnits(ctx.cfg, ctx.idx).length === 0 && periodsToSeal(ctx.cfg, ctx.idx).length === 0) return;
   const periods = new Map(allPeriods(ctx.cfg).map((p) => [p.key, p]));
   const tags = [...new Set([...periods.keys()].map(historyTag))];
   const known = new Set([...ctx.idx.raw.map((r) => r.asset), ...ctx.idx.editions.map((e) => e.asset), ...ctx.idx.unused.map((u) => u.asset)]);
@@ -416,8 +423,12 @@ export async function fetchUnits(ctx: Ctx, maxUnits: number, onMonthComplete?: (
     // PF-5j-NOA). A raw asset is immutable and a sealed month is never fetched again, so the empty answer is kept only
     // once the source still answers rows it gave for the newer month; otherwise the month fails like any other failure
     // and is asked again next run (round 15 review).
+    // An era whose every month has rows (expectRows) takes an empty answer as a fault without probing: the month fails
+    // and is asked again next run.
     let emptyAfter: { newer: string; rows: number } | null = null;
-    if (res.ok && res.rows.length === 0) {
+    if (res.ok && res.rows.length === 0 && era.expectRows) {
+      res = { ok: false, error: `${key} answered no rows (count ${res.providerCount ?? 'n/a'}) where every month of era ${era.id} has rows`, windows: res.windows, requests: res.requests };
+    } else if (res.ok && res.rows.length === 0) {
       const newer = allPeriods(ctx.cfg).find((q) => q.startMs === u.period.endMs);
       const newerRaw = newer ? rawOf(ctx.idx, u.source, newer.key) : undefined;
       if (newer && newerRaw && newerRaw.rows > 0) {

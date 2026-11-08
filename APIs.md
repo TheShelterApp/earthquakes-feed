@@ -986,7 +986,8 @@ sources measured in 35 months and interpolated, about ±30 % for those):
 | Walk time | about 4 min per month on a runner (requests, 18 uploads read back, the build): about 18 h, about 110 hourly runs, about 5 days; about ten swarm months build for 6–9 min each |
 | `knowledge/index/history.json` | about 9.6 KB per month: about 2.7 MB at the end (the commit job's cap is 8 MB) |
 
-The side index of earliest solutions follows the editions back (*Earliest solutions* below): era A gives it about
+The side index of earliest solutions follows the editions back to 2000-01-01, no further (*Earliest solutions* below):
+era A gives it about
 2.8 M more ComCat reports (one request each), about 1.2 M NCEDC / SCEDC reports read through ComCat and about 0.37 M
 INGV reports, at its own hourly pace (about 43,000 ComCat reports a day: about three months).
 
@@ -1059,7 +1060,11 @@ same source with rows is either where a catalogue starts (going back) or a servi
 keeps anything: it asks the source again for a two-hour window around the newer month's first, middle and last row
 (stopping at the first that answers a row). A row there keeps the empty month (the catalogue starts; named in the
 run's `report.json` `empty_after_rows` and as a warning); no row, or an error, fails the month like any other failure,
-so nothing empty is sealed while the service is down and the month is asked again next run.
+so nothing empty is sealed while the service is down and the month is asked again next run. An era whose every month
+has rows sets `expectRows: true` in `providers/history.json`: an empty answer there fails the month at once, without
+that check. An era with a magnitude floor (`minMagnitude`) fetches rows from the floor minus `fetchMarginMag` (default
+0.5, so a quake one agency puts just over the floor and another just under keeps both rows; a single-source era sets 0):
+the raw header's `fetch_min_magnitude` records it, and the edition's `min_magnitude` is the floor its events reach.
 The heartbeat Worker dispatches the workflow at `:26` (GitHub delivers this repository's hourly crons only a few times
 a day), and a run does nothing unless `providers/history.json` has `enabled: true`. The walk and first-solutions'
 `collect` job (dispatched at `:48`) take turns in one concurrency group, so they never ask a host at the same time: a
@@ -1134,8 +1139,11 @@ What did a source publish *first* for an event, and when? The log answers that s
 interval; backfilled history cannot. Some sources keep a version history of their own, and the
 [`first-solutions`](.github/workflows/first-solutions.yml) workflow collects it into a side index, for every report in
 the feed's day partitions: the 3-year layer from 2023-07-06, the deep history before it as far back as its monthly
-editions reach without a gap (*Deep history* above; that walk builds months newest first), and every day since, once
-its partition is frozen (ten days). Nothing in the day partitions, the archives, the deep-history assets or the log
+editions reach without a gap (*Deep history* above; that walk builds months newest first), but never before 2000-01-01
+(`DEEP_WALK_FLOOR` in [`src/first-solutions-collect.ts`](src/first-solutions-collect.ts)), and every day since, once its
+partition is frozen (ten days). The floor is there because ComCat's records before 2000 are catalogues loaded into it
+years later (the PDE): their version history holds bulk reloads (2014–2022 on a sampled 1985 event), not earliest
+solutions, and walking it would cost about 106,000 ComCat requests and download every pre-2000 edition for nothing. Nothing in the day partitions, the archives, the deep-history assets or the log
 changes.
 
 **Sources** (checked 2026-10-01; one lane each, its own host, one request at a time, at least 1 s apart):
@@ -1674,3 +1682,16 @@ for a deprecation window.
 Data is [CDLA-Permissive-2.0](LICENSE); each record carries its source's license in
 `provenance[].license`. Keep the `metadata.attribution` string when redistributing.
 See [ATTRIBUTIONS.md](ATTRIBUTIONS.md) and [TAKEDOWN.md](TAKEDOWN.md).
+
+**Records under another catalogue's license.** A source can distribute another catalogue's solutions: ComCat's preferred
+origin is sometimes the ISC-GEM Global Instrumental Earthquake Catalogue's (`fields.net` `iscgem` or `iscgemsup`), which
+is [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/). Such a provenance row carries that catalogue's
+license (`CC-BY-SA-3.0`), attribution ("ISC-GEM Global Instrumental Earthquake Catalogue (International Seismological
+Centre and GEM Foundation), via U.S. Geological Survey (ANSS ComCat)") and DOI
+([10.31905/D808B825](https://doi.org/10.31905/D808B825)) instead of ComCat's `US-PD`: check `provenance[].license` per
+row, not per source. The list lives in `providers/registry.json` (`catalogues` of a provider, keyed by `fields.net`;
+[`src/row-license.ts`](src/row-license.ts)) and in [ATTRIBUTIONS.md](ATTRIBUTIONS.md). The ANSS regional networks ComCat
+serves (`nc`, `ci`, `ak`, …) stay `US-PD`, as ComCat distributes them. A row keeps the license it was minted with: rows
+already stored (day partitions, archives, history editions) change only when they are built again. The Global CMT
+Project licenses nothing but asks to be cited (its moment magnitudes are in many ComCat records): the citation is in
+[NOTICE](NOTICE).

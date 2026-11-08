@@ -197,11 +197,18 @@ export interface DeepHistory {
   start: string | null;
 }
 
-/** The deep history the side index can walk: each month's current edition, and how far back they reach without a gap
- *  (the history walk builds months newest first, so a gap is a month not built yet). */
+/** The side index walks no deep month before this day. ComCat's records before 2000 (era B, M4.5+ back to 1973) are
+ *  the PDE catalogue loaded years later: their version history holds bulk reloads (2014-2022, sampled on a 1985 event),
+ *  not earliest solutions, and walking it would cost about 106,000 ComCat requests (about 2.5 days of the lane). The
+ *  day lanes would otherwise download every era-B edition for nothing. */
+export const DEEP_WALK_FLOOR = '2000-01-01';
+
+/** The deep history the side index can walk: each month's current edition from DEEP_WALK_FLOOR on, and how far back
+ *  they reach without a gap (the history walk builds months newest first, so a gap is a month not built yet). */
 export function deepHistory(index: { boundary?: string; editions?: DeepEdition[] } | null): DeepHistory {
   const current = new Map<string, DeepEdition>();
   for (const e of index?.editions ?? []) {
+    if (`${e.period}-01` < DEEP_WALK_FLOOR) continue;
     const had = current.get(e.period);
     if (!had || e.edition > had.edition) current.set(e.period, e);
   }

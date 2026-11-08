@@ -1,3 +1,4 @@
+import { REMERGE_RULES } from '../src/config.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -182,9 +183,10 @@ test('history re-merge: a month waits for its newer month to be merged, and the 
   assert.equal(remergeNeighbour(cfg, idx, [], nov, 0).kind, 'edition', 'epoch 0: as before');
   const archive = { period: '2023-01', tag: 'archive-2023-01', asset: 'events-2023-01.tar.zst', days: ['2023-01-01'] };
   assert.equal(remergeNeighbour(cfg, idx, [archive], dec, 1).kind, 'wait', 'the boundary archive is not merged');
-  assert.equal(remergeNeighbour(cfg, idx, [{ ...archive, merge_epoch: 1 }], dec, 1).kind, 'boundary');
-  assert.equal(remergeNeighbour(cfg, idx, [{ ...archive, merge_epoch: 1, needs_reroll: true }], dec, 1).kind, 'wait');
-  idx.editions.push(entry('2022-12', 2, { merge_epoch: 1, merged_from: { edition: 1, asset: 'x', sha256: 'y' } }));
+  assert.equal(remergeNeighbour(cfg, idx, [{ ...archive, merge_epoch: 1 }], dec, 1).kind, 'wait', 'merged under older input rules (REMERGE_RULES)');
+  assert.equal(remergeNeighbour(cfg, idx, [{ ...archive, merge_epoch: 1, merge_rules: REMERGE_RULES }], dec, 1).kind, 'boundary');
+  assert.equal(remergeNeighbour(cfg, idx, [{ ...archive, merge_epoch: 1, merge_rules: REMERGE_RULES, needs_reroll: true }], dec, 1).kind, 'wait');
+  idx.editions.push(entry('2022-12', 2, { merge_epoch: 1, merge_rules: REMERGE_RULES, merged_from: { edition: 1, asset: 'x', sha256: 'y' } }));
   assert.equal(remergeNeighbour(cfg, idx, [], nov, 1).kind, 'edition');
   // A rollback withdraws e2: e1 is current again, and the month is to be merged again.
   idx.editions[idx.editions.length - 1]!.withdrawn = { at: NOW_ISO, reason: 'rollback' };

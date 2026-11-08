@@ -450,6 +450,11 @@ export const REMERGE_EPOCH: number = 1;
 /** The ingest time every re-merged event's changed lines carry (never the wall clock, so a rebuild is byte-identical);
  *  fixed when REMERGE_EPOCH is raised. */
 export const REMERGE_INGEST_TIME: string = '2026-11-08T00:00:00.000Z';
+/** The version of the re-merge's input normalization (src/remerge.ts normalizeUnit) within an epoch: a unit merged under
+ *  an older value is merged again (a new edition / asset; nothing replaced). 1: none. 2 (2026-11-08): AFAD rows the
+ *  pre-2026-10-01 parser stored 3 h early are re-timed with the PF-5e rule (correction.ts afadCorrections) before the
+ *  windows, so they fold with the agencies' events of the same quake (the archives were frozen before the correction). */
+export const REMERGE_RULES = 2;
 /** Archive months `remerge.yml` merges per run, newest first (src/remerge-archives.ts). */
 export const REMERGE_MONTHS_PER_RUN = Number(process.env.REMERGE_MONTHS_PER_RUN || 4);
 /** The widest pair-time window any merge gate accepts: two events whose rows' origin times are all further apart can

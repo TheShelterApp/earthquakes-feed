@@ -1,3 +1,4 @@
+import { REMERGE_RULES } from '../src/config.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -137,10 +138,11 @@ const silently = <T>(fn: () => T): T => {
 
 test('selection: below the epoch, not waiting for a re-roll, newest first, at most N; nothing with the epoch at 0', () => {
   const e = (period: string, over: Partial<ArchiveEntry> = {}): ArchiveEntry => ({ period, tag: '', asset: '', url: '', bytes: 0, sha256: '', count: 0, days: [], ...over });
-  const list = [e('2024-01'), e('2024-02', { merge_epoch: 1 }), e('2024-03', { needs_reroll: true }), e('2024-04'), e('2024-05')];
+  const list = [e('2024-01'), e('2024-02', { merge_epoch: 1, merge_rules: REMERGE_RULES }), e('2024-03', { needs_reroll: true }), e('2024-04'), e('2024-05'), e('2023-12', { merge_epoch: 1 })];
   assert.deepEqual(selectMonths(list, 1, 2).map((x) => x.period), ['2024-05', '2024-04']);
-  assert.deepEqual(selectMonths(list, 1, 9).map((x) => x.period), ['2024-05', '2024-04', '2024-01']);
-  assert.deepEqual(selectMonths(list, 2, 9).map((x) => x.period), ['2024-05', '2024-04', '2024-03', '2024-02', '2024-01'].filter((p) => p !== '2024-03'));
+  // 2023-12 was merged under the older input rules (no merge_rules = 1): merged again, a new asset.
+  assert.deepEqual(selectMonths(list, 1, 9).map((x) => x.period), ['2024-05', '2024-04', '2024-01', '2023-12']);
+  assert.deepEqual(selectMonths(list, 2, 9).map((x) => x.period), ['2024-05', '2024-04', '2024-02', '2024-01', '2023-12']);
   assert.deepEqual(selectMonths(list, 0, 9), []);
 });
 

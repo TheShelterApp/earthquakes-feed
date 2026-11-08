@@ -1,3 +1,4 @@
+import { REMERGE_RULES } from '../src/config.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Resolver } from '../src/dedup.js';
@@ -205,7 +206,7 @@ test('re-merge: era B months are never re-merged, at any epoch, and never re-sea
   const edition = (period: string, era: HistoryEra, merge_epoch?: number) => ({
     period, edition: 1, era: era.id, tag: `history-${period.slice(0, 4)}`, asset: `events-${period}.e1.tar.zst`, url: '', sha256: 'e', bytes: 1, events: 1, days: [`${period}-01`],
     sources: era.sources, min_magnitude: era.minMagnitude, built_from: era.sources.map((s) => rawAssetName(s, period)), context: null, joined_newer: 0,
-    ...(merge_epoch != null ? { merge_epoch } : {}),
+    ...(merge_epoch != null ? { merge_epoch, merge_rules: REMERGE_RULES } : {}),
   });
   // Every month fetched and sealed at epoch 0 (no merge_epoch): era A's 2000-01 and every era-B month.
   for (const s of A.sources) idx.raw.push(raw1(s, '2000-01'));

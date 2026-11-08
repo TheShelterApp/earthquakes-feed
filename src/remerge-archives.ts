@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { type ArchiveEntry, type ArchiveRemediationRef, type ArchiveUnused, type Archives, archiveAssetName, extractTarball, makeTarball, nextFreeEdition, uploadNew } from './archive.js';
 import { featureToNode } from './bitemporal.js';
-import { DATA_DIR, REMERGE_EPOCH, REMERGE_INGEST_TIME, REMERGE_MONTHS_PER_RUN, REPO, dataPaths } from './config.js';
+import { DATA_DIR, REMERGE_EPOCH, REMERGE_INGEST_TIME, REMERGE_MONTHS_PER_RUN, REMERGE_RULES, REPO, dataPaths } from './config.js';
 import { type HistoryIndex, currentEdition as currentHistoryEdition } from './history-index.js';
 import { type ReleaseIo, ghReleaseIo } from './log-archive.js';
 import { loadRegistry } from './providers.js';
@@ -22,6 +22,7 @@ import {
   remergeNodes,
   remergedDayFiles,
   snapshotUnit,
+  normalizeUnit,
   usgsResidual,
 } from './remerge.js';
 import { type EditionRef, type EditionStats, type RemediationIndex, currentEdition, editionAssetName, editionProblems, emptyRemediationIndex, nextFree, remediationTag } from './remediation.js';
@@ -94,10 +95,14 @@ export interface ArchiveEditionMeta {
 }
 
 /** The months a run takes: below the epoch, not waiting for a re-roll, newest first, at most `max`. */
-export function selectMonths(list: readonly ArchiveEntry[], epoch: number, max: number, only?: ReadonlySet<string>): ArchiveEntry[] {
+/** Whether an entry is merged to the epoch under the current input rules (config REMERGE_RULES). */
+export const archiveIsMerged = (e: Pick<ArchiveEntry, 'merge_epoch' | 'merge_rules'>, epoch: number, rules: number = REMERGE_RULES): boolean =>
+  (e.merge_epoch ?? 0) >= epoch && (e.merge_rules ?? 1) >= rules;
+
+export function selectMonths(list: readonly ArchiveEntry[], epoch: number, max: number, only?: ReadonlySet<string>, rules: number = REMERGE_RULES): ArchiveEntry[] {
   if (epoch <= 0) return [];
   return list
-    .filter((e) => (e.merge_epoch ?? 0) < epoch && !e.needs_reroll && (!only || only.has(e.period)))
+    .filter((e) => !archiveIsMerged(e, epoch, rules) && !e.needs_reroll && (!only || only.has(e.period)))
     .sort((a, b) => (a.period < b.period ? 1 : -1))
     .slice(0, Math.max(0, max));
 }
@@ -132,6 +137,8 @@ export interface MonthReport {
   ms: number;
   /** Live M4.5+ earthquakes without a usgs row after the merge (remerge.ts usgsResidual). */
   residual?: { near: number; far: number };
+  /** The input normalization's counts (remerge.ts normalizeUnit). */
+  normalized?: { afad_retime: number; afad_mixed: number };
   /** The unit's days, [first, last]. */
   first_day?: string;
   last_day?: string;
@@ -411,9 +418,11 @@ export function remergeMonth(
   const anchored = new Set(older.intoNewer.filter((id) => ownIds.has(id)));
   const before = snapshotUnit(own);
   const countsBefore = magnitudeCounts(own);
-  // 4. Merge and gates.
+  // 4. The input normalization (REMERGE_RULES), then the merge and the gates.
   let res: RemergeResult;
+  let normalized: ReturnType<typeof normalizeUnit>;
   try {
+    normalized = normalizeUnit(own, ctx.registry, ctx.ingestTime);
     res = remergeNodes({
       own,
       memberDay,
@@ -462,6 +471,7 @@ export function remergeMonth(
         older: older.meta,
         newer: newer.meta,
         anchored,
+        normalized,
       }),
       count: own.length,
       live,
@@ -534,6 +544,7 @@ export function remergeMonth(
     needs_reroll: false,
     edition,
     merge_epoch: ctx.epoch,
+    merge_rules: REMERGE_RULES,
     live,
     superseded: meta.superseded,
     built_on: meta.built_on,
@@ -555,6 +566,7 @@ export function remergeMonth(
     slowest_ms: res.steps.slowest_ms,
     ms: Math.round(performance.now() - t0),
     residual: usgsResidual(own),
+    normalized,
     first_day: first,
     last_day: last,
   }, meta, own);
@@ -600,7 +612,7 @@ export function runRemergeArchives(ctx: RemergeArchivesCtx, opts: { max: number;
     // data branch's day partitions.
     const i = sortedList.findIndex((e) => e.period === entry.period);
     const newerEntry = sortedList[i + 1];
-    if (newerEntry && !merged.has(newerEntry.period) && ((newerEntry.merge_epoch ?? 0) < ctx.epoch || newerEntry.needs_reroll)) {
+    if (newerEntry && !merged.has(newerEntry.period) && (!archiveIsMerged(newerEntry, ctx.epoch) || newerEntry.needs_reroll)) {
       report.waiting.push(`${entry.period}: waits for ${newerEntry.period} to be merged`);
       continue;
     }
@@ -617,7 +629,7 @@ export function runRemergeArchives(ctx: RemergeArchivesCtx, opts: { max: number;
       const m = report.merged[report.merged.length - 1]!;
       console.log(
         `remerge: ${entry.period} -> ${r.entry.asset}: live ${m.before.live} -> ${m.after.live}, M4.5+ ${m.before.m45} -> ${m.after.m45}, M6+ ${m.before.m6} -> ${m.after.m6}, ` +
-          `${m.folds} folds, ${m.into_newer} into the newer month, ${r.remediation_editions.length} remediation edition(s)` +
+          `${m.folds} folds, ${m.into_newer} into the newer month, AFAD re-timed ${m.normalized?.afad_retime ?? 0} (${m.normalized?.afad_mixed ?? 0} left in mixed events), ${r.remediation_editions.length} remediation edition(s)` +
           `${m.remediation_days.length ? ` (day inputs: ${r.entry.remediation!.map((x) => `${x.day} e${x.edition}`).join(', ')})` : ''}${m.adopted ? ', adopted (an earlier upload of the same bytes)' : ''}; ${m.ms} ms`,
       );
     } catch (e) {
@@ -679,7 +691,7 @@ function main(): void {
     history,
     now: () => new Date().toISOString(),
   };
-  console.log(`remerge: epoch ${epoch}${dryRun ? ' (dry run)' : ''}; ${archives.list.length} archive month(s), ${archives.list.filter((e) => (e.merge_epoch ?? 0) >= epoch).length} merged`);
+  console.log(`remerge: epoch ${epoch} rules ${REMERGE_RULES}${dryRun ? ' (dry run)' : ''}; ${archives.list.length} archive month(s), ${archives.list.filter((e) => archiveIsMerged(e, epoch)).length} merged`);
   let res: ReturnType<typeof runRemergeArchives>;
   try {
     res = runRemergeArchives(ctx, { max: Number(process.env.REMERGE_MONTHS || REMERGE_MONTHS_PER_RUN), ...(only ? { only } : {}) });

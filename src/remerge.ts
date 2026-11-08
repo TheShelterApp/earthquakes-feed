@@ -1,5 +1,6 @@
 import { eventDayKey, nodeToFeature } from './bitemporal.js';
-import { HOT_WINDOW_DAYS, MAX_PAIR_DT_MS } from './config.js';
+import { HOT_WINDOW_DAYS, MAX_PAIR_DT_MS, REMERGE_RULES } from './config.js';
+import { afadCorrections } from './correction.js';
 import { Resolver } from './dedup.js';
 import { haversineKm } from './geo.js';
 import { feedSideSteps } from './heal.js';
@@ -85,6 +86,10 @@ export interface ContextMeta {
 /** The `merge` block of a re-merged unit (`_edition.json`, `_archive.json`; APIs.md, Re-merged history). */
 export interface MergeMeta {
   epoch: number;
+  /** config REMERGE_RULES when merged (absent = 1: no input normalization). */
+  rules?: number;
+  /** What the input normalization changed (normalizeUnit), absent when nothing. */
+  normalized?: NormalizeCounts;
   ingest_time: string;
   /** The feed commit that merged it (GITHUB_SHA), or null locally. */
   code: string | null;
@@ -107,11 +112,14 @@ export interface MergeMeta {
 /** The merge block of a result (C8). */
 export function mergeMeta(
   res: RemergeResult,
-  o: { epoch: number; ingestTime: string; from: MergeMeta['from']; older: ContextMeta | null; newer: ContextMeta | null; anchored: ReadonlySet<string> },
+  o: { epoch: number; ingestTime: string; from: MergeMeta['from']; older: ContextMeta | null; newer: ContextMeta | null; anchored: ReadonlySet<string>; normalized?: NormalizeCounts },
 ): MergeMeta {
   const { slowest_ms: _slowest, ...steps } = res.steps;
+  const normalized = o.normalized && Object.values(o.normalized).some((v) => v > 0) ? o.normalized : undefined;
   return {
     epoch: o.epoch,
+    rules: REMERGE_RULES,
+    ...(normalized ? { normalized } : {}),
     ingest_time: o.ingestTime,
     code: process.env.GITHUB_SHA ?? null,
     window_days: REMERGE_WINDOW_DAYS,
@@ -475,4 +483,45 @@ export function usgsResidual(nodes: Iterable<EventNode>): { near: number; far: n
     else far++;
   }
   return { near, far };
+}
+
+// --- input normalization (config REMERGE_RULES) ---
+
+export interface NormalizeCounts {
+  /** AFAD rows re-timed (PF-5e) in events of AFAD rows only. */
+  afad_retime: number;
+  /** AFAD rows the PF-5e rule would re-time that stand in an event with other providers' rows: left as they are (moving
+   *  them out would mint an id, which the re-merge never does). */
+  afad_mixed: number;
+}
+
+/**
+ * The re-merge's input normalization (REMERGE_RULES 2), applied to a unit's own events before remergeNodes: the AFAD
+ * rows the pre-2026-10-01 parser stored 3 h early, found by the live correction's own rule (correction.ts
+ * afadCorrections: the row's stored fields re-read by the fixed parser land exactly AFAD_LEGACY_OFFSET_MS later and are
+ * otherwise unchanged), are re-timed through Resolver.correctReport, the step the one-time correction and the
+ * remediation editions use, when their event holds AFAD rows only (the row is revised in place: same feed id, same
+ * source id). An AFAD row in an event with other providers' rows is left as it is and counted (correctReport would
+ * withdraw it and mint an event). Changes the nodes in place; deterministic.
+ */
+export function normalizeUnit(own: EventNode[], registry: ProviderConfig[], ingestTime: string): NormalizeCounts {
+  const counts: NormalizeCounts = { afad_retime: 0, afad_mixed: 0 };
+  const map = new Map(own.map((n) => [n.feedId, n]));
+  const corrections = afadCorrections(map, -Infinity);
+  if (!corrections.length) return counts;
+  const r = new Resolver(map, priorityMap(registry), configMap(registry), 0, { hotFloorMs: 0, merge: false });
+  const byKey = new Map<string, EventNode>();
+  for (const n of own) if (n.state === 'live') for (const p of n.provenance) byKey.set(`${p.provider}:${p.nativeId}`, n);
+  for (const c of corrections) {
+    const node = byKey.get(`${c.provider}:${c.providerEventId}`);
+    if (!node) continue;
+    if (!node.provenance.every((p) => p.provider === c.provider)) {
+      counts.afad_mixed++;
+      continue;
+    }
+    const entries = r.correctReport(c, ingestTime);
+    if (entries.length === 1 && entries[0]!.op === 'observe' && entries[0]!.result.node.feedId === node.feedId) counts.afad_retime++;
+    else if (entries.length) throw new RemergeError(`remerge: the AFAD re-time of ${c.providerEventId} did not stay in ${node.feedId}`);
+  }
+  return counts;
 }

@@ -872,7 +872,13 @@ over published history, in sliding daily windows of 7 days, as live judged every
   M4.5+ (and M6+) rows in live events are unchanged and no new event holds two ComCat events that ComCat's own `ids` do
   not link.
 
-The rules are today's (epoch 1); a later rule round is a new epoch and a new campaign. Statistics should count
+Before the windows, each unit's own rows are normalized (config `REMERGE_RULES`, recorded as `merge.rules` and
+`merge.normalized`): since rules 2 the AFAD rows the pre-2026-10-01 parser stored 3 h early (*Turkey (AFAD)*; the
+one-time correction reached only the unfrozen days) are re-timed by that correction's own rule in events of AFAD rows
+only, so they fold with the other agencies' events of the quake (the Marmara M6.2 of 2025-04-23 09:49 UTC was archived
+at 06:49); an AFAD row in a mixed event stays and is counted (`afad_mixed`). A unit merged under an older `rules`
+value is merged again: a new edition / asset, nothing replaced (`archives.json` and `history.json` record
+`merge_rules`). The rules are today's (epoch 1); a later rule round is a new epoch and a new campaign. Statistics should count
 ComCat-anchored events for global figures: the residual over-count after epoch 1 is documented by
 `scripts/remerge-verify.ts` (per month: live M4.5+ and M6+ before and after, the anchored counts, ComCat's count, the
 M4.5+ events without a ComCat row near one or not, every M6+ fold).

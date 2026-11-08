@@ -309,3 +309,34 @@ test('gates: a lost id, a lost row, a dangling pointer, a chain and a key live t
   ];
   for (const [label, mutate, re] of variants) assert.match(remergeGateProblems(before, mutate(own.map((n) => structuredClone(n))), res).join('\n'), re, label);
 });
+
+test('normalization (REMERGE_RULES 2): archived AFAD rows stored 3 h early are re-timed by the PF-5e rule in AFAD-only events, left in mixed ones; then they fold with the quake', async () => {
+  const { afadCorrections, AFAD_LEGACY_OFFSET_MS } = await import('../src/correction.js');
+  const { normalizeUnit } = await import('../src/remerge.js');
+  const fixture = readFileSync(here('fixtures/afad-event-map-2026-09.ndjson'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as EventNode);
+  const corrections = afadCorrections(new Map(fixture.map((n) => [n.feedId, n])), -Infinity);
+  assert.ok(corrections.length > 0, 'the fixture holds legacy AFAD rows');
+  const own = fixture.map((n) => structuredClone(n));
+  const before = snapshotUnit(own);
+  const counts = normalizeUnit(own, registry, IT);
+  assert.equal(counts.afad_retime + counts.afad_mixed, corrections.length);
+  assert.ok(counts.afad_retime > 0);
+  for (const c of corrections) {
+    const n = own.find((x) => x.provenance.some((p) => p.provider === 'afad' && p.nativeId === c.providerEventId))!;
+    const row = n.provenance.find((p) => p.provider === 'afad' && p.nativeId === c.providerEventId)!;
+    if (n.provenance.every((p) => p.provider === 'afad')) assert.equal(row.eventTimeMs, c.eventTimeMs, 'moved to the real time');
+    else assert.equal(row.eventTimeMs, c.eventTimeMs - AFAD_LEGACY_OFFSET_MS, 'left where it stands');
+  }
+  const after = snapshotUnit(own);
+  assert.deepEqual([...after.ids].sort(), [...before.ids].sort(), 'no id minted or lost');
+  assert.deepEqual([...after.keys].sort(), [...before.keys].sort(), 'no row lost');
+  assert.deepEqual(normalizeUnit(own, registry, IT), { afad_retime: 0, afad_mixed: counts.afad_mixed }, 'idempotent');
+  // A re-timed AFAD event now sits on the quake's EMSC event and folds into it.
+  const target = corrections.find((c) => own.find((x) => x.provenance.some((p) => p.nativeId === c.providerEventId))!.provenance.every((p) => p.provider === 'afad'))!;
+  const [emsc] = split([obs('emsc', '20250423_marmara', { eventTimeMs: target.eventTimeMs + 1_000, lat: target.lat + 0.02, lon: target.lon, mag: target.mag, magType: 'ml', status: 'reviewed' })]).values();
+  const unit = [...own, emsc!];
+  const t = Math.min(...unit.map((n) => n.eventTimeMs));
+  const res = remergeNodes({ own: unit, memberDay: memberDays(unit), startMs: Math.floor(t / DAY) * DAY, endMs: Math.max(...unit.map((n) => n.eventTimeMs)) + DAY, older: [], newer: [], anchored: new Set(), registry, ingestTime: IT });
+  const afadNode = unit.find((x) => x.provenance.some((p) => p.provider === 'afad' && p.nativeId === target.providerEventId))!;
+  assert.ok(res.merges.some((m) => m.loser === afadNode.feedId || m.loser === emsc!.feedId), 'the re-timed AFAD event folds with the EMSC event of its quake');
+});

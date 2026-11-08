@@ -511,6 +511,8 @@ export function remergeMonth(
   if (!adopted) writeAssetLocal(ctx, tag, tarPath);
   for (const r of refreshed) if (!r.reused) writeAssetLocal(ctx, r.ref.tag, r.file);
   rmSync(dir, { recursive: true, force: true });
+  // Only the month just merged is read again (as the next, older month's newer context): keep no other in memory.
+  merged.clear();
   merged.set(period, { asset, members });
   const next: ArchiveEntry = {
     period,
@@ -602,6 +604,8 @@ export function runRemergeArchives(ctx: RemergeArchivesCtx, opts: { max: number;
         continue;
       }
       pending.months.push(r);
+      // Written after every month: a run that dies later (a runner lost, the memory limit) still leaves what it did.
+      writeOutputs(ctx, pending, report);
       const m = report.merged[report.merged.length - 1]!;
       console.log(
         `remerge: ${entry.period} -> ${r.entry.asset}: live ${m.before.live} -> ${m.after.live}, M4.5+ ${m.before.m45} -> ${m.after.m45}, M6+ ${m.before.m6} -> ${m.after.m6}, ` +
@@ -612,10 +616,14 @@ export function runRemergeArchives(ctx: RemergeArchivesCtx, opts: { max: number;
       console.log(`::warning::remerge: ${entry.period}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
+  writeOutputs(ctx, pending, report);
+  return { pending, report };
+}
+
+function writeOutputs(ctx: RemergeArchivesCtx, pending: Pending, report: RunReport): void {
   mkdirSync(ctx.out, { recursive: true });
   writeFileSync(join(ctx.out, 'pending.json'), JSON.stringify(pending, null, 2) + '\n');
   writeFileSync(join(ctx.out, 'report.json'), JSON.stringify(report, null, 2) + '\n');
-  return { pending, report };
 }
 
 function setOutput(key: string, value: string): void {

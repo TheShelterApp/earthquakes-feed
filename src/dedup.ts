@@ -249,6 +249,11 @@ export class Resolver {
   /** When set (src/remerge.ts only, MAX_PAIR_DT_MS), mergeableNeighbours skips a candidate whose rows' origin times are
    *  all more than this far from the node's (no gate can pass beyond the widest pair-time window). */
   private readonly pairPrefilterMs: number | null;
+  /** With pairPrefilterMs: per grid cell, its live events' origin-time ranges sorted by their start, rebuilt when the
+   *  geo index or any event's solution changed since (geoVersion), so mergeableNeighbours reads only the events of a
+   *  dense cell whose times can pass (candidatesInTime). */
+  private readonly cellTimes = new Map<string, { version: number; lo: number[]; hi: number[]; ids: string[]; maxWidth: number }>();
+  private geoVersion = 0;
 
   constructor(
     readonly eventMap: Map<string, EventNode>,
@@ -296,12 +301,14 @@ export class Resolver {
   }
 
   private indexGeo(node: EventNode): void {
+    this.geoVersion++;
     let set = this.geo.get(node.geohash);
     if (!set) this.geo.set(node.geohash, (set = new Set()));
     set.add(node.feedId);
   }
 
   private deindexGeo(hash: string, feedId: string): void {
+    this.geoVersion++;
     this.geo.get(hash)?.delete(feedId);
   }
 
@@ -900,6 +907,40 @@ export class Resolver {
     return cand;
   }
 
+  /** candidates(s) without the events whose origin-time range lies more than `gapMs` from `range` (pairPrefilterMs): the
+   *  same set as candidates(s) filtered by timeGapMs, read from the cells' time-sorted index instead of every event of a
+   *  dense cell (a swarm cell holds thousands in a week, and the heal asks every one of them). */
+  private candidatesInTime(s: Solution, range: [number, number], gapMs: number): Set<string> {
+    const cand = new Set<string>();
+    const [alo, ahi] = range;
+    for (const cell of gatherCellKeys(s.lat, s.lon, Resolver.maxWindowKm(s), GRID_CELL_DEG)) {
+      const set = this.geo.get(cell);
+      if (!set || !set.size) continue;
+      let idx = this.cellTimes.get(cell);
+      if (!idx || idx.version !== this.geoVersion) {
+        const entries = [...set].map((fid) => {
+          const n = this.eventMap.get(fid)!;
+          const [lo, hi] = Resolver.timeRange(n);
+          return { fid, lo, hi };
+        });
+        entries.sort((a, b) => a.lo - b.lo);
+        idx = { version: this.geoVersion, lo: entries.map((e) => e.lo), hi: entries.map((e) => e.hi), ids: entries.map((e) => e.fid), maxWidth: entries.reduce((m, e) => Math.max(m, e.hi - e.lo), 0) };
+        this.cellTimes.set(cell, idx);
+      }
+      // An event passes when lo <= ahi + gap and hi >= alo - gap; hi <= lo + maxWidth bounds where to start.
+      const from = alo - gapMs - idx.maxWidth;
+      let a = 0;
+      let b = idx.lo.length;
+      while (a < b) {
+        const mid = (a + b) >> 1;
+        if (idx.lo[mid]! < from) a = mid + 1;
+        else b = mid;
+      }
+      for (let i = a; i < idx.lo.length && idx.lo[i]! <= ahi + gapMs; i++) if (idx.hi[i]! >= alo - gapMs) cand.add(idx.ids[i]!);
+    }
+    return cand;
+  }
+
   /** Live feed ids whose representative is close enough to hold a revisedIdPair of `row` (a REVISED_ID_WINDOWS provider's
    *  row): within the provider's window plus the widest identity window (an event's rows lie within that of its
    *  representative). Empty for any other provider. */
@@ -1324,6 +1365,8 @@ export class Resolver {
 
   /** Re-derive the representative solution and keep the spatial index in step with it. */
   private reposition(node: EventNode): void {
+    // Every change of an event's rows ends here (or in deindexGeo): the time-sorted cell index is stale from now on.
+    this.geoVersion++;
     const beforeHash = node.geohash;
     this.applyRepr(node);
     node.geohash = gridKey(node.lat, node.lon, GRID_CELL_DEG);
@@ -2166,7 +2209,7 @@ export class Resolver {
   private mergeableNeighbours(node: EventNode): { node: EventNode; score: number }[] {
     if (node.eventTimeMs < this.hotFloor) return [];
     const out: { node: EventNode; score: number }[] = [];
-    const cands = this.candidates(node);
+    const cands = this.pairPrefilterMs != null ? this.candidatesInTime(node, Resolver.timeRange(node), this.pairPrefilterMs) : this.candidates(node);
     for (const r of node.provenance) for (const fid of this.revisedCandidates(r)) cands.add(fid);
     for (const fid of this.farCandidates(node)) cands.add(fid);
     for (const other of this.reviewedTwinNodesOf(node)) cands.add(other.feedId);
@@ -2184,18 +2227,20 @@ export class Resolver {
   /** The gap between two nodes' origin-time ranges (every row and the representative), 0 when they overlap: every
    *  pair-time gate compares the representatives or two rows, each inside its node's range. */
   private static timeGapMs(a: EventNode, b: EventNode): number {
-    const range = (n: EventNode): [number, number] => {
-      let lo = n.eventTimeMs;
-      let hi = n.eventTimeMs;
-      for (const r of n.provenance) {
-        if (r.eventTimeMs < lo) lo = r.eventTimeMs;
-        if (r.eventTimeMs > hi) hi = r.eventTimeMs;
-      }
-      return [lo, hi];
-    };
-    const [alo, ahi] = range(a);
-    const [blo, bhi] = range(b);
+    const [alo, ahi] = Resolver.timeRange(a);
+    const [blo, bhi] = Resolver.timeRange(b);
     return Math.max(0, blo - ahi, alo - bhi);
+  }
+
+  /** The origin-time range of an event: its representative's and every row's. */
+  private static timeRange(n: EventNode): [number, number] {
+    let lo = n.eventTimeMs;
+    let hi = n.eventTimeMs;
+    for (const r of n.provenance) {
+      if (r.eventTimeMs < lo) lo = r.eventTimeMs;
+      if (r.eventTimeMs > hi) hi = r.eventTimeMs;
+    }
+    return [lo, hi];
   }
 
   /** The next fold the merge pass around `node` makes, with the reason string its op:merge

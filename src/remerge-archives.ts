@@ -138,7 +138,7 @@ export interface MonthReport {
   /** Live M4.5+ earthquakes without a usgs row after the merge (remerge.ts usgsResidual). */
   residual?: { near: number; far: number };
   /** The input normalization's counts (remerge.ts normalizeUnit). */
-  normalized?: { afad_retime: number; afad_mixed: number };
+  normalized?: import('./remerge.js').NormalizeCounts;
   /** The unit's days, [first, last]. */
   first_day?: string;
   last_day?: string;
@@ -422,7 +422,10 @@ export function remergeMonth(
   let res: RemergeResult;
   let normalized: ReturnType<typeof normalizeUnit>;
   try {
-    normalized = normalizeUnit(own, ctx.registry, ctx.ingestTime);
+    normalized = normalizeUnit(own, ctx.registry);
+    // The context windows read the same corrected rows (the unit's own are the ones published anew).
+    normalizeUnit(older.nodes, ctx.registry);
+    normalizeUnit(newer.nodes, ctx.registry);
     res = remergeNodes({
       own,
       memberDay,
@@ -629,7 +632,7 @@ export function runRemergeArchives(ctx: RemergeArchivesCtx, opts: { max: number;
       const m = report.merged[report.merged.length - 1]!;
       console.log(
         `remerge: ${entry.period} -> ${r.entry.asset}: live ${m.before.live} -> ${m.after.live}, M4.5+ ${m.before.m45} -> ${m.after.m45}, M6+ ${m.before.m6} -> ${m.after.m6}, ` +
-          `${m.folds} folds, ${m.into_newer} into the newer month, AFAD re-timed ${m.normalized?.afad_retime ?? 0} (${m.normalized?.afad_mixed ?? 0} left in mixed events), ${r.remediation_editions.length} remediation edition(s)` +
+          `${m.folds} folds, ${m.into_newer} into the newer month, normalized: AFAD re-timed ${m.normalized?.afad_retimed ?? 0} (${m.normalized?.afad_joined_kept ?? 0} joined and kept), ISC magnitudes dropped ${m.normalized?.isc_magnitude_dropped ?? 0}, ${r.remediation_editions.length} remediation edition(s)` +
           `${m.remediation_days.length ? ` (day inputs: ${r.entry.remediation!.map((x) => `${x.day} e${x.edition}`).join(', ')})` : ''}${m.adopted ? ', adopted (an earlier upload of the same bytes)' : ''}; ${m.ms} ms`,
       );
     } catch (e) {

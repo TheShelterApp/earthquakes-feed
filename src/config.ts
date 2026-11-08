@@ -453,8 +453,10 @@ export const REMERGE_INGEST_TIME: string = '2026-11-08T00:00:00.000Z';
 /** The version of the re-merge's input normalization (src/remerge.ts normalizeUnit) within an epoch: a unit merged under
  *  an older value is merged again (a new edition / asset; nothing replaced). 1: none. 2 (2026-11-08): AFAD rows the
  *  pre-2026-10-01 parser stored 3 h early are re-timed with the PF-5e rule (correction.ts afadCorrections) before the
- *  windows, so they fold with the agencies' events of the same quake (the archives were frozen before the correction). */
-export const REMERGE_RULES = 2;
+ *  windows, so they fold with the agencies' events of the same quake (the archives were frozen before the correction).
+ *  3 (2026-11-08): row-normalize.ts normalizeRows on the unit and both context windows (AFAD as in 2, plus ISC
+ *  magnitudes by untrusted authors dropped, the representatives re-derived). */
+export const REMERGE_RULES = 3;
 /** Archive months `remerge.yml` merges per run, newest first (src/remerge-archives.ts). */
 export const REMERGE_MONTHS_PER_RUN = Number(process.env.REMERGE_MONTHS_PER_RUN || 4);
 /** The widest pair-time window any merge gate accepts: two events whose rows' origin times are all further apart can

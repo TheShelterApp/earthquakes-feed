@@ -245,7 +245,7 @@ test('accumulator: bins and the M4.5/M5/M6 cuts on mag x 100, mmax per cell, fil
   acc.add(feat(t, 11), null);
   acc.add(feat(Date.parse('2024-01-03T00:00:00Z'), 3), null);
   assert.equal(acc.pending.length, 7, 'M3.5+ rows wait for the reconciliation');
-  acc.finish(new Map());
+  acc.finish({ dropped: new Map(), outOfRegion: new Set() });
   assert.deepEqual(acc.bins[0], [1, 1, 0, 0, 0, 0, 3, 2, 1, 1], '4.496 rounds to 450: M4.5+; 4.99 to 499: under M5');
   assert.equal(acc.total[0], 9);
   assert.equal(acc.filtered[0], 1);
@@ -261,7 +261,7 @@ test('accumulator: bins and the M4.5/M5/M6 cuts on mag x 100, mmax per cell, fil
   const tb = Date.parse('1985-01-01T03:00:00Z');
   for (const m of [4.4, 4.5, 6.1]) b.add(feat(tb, m), 4.5);
   b.add(feat(tb, 5, { type: 'explosion' }), 4.5);
-  b.finish(new Map());
+  b.finish({ dropped: new Map(), outOfRegion: new Set() });
   assert.equal(b.belowFloor, 1);
   assert.deepEqual([...b.area.values()][0], [2, 2, 610]);
 });

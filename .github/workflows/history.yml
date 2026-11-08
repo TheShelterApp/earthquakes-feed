@@ -29,6 +29,9 @@ on:
       sources:
         description: 'Dry runs only: fetch only these sources (comma-separated provider ids; blank = every source of the era)'
         required: false
+      remerge:
+        description: 'Dry runs only: re-merge review, <epoch>:<YYYY-MM,...> (no wait for the newer month; budget 50 min), e.g. 1:2019-07'
+        required: false
 
 # Runs never overlap, so the index each run reads is the one the previous run committed (or, when that
 # commit failed, the next run adopts the uploaded assets). A dry run stays in the group too: it asks the same hosts
@@ -99,8 +102,13 @@ jobs:
           HISTORY_FORCE: ${{ inputs.dry_run && '1' || '' }}
           HISTORY_MAX_UNITS: ${{ inputs.max_units }}
           HISTORY_ONLY_SOURCES: ${{ inputs.dry_run && inputs.sources || '' }}
+          REMERGE_INPUT: ${{ inputs.dry_run && inputs.remerge || '' }}
           GH_TOKEN: ${{ github.token }}
-        run: npx --no-install tsx src/history.ts
+        run: |
+          if [ -n "${REMERGE_INPUT:-}" ]; then
+            export HISTORY_REMERGE_EPOCH="${REMERGE_INPUT%%:*}" HISTORY_REMERGE_ONLY="${REMERGE_INPUT#*:}" HISTORY_REMERGE_NO_WAIT=1 HISTORY_MAX_SECONDS=3000
+          fi
+          npx --no-install tsx src/history.ts
       # Both files, whichever changed: the commit job copies both and git commits only what differs.
       - if: steps.walk.outputs.changed == 'true' && !inputs.dry_run
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

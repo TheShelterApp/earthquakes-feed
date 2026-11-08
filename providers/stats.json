@@ -1,6 +1,6 @@
 {
   "_comment": "Statistics products (APIs.md, Statistics; src/stats.ts, src/stats-table.ts). `derive_publish` is derive's switch for the 61 day tables, the index and the manifest pointer: \"off\" builds nothing, \"shadow\" builds and checks them in the runner's temp directory (never deployed, no pointer), \"on\" publishes them under /v1/stats/ with the v1 `stats` pointer and the signed v2 `stats` entry. A failure, a failed check or a run past `derive_budget_ms` drops the stats of that run (::warning::stats dropped) and never blocks the live deploy. `history_enabled` is the switch of stats.yml (the year and area builder). `epochs` are the completeness regimes the index publishes (the app compares years across them on M4.5+ only). `gate` holds the ComCat thresholds per year (ratio feed/ComCat; era B within +-2 %; the open current year warns only). Switching any of these is a one-line PR.",
-  "derive_publish": "shadow",
+  "derive_publish": "on",
   "history_enabled": false,
   "builder": 1,
   "derive_budget_ms": 10000,

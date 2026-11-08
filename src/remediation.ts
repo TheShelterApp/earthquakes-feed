@@ -1,7 +1,7 @@
-import { eventDayKey } from './bitemporal.js';
-import { dayPartitionText, type PartitionFormat } from './partitions.js';
+import { eventDayKey, nodeToFeature } from './bitemporal.js';
 import { afadCorrections } from './correction.js';
 import { Resolver } from './dedup.js';
+import { dayPartitionText, type PartitionFormat } from './partitions.js';
 import { configMap, priorityMap } from './providers.js';
 import { byIngestOrder, emptyTally, screen } from './quality.js';
 import type { EventNode, ProviderConfig, RawObs } from './types.js';
@@ -20,7 +20,12 @@ import type { EventNode, ProviderConfig, RawObs } from './types.js';
  * is published as an immutable day edition — the complete day after remediation, in the day-partition format — beside
  * a raw asset with exactly what the source answered, in the Release `remediation-YYYY`, indexed in
  * knowledge/index/remediation.json. The archived day, its Release asset and the manifest stay as they were; a consumer
- * that wants the repaired day reads the edition the index names (APIs.md, Saturated days).
+ * that wants the repaired day reads the edition the index names (APIs.md, Remediation editions).
+ *
+ * The same mechanism repairs the 2026-06-28..07-03 seam (`reason: 'seam'`): days the live layer's start left empty for
+ * the 15 sources the onboarding bootstrap seeded as complete. Explicit refills go through a persistent queue in the
+ * index (`refill_queue`), taken day by day once each day is archived; one edition is built per day from all of its
+ * sources' raw assets, and a neighbour is read as consumers read it (its current edition, else its archived day).
  */
 
 /** Kamchatka first, then the Sındırgı sequence (AFAD), then the rest. */
@@ -31,9 +36,48 @@ export const FIRST_WINDOW_MS = 6 * 3_600_000;
 export const MIN_WINDOW_MS = 5 * 60_000;
 const DAY_MS = 86_400_000;
 
+/** Why a day is remediated: a source's backfill window filled its page cap (`saturated`, the default when absent), or
+ *  the live layer's start left the day empty for some sources (`seam`, 2026-06-28..07-03; APIs.md, Remediation
+ *  editions). */
+export type RemediationReason = 'saturated' | 'seam';
+
 export interface DayTask {
   provider: string;
   day: string;
+  reason?: RemediationReason;
+}
+
+/** The days of `YYYY-MM-DD..YYYY-MM-DD` (both ends included; one day may be given alone), at most MAX_REFILL_DAYS. */
+export const MAX_REFILL_DAYS = 31;
+export function rangeDays(range: string): string[] {
+  const m = /^(\d{4}-\d{2}-\d{2})(?:\.\.(\d{4}-\d{2}-\d{2}))?$/.exec(range.trim());
+  const valid = (d: string): boolean => !Number.isNaN(Date.parse(`${d}T00:00:00Z`)) && new Date(Date.parse(`${d}T00:00:00Z`)).toISOString().slice(0, 10) === d;
+  if (!m || !valid(m[1]!) || (m[2] != null && !valid(m[2]))) throw new Error(`bad refill range "${range}": expected YYYY-MM-DD..YYYY-MM-DD`);
+  const from = m[1]!;
+  const to = m[2] ?? from;
+  if (to < from) throw new Error(`bad refill range "${range}": it ends before it starts`);
+  const days: string[] = [];
+  for (let t = Date.parse(`${from}T00:00:00Z`); t <= Date.parse(`${to}T00:00:00Z`); t += DAY_MS) days.push(new Date(t).toISOString().slice(0, 10));
+  if (days.length > MAX_REFILL_DAYS) throw new Error(`bad refill range "${range}": ${days.length} days, at most ${MAX_REFILL_DAYS}`);
+  return days;
+}
+
+/**
+ * Explicit refill tasks (the 2026-07 seam): every provider × every day of `range`, `reason: 'seam'`, those already in
+ * the index (`done`: `provider:day` of its raw assets) skipped, by day then provider.
+ */
+export function refillTasks(range: string, providers: readonly string[], done: ReadonlySet<string>, reason: RemediationReason = 'seam'): DayTask[] {
+  const days = rangeDays(range);
+  const out: DayTask[] = [];
+  for (const day of days) for (const provider of [...new Set(providers)].sort()) if (!done.has(`${provider}:${day}`)) out.push({ provider, day, reason });
+  return out;
+}
+
+/** Tasks grouped per day, days ascending (a run builds one edition per day from all of the day's sources). */
+export function tasksByDay(tasks: readonly DayTask[]): Map<string, DayTask[]> {
+  const by = new Map<string, DayTask[]>();
+  for (const t of tasks) (by.get(t.day) ?? by.set(t.day, []).get(t.day)!).push(t);
+  return new Map([...by].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
 /**
@@ -176,7 +220,7 @@ export interface EditionStats {
  *  2. the fetched rows go through the ingest screen and backfill's Resolver (merge off: history never folds on ingest),
  *     against the day and its neighbours;
  *  3. the edition is the archived day's events (by feed id, whatever their time is now) plus the events this build
- *     minted, serialized exactly as a day partition (dayPartitionText: event time, feed id; review_status per the PartitionFormat).
+ *     minted, serialized exactly as a day partition (writeDayPartition: event time, feed id; nodeToFeature).
  *
  * The edition replaces ONE archived day while its neighbours stay as archived, so membership follows the archive, not
  * the corrected time: an event re-read across midnight stays in this edition (counted `off_day`), an event of a
@@ -192,7 +236,9 @@ export function buildDayEdition(input: {
   nowMs: number;
   ingestTime: string;
   seqMarker: number;
-  /** The data checkout's partition format: the edition's lines carry `review_status` as the day's partition would. */
+  /** The line format (dayPartitionText): EDITION_FORMAT for every edition built since 2026-11-08 (decision A4 of the
+   *  2026-11-08 plan); the editions of 2026-10-04 were built without `review_status` (NO_PARTITION_FORMAT) and keep
+   *  their bytes. */
   fmt: PartitionFormat;
 }): { text: string; nodes: EventNode[]; stats: EditionStats } {
   const map = new Map<string, EventNode>();
@@ -293,6 +339,10 @@ export function buildDayEdition(input: {
 
 const reportKey = (r: { provider: string; nativeId: string }): string => `${r.provider}:${r.nativeId}`;
 
+/** The line format of the remediation editions built since 2026-11-08: `review_status` on every day (decision A4 of
+ *  the 2026-11-08 plan: they are new assets, so no frozen bytes change), wherever the event's rows give one. */
+export const EDITION_FORMAT: PartitionFormat = { version: 1, review_status_from: '0000-01-01' };
+
 /**
  * What must hold for an edition before it is published: every event is on the day — or, given the ARCHIVED days it was
  * built on (`archive`, unchanged), was archived on the day or holds only reports the archived day held (an AFAD row
@@ -376,6 +426,14 @@ export interface RawRef {
   requests: number;
   partial: boolean;
   fetched_at: string;
+  /** Absent: `saturated` (the index of 2026-10-04). */
+  reason?: RemediationReason;
+}
+/** A published asset a build read: an archive month or a remediation edition, and its sha256. */
+export interface AssetRef {
+  tag: string;
+  asset: string;
+  sha256: string | null;
 }
 export interface EditionRef {
   day: string;
@@ -386,23 +444,119 @@ export interface EditionRef {
   sha256: string;
   bytes: number;
   /** The archived day it is built on: its archive asset and that asset's sha256. */
-  built_on: { tag: string; asset: string; sha256: string | null };
+  built_on: AssetRef;
   /** The raw assets it is built from. */
   built_from: string[];
+  /** Absent: `saturated` (the index of 2026-10-04). */
+  reason?: RemediationReason;
+  /** What the day and its neighbours were read from, by day: the archive asset, or a neighbour's current edition
+   *  (absent on the editions of 2026-10-04, which read archives only). */
+  context?: Record<string, AssetRef>;
   stats: EditionStats;
   built_at: string;
+}
+/**
+ * A queued refill: its days are remediated as soon as each is archived (a remediation edition supplements an archived
+ * day only), by the scheduled run or any dispatch, and dropped from the range once done (every provider has a raw
+ * asset of the day and the day's current edition is built from all of the day's raws).
+ */
+export interface RefillEntry {
+  range: string;
+  providers: string[];
+  reason: RemediationReason;
+  queued_at: string;
 }
 export interface RemediationIndex {
   version: 1;
   raw: RawRef[];
   editions: EditionRef[];
+  refill_queue?: RefillEntry[];
 }
-export const emptyRemediationIndex = (): RemediationIndex => ({ version: 1, raw: [], editions: [] });
+export const emptyRemediationIndex = (): RemediationIndex => ({ version: 1, raw: [], editions: [], refill_queue: [] });
 /** The current edition of a day: the highest. */
 export const currentEdition = (idx: RemediationIndex, day: string): EditionRef | undefined =>
   idx.editions.filter((e) => e.day === day).sort((a, b) => b.edition - a.edition)[0];
 export function indexText(idx: RemediationIndex): string {
   const raw = [...idx.raw].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : a.provider < b.provider ? -1 : 1));
   const editions = [...idx.editions].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : a.edition - b.edition));
-  return JSON.stringify({ version: 1, raw, editions }, null, 2) + '\n';
+  return JSON.stringify({ version: 1, raw, editions, refill_queue: idx.refill_queue ?? [] }, null, 2) + '\n';
+}
+
+/** Add a refill to the queue (an entry with the same range, providers and reason is not added twice). */
+export function enqueueRefill(idx: RemediationIndex, range: string, providers: readonly string[], reason: RemediationReason, nowIso: string): boolean {
+  rangeDays(range);
+  const q = (idx.refill_queue ??= []);
+  const ps = [...new Set(providers)].sort();
+  if (q.some((e) => e.range === range && e.reason === reason && e.providers.join(',') === ps.join(','))) return false;
+  q.push({ range, providers: ps, reason, queued_at: nowIso });
+  return true;
+}
+
+/** The raw assets of a day the index lists, the newest per provider. */
+export function dayRaws(idx: RemediationIndex, day: string): RawRef[] {
+  const by = new Map<string, RawRef>();
+  for (const r of idx.raw) if (r.day === day) {
+    const had = by.get(r.provider);
+    if (!had || r.fetched_at > had.fetched_at || (r.fetched_at === had.fetched_at && r.asset > had.asset)) by.set(r.provider, r);
+  }
+  return [...by.values()].sort((a, b) => (a.provider < b.provider ? -1 : 1));
+}
+
+/** The raws of the day its current edition is not built from (a run uploaded them but built no edition: another source
+ *  of the day failed, or the run died between the uploads). */
+export function unbuiltRaws(idx: RemediationIndex, day: string): RawRef[] {
+  const cur = currentEdition(idx, day);
+  const built = new Set(cur?.built_from ?? []);
+  return dayRaws(idx, day).filter((r) => !built.has(r.asset));
+}
+
+/** A queued day is done when every provider of the entry has a raw asset of it and its current edition is built from
+ *  all of the day's raws. */
+const queuedDayDone = (idx: RemediationIndex, day: string, providers: readonly string[]): boolean => {
+  const have = new Set(dayRaws(idx, day).map((r) => r.provider));
+  return providers.every((p) => have.has(p)) && currentEdition(idx, day) != null && unbuiltRaws(idx, day).length === 0;
+};
+
+/**
+ * What the queue asks of this run: fetch tasks for its ARCHIVED days (providers without a raw of the day), the archived
+ * days whose raws are all there but not yet in an edition, and the days still waiting for their month's archive.
+ */
+export function queuePlan(idx: RemediationIndex, archivedDays: ReadonlySet<string>): { tasks: DayTask[]; editionOnly: string[]; waiting: string[] } {
+  const done = new Set(idx.raw.map((r) => `${r.provider}:${r.day}`));
+  const tasks = new Map<string, DayTask>();
+  const editionOnly = new Set<string>();
+  const waiting = new Set<string>();
+  for (const e of idx.refill_queue ?? []) {
+    for (const t of refillTasks(e.range, e.providers, new Set(), e.reason)) {
+      if (!archivedDays.has(t.day)) waiting.add(t.day);
+      else if (!done.has(`${t.provider}:${t.day}`)) tasks.set(`${t.provider}:${t.day}`, t);
+    }
+    for (const day of rangeDays(e.range)) {
+      if (archivedDays.has(day) && !queuedDayDone(idx, day, e.providers) && e.providers.every((p) => done.has(`${p}:${day}`))) editionOnly.add(day);
+    }
+  }
+  const sort = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+  return {
+    tasks: [...tasks.values()].sort((a, b) => sort(a.day, b.day) || sort(a.provider, b.provider)),
+    editionOnly: [...editionOnly].sort(sort),
+    waiting: [...waiting].sort(sort),
+  };
+}
+
+/** Drop the done days from the queue: each entry's range shrinks from both ends past its done days, and an entry with
+ *  every day done leaves the queue. Returns the entries that left. */
+export function pruneQueue(idx: RemediationIndex): RefillEntry[] {
+  const left: RefillEntry[] = [];
+  const keep: RefillEntry[] = [];
+  for (const e of idx.refill_queue ?? []) {
+    const days = rangeDays(e.range);
+    let a = 0;
+    let b = days.length - 1;
+    while (a <= b && queuedDayDone(idx, days[a]!, e.providers)) a++;
+    while (b >= a && queuedDayDone(idx, days[b]!, e.providers)) b--;
+    if (a > b) left.push(e);
+    else keep.push({ ...e, range: a === b ? `${days[a]}..${days[a]}` : `${days[a]}..${days[b]}` });
+  }
+  idx.refill_queue = keep;
+  return left;
 }

@@ -1,16 +1,36 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
+import { gunzipSync } from 'node:zlib';
+import { featureToNode, nodeToFeature } from '../src/bitemporal.js';
+import { LocalStore } from '../src/history-store.js';
+import { NO_PARTITION_FORMAT, dayPartitionText } from '../src/partitions.js';
+import { BOOTSTRAP_2026_07_05, type DayRunDeps, remediateDay, resolveProviders } from '../src/remediate.js';
+import type { WindowOutcome } from '../src/providers.js';
 import { Resolver } from '../src/dedup.js';
-import { NO_PARTITION_FORMAT } from '../src/partitions.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import {
+  MAX_REFILL_DAYS,
   MIN_WINDOW_MS,
   RAW_REMEDIATION_KIND,
   buildDayEdition,
   editionProblems,
   editionAssetName,
+  EDITION_FORMAT,
+  emptyRemediationIndex,
+  enqueueRefill,
   fetchDayInWindows,
+  indexText,
   nextFree,
+  pruneQueue,
+  queuePlan,
+  rangeDays,
+  refillTasks,
+  type RemediationIndex,
+  tasksByDay,
   parseRawText,
   rawAssetName,
   rawText,
@@ -121,6 +141,14 @@ test('edition: missing rows become events, known rows join or stay unchanged, th
   assert.equal(lines.length, 3);
   assert.deepEqual(lines.map((f) => f.properties.time), [...lines.map((f) => f.properties.time)].sort((a, b) => a - b), 'in event-time order');
   assert.ok(out.nodes.filter((n) => n.lastSeq === 202_999).length >= 2, 'changed nodes carry the run marker');
+  // The saturated path's bytes as the editions of 2026-10-04 were built (before the per-day loop and review_status).
+  assert.equal(createHash('sha256').update(out.text).digest('hex'), 'a99c5e155c5a1c168d83e9cc86c6c4c4109d39df3ee567a6cf32637bb21e99a0');
+  assert.equal(out.text, dayPartitionText(out.nodes, DAY, NO_PARTITION_FORMAT), 'without review_status an edition is a day partition byte for byte');
+  const withStatus = dayPartitionText(out.nodes, DAY, EDITION_FORMAT);
+  assert.equal(withStatus.split('\n').length, out.text.split('\n').length, 'one line per event either way');
+  // review_status wherever the event's rows give one (decision A4), the same line as nodeToFeature's with the option.
+  assert.deepEqual(withStatus.split('\n').filter(Boolean), [...out.nodes].sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : 1)).map((n) => JSON.stringify(nodeToFeature(n, { reviewStatus: true }))));
+  assert.deepEqual(withStatus.split('\n').filter(Boolean).map((l) => (JSON.parse(l) as { id: string }).id), out.text.split('\n').filter(Boolean).map((l) => (JSON.parse(l) as { id: string }).id));
   assert.deepEqual(editionProblems(DAY, out.nodes), []);
   const twice = structuredClone(out.nodes[0]!);
   twice.feedId = 'efd_twice';
@@ -183,4 +211,200 @@ test('raw asset: header + rows round-trip; a count that disagrees is refused; na
   const names = new Set(['events-2025-07-30.e1.ndjson.gz', 'events-2025-07-30.e2.ndjson.gz']);
   assert.equal(nextFree(names, (n) => editionAssetName(DAY, n)), 3);
   assert.equal(nextFree(names, (n) => editionAssetName(DAY, n), 2), 3);
+});
+
+// ---- The 2026-06-28..07-03 seam: explicit refills, one edition per day, the persistent queue (2026-11-08 plan C1). ----
+
+test('refill: ranges are inclusive, at most 31 days, malformed ones throw; tasks skip done keys, by day then provider', () => {
+  assert.deepEqual(rangeDays('2026-06-28..2026-07-03'), ['2026-06-28', '2026-06-29', '2026-06-30', '2026-07-01', '2026-07-02', '2026-07-03']);
+  assert.deepEqual(rangeDays('2026-06-30'), ['2026-06-30']);
+  assert.equal(rangeDays('2026-01-01..2026-01-31').length, MAX_REFILL_DAYS);
+  assert.throws(() => rangeDays('2026-01-01..2026-02-01'), /32 days, at most 31/);
+  assert.throws(() => rangeDays('2026-07-03..2026-06-28'), /ends before it starts/);
+  assert.throws(() => rangeDays('2026-06-31..2026-07-01'), /bad refill range/);
+  assert.throws(() => rangeDays('2026-6-28..2026-07-01'), /bad refill range/);
+  assert.throws(() => rangeDays(''), /bad refill range/);
+  const t = refillTasks('2026-06-29..2026-06-30', ['usgs', 'emsc', 'usgs'], new Set(['emsc:2026-06-30']));
+  assert.deepEqual(t.map((x) => `${x.provider}:${x.day}`), ['emsc:2026-06-29', 'usgs:2026-06-29', 'usgs:2026-06-30']);
+  assert.ok(t.every((x) => x.reason === 'seam'));
+  const g = tasksByDay([{ provider: 'usgs', day: '2026-06-30' }, { provider: 'afad', day: '2025-08-11' }, { provider: 'emsc', day: '2026-06-30' }]);
+  assert.deepEqual([...g.keys()], ['2025-08-11', '2026-06-30']);
+  assert.deepEqual(g.get('2026-06-30')!.map((x) => x.provider), ['usgs', 'emsc']);
+});
+
+test('refill providers: the bootstrap set expands to its 15 sources; unknown, inactive or forward-only ids are refused', () => {
+  assert.equal(BOOTSTRAP_2026_07_05.length, 15);
+  assert.deepEqual(resolveProviders('bootstrap-2026-07-05', registry), [...BOOTSTRAP_2026_07_05].sort());
+  assert.deepEqual(resolveProviders('usgs, emsc', registry), ['emsc', 'usgs']);
+  assert.throws(() => resolveProviders('usgs,nosuch', registry), /nosuch is not in the registry/);
+  assert.throws(() => resolveProviders('', registry), /no providers/);
+  const fwd = registry.find((p) => p.active && p.adapter !== 'fdsn' && !['afad', 'kagsr'].includes(p.id) && p.backfill?.enabled !== true)!;
+  assert.throws(() => resolveProviders(fwd.id, registry), /forward-only/);
+  const inactive = registry.find((p) => !p.active);
+  if (inactive) assert.throws(() => resolveProviders(inactive.id, registry), /not active/);
+});
+
+const SEAM = '2026-06-29';
+const S0 = Date.parse(`${SEAM}T00:00:00Z`);
+const ARCHIVES = [{ period: '2026-06', tag: 'archive-2026-06', asset: 'events-2026-06.tar.zst', days: ['2026-06-28', '2026-06-29', '2026-06-30'], sha256: '49460d9f' }];
+const usgsRow = (id: string, tMs: number, over: Partial<RawObs> = {}): RawObs => ({
+  provider: 'usgs', providerEventId: id, eventTimeMs: tMs, providerUpdatedMs: tMs + HOUR, status: 'reviewed',
+  lat: 35.1, lon: -117.6, depth: 8, mag: 2.1, magType: 'ml', place: 'California', knownAliasIds: [], fields: { ids: `,${id},` }, ...over,
+});
+const emscRow = (id: string, tMs: number, over: Partial<RawObs> = {}): RawObs => ({
+  provider: 'emsc', providerEventId: id, eventTimeMs: tMs, providerUpdatedMs: null, status: null,
+  lat: 38.3, lon: 21.8, depth: 10, mag: 2.6, magType: 'ml', place: 'Greece', knownAliasIds: [], fields: { unid: id }, ...over,
+});
+
+/** Stub sources: each provider's rows, answered per window like fetchProviderWindow; `fail` providers answer HTTP 503. */
+function stubSources(rows: RawObs[], fail: ReadonlySet<string> = new Set()): DayRunDeps['fetchWindow'] {
+  return async (p, s, e) => {
+    if (fail.has(p.id)) return { provider: p.id, obs: [], status: { ok: false, error: 'HTTP 503' }, overflow: false } as WindowOutcome;
+    const obs = rows.filter((r) => r.provider === p.id && r.eventTimeMs >= s - 60_000 && r.eventTimeMs <= e + 60_000);
+    return { provider: p.id, obs, status: { ok: true, events_returned: obs.length }, overflow: false } as WindowOutcome;
+  };
+}
+
+function seamDeps(dir: string, arch: Map<string, EventNode[]>, fetchWindow: DayRunDeps['fetchWindow']): DayRunDeps {
+  return {
+    store: new LocalStore(join(dir, 'releases')), registry, fetchWindow, archives: ARCHIVES, arch: { days: arch, failedMonths: new Set() },
+    work: dir, nowMs: Date.parse('2026-11-08T12:00:00Z'), seqMarker: 500_000, spacingMs: 0, sleep: async () => {},
+  };
+}
+
+/** The seam as archived: a forward-only list source on each day, no usgs or emsc rows. */
+const seamArchive = (): Map<string, EventNode[]> =>
+  archivedDay([
+    { ...emscRow('cenc1', S0 - 10 * HOUR), provider: 'cenc', fields: {} },
+    { ...emscRow('cenc2', S0 + 10 * HOUR, { lat: 30.1, lon: 103.2 }), provider: 'cenc', fields: {} },
+    { ...emscRow('cenc3', S0 + 34 * HOUR, { lat: 30.1, lon: 103.2 }), provider: 'cenc', fields: {} },
+  ]);
+
+test('seam day: two sources, one edition built from both raws, reason seam and the context on every entry', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'efd-seam-'));
+  try {
+    const idx = emptyRemediationIndex();
+    const rows = [usgsRow('ci1', S0 + 2 * HOUR), usgsRow('ci2', S0 + 20 * HOUR), emscRow('e1', S0 + 3 * HOUR), emscRow('e0', S0 - 5 * HOUR)];
+    const tasks = refillTasks(SEAM, ['usgs', 'emsc'], new Set());
+    const r = await remediateDay(SEAM, tasks, idx, seamDeps(dir, seamArchive(), stubSources(rows)));
+    assert.deepEqual(r.failed, []);
+    assert.equal(idx.editions.length, 1, 'one edition for the day, not one per source');
+    const ed = idx.editions[0]!;
+    assert.equal(ed.asset, 'events-2026-06-29.e1.ndjson.gz');
+    assert.deepEqual(ed.built_from, ['raw-emsc-2026-06-29.ndjson.gz', 'raw-usgs-2026-06-29.ndjson.gz']);
+    assert.equal(ed.reason, 'seam');
+    assert.ok(idx.raw.every((x) => x.reason === 'seam'));
+    assert.deepEqual(ed.built_on, { tag: 'archive-2026-06', asset: 'events-2026-06.tar.zst', sha256: '49460d9f' });
+    assert.deepEqual(Object.keys(ed.context!).sort(), ['2026-06-28', '2026-06-29', '2026-06-30']);
+    assert.ok(Object.values(ed.context!).every((c) => c.tag === 'archive-2026-06'));
+    assert.deepEqual(ed.stats.provider_rows.usgs, { before: 0, after: 2 });
+    assert.deepEqual(ed.stats.provider_rows.emsc, { before: 0, after: 1 }, 'the row of the day before is not the day\'s');
+    assert.equal(ed.stats.live_after, 4);
+    const text = gunzipSync(readFileSync(join(dir, 'releases', 'remediation-2026', ed.asset))).toString('utf8');
+    assert.equal(createHash('sha256').update(readFileSync(join(dir, 'releases', 'remediation-2026', ed.asset))).digest('hex'), ed.sha256);
+    assert.equal(text, dayPartitionText(text.split('\n').filter(Boolean).map((l) => featureToNode(JSON.parse(l))), SEAM, EDITION_FORMAT), 'the edition is dayPartitionText(nodes, day, EDITION_FORMAT)');
+    assert.ok(text.includes('"review_status"'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('seam day: a failed source uploads only the other raws and no edition; the next run fetches it and builds e1 from both', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'efd-seam-'));
+  try {
+    const idx = emptyRemediationIndex();
+    enqueueRefill(idx, '2026-06-28..2026-07-01', ['usgs', 'emsc'], 'seam', '2026-11-08T00:00:00.000Z');
+    const rows = [usgsRow('ci1', S0 + 2 * HOUR), emscRow('e1', S0 + 3 * HOUR)];
+    const first = await remediateDay(SEAM, refillTasks(SEAM, ['usgs', 'emsc'], new Set()), idx, seamDeps(dir, seamArchive(), stubSources(rows, new Set(['emsc']))));
+    assert.match(first.failed.join('\n'), /emsc:2026-06-29: .*HTTP 503/);
+    assert.match(first.failed.join('\n'), /1 raw\(s\) uploaded, no edition/);
+    assert.deepEqual(idx.raw.map((x) => x.asset), ['raw-usgs-2026-06-29.ndjson.gz']);
+    assert.equal(idx.editions.length, 0);
+    // The queue asks for the missing source only, and keeps the day.
+    const plan = queuePlan(idx, new Set(ARCHIVES[0]!.days));
+    assert.deepEqual(plan.tasks.filter((t) => t.day === SEAM).map((t) => t.provider), ['emsc']);
+    assert.deepEqual(plan.waiting, ['2026-07-01']);
+    pruneQueue(idx);
+    assert.equal(idx.refill_queue![0]!.range, '2026-06-28..2026-07-01');
+    const second = await remediateDay(SEAM, plan.tasks.filter((t) => t.day === SEAM), idx, seamDeps(dir, seamArchive(), stubSources(rows)));
+    assert.deepEqual(second.failed, []);
+    assert.equal(second.edition!.edition, 1);
+    assert.deepEqual(second.edition!.built_from, ['raw-emsc-2026-06-29.ndjson.gz', 'raw-usgs-2026-06-29.ndjson.gz']);
+    assert.deepEqual(second.edition!.stats.provider_rows.usgs, { before: 0, after: 1 }, 'the usgs rows come from its raw asset');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('seam day: the neighbour context is the neighbour\'s current edition; against it, an archive-only build is refused', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'efd-seam-'));
+  try {
+    const idx = emptyRemediationIndex();
+    const arch = seamArchive();
+    // 06-28's edition: its archived day plus EMSC's event 10 s before midnight.
+    const lateRow = emscRow('late', S0 - 10_000);
+    const prevDay = '2026-06-28';
+    const r28 = await remediateDay(prevDay, refillTasks(prevDay, ['emsc'], new Set()), idx, seamDeps(dir, arch, stubSources([lateRow])));
+    assert.deepEqual(r28.failed, []);
+    assert.equal(r28.edition!.stats.new_events, 1);
+    // EMSC has since revised the event to 5 s after midnight: asked for 06-29, it answers it there.
+    const revised = { ...lateRow, eventTimeMs: S0 + 5_000, providerUpdatedMs: Date.parse('2026-07-10T00:00:00Z') };
+    const r29 = await remediateDay(SEAM, refillTasks(SEAM, ['emsc'], new Set()), idx, seamDeps(dir, arch, stubSources([revised])));
+    assert.deepEqual(r29.failed, []);
+    assert.deepEqual(r29.edition!.context![prevDay], { tag: 'remediation-2026', asset: 'events-2026-06-28.e1.ndjson.gz', sha256: r28.edition!.sha256 });
+    assert.equal(r29.edition!.context![SEAM]!.tag, 'archive-2026-06', 'the day itself is always its archived day');
+    assert.equal(r29.edition!.stats.neighbour_joins, 1, 'the row joins the event the 06-28 edition publishes');
+    assert.equal(r29.edition!.stats.new_events, 0);
+    // Built on the archives alone, the row would mint a second event: refused against what consumers read.
+    const archiveOnly = buildDayEdition({ day: SEAM, context: new Map([...arch].map(([d, ns]) => [d, ns.map((n) => structuredClone(n))])), rows: [revised], registry, nowMs: Date.parse('2026-11-08T12:00:00Z'), ingestTime: '2026-11-08T12:00:00.000Z', seqMarker: 1, fmt: EDITION_FORMAT });
+    assert.equal(archiveOnly.stats.new_events, 1);
+    const edNodes = gunzipSync(readFileSync(join(dir, 'releases', 'remediation-2026', 'events-2026-06-28.e1.ndjson.gz'))).toString('utf8').split('\n').filter(Boolean).map((l) => featureToNode(JSON.parse(l)));
+    const consumerContext = new Map([[prevDay, edNodes], [SEAM, arch.get(SEAM)!], ['2026-06-30', arch.get('2026-06-30')!]]);
+    assert.match(editionProblems(SEAM, archiveOnly.nodes, consumerContext).join('\n'), /emsc:late would be live twice/);
+    assert.deepEqual(editionProblems(SEAM, archiveOnly.nodes, arch), [], 'the archives alone do not see it');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('refill queue: persistent, deduplicated; archived days are taken, the others stay queued; done days leave it', () => {
+  const idx: RemediationIndex = { version: 1, raw: [], editions: [] }; // an index of 2026-10-04: no queue yet
+  assert.equal(enqueueRefill(idx, '2026-06-28..2026-07-03', ['usgs', 'emsc'], 'seam', '2026-11-08T00:00:00.000Z'), true);
+  assert.equal(enqueueRefill(idx, '2026-06-28..2026-07-03', ['emsc', 'usgs'], 'seam', '2026-11-09T00:00:00.000Z'), false, 'queued once');
+  assert.throws(() => enqueueRefill(idx, '2026-07-03..2026-06-28', ['usgs'], 'seam', 'x'), /ends before/);
+  const june = new Set(['2026-06-27', '2026-06-28', '2026-06-29', '2026-06-30']);
+  let plan = queuePlan(idx, june);
+  assert.deepEqual(plan.tasks.map((t) => `${t.provider}:${t.day}`), ['emsc:2026-06-28', 'usgs:2026-06-28', 'emsc:2026-06-29', 'usgs:2026-06-29', 'emsc:2026-06-30', 'usgs:2026-06-30']);
+  assert.deepEqual(plan.waiting, ['2026-07-01', '2026-07-02', '2026-07-03'], 'not archived yet: stays queued');
+  // 06-28 done (both raws, an edition built from both); 06-29 has both raws but no edition (a run died between them).
+  const raw = (provider: string, day: string) => ({ provider, day, tag: 'remediation-2026', asset: `raw-${provider}-${day}.ndjson.gz`, url: '', sha256: 'x', bytes: 1, rows: 1, requests: 1, partial: false, fetched_at: '2026-11-08T00:00:00.000Z', reason: 'seam' as const });
+  idx.raw.push(raw('usgs', '2026-06-28'), raw('emsc', '2026-06-28'), raw('usgs', '2026-06-29'), raw('emsc', '2026-06-29'));
+  const ed = (day: string, from: string[]) => ({ day, edition: 1, tag: 'remediation-2026', asset: `events-${day}.e1.ndjson.gz`, url: '', sha256: 'y', bytes: 1, built_on: { tag: 'a', asset: 'b', sha256: null }, built_from: from, reason: 'seam' as const, stats: {} as never, built_at: '' });
+  idx.editions.push(ed('2026-06-28', ['raw-emsc-2026-06-28.ndjson.gz', 'raw-usgs-2026-06-28.ndjson.gz']));
+  plan = queuePlan(idx, june);
+  assert.deepEqual(plan.tasks.map((t) => `${t.provider}:${t.day}`), ['emsc:2026-06-30', 'usgs:2026-06-30']);
+  assert.deepEqual(plan.editionOnly, ['2026-06-29']);
+  assert.deepEqual(pruneQueue(idx), []);
+  assert.equal(idx.refill_queue![0]!.range, '2026-06-29..2026-07-03', 'the done day left the range');
+  // July rolls: its days are taken. Everything done: the entry leaves the queue.
+  const julyToo = new Set([...june, '2026-07-01', '2026-07-02', '2026-07-03', '2026-07-04']);
+  assert.deepEqual(queuePlan(idx, julyToo).waiting, []);
+  assert.equal(queuePlan(idx, julyToo).tasks.length, 8);
+  for (const d of ['2026-06-29', '2026-06-30', '2026-07-01', '2026-07-02', '2026-07-03']) {
+    if (d !== '2026-06-29') idx.raw.push(raw('usgs', d), raw('emsc', d));
+    idx.editions.push(ed(d, [`raw-emsc-${d}.ndjson.gz`, `raw-usgs-${d}.ndjson.gz`]));
+  }
+  assert.deepEqual(pruneQueue(idx).map((e) => e.range), ['2026-06-29..2026-07-03']);
+  assert.deepEqual(idx.refill_queue, []);
+  assert.deepEqual(JSON.parse(indexText(idx)).refill_queue, []);
+});
+
+test('index text: the queue is kept; the index of 2026-10-04 (no queue, no reason) still reads', () => {
+  const idx = emptyRemediationIndex();
+  enqueueRefill(idx, '2026-07-01..2026-07-03', ['usgs'], 'seam', '2026-11-08T00:00:00.000Z');
+  const back = JSON.parse(indexText(idx)) as RemediationIndex;
+  assert.deepEqual(back.refill_queue, [{ range: '2026-07-01..2026-07-03', providers: ['usgs'], reason: 'seam', queued_at: '2026-11-08T00:00:00.000Z' }]);
+  const old = { version: 1 as const, raw: [], editions: [] };
+  assert.deepEqual(queuePlan(old, new Set(['2026-07-01'])), { tasks: [], editionOnly: [], waiting: [] });
+  assert.deepEqual(pruneQueue(old), []);
 });

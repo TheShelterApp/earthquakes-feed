@@ -16,7 +16,7 @@ archival, redaction).
 | jsDelivr (branch) | `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/` | full-history partitions; **from 2026-11-04 frozen days only** (*Historical day partitions*) | ~12 h |
 | jsDelivr (`@sha`) | `…@<data_commit>/` | immutable frozen partitions | 1 year, immutable |
 | GitHub Releases | `archive-YYYY-MM` assets | very old months (bulk) | immutable, no CORS |
-| GitHub Releases | `remediation-YYYY` assets | complete editions of days a source's backfill could not fetch whole (*Saturated days*) | immutable, no CORS |
+| GitHub Releases | `remediation-YYYY` assets | complete editions of days a source's backfill could not fetch whole, or that the live layer's start left empty (*Remediation editions*) | immutable, no CORS |
 | GitHub Releases | `first-solutions-YYYY-MM` assets | each source's kept versions per report (*Earliest solutions*) | immutable, no CORS |
 | GitHub Releases | `logs-YYYY-MM` assets | finished months of the run logs: status history and daily change logs (*Run logs*) | immutable, no CORS |
 
@@ -336,7 +336,8 @@ automatic one or one a seismologist reviewed — the same on each `provenance[]`
 on the rolling summaries, the live and month indexes and the detail hours since 2026-10, on the Pages day files
 `/v1/events/<day>.geojson` of every day since 2026-11-08, and on the NDJSON day partitions of the event days from
 `knowledge/index/partition-format.json` `review_status_from` on; the partitions of earlier days keep their bytes, and
-archives and editions follow their partitions). Feed data is under `properties.feed`:
+archives and deep-history editions follow their partitions; remediation editions built since 2026-11-08 carry it on
+every day). Feed data is under `properties.feed`:
 
 | `feed.*` | Meaning |
 |---|---|
@@ -387,7 +388,8 @@ publish time, so nothing is fetched or logged for it. The top-level `status` sta
   `knowledge/index/partition-format.json` on the `data` branch names it (`{"version":1,"review_status_from":"YYYY-MM-DD"}`).
   derive set it once, on its first run after 2026-11-08, to the first unfrozen day of that run, and never moves it, so a
   frozen partition never changed for it. The partitions of earlier days, and the Release archives and deep-history
-  editions built from them, do not carry it; a remediation edition carries it when its day does. To read it on an older
+  editions built from them, do not carry it; a remediation edition built since 2026-11-08 carries it whatever its day
+(they are new assets; the editions of 2026-10-04 do not). To read it on an older
   day, take the Pages day file while it exists (the event-map window, ~45 days), or derive it from the row as below.
 
 | Source | Where it comes from |
@@ -792,6 +794,32 @@ Where the walk stands (`knowledge/index/backfill.json`, 2026-10-01):
 | `isc` | 2025-08-03 | paused (below); ISC rows also fill 2024-05 and 2025-02 (one-off fills) |
 | `aec`, `cenc`, `ncs`, `tmd`, `bmkg`, `jma`, `mexico`, `ipma`, `egypt`, `bgs`, `ign`, `inpres`, `ga`, `ovsicori`, `igepn`, `cwa`, `geosphere`, `koeri`, `phivolcs` | the source's first live run (whatever its list then held of the last 7 days) | forward-only: no time-range query |
 
+The forward-only sources' first lists matter for the walk too: their rows of up to a week before the first live run
+set the live floor (the earliest `event_map` day, 2026-06-28), and backfill walks only below it. See the seam below.
+
+**The seam of 2026-06-28 → 07-03 05:42 UTC.** The first live run (2026-07-05 05:42) asked the time-range sources for
+their last 48 hours only, so they reached back to 07-03 05:42, while the forward-only lists (NCS, CENC, TMD, AFAD's
+list) reached 06-28 and set the floor there. Backfill filled only before 06-28, and the onboarding bootstrap seeded
+the 15 sources then present (`usgs`, `emsc`, `geofon`, `ingv`, `geonet`, `resif`, `noa`, `ethz`, `nrcan`, `ncedc`,
+`scedc`, `knmi`, `auspass`, `afad`, `kagsr`) as complete. So none of them was ever asked for [06-28 00:00,
+07-03 05:42): about 4,900 events were missing, the days held only RéNaSS, ISC, CSN, IPGP, IGP, IMO, USP (onboarded
+later, through `pending`) and the forward-only lists. Measured on 2026-11-08:
+
+| Day | Events | usgs rows | emsc rows | ComCat count | EMSC count |
+|---|---|---|---|---|---|
+| 06-27 (backfilled, for comparison) | 1,021 | 278 | 376 | 343 | 403 |
+| 06-28 | 158 | 0 | 0 | 384 | 424 |
+| 06-29 | 158 | 1 | 1 | 337 | 430 |
+| 06-30 | 191 | 1 | 2 | 356 | 384 |
+| 07-01 | 200 | 5 | 0 | 371 | 428 |
+| 07-02 | 189 | 2 | 1 | 384 | 454 |
+| 07-03 | 830 | 207 | 279 | 425 | 430 |
+
+The days are repaired by remediation editions with `reason: "seam"` (*Remediation editions*), not in place: 06-28…06-30
+were already in `archive-2026-06`, and 07-01…07-03 are frozen and wait in the refill queue for July's archive. Since
+2026-11-08 the onboarding bootstrap seeds a source as complete only when its live lookback reaches the floor, and
+queues the others like a source added later, so a new `data` branch cannot open the same gap.
+
 A source's walk reports its failures: a window that fails is halved for the next run (a window whose answer is too
 large to stream within the timeout fails as a timeout, never as an overflow), each failure is logged with its error,
 the cursor keeps `lastError` and `failingSince`, a streak of 24 runs adds a warning to every run, and from 72 runs at a
@@ -1105,26 +1133,43 @@ read from the Releases, read only, so a dry run can build a month's next edition
 `history-out/history.json` and `history-out/history-state.json` (a run writes both every time). `-f sources=ingv` (`HISTORY_ONLY_SOURCES`) limits a dry run to some sources; it seals
 nothing that needs another source. The dry run stays in the walk's concurrency group: it asks the same hosts.
 
-## Saturated days
+## Remediation editions (saturated days and the 2026-07 seam)
 
-When even a one-day backfill window filled a source's page cap, the walk kept the capped rows (the day is partial for
-that source) and listed the day in its cursor (`saturatedDays` in `knowledge/index/backfill.json`). On 2026-10-04 that
-was KAGSR 2025-07-30 (the day after the M8.8 Kamchatka mainshock), 23 AFAD days of the Sındırgı sequences (2025-08-11
-to 08-25 and 2025-10-28 to 11-12) and IMO 2023-11-11, 2025-04-01 and 2025-05-24. All of them are frozen and rolled
-into `archive-YYYY-MM` Releases, and the feed never rewrites a frozen day or a published asset, so they are not
-repaired in place. The `remediate` workflow (manual, `workflow_dispatch`; `src/remediate.ts`) publishes ADDITIVE day
-editions instead, Kamchatka first, then the Sındırgı days:
+Two kinds of days are incomplete for some sources although they are frozen:
 
-- the source's whole day is asked again in 6-hour windows, each halved while its answer fills the cap (down to
-  5 minutes; a window still full there marks the day `partial`), one request at a time, at least 1.1 s apart;
-- the archived day and its two neighbours are read back from their archive asset (read only); AFAD rows the archive
-  holds 3 h early (before 2026-10-01, see *Turkey (AFAD)*) are re-read at their real time and folded, as the one-time
-  correction did for the unfrozen days, so the day has one time base; then the fetched rows go through the ingest
-  screen and backfill's Resolver;
-- the result is the complete day in the day-partition format, published as `events-<day>.e<N>.ndjson.gz` beside
-  `raw-<source>-<day>.ndjson.gz` (a header line, then exactly the rows the source answered) in the Release
-  `remediation-YYYY`. Both are immutable; a later remediation of the same day (another source) is the next edition,
-  built from the archive and every raw asset of the day. Each upload is read back and its checksum compared;
+- **Saturated days.** When even a one-day backfill window filled a source's page cap, the walk kept the capped rows
+  (the day is partial for that source) and listed the day in its cursor (`saturatedDays` in
+  `knowledge/index/backfill.json`). On 2026-10-04 that was KAGSR 2025-07-30 (the day after the M8.8 Kamchatka
+  mainshock), 23 AFAD days of the Sındırgı sequences (2025-08-11 to 08-25 and 2025-10-28 to 11-12) and IMO 2023-11-11,
+  2025-04-01 and 2025-05-24.
+- **The seam** 2026-06-28 → 07-03 05:42 UTC, which 15 sources never fetched (*History and backfill*).
+
+The feed never rewrites a frozen day or a published asset, so they are not repaired in place. The `remediate`
+workflow (`src/remediate.ts`) publishes ADDITIVE day editions instead, for archived days only:
+
+- the saturated days are its default tasks on a dispatch; an explicit refill (inputs `refill`, a range of at most 31
+  days, and `providers`, a comma list or `bootstrap-2026-07-05` for the 15 seam sources) is added to the PERSISTENT
+  refill queue, `refill_queue` in the index (`range`, `providers`, `reason`, `queued_at`). Every run, and a scheduled
+  run once a day (04:43 UTC, the queue only), takes the queue's days whose month is archived and leaves the others
+  queued; a day leaves the queue once every source of its entry has a raw asset of it and its current edition is
+  built from all of the day's raws. 2026-07-01…07-03 are queued so and are taken by the first scheduled run after
+  `archive` rolls July (on or after 2026-11-29);
+- a run works day by day (ascending, at most `max_days`); each source of the day is asked again for the whole day in
+  6-hour windows, each halved while its answer fills the cap (down to 5 minutes; a window still full there marks the
+  day `partial`), one request at a time, at least 1.1 s apart. When a source fails, the day's successful raw assets are
+  uploaded and indexed, and no edition is built: the next run asks only the sources that have no raw asset of the day
+  yet and builds the edition from all of them;
+- the archived day is read back from its archive asset (read only), and each neighbour as a consumer reads it: its
+  current remediation edition when it has one, else its archived day. AFAD rows the archive holds 3 h early (before
+  2026-10-01, see *Turkey (AFAD)*) are re-read at their real time and folded, as the one-time correction did for the
+  unfrozen days, so the day has one time base; then the fetched rows, and the rows of every other raw asset of the day
+  the index lists, go through the ingest screen and backfill's Resolver;
+- the result is ONE edition per day, whatever the number of sources: the complete day in the day-partition format,
+  published as `events-<day>.e<N>.ndjson.gz` beside one `raw-<source>-<day>.ndjson.gz` per source (a header line, then
+  exactly the rows the source answered) in the Release `remediation-YYYY`. Editions built since 2026-11-08 carry
+  `review_status` on their lines where the event's rows give one; the editions of 2026-10-04 do not and keep their
+  bytes. All assets are immutable; a later remediation of the same day is the next edition, built from the archive
+  and every raw asset of the day. Each upload is read back and its checksum compared;
 - an edition replaces ONE archived day while its neighbours stay as archived, so it holds the archived day's events by
   feed id plus the events the remediation minted. An AFAD event re-read across midnight keeps the day its archive gave
   it (its time may then lie up to 3 h into the next day; `stats.off_day`), the AFAD re-read and its folds stay among
@@ -1134,9 +1179,11 @@ editions instead, Kamchatka first, then the Sındırgı days:
   reading the edition instead of the archived day never drops an event or publishes one twice.
 
 `knowledge/index/remediation.json` lists every raw asset (`provider`, `day`, `rows`, `requests`, `partial`,
-`sha256`, …) and every edition (`day`, `edition`, `url`, `sha256`, `built_on`: the archive asset and its checksum,
-`built_from`: the raw assets, and `stats`: events before and after, new, retired, off the day, rows changed /
-unchanged, rows that joined a neighbouring day, AFAD rows re-read). The archived day, its `archive-YYYY-MM` asset and `manifest.json` are unchanged: a consumer that wants the
+`sha256`, `reason`, …) and every edition (`day`, `edition`, `url`, `sha256`, `built_on`: the archive asset and its
+checksum, `built_from`: the raw assets, `reason`: `saturated` or `seam` (absent on the entries of 2026-10-04: `saturated`),
+`context`: by day, the archive asset or the neighbour's edition the build read, with its checksum (absent on the
+entries of 2026-10-04: archives only), and `stats`: events before and after, new, retired, off the day, rows changed /
+unchanged, rows that joined a neighbouring day, AFAD rows re-read, rows per source before and after). The archived day, its `archive-YYYY-MM` asset and `manifest.json` are unchanged: a consumer that wants the
 repaired day reads the current edition (the highest `edition` of the day) instead of the archived day.
 
 ## Earliest solutions (side index)

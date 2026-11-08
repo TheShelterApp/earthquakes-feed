@@ -1,13 +1,19 @@
 name: remediate
 
-# Saturated-day remediation (FEED-DQ-1 / DQ-3; src/remediation.ts, APIs.md "Saturated days"). A backfill day whose
-# one-day window still filled the source's page cap was kept partial and listed in knowledge/index/backfill.json
-# `saturatedDays`. Each such day is asked again in sub-day windows and published as an ADDITIVE, immutable day
-# edition in the Release `remediation-YYYY` (beside the raw answer); the archived day, its archive asset and the
-# manifest are never touched. The data branch gains only knowledge/index/remediation.json, written by the `commit` job,
-# which holds no writer lock (FEED-OPS-4, round 14): no other writer touches the file, so its push rebases onto theirs.
-# Manual only: a run does at most `max_days` days, one request at a time per source host.
+# Remediation editions (src/remediation.ts, APIs.md "Remediation editions"): days a source's backfill could not fetch
+# whole (FEED-DQ-1 / DQ-3: a one-day window still filled the page cap, listed in knowledge/index/backfill.json
+# `saturatedDays`) and days the live layer's start left empty (the 2026-06-28..07-03 seam). Each day's sources are
+# asked again in sub-day windows and the day is published as an ADDITIVE, immutable edition in the Release
+# `remediation-YYYY` (beside the raw answers); the archived day, its archive asset and the manifest are never touched.
+# The data branch gains only knowledge/index/remediation.json, written by the `commit` job, which holds no writer lock
+# (FEED-OPS-4, round 14): no other writer touches the file, so its push rebases onto theirs.
+# A dispatch with `refill` adds the range to the PERSISTENT refill queue (remediation.json `refill_queue`); the queue's
+# days are taken once their month is archived (archive.yml), by any later run and by the daily scheduled run, which
+# does the queue only (nothing when it is empty or still waiting). A run does at most `max_days` days, one request at
+# a time, at least 1.1 s apart.
 on:
+  schedule:
+    - cron: '43 4 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -18,7 +24,13 @@ on:
         description: 'Only these tasks, e.g. kagsr:2025-07-30,afad:2025-08-11 (blank = every saturated day, Kamchatka and Sındırgı first)'
         required: false
       max_days:
-        description: 'Days per run (blank = 8)'
+        description: 'Days per run (blank = 8; the scheduled run does 3)'
+        required: false
+      refill:
+        description: 'Queue a refill of these days, e.g. 2026-06-28..2026-07-03 (taken as each day is archived); the run then does the queue only'
+        required: false
+      providers:
+        description: 'With refill: bootstrap-2026-07-05 (the 15 sources of the seam) or a comma list of source ids'
         required: false
 
 concurrency:
@@ -60,14 +72,17 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      - name: Remediate saturated days
+      - name: Remediate
         id: run
         env:
           DATA_DIR: .data
           REMEDIATION_OUT: remediation-out
           REMEDIATION_DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
           REMEDIATION_DAYS: ${{ inputs.days }}
-          REMEDIATION_MAX_DAYS: ${{ inputs.max_days }}
+          REMEDIATION_MAX_DAYS: ${{ inputs.max_days || (github.event_name == 'schedule' && '3' || '') }}
+          REMEDIATION_REFILL: ${{ inputs.refill }}
+          REMEDIATION_PROVIDERS: ${{ inputs.providers }}
+          REMEDIATION_QUEUE_ONLY: ${{ github.event_name == 'schedule' && '1' || '' }}
           # gh: the archived months (read only) and the remediation assets.
           GH_TOKEN: ${{ github.token }}
         run: npx --no-install tsx src/remediate.ts

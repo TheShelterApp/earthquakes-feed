@@ -77,6 +77,8 @@ export interface ArchiveEntry {
   edition?: number;
   /** The re-merge epoch the asset is merged to (src/remerge-archives.ts); absent = never merged. A re-roll clears it. */
   merge_epoch?: number;
+  /** config REMERGE_RULES the asset was merged under (absent = 1); an older value is merged again. */
+  merge_rules?: number;
   /** A merged asset: its live and superseded lines, the asset it was merged from, and the remediation days it took. */
   live?: number;
   superseded?: number;

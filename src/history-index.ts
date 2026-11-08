@@ -1,4 +1,4 @@
-import { REMERGE_EPOCH } from './config.js';
+import { REMERGE_EPOCH, REMERGE_RULES } from './config.js';
 import { type HistoryConfig, type HistoryEra, type Period, allPeriods, dayKeyOf } from './history-config.js';
 
 /**
@@ -51,6 +51,8 @@ export interface EditionEntry {
   /** The re-merge epoch it is merged to (config REMERGE_EPOCH; absent = never re-merged). A merged edition is built from
    *  the edition it names in `merged_from`, not from the raw assets, so `built_from` stays that edition's. */
   merge_epoch?: number;
+  /** config REMERGE_RULES when merged (absent = 1); an older value is merged again. */
+  merge_rules?: number;
   merged_from?: { edition: number; asset: string; sha256: string };
   /** Lines in the edition (every state) and the superseded ones among them (`events` counts the live ones). */
   lines?: number;
@@ -130,7 +132,8 @@ export const currentEdition = (idx: HistoryIndex, period: string): EditionEntry 
 /** True when the edition is merged to the current re-merge epoch (always with REMERGE_EPOCH 0). Separate from
  *  editionIsCurrent, which is about the raw assets only: no staleness predicate re-seals a month because it is
  *  unmerged (a single-source era-B month must not be forced to e2 that way). */
-export const editionIsMerged = (e: Pick<EditionEntry, 'merge_epoch'>, epoch: number = REMERGE_EPOCH): boolean => (e.merge_epoch ?? 0) >= epoch;
+export const editionIsMerged = (e: Pick<EditionEntry, 'merge_epoch' | 'merge_rules'>, epoch: number = REMERGE_EPOCH, rules: number = REMERGE_RULES): boolean =>
+  (e.merge_epoch ?? 0) >= epoch && (epoch <= 0 || (e.merge_rules ?? 1) >= rules);
 
 export interface Unit {
   source: string;
@@ -203,6 +206,7 @@ export interface ArchiveIndexEntry {
   sha256?: string;
   days?: string[];
   merge_epoch?: number;
+  merge_rules?: number;
   needs_reroll?: boolean;
 }
 

@@ -44,7 +44,7 @@ import {
 import { type HistoryState, type StallEntry, emptyState, loadState, recordRun, stateText, walkTexts } from './history-state.js';
 import { type AssetInfo, DryRunStore, GitHubStore, type HistoryStore, LocalStore } from './history-store.js';
 import { verifyEdition } from './history-verify.js';
-import { type ContextMeta, mergeMeta, remergeGateProblems, remergeNodes, remergedDayFiles, snapshotUnit } from './remerge.js';
+import { type ContextMeta, mergeMeta, normalizeUnit, remergeGateProblems, remergeNodes, remergedDayFiles, snapshotUnit } from './remerge.js';
 import { createTar } from './tar.js';
 import type { EventNode } from './types.js';
 import { loadRegistry } from './providers.js';
@@ -373,7 +373,7 @@ function editionEntryOf(tag: string, asset: string, sha256: string, bytes: numbe
     built_from: m.raw.map((r) => r.asset),
     context: m.context ? m.context.label : null,
     joined_newer: m.rows.joined_newer,
-    ...(m.merge ? { merge_epoch: m.merge.epoch } : {}),
+    ...(m.merge ? { merge_epoch: m.merge.epoch, merge_rules: m.merge.rules ?? 1 } : {}),
     ...(m.merge?.from ? { merged_from: m.merge.from } : {}),
     ...(m.lines != null ? { lines: m.lines } : {}),
     ...(m.superseded != null ? { superseded: m.superseded } : {}),
@@ -737,7 +737,9 @@ export function remergePeriods(ctx: Ctx): void {
     }
     const before = snapshotUnit(own);
     let res: ReturnType<typeof remergeNodes>;
+    let normalized: ReturnType<typeof normalizeUnit>;
     try {
+      normalized = normalizeUnit(own, ctx.registry, REMERGE_INGEST_TIME);
       res = remergeNodes({ own, memberDay, startMs: p.startMs, endMs: p.endMs, older, newer, anchored, registry: ctx.registry, ingestTime: REMERGE_INGEST_TIME });
     } catch (e) {
       ctx.report.blocked.push(`history: re-merge of ${p.key} blocked: ${e instanceof Error ? e.message : String(e)}`);
@@ -764,6 +766,7 @@ export function remergePeriods(ctx: Ctx): void {
         older: olderMeta,
         newer: newerMeta,
         anchored,
+        normalized,
       }),
       lines: own.length,
       superseded: own.filter((n) => n.state === 'superseded').length,

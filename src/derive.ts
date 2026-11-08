@@ -28,7 +28,7 @@ import { writeDetailHours } from './event-detail.js';
 import { writeLiveMonth } from './live-month.js';
 import { tmpdir } from 'node:os';
 import { deriveStats, loadStatsConfig, statsDays } from './stats.js';
-import { dayTableJson, type DayTableResult } from './stats-table.js';
+import { dayRows, type DayRows } from './stats-table.js';
 
 function main(): void {
   const nowMs = Date.now();
@@ -96,13 +96,14 @@ function main(): void {
   let pagesNdjsonBytes = 0;
   const baselineWanted = new Set(baselineDays(nowMs));
   const written = new Map<string, string>();
-  // Statistics (APIs.md, Statistics; providers/stats.json `derive_publish`): the day tables of the event-map days are
-  // built here from the features the partition writer already made; none are kept. A failure only drops the stats.
+  // Statistics (APIs.md, Statistics; providers/stats.json `derive_publish`): the rows of the event-map days are
+  // taken here from the features the partition writer already made (no feature is kept); writeStats reconciles the
+  // window and writes the tables. A failure only drops the stats.
   const statsCfg = loadStatsConfig();
   if (statsCfg.warning) console.warn(`::warning::${statsCfg.warning}`);
   const statsOn = statsCfg.mode !== 'off' && statsCfg.config != null;
   const statsDaySet = new Set(statsOn ? statsDays(nowMs) : []);
-  const statsTables = new Map<string, DayTableResult>();
+  const statsTables = new Map<string, DayRows>();
   let statsLoopError: unknown = null;
   let statsLoopMs = 0;
   for (const [day, nodes] of byDay) {
@@ -111,7 +112,7 @@ function main(): void {
     if (statsDaySet.has(day) && statsLoopError == null) {
       const t = performance.now();
       try {
-        statsTables.set(day, dayTableJson(day, out.feats));
+        statsTables.set(day, dayRows(day, out.feats));
       } catch (err) {
         statsLoopError = err;
       }
@@ -258,7 +259,7 @@ function main(): void {
       (stats
         ? ` days=${stats.index.days.length} missing=${stats.index.missing_days.length} from_data=${stats.fromData.length}` +
           ` years=${stats.index.years.length} area=${stats.index.area.length} through=${stats.index.through ?? 'null'}` +
-          ` bytes=${stats.bytes} ms=${Math.round(stats.ms + statsLoopMs)} (tables in the loop ${Math.round(statsLoopMs)})` +
+          ` bytes=${stats.bytes} ms=${Math.round(stats.ms + statsLoopMs)} (rows in the loop ${Math.round(statsLoopMs)}, reconciliation ${Math.round(stats.reconcileMs)}: ${stats.collapsed} collapsed)` +
           (stats.dropped.length ? ` not_published=${stats.dropped.length}` : '')
         : statsOn ? ' dropped' : ''),
   );

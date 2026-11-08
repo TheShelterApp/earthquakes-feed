@@ -4,7 +4,7 @@
   "title": "Statistics area file (v1/stats/area/YYYY.json)",
   "description": "One year of events on a 0.1-degree grid for Your area: per occupied cell (row = min(1799, floor((latE4 + 900000) / 1000)), col = floor(((lonE4 + 1800000) mod 3600000) / 1000), cell = row * 3600 + col; delta-coded, strictly increasing) the event count, the M4.5+ count and the largest magnitude x 100 of its events, plus the M6+ events as an event table of kind \"area\". min_mag 4.5 (era B) means every record is M4.5+. Built by stats.yml, committed on data at the same path. APIs.md, Statistics.",
   "type": "object",
-  "required": ["format", "kind", "year", "builder", "min_mag", "through", "complete", "cell_deg", "records", "cell", "total", "m45", "mmax", "m6", "inputs_digest", "attribution"],
+  "required": ["format", "kind", "year", "builder", "min_mag", "through", "complete", "cell_deg", "records", "cell", "total", "m45", "mmax", "m6", "reconciled", "inputs_digest", "attribution"],
   "properties": {
     "format": { "const": 1 },
     "kind": { "const": "area" },
@@ -23,6 +23,7 @@
       "allOf": [{ "$ref": "stats-table.schema.json#/$defs/eventTable" }],
       "properties": { "kind": { "const": "area" } }
     },
+    "reconciled": { "type": "object", "required": ["rule", "collapsed"], "additionalProperties": false, "properties": { "rule": { "const": "v1" }, "collapsed": { "type": "integer", "minimum": 0 } }, "description": "the statistical reconciliation: its rule and the rows it left out (APIs.md, Statistics, Reconciliation)" },
     "inputs_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "attribution": { "type": "string" }
   }

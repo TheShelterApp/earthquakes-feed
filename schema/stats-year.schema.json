@@ -4,7 +4,7 @@
   "title": "Statistics year file (v1/stats/year/YYYY.json)",
   "description": "One calendar year through `through` for the year view: per-day totals, filtered counts, 10 magnitude bins and providers, plus the M5+ events as an event table of kind \"year\". Built by stats.yml, committed on data at the same path. APIs.md, Statistics.",
   "type": "object",
-  "required": ["format", "kind", "year", "builder", "first", "through", "complete", "mag_edges_e2", "provider_names", "days", "events", "inputs_digest", "attribution"],
+  "required": ["format", "kind", "year", "builder", "first", "through", "complete", "mag_edges_e2", "provider_names", "days", "events", "reconciled", "inputs_digest", "attribution"],
   "properties": {
     "format": { "const": 1 },
     "kind": { "const": "year" },
@@ -17,10 +17,11 @@
     "provider_names": { "type": "array", "items": { "type": "string" } },
     "days": {
       "type": "object",
-      "required": ["total", "filtered", "bins", "providers", "missing"],
+      "required": ["total", "filtered", "collapsed", "bins", "providers", "missing"],
       "properties": {
         "total": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
         "filtered": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "collapsed": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "description": "rows the statistical reconciliation left out, per day" },
         "bins": { "type": "array", "items": { "type": "array", "minItems": 10, "maxItems": 10, "items": { "type": "integer", "minimum": 0 } } },
         "providers": { "type": "array", "items": { "type": "array", "items": { "type": "integer", "minimum": 0 } } },
         "missing": { "type": "array", "items": { "type": "integer", "minimum": 0 } }
@@ -30,6 +31,7 @@
       "allOf": [{ "$ref": "stats-table.schema.json#/$defs/eventTable" }],
       "properties": { "kind": { "const": "year" } }
     },
+    "reconciled": { "type": "object", "required": ["rule", "collapsed"], "additionalProperties": false, "properties": { "rule": { "const": "v1" }, "collapsed": { "type": "integer", "minimum": 0 } }, "description": "the statistical reconciliation: its rule and the rows it left out (APIs.md, Statistics, Reconciliation)" },
     "inputs_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "attribution": { "type": "string" }
   }

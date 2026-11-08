@@ -279,9 +279,26 @@ noise, not existing, other event, volcanic eruption) is **filtered** (counted by
 live event is a row: `status` is the review status of its chosen provenance row (*Review status*: 1 reviewed, 0
 automatic, null when the source does not say), `upd` is 1 when `updated − time` is more than 3,600,000 ms (0 otherwise,
 null without `updated`), `delay` the seconds from origin to the feed's `first_ingest_time`, `intensity` `mmi`, else
-`cdi`. Statistics add no deduplication rule of their own: the feed's merge is the single one (*Realtime + client
-dedup*, *Re-merged history*); the year and area files count an input that is not yet re-merged after running that same
-merge over it (below).
+`cdi`. Event identity is the feed's merge alone (*Realtime + client dedup*, *Re-merged history*); the year and area
+files count an input that is not yet re-merged after running that same merge over it (below). The statistics products
+then apply one more step of their own, the reconciliation.
+
+**Reconciliation** (rule `v1`, `reconcileRows` in `src/stats-table.ts`; statistics products only). Even merged, the
+feed keeps some quakes as several events: agencies place and size one quake differently, and the merge (an identity
+rule: it must never join two real quakes) leaves such reports apart. Counted as they are, they put M6+ 1.2–1.7× above
+USGS ComCat. The statistics collapse them at catalogue level, which is explicitly not event identity: the events, the
+day partitions, the live map and the detail pages are unchanged. Two live earthquake rows link when all of these hold:
+they share no provenance provider (a provider's own catalogue is self-consistent, so two events that share one never
+collapse), their origin times are at most 60 s apart, their epicentres at most 100 km apart, their magnitudes at most
+1.0 apart, and one of them is M4.5+ (all on the scaled integers: `mag × 100`). Links are taken closest first (time gap,
+then distance, then ids) and join two groups only while the groups share no provider (single link under that
+constraint). Each group keeps one row, its representative: the member holding a `usgs` provenance row (ComCat's
+magnitude is the reference), else the member whose chosen provider ranks first in the registry's provider `priority`
+(as the merge ranks), then the earliest origin, then the smallest feed id; the others are left out and counted. derive
+reconciles the rows of its whole 61-day window together before writing the day tables, so a pair across midnight
+counts once; the stats builder reconciles each year with the day before and the day after it as context. Counters:
+`collapsed` in each day table, `days.collapsed` per day and `reconciled: {rule, collapsed}` in a year file,
+`reconciled: {rule, collapsed}` in an area file.
 
 **Event table** (format 1, shared by the three file kinds): `{format, kind, t0, count, providers, id, t, lat, lon, mag,
 …optional columns}`, rows sorted by (time, id). `id` is the feed id (`efd_…`, the feature id). `t` holds ms deltas:
@@ -293,21 +310,22 @@ of them, a year table all but `delay`, an area table `depth`, `place`, `prov`.
 
 **Day table** (`v1/stats/days/YYYY-MM-DD.json`): the event table of `kind: "day"` with `date` (after `kind`),
 `t0` = the day's 00:00 UTC, plus `filtered` (the filtered events' times, ms from `t0` each, ascending), `skipped` (a
-count) and `attribution`. `count + filtered.length + skipped` = the day's live, non-tombstoned features. The day tables
+count), `collapsed` (a count: rows the reconciliation left out) and `attribution`. `count + filtered.length + skipped +
+collapsed` = the day's live, non-tombstoned features. The day tables
 of the 45 event-map days are built from the run's own events; today − 60 … today − 46 from the frozen partitions on
 `data`. A day's bytes change only when its events do: ~140 KB a day, 8.6 MB for the 61 days on 2026-11-08 (2.8 MB at brotli
 quality 4: the random part of the feed ids does not compress), so a first sync is a few MB and a refresh moves the index
 and the days that changed (today, yesterday, a revised day).
 
 **Year file** (`v1/stats/year/YYYY.json`): `{format, kind: "year", year, builder, first, through, complete,
-mag_edges_e2: [200, 250, 300, 350, 400, 450, 500, 600, 700], provider_names, days: {total, filtered, bins, providers,
-missing}, events, inputs_digest, attribution}`. Per day of the year from `first` through `through`: `total` rows,
+mag_edges_e2: [200, 250, 300, 350, 400, 450, 500, 600, 700], provider_names, days: {total, filtered, collapsed, bins,
+providers, missing}, events, reconciled, inputs_digest, attribution}`. Per day of the year from `first` through `through`: `total` rows,
 `filtered`, `bins` (10 counts: < 2, [2, 2.5), … [6, 7), ≥ 7; `atLeast[m]` is the sum of the bins whose lower edge is
 ≥ m), `providers` (indexes into `provider_names`), and `missing` (day indexes with no input). `events` is an event table
 of the M5+ rows. Days after `through` come from the day tables.
 
 **Area file** (`v1/stats/area/YYYY.json`): `{format, kind: "area", year, builder, min_mag, through, complete, cell_deg:
-0.1, records, cell, total, m45, mmax, m6, inputs_digest, attribution}`. One record per occupied 0.1° cell: `row =
+0.1, records, cell, total, m45, mmax, m6, reconciled, inputs_digest, attribution}`. One record per occupied 0.1° cell: `row =
 min(1799, floor((latE4 + 900000) / 1000))`, `col = floor(((lonE4 + 1800000) mod 3600000) / 1000)`, `cell = row × 3600
 + col` (centre `−90 + (row + 0.5) / 10`, `−180 + (col + 0.5) / 10`); `cell` is delta-coded and strictly increasing
 below 6,480,000. `total` counts the rows, `m45` the M4.5+ rows, `mmax` the largest `mag × 100`; `m6` is an event table of
@@ -323,7 +341,7 @@ day tables.
   day, the current deep-history edition that lists it (*Deep history*; era B editions carry `min_magnitude: 4.5`). A
   year with a day that has no input waits (the era B walk) and is not published.
 - **Rebuild:** a year is rebuilt when the digest of its inputs changes: sha256 of the canonical JSON of the builder
-  version, the format, the re-merge epoch, `through` and every input's `{kind, key, sha256 or blob}` (plus the inputs of
+  version, the format and reconciliation rule, the re-merge epoch, `through` and every input's `{kind, key, sha256 or blob}` (plus the inputs of
   the 7 days on each side when the year is re-merged in memory). A new frozen day rebuilds the current year; a re-merged
   archive or edition, a new remediation edition or a re-roll rebuilds its year with no other action; a builder bump
   rebuilds them all. The current year and the two before it first, then newest first, at most `max_years_per_run` a run.
@@ -347,7 +365,7 @@ day tables.
 - **Ledger** `knowledge/stats/state.json` on `data` (derive reads `through` and each file's `sha256` from it):
   `{version, builder, through, generated, run_id, years: {Y: {inputs_digest, through, complete, area: {bytes, sha256,
   records, m6}, year?: {bytes, sha256}, check: {gate: ok|warn|fail|error, era, window, feed, comcat, ratio, bands},
-  remerged_in_memory, inputs: {remediation, partition, archive, edition, unmerged_months}, dup_suspects: {count, n45,
+  remerged_in_memory, collapsed, inputs: {remediation, partition, archive, edition, unmerged_months}, dup_suspects: {count, n45,
   ratio, sample}, months: {YYYY-MM: {n45, m6, dup}}, failed_digest?, error?, waiting?}}}`. `dup_suspects` (diagnostics
   only) counts pairs of M4.5+ rows of different chosen providers within 60 s and 100 km: splits the merge left.
 - **Verify:** a dispatch with `verify: sample` (the last 13 months and 6 older ones) or `full` (every month) compares

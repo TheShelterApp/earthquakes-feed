@@ -21,7 +21,7 @@ import {
   type StatsConfig,
   type StatsIndex,
 } from '../src/stats.js';
-import { AREA_COLUMNS, STATS_ATTRIBUTION, YEAR_COLUMNS, buildEventTable, dayTableJson, parseNdjson, statsEventOf, type DayTableResult, type StatsEvent } from '../src/stats-table.js';
+import { AREA_COLUMNS, STATS_ATTRIBUTION, YEAR_COLUMNS, buildEventTable, dayRows, dayTableJson, parseNdjson, statsEventOf, type DayRows, type StatsEvent } from '../src/stats-table.js';
 import type { EventNode, RawObs } from '../src/types.js';
 
 // derive's stats step (APIs.md, Statistics): 61 day tables, the event-map days from the partition loop's features, the
@@ -79,7 +79,7 @@ interface World {
   dataDir: string;
   publicDir: string;
   shadowDir: string;
-  tables: Map<string, DayTableResult>;
+  tables: Map<string, DayRows>;
 }
 
 /** Writes every day's partition into a temp data checkout (all but `skip`), and keeps the tables of the map days
@@ -93,11 +93,11 @@ function world(skip: string[] = []): World {
   const byDay = new Map<string, EventNode[]>();
   for (const n of nodes().values()) (byDay.get(eventDayKey(n.eventTimeMs)) ?? byDay.set(eventDayKey(n.eventTimeMs), []).get(eventDayKey(n.eventTimeMs))!).push(n);
   const mapFrom = eventDayKey(NOW - 45 * DAY);
-  const tables = new Map<string, DayTableResult>();
+  const tables = new Map<string, DayRows>();
   for (const [day, ns] of byDay) {
     if (skip.includes(day)) continue;
     const out = writeDayPartition(dataDir, day, ns, { nowMs: NOW, headIngestTime: iso(NOW), fmt: { version: 1, review_status_from: eventDayKey(NOW - 20 * DAY) } });
-    if (day >= mapFrom) tables.set(day, dayTableJson(day, out.feats));
+    if (day >= mapFrom) tables.set(day, dayRows(day, out.feats));
   }
   return { dataDir, publicDir, shadowDir, tables };
 }
@@ -151,19 +151,21 @@ test('61 days: the map days from the loop, older ones from the data checkout, a 
 function yearDoc(): string {
   const ev = (statsEventOf({ type: 'Feature', id: 'efd_01M6Q2J4WG0000000000000001', geometry: { coordinates: [140, 35, 10] }, properties: { mag: 5.3, time: Date.parse('2026-03-01T00:00:00Z'), type: 'earthquake', feed: { state: 'live', chosen_provider: 'usgs' } } }) as { ev: StatsEvent }).ev;
   return JSON.stringify({
-    format: 1, kind: 'year', year: 2026, builder: 1, first: '2026-01-01', through: '2026-11-05', complete: false,
+    format: 1, kind: 'year', year: 2026, builder: 2, first: '2026-01-01', through: '2026-11-05', complete: false,
     mag_edges_e2: [200, 250, 300, 350, 400, 450, 500, 600, 700], provider_names: ['usgs'],
-    days: { total: [1], filtered: [0], bins: [[0, 0, 0, 0, 0, 0, 0, 1, 0, 0]], providers: [[0]], missing: [] },
+    days: { total: [1], filtered: [0], collapsed: [0], bins: [[0, 0, 0, 0, 0, 0, 0, 1, 0, 0]], providers: [[0]], missing: [] },
     events: buildEventTable('year', Date.parse('2026-01-01T00:00:00Z'), [ev], YEAR_COLUMNS),
+    reconciled: { rule: 'v1', collapsed: 0 },
     inputs_digest: 'a'.repeat(64), attribution: STATS_ATTRIBUTION,
   });
 }
 function areaDoc(year: number, minMag: number | null = null): string {
   const ev = (statsEventOf({ type: 'Feature', id: 'efd_01M6Q2J4WG0000000000000002', geometry: { coordinates: [140, 35, 10] }, properties: { mag: 6.4, time: Date.parse(`${year}-03-01T00:00:00Z`), type: 'earthquake', feed: { state: 'live', chosen_provider: 'usgs' } } }) as { ev: StatsEvent }).ev;
   return JSON.stringify({
-    format: 1, kind: 'area', year, builder: 1, min_mag: minMag, through: `${year}-12-31`, complete: true, cell_deg: 0.1, records: 2,
+    format: 1, kind: 'area', year, builder: 2, min_mag: minMag, through: `${year}-12-31`, complete: true, cell_deg: 0.1, records: 2,
     cell: [4_500_000, 5], total: [3, 1], m45: minMag ? [3, 1] : [1, 0], mmax: [640, 300],
     m6: buildEventTable('area', Date.parse(`${year}-01-01T00:00:00Z`), [ev], AREA_COLUMNS),
+    reconciled: { rule: 'v1', collapsed: 0 },
     inputs_digest: 'b'.repeat(64), attribution: STATS_ATTRIBUTION,
   });
 }
@@ -246,7 +248,7 @@ test('a throw, a guard timeout, a failed check or a loop error leaves no public/
   const cases: Array<[string, Partial<Parameters<typeof deriveStats>[0]>, RegExp]> = [
     ['throw', { write: (t, o) => { writeStats(t, o); throw new Error('boom'); } }, /threw: boom/],
     ['timeout', { write: (t, o) => ({ ...writeStats(t, o), ms: 9_000 }), loopMs: 1_500 }, /over the 10000 ms budget/],
-    ['check', { tables: new Map([...w.tables, [eventDayKey(NOW), { body: '{"format":1}', count: 0, filtered: 0, skipped: 0 }]]) }, /check failed/],
+    ['check', { tables: new Map([...w.tables].map(([d, r]) => [d, d === eventDayKey(NOW) ? { ...r, rows: r.rows.map((x) => ({ ...x, id: 'not-a-feed-id' })) } : r])) }, /check failed/],
     ['loop', { loopError: new Error('bad feature') }, /threw: bad feature/],
   ];
   for (const [name, over, why] of cases) {

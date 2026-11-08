@@ -140,9 +140,17 @@ export function inputLookup(idx: InputIndex, epoch = STATS_REMERGE_EPOCH): Input
   for (const a of idx.archives) for (const d of a.days ?? []) archiveByDay.set(d, a);
   const editionByDay = new Map<string, EditionEntry>();
   if (idx.history) {
+    // An edition covers every day of its month before the history boundary: `days` lists only the days that have a
+    // member, and a quiet day has none (era B: no M4.5+ quake on 1981-10-30). The 2023-07 editions end at the boundary.
+    const boundary = idx.history.boundary;
     for (const period of new Set(idx.history.editions.map((e) => e.period))) {
       const e = currentHistoryEdition(idx.history, period);
-      if (e) for (const d of e.days) editionByDay.set(d, e);
+      if (!e) continue;
+      const [y, m] = period.split('-').map(Number);
+      for (let t = Date.UTC(y!, m! - 1, 1); t < Date.UTC(y!, m!, 1); t += DAY) {
+        const d = eventDayKey(t);
+        if (d < boundary || e.days.includes(d)) editionByDay.set(d, e);
+      }
     }
   }
   return { idx, epoch, remediationByDay, archiveByDay, editionByDay };

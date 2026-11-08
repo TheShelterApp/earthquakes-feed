@@ -159,6 +159,9 @@ test('chooseDayInput: remediation > partition > archive > edition; the 2023-07 s
   const one = inputLookup({ ...idx, history: history([edition('1985-03', { era: 'B', min_magnitude: 4.5, sources: ['usgs'] })]) }, 1);
   assert.equal(chooseDayInput('1985-03-10', one)!.merged, true, 'a single-source edition is never re-merged (eraIsRemerged)');
   assert.equal(chooseDayInput('1985-04-01', lk), null, 'no input: a missing day');
+  const quiet = inputLookup({ ...idx, history: history([edition('1981-10', { era: 'B', min_magnitude: 4.5, sources: ['usgs'], days: monthDays('1981-10').filter((d) => d !== '1981-10-30') })]) }, 1);
+  assert.equal(chooseDayInput('1981-10-30', quiet)?.kind, 'edition', 'a quiet day of an edition month (no member) is that edition\'s');
+  assert.equal(planYear(1981, '2026-10-28', quiet, 2).missing.filter((d) => d.startsWith('1981-10')).length, 0);
   // Remediation editions merged at build time or refreshed by the archive re-merge carry their epoch.
   const refreshed = (sha: string): InputLookup => inputLookup({ ...idx, remediation: remediation([{ ...remEdition('2025-08-11', 3), built_on: { tag: 'archive-2025-08', asset: 'events-2025-08.tar.zst', sha256: sha }, stats: { remerge: { epoch: 1, from_edition: 2 } } } as unknown as EditionRef]) }, 1);
   assert.equal(chooseDayInput('2025-08-11', refreshed(SHA('8')))!.merged, true, 'refreshed on the merged month asset');

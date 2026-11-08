@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { JSDELIVR_BASE, LIVE_INDEX_DAYS, RETIRED_VISIBLE_MS, SCHEMA_VERSION, dataPaths } from './config.js';
 import { featureToNode, nodeToFeature, writeIfChanged } from './bitemporal.js';
+import { reviewStatusOfRow } from './review-status.js';
 import type { EventNode } from './types.js';
 import { isoFromMs } from './util.js';
 
@@ -73,10 +74,87 @@ export function removeStalePagesPartitions(publicDir: string, keep: ReadonlySet<
   return removed.sort();
 }
 
+/**
+ * `knowledge/index/partition-format.json` on the `data` branch: from which event day a day partition's lines carry
+ * `review_status` (review-status.ts; on the event and on each provenance row that has one). Until 2026-11-08 no partition
+ * carried it, so that a frozen day never changed. derive fixes `review_status_from` on its first run after that change at
+ * the first unfrozen day (frozenBefore) and never moves it: every day before it keeps its bytes, every day from it on
+ * (and the archives and remediation editions built from those partitions) carries the field. The Pages day files carry
+ * it on every day regardless (writeDayPartition): they are rebuilt every run and promise no bytes.
+ */
+export interface PartitionFormat {
+  version: 1;
+  review_status_from: string | null;
+}
+export const NO_PARTITION_FORMAT: PartitionFormat = { version: 1, review_status_from: null };
+const partitionFormatFile = (root: string): string => dataPaths(root).partitionFormat;
+
+/** The data checkout's partition format; absent = NO_PARTITION_FORMAT (no day carries `review_status`). A file of another
+ *  shape throws: guessing would change bytes of days that must keep them. */
+export function loadPartitionFormat(root: string): PartitionFormat {
+  const file = partitionFormatFile(root);
+  if (!existsSync(file)) return NO_PARTITION_FORMAT;
+  const raw = JSON.parse(readFileSync(file, 'utf8')) as Partial<PartitionFormat> | null;
+  const from = raw?.review_status_from;
+  if (raw?.version !== 1 || !(from === null || (typeof from === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(from)))) {
+    throw new Error(`${file}: not a partition format (version 1, review_status_from YYYY-MM-DD or null)`);
+  }
+  return { version: 1, review_status_from: from };
+}
+
+/** derive only: the partition format, with `review_status_from` set to frozenBefore(nowMs) the first time (written then);
+ *  an existing value is never moved. */
+export function ensurePartitionFormat(root: string, nowMs: number): PartitionFormat {
+  const fmt = loadPartitionFormat(root);
+  if (fmt.review_status_from != null) return fmt;
+  const set: PartitionFormat = { version: 1, review_status_from: frozenBefore(nowMs) };
+  writeIfChanged(partitionFormatFile(root), JSON.stringify(set) + '\n');
+  return set;
+}
+
+/** Whether `fmt` puts `review_status` on the partition lines of `dayKey`. */
+export const partitionCarriesReviewStatus = (dayKey: string, fmt: PartitionFormat): boolean =>
+  fmt.review_status_from != null && dayKey >= fmt.review_status_from;
+
+/** One day partition line's feature (full-fat; `review_status` per `fmt`). */
+export const partitionFeature = (n: EventNode, dayKey: string, fmt: PartitionFormat): unknown =>
+  nodeToFeature(n, { reviewStatus: partitionCarriesReviewStatus(dayKey, fmt) });
+
+/**
+ * validate.ts check 3c, pure: the problems of a day partition's `lines` against `fmt`. A day the format leaves without
+ * the field (before `review_status_from`, or no format yet) has it on no event and no provenance row: those are the
+ * frozen bytes. A day from `review_status_from` on has it on every live event whose representative row (the chosen
+ * one, else the first) says it (review-status.ts reviewStatusOfRow).
+ */
+export function partitionFormatProblems(dayKey: string, lines: readonly string[], fmt: PartitionFormat): string[] {
+  type Row = { provider?: string; status?: string | null; fields?: Record<string, unknown>; chosen?: boolean; review_status?: unknown };
+  type Feat = { id?: string; properties?: { review_status?: unknown; feed?: { state?: string; provenance?: Row[] } } };
+  const on = partitionCarriesReviewStatus(dayKey, fmt);
+  const out: string[] = [];
+  for (const [i, line] of lines.entries()) {
+    if (!line) continue;
+    const f = JSON.parse(line) as Feat;
+    const rows = f.properties?.feed?.provenance ?? [];
+    const carries = f.properties?.review_status !== undefined || rows.some((r) => r.review_status !== undefined);
+    if (!on) {
+      if (carries) out.push(`${dayKey}:${i + 1} ${f.id}: review_status on a day before review_status_from (${fmt.review_status_from ?? 'none'})`);
+      continue;
+    }
+    if (f.properties?.feed?.state !== 'live') continue;
+    const rep = rows.find((r) => r.chosen) ?? rows[0];
+    const expected = rep ? reviewStatusOfRow({ provider: rep.provider ?? '', status: rep.status ?? null, fields: (rep.fields ?? {}) as Record<string, string> }) : null;
+    if (expected != null && f.properties?.review_status !== expected) {
+      out.push(`${dayKey}:${i + 1} ${f.id}: review_status ${JSON.stringify(f.properties?.review_status ?? null)}, its row says ${expected}`);
+    }
+  }
+  return out;
+}
+
 /** A day partition's bytes: every node of the day (all states), by event time then feed id, one full-fat Feature per
- *  line. A pure function of the nodes, so the event_map alone rebuilds it (live-baseline.ts). */
-export function dayPartitionText(nodes: Iterable<EventNode>): string {
-  return ndjsonOf(partitionOrder(nodes).map((n) => nodeToFeature(n)));
+ *  line (partitionFeature: `review_status` per `fmt`). A pure function of the nodes and the format, so the event_map
+ *  alone rebuilds it (live-baseline.ts). */
+export function dayPartitionText(nodes: Iterable<EventNode>, dayKey: string, fmt: PartitionFormat): string {
+  return ndjsonOf(partitionOrder(nodes).map((n) => partitionFeature(n, dayKey, fmt)));
 }
 
 const partitionOrder = (nodes: Iterable<EventNode>): EventNode[] =>
@@ -107,7 +185,8 @@ export function readDayPartitionNodes(root: string, dayKey: string): EventNode[]
  * Write one UTC day's partition: plain NDJSON in the tree (the byte-compare leaves an unchanged
  * day alone; a changed one costs the repository about one compressed copy per GitHub roll-up,
  * APIs.md Repository size) plus, for recent days, a ready-to-render GeoJSON on Pages.
- * Includes ALL node states (live/tombstoned/superseded) so the round-trip is lossless.
+ * Includes ALL node states (live/tombstoned/superseded) so the round-trip is lossless; the NDJSON carries `review_status`
+ * per `opts.fmt` (PartitionFormat), the Pages day file on every day.
  * The Pages day file carries the live events full-fat plus, in compact form, the recently
  * retired ones (superseded or tombstoned) flagged non-live (publishesRetired) — the summaries
  * follow the same rule. Returns the NDJSON it wrote (derive copies an unfrozen day's to Pages).
@@ -116,23 +195,24 @@ export function writeDayPartition(
   root: string,
   dayKey: string,
   nodes: EventNode[],
-  opts: { publicV1?: string; nowMs: number; headIngestTime: string },
+  opts: { publicV1?: string; nowMs: number; headIngestTime: string; fmt: PartitionFormat },
 ): { written: boolean; stat: PartStat; ndjson: string } {
   const sorted = partitionOrder(nodes);
-  const feats = sorted.map((n) => nodeToFeature(n));
+  const on = partitionCarriesReviewStatus(dayKey, opts.fmt);
+  const feats = sorted.map((n) => partitionFeature(n, dayKey, opts.fmt));
   const ndjson = ndjsonOf(feats);
   const written = writeIfChanged(dayPartitionFile(root, dayKey), ndjson);
 
   if (opts.publicV1 && dayKey >= dayFromMs(opts.nowMs - PAGES_DAY_WINDOW * 86_400_000)) {
     const ageSeconds = opts.headIngestTime ? Math.max(0, Math.round((opts.nowMs - Date.parse(opts.headIngestTime)) / 1000)) : null;
-    // Pages day file (map layer): live events full-fat; a recently retired one (superseded or
-    // tombstoned) rides along compact and non-live so a poller sees the removal; older retired
-    // ones stay in the tree file only.
+    // Pages day file (map layer): live events full-fat, with `review_status` on every day (the file is rebuilt every
+    // run and promises no bytes); a recently retired one (superseded or tombstoned) rides along compact and non-live so
+    // a poller sees the removal; older retired ones stay in the tree file only.
     const published: unknown[] = [];
     let live = 0;
     sorted.forEach((n, i) => {
       if (n.state === 'live') {
-        published.push(feats[i]);
+        published.push(on ? feats[i] : nodeToFeature(n, { reviewStatus: true }));
         live++;
       } else if (publishesRetired(n, opts.nowMs)) {
         published.push(nodeToFeature(n, { compact: true }));

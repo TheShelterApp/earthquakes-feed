@@ -307,8 +307,9 @@ const maxUpdated = (node: EventNode): number | null => {
  *  Nothing is lost: day partitions and /v1/events day files stay full-fat, and the
  *  summary keeps `aliases` + `chosen_provider` for realtime dedup. */
 /** `reviewStatus`: add the normalized `review_status` (review-status.ts) to the event's properties and to each
- *  provenance row, when the source says it. Opt-in, for the surfaces derive rebuilds every run (summaries, the live
- *  index, the detail hours): the day partitions and Pages day files keep their bytes, so a frozen day never changes. */
+ *  provenance row, when the source says it. Opt-in: the surfaces derive rebuilds every run (summaries, the live and month
+ *  indexes, the detail hours, the Pages day files) always pass it; the day partitions pass it from the day their
+ *  PartitionFormat names (partitions.ts), so a frozen day never changes. */
 export function nodeToFeature(node: EventNode, opts?: { compact?: boolean; reviewStatus?: boolean }): unknown {
   const updated = maxUpdated(node);
   // 2-element [lon, lat] when depth is unknown — never emit a null Z, so strictly

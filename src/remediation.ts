@@ -1,4 +1,5 @@
-import { eventDayKey, nodeToFeature } from './bitemporal.js';
+import { eventDayKey } from './bitemporal.js';
+import { dayPartitionText, type PartitionFormat } from './partitions.js';
 import { afadCorrections } from './correction.js';
 import { Resolver } from './dedup.js';
 import { configMap, priorityMap } from './providers.js';
@@ -175,7 +176,7 @@ export interface EditionStats {
  *  2. the fetched rows go through the ingest screen and backfill's Resolver (merge off: history never folds on ingest),
  *     against the day and its neighbours;
  *  3. the edition is the archived day's events (by feed id, whatever their time is now) plus the events this build
- *     minted, serialized exactly as a day partition (writeDayPartition: event time, feed id; nodeToFeature).
+ *     minted, serialized exactly as a day partition (dayPartitionText: event time, feed id; review_status per the PartitionFormat).
  *
  * The edition replaces ONE archived day while its neighbours stay as archived, so membership follows the archive, not
  * the corrected time: an event re-read across midnight stays in this edition (counted `off_day`), an event of a
@@ -191,6 +192,8 @@ export function buildDayEdition(input: {
   nowMs: number;
   ingestTime: string;
   seqMarker: number;
+  /** The data checkout's partition format: the edition's lines carry `review_status` as the day's partition would. */
+  fmt: PartitionFormat;
 }): { text: string; nodes: EventNode[]; stats: EditionStats } {
   const map = new Map<string, EventNode>();
   for (const nodes of input.context.values()) for (const n of nodes) map.set(n.feedId, n);
@@ -285,8 +288,7 @@ export function buildDayEdition(input: {
     merged: folds.merges.length,
     provider_rows,
   };
-  const feats = nodes.map((n) => JSON.stringify(nodeToFeature(n)));
-  return { text: feats.join('\n') + (feats.length ? '\n' : ''), nodes, stats };
+  return { text: dayPartitionText(nodes, input.day, input.fmt), nodes, stats };
 }
 
 const reportKey = (r: { provider: string; nativeId: string }): string => `${r.provider}:${r.nativeId}`;

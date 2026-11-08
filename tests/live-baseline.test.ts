@@ -19,7 +19,7 @@ import {
   writeBaselineSnapshot,
 } from '../src/live-baseline.js';
 import { detectSilentChanges, liveWindowDays, silentChangesAgainst } from '../src/live-sync.js';
-import { dayPartitionFile, dayPartitionText, writeDayPartition } from '../src/partitions.js';
+import { NO_PARTITION_FORMAT, dayPartitionFile, dayPartitionText, writeDayPartition } from '../src/partitions.js';
 import { LogBuffer } from '../src/oplog.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import type { EventNode, RawObs } from '../src/types.js';
@@ -102,7 +102,7 @@ function deriveRun(root: string, nowMs: number, headSeq: number): void {
   const want = new Set(baselineDays(nowMs));
   const written = new Map<string, string>();
   for (const [day, ns] of byDay) {
-    const out = writeDayPartition(root, day, ns, { nowMs, headIngestTime: iso(nowMs) });
+    const out = writeDayPartition(root, day, ns, { nowMs, headIngestTime: iso(nowMs), fmt: NO_PARTITION_FORMAT });
     if (want.has(day)) written.set(day, out.ndjson);
   }
   writeBaselineRecord(root, baselineRecord(nowMs, headSeq, written));
@@ -113,7 +113,7 @@ function deriveRun(root: string, nowMs: number, headSeq: number): void {
 function snapshot(root: string, dir: string, nowMs: number): void {
   const map = loadEventMap(root, { nowMs });
   const days = baselineDays(nowMs);
-  writeBaselineSnapshot(dir, days, partitionTexts(map.values(), days), { taken_at: nowMs, head_seq: 0 });
+  writeBaselineSnapshot(dir, days, partitionTexts(map.values(), days, NO_PARTITION_FORMAT), { taken_at: nowMs, head_seq: 0 });
 }
 
 /** derive's check at `nowMs`: the new baseline, and the committed partitions' check beside it. */
@@ -165,7 +165,8 @@ test('the snapshot of the checked-out event map is byte for byte the partitions 
     assert.ok(days >= 9, `setup: ${days} days with events`);
     // dayPartitionText does not depend on the order of its input.
     const nodes = [...w.map.values()].filter((n) => eventDayKey(n.eventTimeMs) === eventDayKey(T0));
-    assert.equal(dayPartitionText([...nodes].reverse()), dayPartitionText(nodes));
+    const day = eventDayKey(T0);
+    assert.equal(dayPartitionText([...nodes].reverse(), day, NO_PARTITION_FORMAT), dayPartitionText(nodes, day, NO_PARTITION_FORMAT));
   } finally {
     cleanup();
   }

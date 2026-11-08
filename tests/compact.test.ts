@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { featureToNode, nodeToFeature } from '../src/bitemporal.js';
-import { readDayPartitionNodes, writeDayPartition } from '../src/partitions.js';
+import { NO_PARTITION_FORMAT, readDayPartitionNodes, writeDayPartition } from '../src/partitions.js';
 import type { EventNode } from '../src/types.js';
 
 const node = (): EventNode => ({
@@ -54,7 +54,7 @@ test('writeDayPartition -> readDayPartitionNodes round-trips full-fat (provenanc
   const root = mkdtempSync(join(tmpdir(), 'efd-compact-test-'));
   try {
     const n = node();
-    writeDayPartition(root, '2026-07-01', [n], { nowMs: Date.parse('2026-07-02T00:00:00Z'), headIngestTime: '2026-07-02T00:00:00.000Z' });
+    writeDayPartition(root, '2026-07-01', [n], { nowMs: Date.parse('2026-07-02T00:00:00Z'), headIngestTime: '2026-07-02T00:00:00.000Z', fmt: NO_PARTITION_FORMAT });
     const back = readDayPartitionNodes(root, '2026-07-01');
     assert.equal(back.length, 1);
     assert.equal(back[0]!.provenance.length, 2);

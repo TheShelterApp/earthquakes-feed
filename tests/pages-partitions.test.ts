@@ -10,6 +10,7 @@ import { PartitionReader, unfrozenFromEventMap } from '../src/first-solutions-co
 import { PAGES_BASE } from '../src/manifest-v2.js';
 import {
   FROZEN_AFTER_DAYS,
+  NO_PARTITION_FORMAT,
   dayPartitionFile,
   dayPartitionText,
   frozenBefore,
@@ -114,12 +115,12 @@ test('the Pages copy is byte for byte the partition written to the data checkout
   try {
     const day = dayOf(NOW);
     const ns = [...map.values()].filter((n) => eventDayKey(n.eventTimeMs) === day);
-    const out = writeDayPartition(join(root, 'data'), day, ns, { publicV1: join(root, 'public', 'v1'), nowMs: NOW, headIngestTime: iso(NOW) });
+    const out = writeDayPartition(join(root, 'data'), day, ns, { publicV1: join(root, 'public', 'v1'), nowMs: NOW, headIngestTime: iso(NOW), fmt: NO_PARTITION_FORMAT });
     assert.equal(writePagesPartition(join(root, 'public'), day, out.ndjson), true);
     const onPages = readFileSync(join(root, 'public', partitionPath(day)));
     assert.ok(onPages.equals(readFileSync(dayPartitionFile(join(root, 'data'), day))));
     assert.equal(onPages.byteLength, out.stat.bytes);
-    assert.equal(out.ndjson, dayPartitionText([...ns].reverse()), 'the same bytes from the nodes alone, in any order');
+    assert.equal(out.ndjson, dayPartitionText([...ns].reverse(), day, NO_PARTITION_FORMAT), 'the same bytes from the nodes alone, in any order');
     assert.equal(writePagesPartition(join(root, 'public'), day, out.ndjson), false, 'unchanged: not rewritten');
     // A copy of a day that froze since (left by an earlier local run) goes; nothing else under public/ is touched.
     writePagesPartition(join(root, 'public'), '2026-09-01', 'old\n');
@@ -144,11 +145,11 @@ test('first-solutions reads an unfrozen day from the event map, a frozen one fro
     const frozenDay = dayOf(NOW - 12 * DAY);
     // The tree holds stale copies of both days (as after phase 2 it would hold none of the unfrozen one).
     for (const d of [unfrozenDay, frozenDay]) {
-      writeDayPartition(root, d, [], { nowMs: NOW, headIngestTime: iso(NOW) });
+      writeDayPartition(root, d, [], { nowMs: NOW, headIngestTime: iso(NOW), fmt: NO_PARTITION_FORMAT });
       writeFileSync(dayPartitionFile(root, d), 'stale\n');
     }
     const reader = new PartitionReader(root, [], undefined, undefined, unfrozenFromEventMap(root, NOW));
-    const expected = dayPartitionText([...map.values()].filter((n) => eventDayKey(n.eventTimeMs) === unfrozenDay));
+    const expected = dayPartitionText([...map.values()].filter((n) => eventDayKey(n.eventTimeMs) === unfrozenDay), unfrozenDay, NO_PARTITION_FORMAT);
     assert.match(expected, /us2x0/);
     assert.equal(await reader.dayText(unfrozenDay), expected);
     assert.equal(await reader.dayText(frozenDay), 'stale\n', 'frozen days keep the tree (or the archives)');

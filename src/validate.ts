@@ -5,6 +5,7 @@ import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { DATA_DIR, DOMAIN, MAX_PUBLISHED_BYTES, PUBLIC_DIR, SCHEMA_DIR, dataPaths } from './config.js';
 import { deltaBoundViolations, readSilentLog } from './live-sync.js';
+import { loadPartitionFormat, partitionFormatProblems } from './partitions.js';
 
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 addFormats(ajv);
@@ -114,10 +115,26 @@ for (const file of walk(publicV1, (f) => f.endsWith('.geojson'))) {
 //    because summaries are compact). Sole exception: a tombstoned event may have an empty
 //    provenance — op:tombstone withdraws the deleting provider's row by design, and the
 //    original observations stay in the append-only log.
+// 3c. (in the same pass) `review_status` follows knowledge/index/partition-format.json (partitions.ts PartitionFormat):
+//    a day before `review_status_from` (or every day while there is none) has it nowhere, so a frozen day kept its
+//    bytes; a day from it on has it on every live event whose representative row says it (partitionFormatProblems).
+const partitionFormat = (() => {
+  try {
+    return loadPartitionFormat(DATA_DIR);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+    return null;
+  }
+})();
 for (const file of walk(p.eventsDir, (f) => f.endsWith('.ndjson'))) {
   const bytes = statSync(file).size;
   if (bytes > MAX_PUBLISHED_BYTES) fail(`${file}: ${bytes} bytes exceeds ${MAX_PUBLISHED_BYTES}`);
   const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean);
+  const day = /(\d{4})[/\\](\d{2})[/\\](\d{2})\.ndjson$/.exec(file);
+  if (partitionFormat && day) {
+    const problems = partitionFormatProblems(`${day[1]}-${day[2]}-${day[3]}`, lines, partitionFormat);
+    if (problems.length) fail(`${file}: ${problems.length} line(s) break the partition format: ${problems.slice(0, 3).join('; ')}`);
+  }
   for (const [i, line] of lines.entries()) {
     const feat = JSON.parse(line) as { properties?: { feed?: { state?: string; provenance?: unknown[] } } };
     if (i < 3 && !vFeat(feat)) {

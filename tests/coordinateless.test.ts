@@ -9,7 +9,7 @@ import addFormats from 'ajv-formats';
 import { Resolver } from '../src/dedup.js';
 import { RETRACTION_REASON, ZEROED_REASON, healedEpoch, runFeedSideSteps, withdrawZeroedReports } from '../src/heal.js';
 import { LogBuffer, observationToRaw } from '../src/oplog.js';
-import { writeDayPartition } from '../src/partitions.js';
+import { NO_PARTITION_FORMAT, writeDayPartition } from '../src/partitions.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import { emptyTally, isCoordinateless, screen } from '../src/quality.js';
 import { summaryFeats } from '../src/summaries.js';
@@ -154,13 +154,13 @@ test('retracted events leave the live set at once: summaries and the Pages day f
   const root = mkdtempSync(join(tmpdir(), 'efd-coordless-'));
   try {
     const publicV1 = join(root, 'public', 'v1');
-    writeDayPartition(root, '2026-09-27', [...map.values()], { publicV1, nowMs: NOW, headIngestTime: '2026-09-28T14:00:00.000Z' });
+    writeDayPartition(root, '2026-09-27', [...map.values()], { publicV1, nowMs: NOW, headIngestTime: '2026-09-28T14:00:00.000Z', fmt: NO_PARTITION_FORMAT });
     type Day = { features: { id: string; geometry: { coordinates: number[] }; properties: { feed: { state: string } } }[]; metadata: { count: number } };
     const day = JSON.parse(readFileSync(join(publicV1, 'events', '2026-09-27.geojson'), 'utf8')) as Day;
     assert.equal(day.features.find((f) => f.id === lone.feedId)?.properties.feed.state, 'tombstoned', 'a non-live marker on the Pages day file');
     assert.ok(!day.features.some((f) => f.properties.feed.state === 'live' && f.geometry.coordinates[0] === 0 && f.geometry.coordinates[1] === 0), 'no live feature at 0,0');
     assert.equal(day.metadata.count, 2);
-    writeDayPartition(root, '2026-09-27', [...map.values()], { publicV1, nowMs: NOW + 49 * 3600_000, headIngestTime: '2026-09-28T14:00:00.000Z' });
+    writeDayPartition(root, '2026-09-27', [...map.values()], { publicV1, nowMs: NOW + 49 * 3600_000, headIngestTime: '2026-09-28T14:00:00.000Z', fmt: NO_PARTITION_FORMAT });
     const later = JSON.parse(readFileSync(join(publicV1, 'events', '2026-09-27.geojson'), 'utf8')) as Day;
     assert.ok(!later.features.some((f) => f.id === lone.feedId), 'off the Pages day file 48 h later');
     const tree = readFileSync(join(root, 'events', '2026', '09', '27.ndjson'), 'utf8');

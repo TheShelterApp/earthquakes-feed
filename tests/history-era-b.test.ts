@@ -15,16 +15,26 @@ import {
   loadHistoryConfig,
   rawAssetName,
 } from '../src/history-config.js';
-import { type HistoryIndex, emptyIndex, newerNeighbour, pendingUnits } from '../src/history-index.js';
+import {
+  type HistoryIndex,
+  editionIsCurrent,
+  emptyIndex,
+  eraIsRemerged,
+  newerNeighbour,
+  pendingUnits,
+  periodsToRemerge,
+  periodsToSeal,
+  remergeNeighbour,
+} from '../src/history-index.js';
 import { verifyEdition } from '../src/history-verify.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import { rowLicense } from '../src/row-license.js';
 import type { EventNode, RawObs } from '../src/types.js';
 import { deterministicFeedId } from '../src/ulid.js';
 
-// Era B (1973-1999, ComCat alone, M4.5+; platform plan 2026-11-08 streams/eraB.md): the per-era fetch margin and
-// expectRows, the side index's floor, ISC-GEM rows' own licence. The era itself is configured by a later PR: until then
-// the shipped-config test below is skipped and a synthetic era B (the planned entry) stands in.
+// Era B (1973-1999, ComCat alone, M4.5+; platform plan 2026-11-08 streams/eraB.md): the shipped era entry, the per-era
+// fetch margin and expectRows, the side index's floor, ISC-GEM rows' own licence, and no re-merge of a single-source era.
+// `B` below is the entry as planned (eraB.md §0); the shipped-config test checks providers/history.json equals it.
 
 const registry = loadRegistry();
 const shipped = loadHistoryConfig();
@@ -119,6 +129,11 @@ test('era B build: a row at the floor is kept, none is below it, two ComCat even
   assert.equal(out.meta.rows.below_floor, 0);
   assert.equal(out.meta.min_magnitude, 4.5);
   assert.deepEqual(verifyEdition(out.dayFiles, { period: dec99, boundary: '2023-07-06', archivedDays: new Set(), meta: out.meta, raws: [raw(rows)] }).errors, []);
+  // Sealed with the re-merge on (the epoch raised before 1999-12 is sealed, decision A5): the same events, nothing folded.
+  const merged = buildEdition(input([raw(rows)], { remergeEpoch: 1 }));
+  assert.equal(merged.meta.events, 3, 'two ComCat ids never become one event');
+  assert.deepEqual([merged.meta.merge?.epoch, merged.meta.merge?.merges.length], [1, 0]);
+  assert.deepEqual([...merged.dayFiles.keys()], [...out.dayFiles.keys()]);
   // A raw fetched with the default margin (M4) is not this era's raw.
   assert.throws(() => buildEdition(input([raw(rows, 4)])), /fetched from M4, the era asks M4.5/);
 });
@@ -176,4 +191,42 @@ test('row licence: the Resolver mints it per row (makeRow), so an ISC-GEM-prefer
   r.ingest(obs('usp0001', { eventTimeMs: T + 86_400_000 * 3, lat: -20 }), '2026-11-08T00:00:00.000Z');
   const rows = [...map.values()].flatMap((n) => n.provenance).sort((a, b) => (a.nativeId < b.nativeId ? -1 : 1));
   assert.deepEqual(rows.map((x) => [x.nativeId, x.license, x.doi]), [['iscgem17193343', 'CC-BY-SA-3.0', '10.31905/D808B825'], ['usp0001', 'US-PD', '10.5066/F7MS3QZH']]);
+});
+
+test('re-merge: era B months are never re-merged, at any epoch, and never re-sealed; 1999-12 still waits for a merged 2000-01', () => {
+  assert.equal(eraIsRemerged(B), false);
+  assert.equal(eraIsRemerged(A), true);
+  if (shippedB) assert.equal(eraIsRemerged(shippedB), false);
+  const cfg = cfgOf([A, B]);
+  const idx: HistoryIndex = emptyIndex('2023-07-06');
+  const raw1 = (s: string, period: string) => ({
+    source: s, period, tag: `history-${period.slice(0, 4)}`, asset: rawAssetName(s, period), url: '', sha256: s, bytes: 1, rows: 1, provider_count: 1, start: '', end: '', fetch_min_magnitude: null, fetched_at: '',
+  });
+  const edition = (period: string, era: HistoryEra, merge_epoch?: number) => ({
+    period, edition: 1, era: era.id, tag: `history-${period.slice(0, 4)}`, asset: `events-${period}.e1.tar.zst`, url: '', sha256: 'e', bytes: 1, events: 1, days: [`${period}-01`],
+    sources: era.sources, min_magnitude: era.minMagnitude, built_from: era.sources.map((s) => rawAssetName(s, period)), context: null, joined_newer: 0,
+    ...(merge_epoch != null ? { merge_epoch } : {}),
+  });
+  // Every month fetched and sealed at epoch 0 (no merge_epoch): era A's 2000-01 and every era-B month.
+  for (const s of A.sources) idx.raw.push(raw1(s, '2000-01'));
+  idx.editions.push(edition('2000-01', A));
+  for (const p of eraPeriods(B)) {
+    idx.raw.push(raw1('usgs', p.key));
+    idx.editions.push(edition(p.key, B));
+  }
+  const all = allPeriods(cfg);
+  const dec = all.find((p) => p.key === '1999-12')!;
+  for (const epoch of [1, 2]) {
+    const keys = periodsToRemerge(cfg, idx, epoch).map((p) => p.key);
+    assert.ok(keys.includes('2000-01'), `epoch ${epoch}: era A is re-merged`);
+    assert.equal(keys.filter((k) => k < '2000').length, 0, `epoch ${epoch}: no era-B month is re-merged (no e2)`);
+  }
+  assert.ok(eraPeriods(B).every((p) => editionIsCurrent(cfg, idx, p)), 'built_from-based: an unmerged era-B edition is current');
+  assert.equal(periodsToSeal(cfg, idx).filter((p) => p.eraId === 'B').length, 0, 'nothing to re-seal');
+  // A5: sealing 1999-12 with the epoch raised waits for 2000-01's merged edition, then joins it.
+  assert.equal(remergeNeighbour(cfg, idx, [], dec, 1).kind, 'wait');
+  idx.editions.push({ ...edition('2000-01', A, 1), edition: 2, asset: 'events-2000-01.e2.tar.zst' });
+  const nb = remergeNeighbour(cfg, idx, [], dec, 1);
+  assert.equal(nb.kind, 'edition');
+  if (nb.kind === 'edition') assert.equal(nb.edition.asset, 'events-2000-01.e2.tar.zst');
 });

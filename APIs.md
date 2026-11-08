@@ -827,6 +827,10 @@ M4.5+ events without a ComCat row near one or not, every M6+ fold).
   block, `lines` and `superseded`; `events` counts the live lines; `rows` is unchanged. Its index entry gains
   `merge_epoch`, `merged_from` (the edition, asset and checksum it was merged from), `lines` and `superseded`;
   `built_from` stays (the month is not re-sealed). A month sealed while the epoch is above 0 is merged as it is built.
+  A single-source era (era B, ComCat alone; `eraIsRemerged` in [`src/history-index.ts`](src/history-index.ts)) is never
+  re-merged: there is nothing to fold (the identity resolution keeps two ids of one source apart, so two ComCat events
+  stay two), and its months keep the edition they were sealed with, whatever the epoch was then. Its newest month,
+  1999-12, is still sealed only against a merged 2000-01.
 - *Archives:* `remerge.yml` (every 6 h and by hand, outside the writer lock; `src/remerge-archives.ts`) gives each
   archive month below the epoch a new asset `events-YYYY-MM.e<N>.tar.zst` in its `archive-YYYY-MM` Release, newest
   first, holding the day files and `_archive.json` (`kind: "earthquakes-feed/archive-edition"`: `built_on` the asset it
@@ -1187,6 +1191,32 @@ The side index of earliest solutions follows the editions back to 2000-01-01, no
 era A gives it about
 2.8 M more ComCat reports (one request each), about 1.2 M NCEDC / SCEDC reports read through ComCat and about 0.37 M
 INGV reports, at its own hourly pace (about 43,000 ComCat reports a day: about three months).
+
+**Era B** (owner decision 2026-11-08) goes on from 1999-12 back to 1973-01 with ComCat (`usgs`) alone, M ≥ 4.5 only:
+324 months, walked newest first after era A, one edition per month (the PDE, the USGS Preliminary Determination of
+Epicenters, as ComCat serves it: US public domain). Measured 2026-11-08 with ComCat's own `count` service:
+
+| | Era B (1973-01 → 1999-12) |
+|---|---|
+| Events (= rows: one source) | 106,270 M ≥ 4.5 (160,001 M ≥ 4.0); 194–651 per month (1973-05 the fewest, 1994-10 the most); no month empty |
+| Event types | earthquake 105,708, nuclear explosion 541, explosion 14, mine collapse 5, rock burst 2 (kept as ComCat has them, so the counts match ComCat's; a reader counting earthquakes drops the 562) |
+| Preferred origin (`provenance[].fields.net`) | `us` (PDE) 98.80 %; the ANSS regional networks ComCat serves (`nc`, `ak`, `ci`, `uw`, `hv`, …) 1.02 %, `US-PD` as live; ISC-GEM (`iscgem`, `iscgemsup`) 175 rows, 0.165 %, under their own licence (*Licensing*); `gcmt` 13 |
+| Release assets | 24 per `history-YYYY` (12 raw + 12 editions), 648 in 27 new Releases `history-1973` … `history-1999`: about 7.8 MB raw + 15.5 MB editions |
+| Requests | 648 (ComCat's `count` and one query per month, each answering in about 1 s) |
+| Walk time | about 15–25 s per month on a runner: about 8–14 hourly runs |
+| `knowledge/index/history.json` | about 1.4 KB per month: about +444 KB |
+
+Its entry in `providers/history.json` is `{"id":"B","from":"1973-01-01","to":"2000-01-01","minMagnitude":4.5,
+"fetchMarginMag":0,"expectRows":true,"sources":["usgs"]}`. With one source an event's largest magnitude is its only row's,
+so the margin below the floor that a multi-source era needs (*Pace*) would only fetch rows the build drops: era B asks
+ComCat from M4.5 exactly (`fetch_min_magnitude: 4.5`), and every fetched row is written. Every month has rows, so an
+empty answer fails the month (`expectRows`) instead of being sealed. **A reader must honour `min_magnitude`:** an era-B
+edition (`era: "B"`, `min_magnitude: 4.5`) holds only M4.5+ events and is never comparable with an all-magnitude month;
+PDE's M4.5+ completeness also grows over the period (about 25.6k, 39.5k and 43.1k events per decade). Era B meets era A
+only at the seam: 1999-12 is built against the first day of 2000-01's current edition like any month (*How a month is
+built*; the dry run of 2026-11-08 joined 0 rows there), and a later edition of 2000-01 does not rebuild it. Nothing
+before 1973: ComCat's older records are the ISC-GEM catalogue's (CC BY-SA 3.0). The side index of earliest solutions
+does not follow era B (`DEEP_WALK_FLOOR`, *Earliest solutions*).
 
 **Where it lives.** Everything is an immutable asset of a Release `history-YYYY` (the year of the month):
 
@@ -1894,6 +1924,7 @@ const h = await (await fetch('https://cdn.jsdelivr.net/gh/TheShelterApp/earthqua
 const ed = h.editions.filter(e => e.period === '2022-12' && !e.withdrawn).sort((a, b) => b.edition - a.edition)[0];
 // ed.url: events-2022-12.e<N>.tar.zst, a zstd tar of DD.ndjson day files; check it against ed.sha256.
 // Keep feed.state === 'live' only: a re-merged edition also holds superseded lines (Re-merged history).
+// ed.min_magnitude: the edition's floor (era B, 1973-1999: 4.5); never count such a month as all magnitudes.
 ```
 
 ## Versioning

@@ -1,5 +1,5 @@
 import { REMERGE_EPOCH } from './config.js';
-import { type HistoryConfig, type Period, allPeriods, dayKeyOf } from './history-config.js';
+import { type HistoryConfig, type HistoryEra, type Period, allPeriods, dayKeyOf } from './history-config.js';
 
 /**
  * Deep history (PF-5j): `knowledge/index/history.json` on the `data` branch, the file history adds there for readers
@@ -177,11 +177,19 @@ export function newerNeighbour(cfg: HistoryConfig, idx: HistoryIndex, p: Period)
   return { kind: 'edition', day, edition: currentEdition(idx, next.key)! };
 }
 
-/** Periods whose current edition is current (editionIsCurrent) but not merged to `epoch`, newest first; none while the
- *  epoch is 0. */
+/** True when the re-merge applies to the era's months: it folds one event reported by several sources, so a
+ *  single-source era (era B, ComCat alone) has nothing to fold (the Resolver keeps distinct ids of one source apart)
+ *  and its months are never re-merged, whatever epoch they were sealed at (no e2 across era B; platform plan
+ *  2026-11-08 streams/eraB.md §4). Its newest month still waits for a merged newer neighbour when it is sealed
+ *  (remergeNeighbour). */
+export const eraIsRemerged = (era: Pick<HistoryEra, 'sources'>): boolean => era.sources.length > 1;
+
+/** Periods of multi-source eras (eraIsRemerged) whose current edition is current (editionIsCurrent) but not merged to
+ *  `epoch`, newest first; none while the epoch is 0. */
 export function periodsToRemerge(cfg: HistoryConfig, idx: HistoryIndex, epoch: number = REMERGE_EPOCH): Period[] {
   if (epoch <= 0) return [];
   return allPeriods(cfg).filter((p) => {
+    if (!eraIsRemerged(cfg.eras.find((x) => x.id === p.eraId)!)) return false;
     const e = currentEdition(idx, p.key);
     return e != null && editionIsCurrent(cfg, idx, p) && !editionIsMerged(e, epoch);
   });

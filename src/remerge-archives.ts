@@ -372,7 +372,15 @@ export function remergeMonth(
   for (const day of [...memberText.keys()].sort()) {
     const ed = currentEdition(ctx.remediation, day);
     if (!ed) continue;
-    if (ed.built_on.sha256 !== entry.sha256) return { blocked: `${period}: remediation ${ed.asset} of ${day} was built on ${ed.built_on.asset} (${String(ed.built_on.sha256).slice(0, 12)}), not on the entry's ${entry.asset}` };
+    if (ed.built_on.sha256 !== entry.sha256) {
+      // Built on an earlier asset of the month (a re-roll since: a backfill fill of other days): still the day's input
+      // when the re-roll left that day's file byte for byte as the edition's base had it; else the edition must be
+      // rebuilt on the new asset first (remediate.yml), and the month waits.
+      const prior = (entry.previous ?? []).find((p) => p.sha256 === ed.built_on.sha256);
+      const dd = `${day.slice(8, 10)}.ndjson`;
+      const same = prior != null && cache.members(entry.tag, prior.asset, prior.sha256).get(dd) === base.get(dd);
+      if (!same) return { blocked: `${period}: remediation ${ed.asset} of ${day} was built on ${ed.built_on.asset} (${String(ed.built_on.sha256).slice(0, 12)}), not on the entry's ${entry.asset}${prior ? ', and the re-roll changed that day' : ''}` };
+    }
     const f = join(ctx.work, ed.asset);
     ctx.io.download(ed.tag, ed.asset, f);
     const b = readFileSync(f);
@@ -609,7 +617,8 @@ export function runRemergeArchives(ctx: RemergeArchivesCtx, opts: { max: number;
       const m = report.merged[report.merged.length - 1]!;
       console.log(
         `remerge: ${entry.period} -> ${r.entry.asset}: live ${m.before.live} -> ${m.after.live}, M4.5+ ${m.before.m45} -> ${m.after.m45}, M6+ ${m.before.m6} -> ${m.after.m6}, ` +
-          `${m.folds} folds, ${m.into_newer} into the newer month, ${r.remediation_editions.length} remediation edition(s)${m.adopted ? ', adopted (an earlier upload of the same bytes)' : ''}; ${m.ms} ms`,
+          `${m.folds} folds, ${m.into_newer} into the newer month, ${r.remediation_editions.length} remediation edition(s)` +
+          `${m.remediation_days.length ? ` (day inputs: ${r.entry.remediation!.map((x) => `${x.day} e${x.edition}`).join(', ')})` : ''}${m.adopted ? ', adopted (an earlier upload of the same bytes)' : ''}; ${m.ms} ms`,
       );
     } catch (e) {
       report.blocked.push(`remerge: ${entry.period}: ${e instanceof Error ? e.message : String(e)}`);

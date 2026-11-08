@@ -217,3 +217,31 @@ test('archive re-merge: a remediated day built on another asset blocks the month
   assert.deepEqual(w2.uploads, []);
   assert.ok(existsSync(join(w2.out, 'releases', 'archive-2024-06', 'events-2024-06.e2.tar.zst')));
 });
+
+test('archive re-merge: a remediation edition built on an earlier asset is used when the re-roll left its day unchanged, and blocks the month when it changed it', { skip: !hasZstd && 'zstd not installed' }, () => {
+  for (const changeDay of ['13', '12']) {
+    const w = world({ remediationOn: 'june' });
+    const june = w.archives.list.find((e) => e.period === '2024-06')!;
+    // A re-roll since (a backfill fill): the old asset's members, plus a change on one day.
+    const dir = mkdtempSync(join(tmpdir(), 'reroll-'));
+    const m = join(dir, 'm');
+    mkdirSync(m);
+    const old = join(dir, june.asset);
+    writeFileSync(old, w.store.get('archive-2024-06')!.get(june.asset)!);
+    execFileSync('sh', ['-c', `zstd -d -q -c "$1" | tar -xf - -C "$2"`, 'sh', old, m]);
+    const extra = split([obs('usgs', `usrefill${changeDay}`, Date.parse(`2024-06-${changeDay}T20:00:00Z`), { lat: -30, mag: 3 })])[0]!;
+    const f = join(m, `${changeDay}.ndjson`);
+    writeFileSync(f, (existsSync(f) ? readFileSync(f, 'utf8') : '') + JSON.stringify(nodeToFeature(extra)) + '\n');
+    const { path, asset } = makeTarball(m, readdirSync(m), 'events-2024-06.e2');
+    w.store.get('archive-2024-06')!.set(asset, readFileSync(path));
+    const prev = { asset: june.asset, sha256: june.sha256, bytes: june.bytes, count: june.count, edition: 1, days: june.days };
+    Object.assign(june, { asset, sha256: sha(readFileSync(path)), edition: 2, count: june.count + 1, days: [...new Set([...june.days, `2024-06-${changeDay}`])].sort(), previous: [prev] });
+    const r = silently(() => runRemergeArchives(w.ctx(), { max: 1 }));
+    if (changeDay === '13') {
+      assert.deepEqual(r.report.blocked, []);
+      assert.deepEqual(r.pending.months[0]!.entry.remediation, [{ day: '2024-06-12', edition: 1, sha256: w.remediation.editions[0]!.sha256 }]);
+    } else {
+      assert.match(r.report.blocked.join('\n'), /built on events-2024-06\.tar\.zst .*the re-roll changed that day/);
+    }
+  }
+});

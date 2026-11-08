@@ -10,7 +10,7 @@ import { featureToNode, nodeToFeature } from '../src/bitemporal.js';
 import { HOT_WINDOW_DAYS, RETIRED_VISIBLE_MS } from '../src/config.js';
 import { Resolver, type IngestResult } from '../src/dedup.js';
 import { mergeLine, observationToRaw, observeLine } from '../src/oplog.js';
-import { publishesRetired, readDayPartitionNodes, writeDayPartition } from '../src/partitions.js';
+import { NO_PARTITION_FORMAT, publishesRetired, readDayPartitionNodes, writeDayPartition } from '../src/partitions.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import type { EventNode, Observation, ProviderConfig, RawObs } from '../src/types.js';
 
@@ -496,7 +496,7 @@ test('visibility: a retired node (superseded or tombstoned) is published non-liv
     const old: EventNode = { ...b, feedId: 'efd_01M3D76ES0OLDLOSER0000000001', provenance: b.provenance.map((r) => ({ ...r })), lastIngestTime: '2026-09-20T00:00:00.000Z' };
     const day = '2026-09-25';
     const publicV1 = join(root, 'public');
-    writeDayPartition(root, day, [a, b, old, tomb, oldTomb], { publicV1, nowMs: retiredAt + 3600_000, headIngestTime: b.lastIngestTime });
+    writeDayPartition(root, day, [a, b, old, tomb, oldTomb], { publicV1, nowMs: retiredAt + 3600_000, headIngestTime: b.lastIngestTime, fmt: NO_PARTITION_FORMAT });
     // Tree partition: every state, full-fat (the loser's frozen copy keeps its line self-describing).
     const tree = readDayPartitionNodes(root, day);
     assert.deepEqual(tree.map((n) => n.state).sort(), ['live', 'superseded', 'superseded', 'tombstoned', 'tombstoned']);

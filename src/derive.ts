@@ -4,6 +4,7 @@ import { DATA_DIR, EVENT_MAP_HORIZON_DAYS, JSDELIVR_BASE, PUBLIC_DIR, REPO, SCHE
 import { loadState, pruneEventMapShards, writeIfChanged } from './bitemporal.js';
 import {
   dayMagRange,
+  ensurePartitionFormat,
   isFrozenDay,
   loadInventory,
   manifestPartitions,
@@ -31,6 +32,9 @@ function main(): void {
   const state = loadState(DATA_DIR, { sinceDays: EVENT_MAP_HORIZON_DAYS, nowMs });
   const publicV1 = join(PUBLIC_DIR, 'v1');
   const allNodes = [...state.eventMap.values()];
+  // From which day the partitions carry `review_status` (partitions.ts PartitionFormat): fixed on the first run after
+  // 2026-11-08 at the first unfrozen day, never moved; the commit step's `git add -A` commits the new file.
+  const fmt = ensurePartitionFormat(DATA_DIR, nowMs);
 
   // Summaries: live events plus the recently superseded ones flagged non-live (summaryFeats),
   // compact — the full superset stays in the day files/partitions written below.
@@ -90,7 +94,7 @@ function main(): void {
   const baselineWanted = new Set(baselineDays(nowMs));
   const written = new Map<string, string>();
   for (const [day, nodes] of byDay) {
-    const out = writeDayPartition(DATA_DIR, day, nodes, { publicV1, nowMs, headIngestTime: state.head.ingest_time });
+    const out = writeDayPartition(DATA_DIR, day, nodes, { publicV1, nowMs, headIngestTime: state.head.ingest_time, fmt });
     if (out.written) rewritten++;
     inv[day] = { ...out.stat, ...dayMagRange(nodes, inv[day], isFrozenDay(day, nowMs)) };
     if (baselineWanted.has(day)) written.set(day, out.ndjson);

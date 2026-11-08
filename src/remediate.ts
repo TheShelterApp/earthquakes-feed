@@ -8,7 +8,7 @@ import { type ArchiveRef, readArchivedDays } from './archive-io.js';
 import { backfillCfg } from './backfill-cfg.js';
 import { DATA_DIR, dataPaths } from './config.js';
 import { GitHubStore, type HistoryStore, LocalStore } from './history-store.js';
-import { FROZEN_AFTER_DAYS } from './partitions.js';
+import { FROZEN_AFTER_DAYS, loadPartitionFormat } from './partitions.js';
 import { fetchProviderWindow, loadRegistry } from './providers.js';
 import {
   type DayTask,
@@ -85,6 +85,8 @@ async function main(): Promise<void> {
   const cursor = JSON.parse(readFileSync(paths.backfillCursor, 'utf8')) as { providers: Record<string, { saturatedDays?: string[] }> };
   const archives = existsSync(paths.archivesIndex) ? (JSON.parse(readFileSync(paths.archivesIndex, 'utf8')) as { list: (ArchiveRef & { sha256?: string })[] }).list : [];
   const head = existsSync(paths.head) ? (JSON.parse(readFileSync(paths.head, 'utf8')) as { seq: number }) : { seq: 0 };
+  // The editions serialize their day as its partition would (review_status from the format's day on).
+  const fmt = loadPartitionFormat(DATA_DIR);
   const localIndex = join(out, 'remediation.json');
   const indexIn = dryRun && existsSync(localIndex) ? localIndex : paths.remediationIndex;
   const before = existsSync(indexIn) ? readFileSync(indexIn, 'utf8') : null;
@@ -148,7 +150,7 @@ async function main(): Promise<void> {
       // 4) The edition, then the uploads (raw first: an edition never names a raw asset that is not there).
       // Fresh nodes per task: buildDayEdition ingests into them.
       const fresh = new Map([...context].map(([d, nodes]) => [d, nodes.map((n) => structuredClone(n))]));
-      const built = buildDayEdition({ day: t.day, context: fresh, rows, registry, nowMs, ingestTime: nowIso, seqMarker: head.seq });
+      const built = buildDayEdition({ day: t.day, context: fresh, rows, registry, nowMs, ingestTime: nowIso, seqMarker: head.seq, fmt });
       const problems = editionProblems(t.day, built.nodes, context);
       if (problems.length) {
         report.failed.push(`${t.provider}:${t.day}: the edition fails its check: ${problems.slice(0, 3).join('; ')}`);

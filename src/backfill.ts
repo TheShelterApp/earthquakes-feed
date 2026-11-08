@@ -7,6 +7,7 @@ import { eventDayKey } from './bitemporal.js';
 import { Resolver } from './dedup.js';
 import {
   loadInventory,
+  loadPartitionFormat,
   readDayPartitionNodes,
   saveInventory,
   writeDayPartition,
@@ -46,6 +47,8 @@ async function main(): Promise<void> {
   const providers = activeProviders(all);
   const liveDay = earliestLiveDay(root, nowMs);
   const liveDayMs = dayStartMs(liveDay);
+  // The partitions it rewrites carry `review_status` as derive's would (partitions.ts PartitionFormat).
+  const fmt = loadPartitionFormat(root);
   // Days already rolled to Releases are no longer in-tree. To let a (new) source dedup
   // against + merge into that cold history, we pull the touched archived days back from
   // their Release tarballs (below), re-materialize the changed ones, and flag the month for
@@ -253,7 +256,7 @@ async function main(): Promise<void> {
     // re-materialize it to the tree ONLY if it actually changed (else a needless re-roll).
     const isArchived = archivedDays.has(day);
     if (isArchived && !changedDays.has(day)) continue;
-    const { written, stat } = writeDayPartition(root, day, nodes, { nowMs, headIngestTime: ingestTime });
+    const { written, stat } = writeDayPartition(root, day, nodes, { nowMs, headIngestTime: ingestTime, fmt });
     if (written) {
       rewritten++;
       writtenDays.add(day);

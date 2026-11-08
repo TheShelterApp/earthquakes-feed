@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { DATA_DIR, EVENT_MAP_HORIZON_DAYS } from './config.js';
 import { eventDayKey, loadEventMap, writeIfChanged } from './bitemporal.js';
 import { LIVE_WINDOW_DAYS, addPartitionLines } from './live-sync.js';
-import { dayPartitionFile, dayPartitionText, partitionPath } from './partitions.js';
+import { dayPartitionFile, dayPartitionText, loadPartitionFormat, partitionPath, type PartitionFormat } from './partitions.js';
 import { FUTURE_LEEWAY_MS } from './summaries.js';
 import type { EventNode } from './types.js';
 
@@ -86,14 +86,14 @@ export function baselineDays(nowMs: number): string[] {
 
 /** The day partitions of `days` rebuilt from event-map nodes, by day; a day without nodes is absent (derive writes no
  *  partition for it). */
-export function partitionTexts(nodes: Iterable<EventNode>, days: Iterable<string>): Map<string, string> {
+export function partitionTexts(nodes: Iterable<EventNode>, days: Iterable<string>, fmt: PartitionFormat): Map<string, string> {
   const want = new Set(days);
   const byDay = new Map<string, EventNode[]>();
   for (const n of nodes) {
     const d = eventDayKey(n.eventTimeMs);
     if (want.has(d)) (byDay.get(d) ?? byDay.set(d, []).get(d)!).push(n);
   }
-  return new Map([...byDay].map(([d, ns]) => [d, dayPartitionText(ns)]));
+  return new Map([...byDay].map(([d, ns]) => [d, dayPartitionText(ns, d, fmt)]));
 }
 
 /** The record derive commits for its run at `nowMs`: the sha256 of the partitions it wrote (`texts`) over
@@ -217,7 +217,7 @@ function main(): void {
       }
     })();
     const days = baselineDays(nowMs);
-    const texts = partitionTexts(map.values(), days);
+    const texts = partitionTexts(map.values(), days, loadPartitionFormat(DATA_DIR));
     writeBaselineSnapshot(dir, days, texts, { taken_at: nowMs, head_seq: head });
     const bytes = [...texts.values()].reduce((s, t) => s + Buffer.byteLength(t), 0);
     console.log(`live-baseline: snapshot of ${days[0]}..${days.at(-1)} at head ${head}: ${texts.size} day partition(s), ${bytes} B, ${Date.now() - t0} ms`);

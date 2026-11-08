@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Resolver } from '../src/dedup.js';
+import { NO_PARTITION_FORMAT } from '../src/partitions.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import {
   MIN_WINDOW_MS,
@@ -106,7 +107,7 @@ test('edition: missing rows become events, known rows join or stay unchanged, th
   const late: RawObs = { ...kagsr('20250729_0000999', D0 - 20_000), provider: 'emsc', fields: { unid: '20250729_0000999' } };
   const context = archivedDay([kept, usgs, late]);
   const rows = [kept, kagsr('k2', D0 + 2 * HOUR), kagsr('k3', D0 + 5 * HOUR, { lat: 53.9, lon: 158.9 }), kagsr('k4', D0 + 10_000)];
-  const out = buildDayEdition({ day: DAY, context, rows, registry, nowMs: Date.parse('2026-10-04T12:00:00Z'), ingestTime: '2026-10-04T12:00:00.000Z', seqMarker: 202_999 });
+  const out = buildDayEdition({ day: DAY, context, rows, registry, nowMs: Date.parse('2026-10-04T12:00:00Z'), ingestTime: '2026-10-04T12:00:00.000Z', seqMarker: 202_999, fmt: NO_PARTITION_FORMAT });
   const s = out.stats;
   assert.deepEqual(
     { archived: s.archived_events, events: s.events, live: [s.live_before, s.live_after], changed: s.changed, unchanged: s.unchanged, new: s.new_events, retired: s.retired, off: s.off_day, neighbour: s.neighbour_joins },
@@ -141,7 +142,7 @@ test('edition: AFAD rows the archive holds 3 h early are re-read first, so the r
   // The source, asked again: the first one, the one of 01:00 and a missing one, at their real times.
   const rows = [afad('900000', A0 + HOUR, false), afad('900001', A0 + 10 * HOUR, false), afad('900003', A0 + 12 * HOUR, false)];
   const context = new Map([...archive].map(([d, ns]) => [d, ns.map((n) => structuredClone(n))]));
-  const out = buildDayEdition({ day: AFAD_DAY, context, rows, registry, nowMs: Date.parse('2026-10-04T12:00:00Z'), ingestTime: '2026-10-04T12:00:00.000Z', seqMarker: 1 });
+  const out = buildDayEdition({ day: AFAD_DAY, context, rows, registry, nowMs: Date.parse('2026-10-04T12:00:00Z'), ingestTime: '2026-10-04T12:00:00.000Z', seqMarker: 1, fmt: NO_PARTITION_FORMAT });
   const s = out.stats;
   assert.equal(s.afad_retimed, 2, 'the archived day\'s two legacy rows re-read; the day before is not re-published, so not re-read');
   assert.equal(s.unchanged, 1, 'the re-asked row matches its re-read archived copy');

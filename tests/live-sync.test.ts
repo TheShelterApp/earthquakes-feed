@@ -17,7 +17,7 @@ import {
   writeLiveIndex,
   type LiveIndex,
 } from '../src/live-sync.js';
-import { writeDayPartition } from '../src/partitions.js';
+import { NO_PARTITION_FORMAT, writeDayPartition } from '../src/partitions.js';
 import { eventDayKey } from '../src/bitemporal.js';
 import { LogBuffer } from '../src/oplog.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
@@ -220,7 +220,7 @@ test('a revision of a row that represents nothing changes the feature without a 
     const prevHead = s.seq;
     const byDay = new Map<string, EventNode[]>();
     for (const n of s.map.values()) (byDay.get(eventDayKey(n.eventTimeMs)) ?? byDay.set(eventDayKey(n.eventTimeMs), []).get(eventDayKey(n.eventTimeMs))!).push(n);
-    for (const [day, nodes] of byDay) writeDayPartition(root, day, nodes, { nowMs: T0, headIngestTime: iso(T0) });
+    for (const [day, nodes] of byDay) writeDayPartition(root, day, nodes, { nowMs: T0, headIngestTime: iso(T0), fmt: NO_PARTITION_FORMAT });
     const client = publish(s, T0);
     const cursor = client.index.head_seq;
 

@@ -167,14 +167,17 @@ export function addPartitionLines(into: Map<string, string>, text: string): void
 }
 
 /** detectSilentChanges against previous lines from any source: the window nodes at or below `prevHead` whose full-fat
- *  line differs from the one in `previous`. */
+ *  line differs from the one in `previous`. A line equal to the node's feature with or without `review_status` counts
+ *  as unchanged: the run that switches a day's partitions to carry it (partitions.ts PartitionFormat) changes no event,
+ *  and both serializations encode every other field, so a real change is still caught. */
 export function silentChangesAgainst(previous: ReadonlyMap<string, string>, nodes: Iterable<EventNode>, days: Iterable<string>, prevHead: number): string[] {
   const window = new Set(days);
   const out: string[] = [];
   for (const n of nodes) {
     if (n.lastSeq > prevHead || !window.has(eventDayKey(n.eventTimeMs))) continue;
     const before = previous.get(n.feedId);
-    if (before !== undefined && before !== JSON.stringify(nodeToFeature(n))) out.push(n.feedId);
+    if (before === undefined || before === JSON.stringify(nodeToFeature(n))) continue;
+    if (before !== JSON.stringify(nodeToFeature(n, { reviewStatus: true }))) out.push(n.feedId);
   }
   return out.sort();
 }

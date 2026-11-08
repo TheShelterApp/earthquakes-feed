@@ -35,7 +35,7 @@ import {
 import { gh, ghRetry, ghRetryNet, sleepMs } from './gh.js';
 import { GitHubStore } from './history-store.js';
 import { partitionTexts } from './live-baseline.js';
-import { FROZEN_AFTER_DAYS, dayPartitionFile, frozenBefore } from './partitions.js';
+import { FROZEN_AFTER_DAYS, dayPartitionFile, frozenBefore, loadPartitionFormat } from './partitions.js';
 import { isoFromMs } from './util.js';
 
 /**
@@ -257,7 +257,7 @@ export function unfrozenFromEventMap(root: string, nowMs: number): UnfrozenDays 
           const d = eventDayKey(n.eventTimeMs);
           if (d >= from) days.add(d);
         }
-        byDay = partitionTexts(map.values(), days);
+        byDay = partitionTexts(map.values(), days, loadPartitionFormat(root));
       }
       return byDay.get(day) ?? '';
     },

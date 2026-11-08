@@ -110,7 +110,8 @@ Ready-to-render `FeatureCollection` for one UTC day: the live events **full-fat*
 48 h (see *Retired events* below). Exists for the days currently in the live
 event-map window (~45 days) — a partition's `pages_url` is present in `manifest.json`
 **iff** its day file is actually deployed; for any other day use the partition `url`
-(NDJSON, same full-fat Features, one per line).
+(NDJSON, same full-fat Features, one per line). The live events carry `review_status` on every day since 2026-11-08,
+the partitions only from a fixed day on (see *Review status*).
 
 ### `GET /v1/live/index.json` — live index (incremental refresh of the week)
 
@@ -325,9 +326,11 @@ clients that key a source enum off one required field. `geometry.coordinates` is
 `[lon, lat]` or `[lon, lat, depthKm]` — the depth slot is **omitted (never null)** when
 unknown, so a strictly typed `[Double]`/`[number]` decoder never trips. **`review_status`**
 (`"automatic"` | `"reviewed"`, absent when the source does not say) tells whether the event's solution is its source's
-automatic one or one a seismologist reviewed — the same on each `provenance[]` row for that row (see *Review status*;
-on the rolling summaries, the live index and the detail hours since 2026-10; the day files and partitions keep their
-bytes). Feed data is under `properties.feed`:
+automatic one or one a seismologist reviewed — the same on each `provenance[]` row for that row (see *Review status*:
+on the rolling summaries, the live and month indexes and the detail hours since 2026-10, on the Pages day files
+`/v1/events/<day>.geojson` of every day since 2026-11-08, and on the NDJSON day partitions of the event days from
+`knowledge/index/partition-format.json` `review_status_from` on; the partitions of earlier days keep their bytes, and
+archives and editions follow their partitions). Feed data is under `properties.feed`:
 
 | `feed.*` | Meaning |
 |---|---|
@@ -368,8 +371,18 @@ that keys on it, so the feed keeps the pinned id.
 `properties.review_status` and `provenance[].review_status` (2026-10) normalize what each source says about its
 solution to `"automatic"` or `"reviewed"`; absent means the source does not say it in what the feed reads. The event's
 value is its representative row's (the solution its top-level fields come from). It is computed from the stored row at
-publish time, so every row the hot window holds has it, and nothing is fetched or logged for it. The top-level `status`
-stays the source's own word (ComCat's `automatic` / `reviewed` / `deleted`, NCS's `Reviewed`, …).
+publish time, so nothing is fetched or logged for it. The top-level `status` stays the source's own word (ComCat's
+`automatic` / `reviewed` / `deleted`, NCS's `Reviewed`, …). Where it is published:
+
+- the rolling summaries, the live index (`/v1/live/`), the month index and the detail hours: since 2026-10;
+- the Pages day files `/v1/events/<day>.geojson` (every day they cover): since 2026-11-08 (they are rebuilt every run and
+  promise no bytes);
+- the NDJSON day partitions `events/YYYY/MM/DD.ndjson`: on the event days from `review_status_from` on, as
+  `knowledge/index/partition-format.json` on the `data` branch names it (`{"version":1,"review_status_from":"YYYY-MM-DD"}`).
+  derive set it once, on its first run after 2026-11-08, to the first unfrozen day of that run, and never moves it, so a
+  frozen partition never changed for it. The partitions of earlier days, and the Release archives and deep-history
+  editions built from them, do not carry it; a remediation edition carries it when its day does. To read it on an older
+  day, take the Pages day file while it exists (the event-map window, ~45 days), or derive it from the row as below.
 
 | Source | Where it comes from |
 |---|---|

@@ -24,7 +24,7 @@ import { loadEventMap } from '../src/bitemporal.js';
 import { EVENT_MAP_HORIZON_DAYS } from '../src/config.js';
 import { baselineDays, baselineRecord, partitionTexts, previousWindowLines, type BaselineSnapshot } from '../src/live-baseline.js';
 import { detectSilentChanges, liveWindowDays, silentChangesAgainst } from '../src/live-sync.js';
-import { dayPartitionFile, partitionPath } from '../src/partitions.js';
+import { dayPartitionFile, loadPartitionFormat, partitionPath } from '../src/partitions.js';
 
 const args = process.argv.slice(2);
 const opt = (name: string): string | undefined => {
@@ -90,7 +90,7 @@ for (let i = failedDerive ? 2 : 1; i < derives.length; i++) {
   checkout(b);
   const t0 = Number(git('log', '-1', '--format=%ct', a)) * 1000 - 60_000;
   const covered = baselineDays(t0);
-  const texts = partitionTexts(loadEventMap(dir, { sinceDays: EVENT_MAP_HORIZON_DAYS, nowMs: t0 }).values(), covered);
+  const texts = partitionTexts(loadEventMap(dir, { sinceDays: EVENT_MAP_HORIZON_DAYS, nowMs: t0 }).values(), covered, loadPartitionFormat(dir));
   const snapshot: BaselineSnapshot = { covered: new Set(covered), text: (day) => texts.get(day) ?? null };
 
   // derive on the aggregate commit, at the derive run's clock.

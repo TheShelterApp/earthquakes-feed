@@ -1,3 +1,4 @@
+import { REMERGE_EPOCH } from '../src/config.js';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -581,7 +582,8 @@ test('history store: a local store never overwrites an asset', () => {
 test('history build: day files use the partition feature format (nodeToFeature) that archive readers already parse', () => {
   const out = buildEdition(input());
   const first = (out.dayFiles.get('2022-12-15') ?? '').split('\n')[0]!;
-  const node = out.nodes.find((n) => JSON.stringify(nodeToFeature(n)) === first);
+  // Merged at build time from epoch 1 on (config REMERGE_EPOCH): the day files then carry the review status too.
+  const node = out.nodes.find((n) => JSON.stringify(nodeToFeature(n, { reviewStatus: REMERGE_EPOCH > 0 })) === first);
   assert.ok(node);
   void emsc;
 });

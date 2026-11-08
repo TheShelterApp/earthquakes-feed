@@ -444,8 +444,9 @@ export const HEAL_EPOCH = 2;
  *  archive month and remediation edition is merged to. 0 = off: no history edition, archive or remediation edition is
  *  re-merged, `buildEdition` and `buildDayEdition` build as before, and `remerge.yml` selects nothing (the kill switch).
  *  Epoch 1 replays today's feed-side identity steps (heal.ts feedSideSteps, withdrawals off) over the published events
- *  in sliding 7-day windows; a later rule round is epoch 2. Raise it only together with REMERGE_INGEST_TIME. */
-export const REMERGE_EPOCH: number = 0;
+ *  in sliding 7-day windows; a later rule round is epoch 2. Raise it only together with REMERGE_INGEST_TIME. Epoch 1 since
+ *  2026-11-08 (dry runs reviewed in the platform plan 2026-11-08-feed-statistics/remerge-dryrun.md). */
+export const REMERGE_EPOCH: number = 1;
 /** The ingest time every re-merged event's changed lines carry (never the wall clock, so a rebuild is byte-identical);
  *  fixed when REMERGE_EPOCH is raised. */
 export const REMERGE_INGEST_TIME: string = '2026-11-08T00:00:00.000Z';

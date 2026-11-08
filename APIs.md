@@ -857,7 +857,9 @@ ComCat-anchored events for global figures: the residual over-count after epoch 1
 `scripts/remerge-verify.ts` (per month: live M4.5+ and M6+ before and after, the anchored counts, ComCat's count, the
 M4.5+ events without a ComCat row near one or not, every M6+ fold).
 
-**What is published.** With `REMERGE_EPOCH` 0 (the kill switch) nothing is re-merged. Above 0:
+**What is published.** With `REMERGE_EPOCH` 0 (the kill switch) nothing is re-merged. Epoch 1 is on since 2026-11-08
+(`REMERGE_INGEST_TIME` 2026-11-08T00:00:00.000Z); the archive months are merged first, newest first, then the deep
+history from 2023-07 back. Above 0:
 
 - *Deep history:* the hourly `history` walk gives each month whose current edition is not merged a new edition
   `events-YYYY-MM.e<N+1>.tar.zst`, built from edition N and nothing else, newest month first; a month waits until its

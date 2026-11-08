@@ -89,6 +89,8 @@ jobs:
           REMERGE_MONTHS: ${{ inputs.months }}
           REMERGE_ONLY: ${{ inputs.only }}
           REMERGE_DEADLINE_S: ${{ inputs.dry_run && '6600' || '2100' }}
+          # A swarm month holds about 0.5 M lines with its context (the runner has 16 GB).
+          NODE_OPTIONS: --max-old-space-size=8192
           # gh: the archive, remediation and history assets (read) and the new assets (upload, never replace).
           GH_TOKEN: ${{ github.token }}
         run: npx --no-install tsx src/remerge-archives.ts

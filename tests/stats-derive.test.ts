@@ -155,7 +155,7 @@ function yearDoc(): string {
     mag_edges_e2: [200, 250, 300, 350, 400, 450, 500, 600, 700], provider_names: ['usgs'],
     days: { total: [1], filtered: [0], collapsed: [0], bins: [[0, 0, 0, 0, 0, 0, 0, 1, 0, 0]], providers: [[0]], missing: [] },
     events: buildEventTable('year', Date.parse('2026-01-01T00:00:00Z'), [ev], YEAR_COLUMNS),
-    reconciled: { rule: 'v1', collapsed: 0 },
+    reconciled: { rule: 'v2', collapsed: 0 },
     inputs_digest: 'a'.repeat(64), attribution: STATS_ATTRIBUTION,
   });
 }
@@ -165,7 +165,7 @@ function areaDoc(year: number, minMag: number | null = null): string {
     format: 1, kind: 'area', year, builder: 2, min_mag: minMag, through: `${year}-12-31`, complete: true, cell_deg: 0.1, records: 2,
     cell: [4_500_000, 5], total: [3, 1], m45: minMag ? [3, 1] : [1, 0], mmax: [640, 300],
     m6: buildEventTable('area', Date.parse(`${year}-01-01T00:00:00Z`), [ev], AREA_COLUMNS),
-    reconciled: { rule: 'v1', collapsed: 0 },
+    reconciled: { rule: 'v2', collapsed: 0 },
     inputs_digest: 'b'.repeat(64), attribution: STATS_ATTRIBUTION,
   });
 }

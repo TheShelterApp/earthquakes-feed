@@ -60,7 +60,7 @@ before it as per-day magnitude bins plus their M5+ events, and every year since 
 index's sha256, so a client re-reads only the files whose fingerprint changed. The rows are the feed's own events,
 merged by the feed's own rule (where an input is not yet re-merged, the stats builder runs the same `remergeNodes` over
 it in memory); the statistics then collapse the reports of one quake that the merge keeps apart (the reconciliation:
-other catalogues within 60 s, 100 km and 1.0 magnitude of an M4.5+ row, ComCat's row kept), counted per file. The year and area files come from the `stats` workflow (`src/stats-history.ts`, every
+other catalogues within 60 s, 100 km and 1.0 magnitude of an M4.5+ row, 200 km and 1.5 for M7+, ComCat's row kept), counted per file. The year and area files come from the `stats` workflow (`src/stats-history.ts`, every
 6 h): it rebuilds a year when the checksums of its inputs change, checks each year against USGS ComCat's M6+ and M4.5+
 counts before it commits the files to `data`, and keeps a year's previous files when the check fails. Format, row rule,
 inputs and completeness epochs: [APIs.md](APIs.md#get-v1statsindexjson--statistics). `providers/stats.json` holds the

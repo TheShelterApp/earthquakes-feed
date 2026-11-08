@@ -218,7 +218,7 @@ test('cellOf: poles, antimeridian and the centre', () => {
   assert.ok(Math.abs(lat - 35.55) < 1e-9 && Math.abs(lon - 139.75) < 1e-9, `${lat},${lon}`);
 });
 
-// --- the statistical reconciliation (rule v1) ---
+// --- the statistical reconciliation (rule v2) ---
 
 const KM = 1 / 111.195;
 function row(n: number, provider: string, o: { dt?: number; dkm?: number; mag?: number; sources?: string[] } = {}): StatsEvent {
@@ -280,4 +280,22 @@ test('reconcile: across midnight in the window; the day table counts collapsed a
   assert.deepEqual([t1.count, t1.collapsed, t2.count, t2.collapsed], [1, 1, 1, 0], 'the usgs report on the 7th stays');
   assert.equal(t1.count + t1.filtered + t1.skipped + t1.collapsed, 2);
   assert.equal((JSON.parse(t1.body) as { collapsed: number }).collapsed, 1);
+});
+
+test('reconcile v2: a pair whose larger magnitude is M7.0+ links within 200 km and 1.5; below M7.0 the first tier holds', () => {
+  const pair = (bigMag: number, o: Parameters<typeof row>[2]): number => reconcileRows([row(1, 'usgs', { mag: bigMag }), row(2, 'usp', o)], prio).size;
+  // Great tier: M7.4 with a USP M6.34 17 km away (2025-05-02), a GeoNet report 183 km away.
+  assert.equal(pair(7.4, { mag: 6.34, dkm: 17 }), 1, '|dM| 1.06');
+  assert.equal(pair(7.5, { mag: 6.0, dkm: 10 }), 1, '|dM| exactly 1.5');
+  assert.equal(pair(7.5, { mag: 5.99, dkm: 10 }), 0, '|dM| 1.51');
+  assert.equal(pair(7.0, { mag: 6.6, dkm: 199.5 }), 1);
+  assert.equal(pair(7.0, { mag: 6.6, dkm: 201 }), 0);
+  assert.equal(pair(7.0, { mag: 6.6, dkm: 150, dt: 60_001 }), 0, '60 s in both tiers');
+  // The smaller one first in time: the reach is the partner's tier too.
+  assert.equal(reconcileRows([row(1, 'usp', { mag: 5.6 }), row(2, 'usgs', { mag: 7.1, dt: 2_000, dkm: 180 })], prio).size, 1);
+  // First tier below M7.0.
+  assert.equal(pair(6.99, { mag: 5.9, dkm: 10 }), 0, '|dM| 1.09 under M7');
+  assert.equal(pair(6.99, { mag: 6.5, dkm: 150 }), 0, '150 km under M7');
+  // No special case for a shared provider.
+  assert.equal(reconcileRows([row(1, 'usgs', { mag: 7.4 }), row(2, 'geonet', { mag: 7.0, dkm: 47, sources: ['geonet', 'usgs'] })], prio).size, 0);
 });

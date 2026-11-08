@@ -6,6 +6,7 @@ import addFormats from 'ajv-formats';
 import { DATA_DIR, DOMAIN, MAX_PUBLISHED_BYTES, PUBLIC_DIR, SCHEMA_DIR, dataPaths } from './config.js';
 import { deltaBoundViolations, readSilentLog } from './live-sync.js';
 import { loadPartitionFormat, partitionFormatProblems } from './partitions.js';
+import { STATS_INDEX_PATH, checkStats, loadStatsConfig } from './stats.js';
 
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 addFormats(ajv);
@@ -268,6 +269,39 @@ if (existsSync(liveMonthFile)) {
     live += dayLive;
   }
   if (idx.count !== live) fail(`month index: count ${idx.count} != ${live} live features over its days`);
+}
+
+// 4c. The statistics (stats.ts, APIs.md Statistics): derive publishes them only after its own check passed, so a
+//     failure here is a bug in that check. Every invariant again (checkStats, for the manifest's run), and the
+//     manifest's `stats` pointer names exactly this index. The year and area files lag by design (stats.yml); `through`
+//     unset (once the builder is on) or older than the run's day - 20 is a warning.
+{
+  const statsIndexFile = join(PUBLIC_DIR, STATS_INDEX_PATH);
+  type StatsManifest = { generated?: number; stats?: { path?: string; url?: string; head_seq?: number; format?: number } };
+  const m = ((): StatsManifest | null => {
+    try {
+      return JSON.parse(readFileSync(join(publicV1, 'manifest.json'), 'utf8')) as StatsManifest;
+    } catch {
+      return null;
+    }
+  })();
+  if (existsSync(statsIndexFile)) {
+    if (!m || typeof m.generated !== 'number') fail('stats: an index without a readable manifest');
+    else {
+      for (const e of checkStats(PUBLIC_DIR, m.generated)) fail(`stats: ${e}`);
+      const idx = JSON.parse(readFileSync(statsIndexFile, 'utf8')) as { head_seq?: number; format?: number; through?: string | null };
+      const p = m.stats;
+      if (!p) fail(`stats: ${STATS_INDEX_PATH} is deployed but the manifest has no stats pointer`);
+      else if (p.path !== STATS_INDEX_PATH || p.url !== `https://${DOMAIN}/${STATS_INDEX_PATH}` || p.head_seq !== idx.head_seq || p.format !== idx.format) {
+        fail(`stats: the manifest's pointer ${JSON.stringify(p)} does not name this index (head_seq ${idx.head_seq}, format ${idx.format})`);
+      }
+      const floor = new Date(m.generated - 20 * 86_400_000).toISOString().slice(0, 10);
+      // Before the builder is switched on (history_enabled) a null `through` is expected: a plain line, not 288 warnings a day.
+      if (idx.through == null && loadStatsConfig().config?.history_enabled !== true) console.log('validate: stats through is null (the year and area builder is off)');
+      else if (idx.through == null) console.warn('::warning::stats: through is null (the year and area builder has not run): the year view has no year files');
+      else if (idx.through < floor) console.warn(`::warning::stats: through ${idx.through} is older than ${floor}: the year and area files lag`);
+    }
+  } else if (m?.stats) fail(`stats: the manifest points at ${m.stats.path}, which is not deployed`);
 }
 
 // 5. Manifest (canonical Pages copy).

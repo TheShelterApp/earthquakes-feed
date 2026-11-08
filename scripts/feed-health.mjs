@@ -22,7 +22,9 @@
 //     A read that fails leaves its keys unjudged and is the finding watcher:feed-github (platform board, P3 after 2
 //     runs, never red), so a read that keeps failing does not freeze those rows unseen; without GH_TOKEN in Actions
 //     every read fails, in a local run none is made;
-//   - providers/registry.json from the checkout (the source ids a marker line is filed under).
+//   - providers/registry.json from the checkout (the source ids a marker line is filed under);
+//   - providers/stats.json from the checkout (derive_publish, history_enabled) and, when the v1 manifest has a `stats`
+//     pointer, v1/stats/index.json (the statistics: feed:stats, feed:stats-through, feed:stats-days).
 //
 //   node scripts/feed-health.mjs --findings findings/feed.json   # the CI invocation: writes the document
 //   node scripts/feed-health.mjs                                 # prints the document (a local run: no GitHub parts)
@@ -46,10 +48,12 @@ export const FEED_BASE = 'https://earthquakes-feed.theshelter.app';
 export const MANIFEST_V1_URL = `${FEED_BASE}/v1/manifest.json`;
 export const MANIFEST_V2_URL = `${FEED_BASE}/v2/manifest.json`;
 export const STATUS_V1_URL = `${FEED_BASE}/v1/status.json`;
+export const STATS_INDEX_URL = `${FEED_BASE}/v1/stats/index.json`;
 /** GitHub's REST API: the only host GH_TOKEN is ever sent to. */
 export const GITHUB_API = 'https://api.github.com';
 /** The checkout's provider registry (health.yml's sparse checkout includes it). */
 export const REGISTRY_PATH = fileURLToPath(new URL('../providers/registry.json', import.meta.url));
+export const STATS_CONFIG_PATH = fileURLToPath(new URL('../providers/stats.json', import.meta.url));
 
 /** A zip of a walk's blocked marker: one small text file. Anything bigger is refused, never inflated. */
 export const ZIP_MAX_ENTRIES = 10;
@@ -390,6 +394,70 @@ export function evaluateRepoSize(kb) {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// Statistics: feed:stats, feed:stats-through, feed:stats-days
+
+/** providers/stats.json's switches as health reads them; anything unreadable counts as off. */
+export function readStatsConfig(text) {
+  try {
+    const j = JSON.parse(text);
+    if (!isObject(j)) return { mode: 'off', history: false, message: 'providers/stats.json is not an object' };
+    const mode = ['off', 'shadow', 'on'].includes(j.derive_publish) ? j.derive_publish : 'off';
+    return { mode, history: j.history_enabled === true, message: mode === j.derive_publish ? null : `providers/stats.json derive_publish ${JSON.stringify(j.derive_publish)}: counted as off` };
+  } catch (e) {
+    return { mode: 'off', history: false, message: `providers/stats.json unreadable (${oneLine(errMsg(e), 120)}): counted as off` };
+  }
+}
+
+/** The v1 manifest's `stats` pointer from its raw JSON, or null. */
+export function statsPointerOf(json) {
+  return isObject(json) && isObject(json.stats) && typeof json.stats.path === 'string' ? { path: json.stats.path, headSeq: isNum(json.stats.head_seq) ? json.stats.head_seq : null } : null;
+}
+
+const dayKey = (ms) => new Date(ms).toISOString().slice(0, 10);
+
+/**
+ * The statistics (derive's side; APIs.md, Statistics):
+ *   feed:stats (P2 after a 30-min hold) — derive_publish "on" and the v1 manifest has no `stats` pointer;
+ *   feed:stats-through (P3, maintenance) — history_enabled and `through` null or more than lagDays behind the last
+ *     frozen day (the run's day - frozenAfterDays - 1);
+ *   feed:stats-days (P3) — the index names missing_days.
+ * v1 unreadable: nothing judged here (feed:freshness speaks). An index that cannot be read leaves the last two unjudged.
+ * The stats builder's gate and verify markers reach the board through the walks (walk-blocked-stats, stats.yml).
+ */
+export function evaluateStats({ nowMs, v1Ok, pointer, config, index }) {
+  const findings = [];
+  const unjudged = [];
+  const notes = [];
+  const cfg = config ?? { mode: 'off', history: false, message: null };
+  if (cfg.message) notes.push(cfg.message);
+  if (!v1Ok) return { findings, unjudged: ['feed:stats', 'feed:stats-through', 'feed:stats-days'], notes };
+  if (cfg.mode === 'on' && !pointer) {
+    findings.push(makeFinding('feed:stats', { text: 'providers/stats.json says derive_publish "on" but the live v1 manifest has no stats pointer: derive drops the statistics (its ::warning::stats dropped line says why); the app keeps its last verified copy' }));
+  }
+  if (!pointer) return { findings, unjudged, notes };
+  if (!index || !index.ok || !isObject(index.json)) {
+    unjudged.push('feed:stats-through', 'feed:stats-days');
+    notes.push(`stats: v1/stats/index.json unreadable (${oneLine(index && !index.ok ? index.message : 'not an object', 200)})`);
+    return { findings, unjudged, notes };
+  }
+  const idx = index.json;
+  const missing = Array.isArray(idx.missing_days) ? idx.missing_days.filter((d) => typeof d === 'string') : [];
+  if (missing.length > 0) {
+    findings.push(makeFinding('feed:stats:days', { text: `the statistics index names ${missing.length} missing day(s): ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ', …' : ''} (no event-map day and no partition on data)` }));
+  }
+  if (cfg.history) {
+    const { frozenAfterDays, lagDays } = RULES['feed:stats:through'].limits;
+    const expected = dayKey(Date.parse(`${dayKey(nowMs)}T00:00:00Z`) - (frozenAfterDays + 1) * DAY);
+    const floor = dayKey(Date.parse(`${expected}T00:00:00Z`) - lagDays * DAY);
+    const through = typeof idx.through === 'string' ? idx.through : null;
+    if (through === null || through < floor) {
+      findings.push(makeFinding('feed:stats:through', { text: `the statistics year and area files run through ${through ?? 'nothing yet'}, the last frozen day is ${expected}: stats.yml has not caught up (its runs, or a gate failure)` }));
+    }
+  }
+  return { findings, unjudged, notes };
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // Walk markers: walks:<workflow>:<source>
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -600,6 +668,11 @@ export function evaluateFeed(inputs) {
   if (tree && !tree.ok) notes.push(`data tree: ${oneLine(tree.message, 200)}`);
   add(evaluateSizes(tree && tree.ok ? tree.json : null));
 
+  // Statistics.
+  const st = inputs.stats;
+  add(evaluateStats({ nowMs, v1Ok: !!(inputs.v1 && inputs.v1.ok), pointer: st ? st.pointer : null, config: st ? st.config : null, index: st ? st.index : null }));
+  if (st) parts.push(`stats=${st.config ? st.config.mode : 'off'}${st.pointer ? ' pointer' : ''}`);
+
   // Walk markers.
   add(evaluateWalks(inputs.walks ?? [], nowMs, inputs.ids ?? []));
   parts.push(`walks=${(inputs.walks ?? []).map((r) => `${r.workflow}:${!r.ok ? 'unreadable' : r.marker ? 'marker' : 'clear'}`).join(',')}`);
@@ -800,8 +873,23 @@ export async function collect({ env = process.env, fetchImpl = globalThis.fetch,
     notes.push(`providers/registry.json unreadable (${oneLine(errMsg(e), 120)}): marker lines are filed by status.json's ${fromStatus.length} source ids`);
   }
 
+  // The statistics: the switches from the checkout, the index only when the live v1 manifest points at it.
+  let statsConfig;
+  try {
+    statsConfig = readStatsConfig(readFile(STATS_CONFIG_PATH));
+  } catch (e) {
+    statsConfig = { mode: 'off', history: false, message: `providers/stats.json unreadable (${oneLine(errMsg(e), 120)}): counted as off` };
+  }
+  const pointer = r1.ok ? statsPointerOf(r1.json) : null;
+  let statsIndex = null;
+  if (pointer) {
+    const ri = await read(STATS_INDEX_URL);
+    statsIndex = ri.ok ? { ok: true, json: ri.json } : { ok: false, message: failText(ri) };
+  }
+  const stats = { config: statsConfig, pointer, index: statsIndex };
+
   const [repoSize, tree, walks] = await Promise.all([gh.repoSize, gh.tree, gh.walks]);
-  return { nowMs: clock(), v1, v2, reRead, queuedMs, queueError: queue.error, githubSkipped: gh.skipped, status, repoSize, tree, walks, ids, notes: [...gh.notes, ...notes] };
+  return { nowMs: clock(), v1, v2, reRead, queuedMs, queueError: queue.error, githubSkipped: gh.skipped, status, repoSize, tree, walks, ids, stats, notes: [...gh.notes, ...notes] };
 }
 
 /** argv to options; throws an Error with a readable message on a bad argument. */

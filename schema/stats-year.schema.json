@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://earthquakes-feed.theshelter.app/schema/stats-year.schema.json",
+  "title": "Statistics year file (v1/stats/year/YYYY.json)",
+  "description": "One calendar year through `through` for the year view: per-day totals, filtered counts, 10 magnitude bins and providers, plus the M5+ events as an event table of kind \"year\". Built by stats.yml, committed on data at the same path. APIs.md, Statistics.",
+  "type": "object",
+  "required": ["format", "kind", "year", "builder", "first", "through", "complete", "mag_edges_e2", "provider_names", "days", "events", "inputs_digest", "attribution"],
+  "properties": {
+    "format": { "const": 1 },
+    "kind": { "const": "year" },
+    "year": { "type": "integer" },
+    "builder": { "type": "integer", "minimum": 1 },
+    "first": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+    "through": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+    "complete": { "type": "boolean" },
+    "mag_edges_e2": { "const": [200, 250, 300, 350, 400, 450, 500, 600, 700] },
+    "provider_names": { "type": "array", "items": { "type": "string" } },
+    "days": {
+      "type": "object",
+      "required": ["total", "filtered", "bins", "providers", "missing"],
+      "properties": {
+        "total": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "filtered": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "bins": { "type": "array", "items": { "type": "array", "minItems": 10, "maxItems": 10, "items": { "type": "integer", "minimum": 0 } } },
+        "providers": { "type": "array", "items": { "type": "array", "items": { "type": "integer", "minimum": 0 } } },
+        "missing": { "type": "array", "items": { "type": "integer", "minimum": 0 } }
+      }
+    },
+    "events": {
+      "allOf": [{ "$ref": "stats-table.schema.json#/$defs/eventTable" }],
+      "properties": { "kind": { "const": "year" } }
+    },
+    "inputs_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "attribution": { "type": "string" }
+  }
+}

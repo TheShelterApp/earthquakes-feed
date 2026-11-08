@@ -26,6 +26,9 @@ import { detectSilentChanges, liveWindowDays, nextSilentLog, readSilentLog, sile
 import { baselineDays, baselineRecord, previousWindowLines, readBaselineRecord, readBaselineSnapshot, writeBaselineRecord } from './live-baseline.js';
 import { writeDetailHours } from './event-detail.js';
 import { writeLiveMonth } from './live-month.js';
+import { tmpdir } from 'node:os';
+import { deriveStats, loadStatsConfig, statsDays } from './stats.js';
+import { dayTableJson, type DayTableResult } from './stats-table.js';
 
 function main(): void {
   const nowMs = Date.now();
@@ -93,9 +96,27 @@ function main(): void {
   let pagesNdjsonBytes = 0;
   const baselineWanted = new Set(baselineDays(nowMs));
   const written = new Map<string, string>();
+  // Statistics (APIs.md, Statistics; providers/stats.json `derive_publish`): the day tables of the event-map days are
+  // built here from the features the partition writer already made; none are kept. A failure only drops the stats.
+  const statsCfg = loadStatsConfig();
+  if (statsCfg.warning) console.warn(`::warning::${statsCfg.warning}`);
+  const statsOn = statsCfg.mode !== 'off' && statsCfg.config != null;
+  const statsDaySet = new Set(statsOn ? statsDays(nowMs) : []);
+  const statsTables = new Map<string, DayTableResult>();
+  let statsLoopError: unknown = null;
+  let statsLoopMs = 0;
   for (const [day, nodes] of byDay) {
     const out = writeDayPartition(DATA_DIR, day, nodes, { publicV1, nowMs, headIngestTime: state.head.ingest_time, fmt });
     if (out.written) rewritten++;
+    if (statsDaySet.has(day) && statsLoopError == null) {
+      const t = performance.now();
+      try {
+        statsTables.set(day, dayTableJson(day, out.feats));
+      } catch (err) {
+        statsLoopError = err;
+      }
+      statsLoopMs += performance.now() - t;
+    }
     inv[day] = { ...out.stat, ...dayMagRange(nodes, inv[day], isFrozenDay(day, nowMs)) };
     if (baselineWanted.has(day)) written.set(day, out.ndjson);
     if (!isFrozenDay(day, nowMs)) {
@@ -124,6 +145,21 @@ function main(): void {
   const month = writeLiveMonth(feats, { publicV1, nowMs, headSeq: state.head.seq });
   // EVT-5: per-hour full-fat files for the event detail, over the same days as the Pages day files.
   const detail = writeDetailHours(allNodes, pagesDays, { publicV1, nowMs });
+  // Statistics: "on" publishes under public/v1/stats/ with the manifest pointer, "shadow" builds and checks the same
+  // files in the runner's temp directory (never deployed); a drop leaves neither files nor pointer (safeStats).
+  const { stats, pointer: statsPointer } = deriveStats({
+    mode: statsCfg.mode,
+    config: statsCfg.config,
+    tables: statsTables,
+    loopError: statsLoopError,
+    loopMs: statsLoopMs,
+    publicDir: PUBLIC_DIR,
+    shadowDir: join(process.env.RUNNER_TEMP ?? tmpdir(), 'stats-shadow'),
+    dataDir: DATA_DIR,
+    nowMs,
+    headSeq: state.head.seq,
+  });
+  statsTables.clear();
 
   const manifest = JSON.stringify(
     {
@@ -146,6 +182,8 @@ function main(): void {
       ...(detail ? { event_detail: detail.pointer } : {}),
       // Additive (round 27): the month index (APIs.md, Month index).
       live_month: month.pointer,
+      // Additive (2026-11): the statistics index (APIs.md, Statistics), only when it was published and passed its check.
+      ...(statsPointer ? { stats: statsPointer } : {}),
     },
     null,
     2,
@@ -214,6 +252,15 @@ function main(): void {
       `; month days=${month.index.days.length} ${month.index.days[0]?.date ?? '-'}..${month.index.days.at(-1)?.date ?? '-'}` +
       ` (${month.index.days.reduce((s, d) => s + d.bytes, 0)} B, ${month.index.count} live)` +
       (detail ? `; detail hours=${detail.files} (${detail.bytes} B, largest ${detail.maxBytes} B)` : ''),
+  );
+  console.log(
+    `stats: ${statsCfg.mode}` +
+      (stats
+        ? ` days=${stats.index.days.length} missing=${stats.index.missing_days.length} from_data=${stats.fromData.length}` +
+          ` years=${stats.index.years.length} area=${stats.index.area.length} through=${stats.index.through ?? 'null'}` +
+          ` bytes=${stats.bytes} ms=${Math.round(stats.ms + statsLoopMs)} (tables in the loop ${Math.round(statsLoopMs)})` +
+          (stats.dropped.length ? ` not_published=${stats.dropped.length}` : '')
+        : statsOn ? ' dropped' : ''),
   );
 }
 

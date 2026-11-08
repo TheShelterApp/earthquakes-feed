@@ -20,7 +20,8 @@
     "partitions",
     "tiles",
     "archives",
-    "changes"
+    "changes",
+    "stats"
   ],
   "properties": {
     "schema_version": {
@@ -219,6 +220,43 @@
             "sha256": {
               "type": "string",
               "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      ]
+    },
+    "stats": {
+      "description": "The statistics index (APIs.md, Statistics): its path, URL, bytes and sha256; the index lists every stats file with its sha256. null when the run published none.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "path",
+            "url",
+            "bytes",
+            "sha256",
+            "format"
+          ],
+          "properties": {
+            "path": {
+              "const": "v1/stats/index.json"
+            },
+            "url": {
+              "type": "string",
+              "format": "uri"
+            },
+            "bytes": {
+              "type": "integer"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "format": {
+              "const": 1
             }
           }
         }

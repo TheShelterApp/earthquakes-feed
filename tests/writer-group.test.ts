@@ -156,8 +156,9 @@ test('workflows: every commit to data is pushed by scripts/push-data.sh, nowhere
     assert.equal(viaScript, commits, `${f}: ${commits} commit(s), ${viaScript} push-data.sh call(s)`);
     pushes += viaScript;
   }
-  // aggregate, derive's steps, backfill, archive, and the history / first-solutions / remediate / remerge commit jobs.
-  assert.equal(pushes, 8);
+  // aggregate, derive's steps, backfill, archive, and the history / first-solutions / remediate / remerge / stats commit
+  // jobs.
+  assert.equal(pushes, 9);
 });
 
 test('workflows: derive runs at the end of every aggregate job, and derive.yml only by hand', () => {
@@ -182,6 +183,7 @@ test('workflows: the side-index commit jobs push without the lock and stage only
     ['history.yml', 'knowledge/index/history.json and history-state.json'],
     ['remediate.yml', 'knowledge/index/remediation.json'],
     ['first-solutions.yml', '$dir/cursor.json and chunks.ndjson'],
+    ['stats.yml', 'v1/stats and knowledge/stats'],
   ] as const) {
     const yml = read(`.github/workflows/${f}`);
     const commit = yml.slice(yml.indexOf('\n  commit:'));

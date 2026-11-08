@@ -1,0 +1,172 @@
+name: stats
+
+# The statistics builder (src/stats-history.ts; APIs.md, Statistics): the year files v1/stats/year/<Y>.json (the
+# current year and the two before it), the area files v1/stats/area/<Y>.json (1973 .. the last frozen day's year) and
+# their ledger knowledge/stats/state.json on the `data` branch, which derive copies to Pages byte for byte. A year is
+# rebuilt when the digest of its inputs changes (a new frozen day, a re-merged archive or edition, a new remediation or
+# era B edition, a builder bump), newest first, a few years per run; each rebuilt year is checked against USGS ComCat's
+# M6+ and M4.5+ counts before its files are written (a failing year keeps its previous files, and the marker
+# walk-blocked-stats reaches the "[health] feed" board).
+#
+# The `collect` job (outside the writer group: minutes of downloads and counting) writes nothing to `data`; the short
+# `commit` job copies its output into a sparse checkout of v1/stats and knowledge/stats, checks that the ledger is the
+# one the collect job read, stages only those two directories and pushes through scripts/push-data.sh (no other writer
+# touches them, so its rebase cannot conflict).
+#
+# Off until providers/stats.json `history_enabled` is true: a scheduled run then only logs that it is off. A dry-run
+# dispatch builds and checks anyway and uploads the output as an artifact, never committing it.
+#
+# Cron every 6 h (GitHub delivers about 4 a day; one is enough: the current year changes once a day, when a day freezes).
+on:
+  schedule:
+    - cron: '43 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      max_years:
+        description: 'Years per run (blank = providers/stats.json max_years_per_run)'
+        required: false
+      years:
+        description: 'Years to rebuild whatever their digest, comma-separated (e.g. 2010,2026)'
+        required: false
+      dry_run:
+        description: 'Dry run: build and check, upload the output as an artifact, commit nothing'
+        type: boolean
+        default: true
+      verify:
+        description: 'Per-month table against ComCat: blank, sample (last 13 months + 6 random) or full (every month)'
+        required: false
+        default: ''
+
+# One run at a time: a run reads the ledger the previous run's commit job wrote.
+concurrency:
+  group: earthquakes-feed-stats
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    # 20 minutes of builds start at most (budget_minutes), the last year finishes; a full verify asks ComCat twice for
+    # every month at 0.5 requests a second.
+    timeout-minutes: ${{ inputs.verify == 'full' && 120 || 45 }}
+    outputs:
+      changed: ${{ steps.run.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Blobless and sparse: the indexes, the ledger and the published files; a frozen day partition is read by its
+      # blob (git fetches the one blob).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: data
+          path: .data
+          fetch-depth: 1
+          filter: blob:none
+          persist-credentials: false
+          sparse-checkout: |
+            knowledge/index
+            knowledge/stats
+            v1/stats
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Build the statistics
+        id: run
+        env:
+          DATA_DIR: .data
+          STATS_OUT: stats-out
+          STATS_DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          STATS_YEARS: ${{ inputs.years }}
+          STATS_MAX_YEARS: ${{ inputs.max_years }}
+          STATS_VERIFY: ${{ inputs.verify }}
+          # A swarm month and its context in memory for the in-memory re-merge (the runner has 16 GB).
+          NODE_OPTIONS: --max-old-space-size=8192
+          # gh: the archive, history and remediation assets (read only).
+          GH_TOKEN: ${{ github.token }}
+        run: npx --no-install tsx src/stats-history.ts
+      - if: steps.run.outputs.changed == 'true' || inputs.dry_run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stats-out
+          path: stats-out
+          if-no-files-found: error
+          retention-days: ${{ inputs.dry_run && 3 || 7 }}
+      # A year that failed its ComCat gate (or its build, or a verify) keeps the run green: a warning here, and the
+      # marker as the artifact walk-blocked-stats, which the health workflow's feed evaluator (scripts/feed-health.mjs)
+      # files on the "[health] feed" board (a P3). A dry run's marker stays a warning only.
+      - name: Warn if a year was blocked
+        if: always()
+        run: |
+          if [ -f stats-blocked.txt ]; then
+            cat stats-blocked.txt
+            echo '::warning::stats: a year failed its ComCat gate or its build (see above); its previous files stay, and the health workflow files the marker on the "[health] feed" board'
+          fi
+      - name: Upload the blocked marker (read by the health workflow)
+        if: always() && !inputs.dry_run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: walk-blocked-stats
+          path: stats-blocked.txt
+          if-no-files-found: ignore
+          retention-days: 3
+          overwrite: true
+
+  commit:
+    needs: collect
+    if: needs.collect.outputs.changed == 'true' && !inputs.dry_run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    # The only part that writes `data`: a sparse checkout of v1/stats and knowledge/stats (blobs fetched on demand), the
+    # collect job's files, a commit. No writer lock (see the top of this file).
+    steps:
+      # The main checkout holds only scripts/push-data.sh, the push loop every writer shares. First: checkout empties a
+      # directory that is not yet a repository, so it must not run after the artifact download.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/push-data.sh
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stats-out
+          path: stats-out
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: data
+          path: .data
+          fetch-depth: 1
+          sparse-checkout: |
+            knowledge/stats
+            v1/stats
+          sparse-checkout-cone-mode: false
+      - name: Commit & push the statistics
+        working-directory: .data
+        run: |
+          set -euo pipefail
+          # The collect job read this ledger; anything else having changed it since means two writers: stop.
+          sha() { if [ -f "$1" ]; then sha256sum "$1" | cut -d' ' -f1; else echo null; fi; }
+          if [ "$(sha knowledge/stats/state.json)" != "$(jq -r '.state_sha256 // "null"' ../stats-out/base.json)" ]; then
+            echo '::error::knowledge/stats/state.json changed since the collect job read it; not overwriting'; exit 1
+          fi
+          mkdir -p v1/stats knowledge/stats
+          rsync -a --delete ../stats-out/v1/stats/ v1/stats/
+          rsync -a --delete ../stats-out/knowledge/stats/ knowledge/stats/
+          git config user.name  "earthquakes-feed-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -A v1/stats knowledge/stats
+          # Without the writer lock this commit must touch nothing another writer writes.
+          staged=$(git diff --cached --name-only | grep -v -E '^(v1/stats|knowledge/stats)/' || true)
+          if [ -n "$staged" ]; then echo "::error::refusing to commit anything but v1/stats and knowledge/stats: $staged"; exit 1; fi
+          git commit -m "stats: $(jq -r '[.years | to_entries[] | select(.value.check.gate != null) | .key] | length' knowledge/stats/state.json) year(s) checked, through $(jq -r '.through // "none"' knowledge/stats/state.json) @ $(date -u +%FT%TZ)" \
+            || { echo 'no changes'; exit 0; }
+          # No writer lock: only this workflow writes these files, so a push that loses the race to another writer
+          # fetches, rebases this one commit onto it (no conflict possible) and tries again (scripts/push-data.sh).
+          PUSH_ATTEMPTS=6 PUSH_BACKOFF_S=3 bash "$GITHUB_WORKSPACE/scripts/push-data.sh"

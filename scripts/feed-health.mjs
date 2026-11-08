@@ -18,7 +18,7 @@
 //     the watchdog must not read as broken publishing (2026-07-25: the queue stalled 1 h 54 min);
 //   - with GH_TOKEN and GITHUB_REPOSITORY (GitHub's own API only): this run's created_at (the queue time), the
 //     repository's size, the data branch's tree (every file's size) and the newest walk-blocked-<workflow> artifact of
-//     each maintenance walk (history, first-solutions, backfill, archive), whose zip holds the walk's blocked marker.
+//     each maintenance walk (history, first-solutions, backfill, archive, remerge, stats), whose zip holds the walk's blocked marker.
 //     A read that fails leaves its keys unjudged and is the finding watcher:feed-github (platform board, P3 after 2
 //     runs, never red), so a read that keeps failing does not freeze those rows unseen; without GH_TOKEN in Actions
 //     every read fails, in a local run none is made;

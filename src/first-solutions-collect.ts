@@ -186,6 +186,8 @@ export interface DeepEdition {
   asset: string;
   days: string[];
   built_from: string[];
+  /** Withdrawn by scripts/remerge-rollback.ts: never current. */
+  withdrawn?: { at: string; reason: string };
 }
 
 export interface DeepHistory {
@@ -209,6 +211,7 @@ export function deepHistory(index: { boundary?: string; editions?: DeepEdition[]
   const current = new Map<string, DeepEdition>();
   for (const e of index?.editions ?? []) {
     if (`${e.period}-01` < DEEP_WALK_FLOOR) continue;
+    if (e.withdrawn) continue;
     const had = current.get(e.period);
     if (!had || e.edition > had.edition) current.set(e.period, e);
   }

@@ -36,7 +36,7 @@ The catalog. Fields:
 | `data_commit` | git SHA for building immutable partition URLs |
 | `summaries` | map of `{name: {path, url, count}}` for the 20 rolling feeds (`count` = live events in that file) |
 | `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}`; `url` is the NDJSON: the Pages copy for an unfrozen day, jsDelivr `@data` for a frozen one (*Historical day partitions*). `count` is every feature of the file (all states); since round 26 (2026-10-14) `min_mag` / `max_mag` are the day's **live** events' range, recorded while the day is unfrozen and kept when it freezes (a retired event keeps its last solution: a phantom M8.2 folded into the Panama M7.7 of 2026-10-09 had kept that day at 8.2); days frozen before then keep the range over every feature |
-| `archives[]` | rolled-up cold months: `{period, tag, asset, url, bytes, sha256, count, days[]}` |
+| `archives[]` | rolled-up cold months: `{period, tag, asset, url, bytes, sha256, count, days[]}`; `count` is every line of the asset (all states). Since 2026-11 also `edition` (absent = 1), and for a re-merged month `merge_epoch`, `live`, `superseded`, `built_on`, `remediation[]`, and `previous[]` (the month's earlier assets, never deleted; see *Re-merged history*) |
 | `live` | the live index: `{path, url, head_seq, window_days}` (see *Live index* below; since 2026-10) |
 | `live_month` | the month index: `{path, url, head_seq, min_mag, window_days}` (see *Month index* below; since 2026-10-14) |
 | `event_detail` | the per-hour detail files: `{path_template, url_template, first_hour, last_hour}` (see *Event detail* below; since 2026-10) |
@@ -769,7 +769,10 @@ on the `data` branch records it. A second heal (epoch 2) runs the same pass once
 solutions start counting as the agency's own report (see *EMSC's copies of agencies'
 solutions*). The agencies added to that list on 2026-10-01 and the exact-0.1 magnitude rule
 (see *Realtime + client dedup*) came without a heal: they apply to reports and revisions from then on (since
-FEED-6 the regular heal also folds what they join inside the hot window). Historical partitions are never rewritten.
+FEED-6 the regular heal also folds what they join inside the hot window). Historical partitions are never rewritten
+in place: the offline re-merge (*Re-merged history* below) publishes new editions and new archive assets beside the old
+ones. Since then history and archive lines can be `superseded` too: follow `superseded_by`, which names a live event of
+the same asset or, at a month's end, one of the next month's first 7 days (it crosses at most one month boundary).
 
 A report with no location — exactly 0° N, 0° E with magnitude 0 or none (NCEDC publishes such
 placeholders, `MU 0.0`) — is never ingested. When the id is one the feed already holds, the
@@ -785,6 +788,81 @@ from 2026-08-14); older history is never rewritten, so the day partitions before
 (1,909 such features in 2026-05-01…08-13) and the monthly Release archives still carry these
 placeholders as `live`. A consumer of that history should drop every feature at exactly 0, 0
 with magnitude 0 or none.
+
+## Re-merged history
+
+The paths that write history with the merge pass off (backfill, the deep-history build, a new source's onboarding,
+the remediation editions) never fold two events, so a quake whose agencies' solutions reached them separately stays
+several events there: in the archive month 2024-06 one M5.8 was five feed events, and the archives counted 75 % more
+M4.5+ events than ComCat. The live feed heals such splits every run inside its hot window (*Retired events*); the
+**re-merge** (config `REMERGE_EPOCH`, `src/remerge.ts`) replays exactly those feed-side identity steps
+(`src/heal.ts` `feedSideSteps`: the EMSC copy re-home, the re-point guard, the representative re-derivation and the heal)
+over published history, in sliding daily windows of 7 days, as live judged every event in the seven runs after it:
+
+- each window holds the events with an origin in the 7 days before its "now", so a grid cell's density (the swarm guard)
+  is counted over 7 days, as live counts it;
+- the older neighbour's last 7 days are context that counts for density and never folds; the newer neighbour's first
+  7 days are context that may absorb an event of the unit (the loser then points across the boundary, listed in
+  `merge.into_newer`) but never loses one, and so are the unit's events an older unit already points into
+  (`merge.anchored`);
+- nothing is minted or dropped: a loser becomes `superseded` with `superseded_by` and keeps a frozen copy of its rows,
+  so every source id stays in the asset; no row is withdrawn offline (the coordinate-less retraction and the held
+  withdrawal stay live-only), so the 0, 0 placeholders stay live lines a reader drops;
+- every unit passes hard checks before anything is uploaded: the same feed ids and line count as its input, every
+  source id still there, each source id live in one event at most, every `superseded_by` resolving to a live event of
+  the unit or `into_newer` (no chains), the context unchanged, and the ComCat anchor: the distinct ComCat ids of
+  M4.5+ (and M6+) rows in live events are unchanged and no new event holds two ComCat events that ComCat's own `ids` do
+  not link.
+
+The rules are today's (epoch 1); a later rule round is a new epoch and a new campaign. Statistics should count
+ComCat-anchored events for global figures: the residual over-count after epoch 1 is documented by
+`scripts/remerge-verify.ts` (per month: live M4.5+ and M6+ before and after, the anchored counts, ComCat's count, the
+M4.5+ events without a ComCat row near one or not, every M6+ fold).
+
+**What is published.** With `REMERGE_EPOCH` 0 (the kill switch) nothing is re-merged. Above 0:
+
+- *Deep history:* the hourly `history` walk gives each month whose current edition is not merged a new edition
+  `events-YYYY-MM.e<N+1>.tar.zst`, built from edition N and nothing else, newest month first; a month waits until its
+  newer month is merged (the boundary month 2023-07 until `archive-2023-07` is). Its `_edition.json` gains a `merge`
+  block, `lines` and `superseded`; `events` counts the live lines; `rows` is unchanged. Its index entry gains
+  `merge_epoch`, `merged_from` (the edition, asset and checksum it was merged from), `lines` and `superseded`;
+  `built_from` stays (the month is not re-sealed). A month sealed while the epoch is above 0 is merged as it is built.
+- *Archives:* `remerge.yml` (every 6 h and by hand, outside the writer lock; `src/remerge-archives.ts`) gives each
+  archive month below the epoch a new asset `events-YYYY-MM.e<N>.tar.zst` in its `archive-YYYY-MM` Release, newest
+  first, holding the day files and `_archive.json` (`kind: "earthquakes-feed/archive-edition"`: `built_on` the asset it
+  was merged from, `remediation_days`, the `merge` block, `count`, `live`, `superseded`, `days`). Its remediated days are
+  the current remediation editions (the month waits when one was built on another asset). `archives.json`'s entry then
+  names the new asset with `edition`, `merge_epoch`, `live`, `superseded`, `built_on`, `remediation`, and lists the
+  replaced asset in `previous[]`; the commit applies an entry only when it still has the checksum the merge was built
+  on (compare-and-set). Readers of `*.ndjson` members ignore `_archive.json`.
+- *Remediation editions:* each remediated day of a merged month gets a refreshed edition (the merged day file, `built_on`
+  the new archive asset, `stats.remerge: {epoch, from_edition}`, the fetch fields 0), so "the highest edition replaces
+  the archived day" stays true. A remediation edition built while the epoch is above 0 is merged as it is built.
+- *Frozen live days* (2026-07 → today) stay as published in `partitions[]` until their month rolls into an archive,
+  which is then merged within about 6 h. A month re-rolled later (a backfill fill, `needs_reroll`) gets a new asset
+  without `merge_epoch` and is merged again.
+
+The `merge` block: `{epoch, ingest_time, code, window_days, from: {edition, asset, sha256} | null, older_context,
+newer_context: {label, sha256, days} | null, anchored[], steps: {rehomed, stranded, rederived, folds, windows},
+into_newer: [{loser, survivor}], off_unit[], external[]?, merges: [{loser, survivor, reason}], live_before,
+live_after}`. `merges[]` with the fold reasons is the audit trail (there is no observation log offline). `off_unit`
+lists events whose solution moved out of the unit: they stay in the day file they were in (backfill keeps them there
+too). `external` lists superseded lines published before the re-merge whose pointer leaves the unit (live-era folds);
+they are kept as they were. The changed lines carry `ingest_time` = `merge.ingest_time` and a new `revision`, and every
+line of a merged asset carries the normalized `review_status` (*Review status*).
+
+**Never rewritten, never deleted.** Every earlier edition and asset stays where it was: history editions in
+`history.json` `editions`, archive assets in `previous[]`, remediation editions in `remediation.json`. An upload whose
+index commit never landed is taken over by the next run (history: `adoptOrphans` when it was merged from the month's
+current edition; archives: the output is deterministic, so the next run's identical asset is adopted by checksum);
+any other is listed in `unused`. A rollback (`remerge.yml` input `rollback: <epoch>[:YYYY-MM,...]`,
+`scripts/remerge-rollback.ts`; set `REMERGE_EPOCH` to 0 first) changes only the indexes: each archive entry goes back
+to `previous[0]` (the merged asset stays listed with `withdrawn_at` and a reason), and each merged history edition and
+refreshed remediation edition gets `withdrawn: {at, reason}`, which a reader skips: the current edition is the highest
+one not withdrawn.
+
+**Reading merged history:** keep the lines whose `feed.state` is `live` (as everywhere in the feed), drop the 0, 0
+placeholders, and resolve a `superseded` id through `superseded_by` (at most one month boundary away).
 
 ## Late publications
 
@@ -1123,7 +1201,8 @@ from all its raw assets, newest month first, and the older edition stays. The in
 for readers on the `data` branch: `knowledge/index/history.json` (read it through jsDelivr,
 `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/knowledge/index/history.json`). It lists each raw asset
 (`url`, `sha256`, `bytes`, `rows`, `provider_count`, `fetched_at`) and each edition (`url`, `sha256`, `events`, `days`,
-`sources`, `built_from`); a month's current edition is its highest `edition`. It changes only when the walk publishes or
+`sources`, `built_from`); a month's current edition is its highest `edition` not `withdrawn`. A re-merged edition also
+has `merge_epoch`, `merged_from`, `lines` and `superseded` (*Re-merged history*). It changes only when the walk publishes or
 takes over an asset. Its `attempts` is always `{}` since round 24 (2026-10-13): the walk's bookkeeping is in its other
 file, `knowledge/index/history-state.json` (a few hundred bytes, written in the same commit): `attempts`, keyed
 `<source>:<YYYY-MM>`, each source month whose fetch failed (`failures` in a row, `since`, `last_error`, `not_before`
@@ -1269,7 +1348,9 @@ checksum, `built_from`: the raw assets, `reason`: `saturated` or `seam` (absent 
 `context`: by day, the archive asset or the neighbour's edition the build read, with its checksum (absent on the
 entries of 2026-10-04: archives only), and `stats`: events before and after, new, retired, off the day, rows changed /
 unchanged, rows that joined a neighbouring day, AFAD rows re-read, rows per source before and after). The archived day, its `archive-YYYY-MM` asset and `manifest.json` are unchanged: a consumer that wants the
-repaired day reads the current edition (the highest `edition` of the day) instead of the archived day.
+repaired day reads the current edition (the highest `edition` of the day not `withdrawn`) instead of the archived day.
+When the archive month is re-merged (*Re-merged history*), each of its remediated days gets a refreshed edition built
+on the new archive asset (`built_on`), with `stats.remerge` set.
 
 ## Earliest solutions (side index)
 
@@ -1810,8 +1891,9 @@ const url = p.frozen
 
 // Before 2023-07-06 (the deep history; APIs.md, Deep history): a month's current edition
 const h = await (await fetch('https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/knowledge/index/history.json')).json();
-const ed = h.editions.filter(e => e.period === '2022-12').sort((a, b) => b.edition - a.edition)[0];
-// ed.url: events-2022-12.e<N>.tar.zst, a zstd tar of DD.ndjson day files; check it against ed.sha256
+const ed = h.editions.filter(e => e.period === '2022-12' && !e.withdrawn).sort((a, b) => b.edition - a.edition)[0];
+// ed.url: events-2022-12.e<N>.tar.zst, a zstd tar of DD.ndjson day files; check it against ed.sha256.
+// Keep feed.state === 'live' only: a re-merged edition also holds superseded lines (Re-merged history).
 ```
 
 ## Versioning

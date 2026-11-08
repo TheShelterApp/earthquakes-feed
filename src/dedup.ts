@@ -241,14 +241,25 @@ export class Resolver {
   /** REVIEWED_ID_WINDOWS (round 27), built on first use (reviewedTwinIndex) and cleared whenever a row of such a provider
    *  is stored or withdrawn (makeRow, withdrawRow). */
   private reviewedIndex: ReviewedTwinIndex | null = null;
+  /** The offline re-merge's context (src/remerge.ts; live passes neither): `pinned` events (the newer neighbour, an older
+   *  unit's anchored survivors) may survive a fold but never lose one; `frozen` events (the older neighbour) count for
+   *  density only and never fold. Neither is ever a heal's starting node, a rehome's source or a rehome's home. */
+  private readonly pinned: ReadonlySet<string>;
+  private readonly frozen: ReadonlySet<string>;
+  /** When set (src/remerge.ts only, MAX_PAIR_DT_MS), mergeableNeighbours skips a candidate whose rows' origin times are
+   *  all more than this far from the node's (no gate can pass beyond the widest pair-time window). */
+  private readonly pairPrefilterMs: number | null;
 
   constructor(
     readonly eventMap: Map<string, EventNode>,
     private readonly priority: Map<string, number>,
     private readonly cfg: Map<string, ProviderConfig>,
     nowMs: number,
-    opts: { hotFloorMs?: number; denseFloorMs?: number; merge?: boolean } = {},
+    opts: { hotFloorMs?: number; denseFloorMs?: number; merge?: boolean; pinned?: ReadonlySet<string>; frozen?: ReadonlySet<string>; pairPrefilterMs?: number } = {},
   ) {
+    this.pinned = opts.pinned ?? new Set();
+    this.frozen = opts.frozen ?? new Set();
+    this.pairPrefilterMs = opts.pairPrefilterMs ?? null;
     // Backfill passes hotFloorMs=0 to index events by event-time window (not wall-clock
     // recency), so historical reports dedup against the transient partition index (C2).
     this.hotFloor = opts.hotFloorMs ?? nowMs - HOT_WINDOW_DAYS * 86_400_000;
@@ -269,6 +280,19 @@ export class Resolver {
         for (const a of node.aliases) this.retired.set(a, node.feedId);
       }
     }
+  }
+
+  /** A context node of the offline re-merge (pinned or frozen). */
+  private ctx(n: EventNode): boolean {
+    return this.pinned.has(n.feedId) || this.frozen.has(n.feedId);
+  }
+
+  /** Why the re-merge's context keeps two nodes apart, or null: a frozen node never folds, two pinned nodes never fold
+   *  with each other. */
+  private contextBlocks(a: EventNode, b: EventNode): string | null {
+    if (this.frozen.has(a.feedId) || this.frozen.has(b.feedId)) return 'frozen context';
+    if (this.pinned.has(a.feedId) && this.pinned.has(b.feedId)) return 'pinned pair';
+    return null;
   }
 
   private indexGeo(node: EventNode): void {
@@ -1675,7 +1699,7 @@ export class Resolver {
     let bestKm = Infinity;
     for (const fid of this.candidates(raw)) {
       const node = this.eventMap.get(fid);
-      if (!node || node.state !== 'live' || node === from) continue;
+      if (!node || node.state !== 'live' || node === from || this.ctx(node)) continue;
       const d = haversineKm(raw.lat, raw.lon, node.lat, node.lon);
       if (this.reject(raw, node, d, dense)) continue;
       if (Resolver.lifecycleLocationBlocks([raw], raw, node.provenance, node)) continue;
@@ -1702,7 +1726,7 @@ export class Resolver {
     const pick = (node: EventNode): ProvenanceRow[] =>
       node.provenance.filter((r) => r.provider === EMSC_PROVIDER && !Resolver.copyCode(r) && far(r, node));
     const nodes = [...this.eventMap.values()]
-      .filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor && n.provenance.length > 1 && pick(n).length > 0)
+      .filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor && n.provenance.length > 1 && !this.ctx(n) && pick(n).length > 0)
       .sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : a.feedId > b.feedId ? 1 : 0));
     for (const node of nodes) {
       for (const row of pick(node).sort((a, b) => (a.nativeId < b.nativeId ? -1 : a.nativeId > b.nativeId ? 1 : 0))) {
@@ -1724,7 +1748,7 @@ export class Resolver {
     const out: { raw: RawObs; result: IngestResult }[] = [];
     if (!this.mergePass) return out;
     const nodes = [...this.eventMap.values()]
-      .filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor && n.provenance.length > 1 && n.provenance.some((r) => r.provider === EMSC_PROVIDER && Resolver.copyCode(r)))
+      .filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor && n.provenance.length > 1 && !this.ctx(n) && n.provenance.some((r) => r.provider === EMSC_PROVIDER && Resolver.copyCode(r)))
       .sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : a.feedId > b.feedId ? 1 : 0));
     for (const node of nodes) {
       const copies = node.provenance
@@ -1756,7 +1780,7 @@ export class Resolver {
     for (const cell of gatherCellKeys(copy.lat, copy.lon, LATE_TWIN_KM, GRID_CELL_DEG)) {
       for (const fid of this.geo.get(cell) ?? []) {
         const node = this.eventMap.get(fid);
-        if (!node || node.state !== 'live' || node === from) continue;
+        if (!node || node.state !== 'live' || node === from || this.ctx(node)) continue;
         for (const row of node.provenance) {
           if (row.provider === EMSC_PROVIDER || !Resolver.authoredCopy(copy, row)) continue;
           const km = haversineKm(copy.lat, copy.lon, row.lat, row.lon);
@@ -1841,6 +1865,7 @@ export class Resolver {
       const other = fid ? this.resolveLive(fid) : undefined;
       if (!other || other.state !== 'live' || seen.has(other.feedId)) return null;
       if (hotOnly && other.eventTimeMs < this.hotFloor) return null;
+      if (this.contextBlocks(node, other)) return null;
       seen.add(other.feedId);
       const link = Resolver.comcatLink(node, other, id) ?? Resolver.comcatLink(other, node, id);
       if (!link || this.nodesDistinct(node, other)) return null;
@@ -1860,7 +1885,7 @@ export class Resolver {
         }
         if (r.provider === COMCAT_PROVIDER && id !== r.nativeId) {
           const other = this.comcatSibling(node, id);
-          if (other && !this.nodesDistinct(node, other)) {
+          if (other && !this.contextBlocks(node, other) && !this.nodesDistinct(node, other)) {
             return { node: other, reason: `exact id: ComCat ${r.nativeId} lists ${id}, ComCat's own row of the other event` };
           }
         }
@@ -2039,7 +2064,7 @@ export class Resolver {
     const out: EventNode[] = [];
     if (!this.mergePass) return out;
     const nodes = [...this.eventMap.values()]
-      .filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor && n.provenance.length > 1)
+      .filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor && n.provenance.length > 1 && !this.ctx(n))
       .sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : a.feedId > b.feedId ? 1 : 0));
     for (const node of nodes) {
       const chosen = node.provenance.find((r) => r.chosen);
@@ -2083,6 +2108,8 @@ export class Resolver {
    *  judging from the non-dense side — an M6.8 mainshock's second id must still fold after its
    *  own aftershocks filled the cell, Kumamoto 2026-07-28). */
   whyNotMerged(a: EventNode, b: EventNode): string | null {
+    const context = this.contextBlocks(a, b);
+    if (context) return context;
     const why = this.whyNotMergedByWindows(a, b);
     return why != null && this.farJoin(a, b) ? null : why;
   }
@@ -2147,10 +2174,28 @@ export class Resolver {
       if (fid === node.feedId) continue;
       const other = this.eventMap.get(fid);
       if (!other || other.state !== 'live') continue;
+      if (this.pairPrefilterMs != null && Resolver.timeGapMs(node, other) > this.pairPrefilterMs) continue;
       if (this.whyNotMerged(node, other)) continue;
       out.push({ node: other, score: this.score(node, other) });
     }
     return out.sort((x, y) => x.score - y.score || (x.node.feedId < y.node.feedId ? -1 : x.node.feedId > y.node.feedId ? 1 : 0));
+  }
+
+  /** The gap between two nodes' origin-time ranges (every row and the representative), 0 when they overlap: every
+   *  pair-time gate compares the representatives or two rows, each inside its node's range. */
+  private static timeGapMs(a: EventNode, b: EventNode): number {
+    const range = (n: EventNode): [number, number] => {
+      let lo = n.eventTimeMs;
+      let hi = n.eventTimeMs;
+      for (const r of n.provenance) {
+        if (r.eventTimeMs < lo) lo = r.eventTimeMs;
+        if (r.eventTimeMs > hi) hi = r.eventTimeMs;
+      }
+      return [lo, hi];
+    };
+    const [alo, ahi] = range(a);
+    const [blo, bhi] = range(b);
+    return Math.max(0, blo - ahi, alo - bhi);
   }
 
   /** The next fold the merge pass around `node` makes, with the reason string its op:merge
@@ -2241,7 +2286,7 @@ export class Resolver {
    *  no further node is visited (a chain already started may add up to MERGE_MAX_ROUNDS − 1 more) and `capped` is
    *  set; the next run goes on from what is left. */
   heal(ingestTime: string, maxFolds = Infinity): { merges: MergeRecord[]; survivors: EventNode[]; capped: boolean } {
-    return this.foldPasses(() => [...this.eventMap.values()].filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor), ingestTime, maxFolds);
+    return this.foldPasses(() => [...this.eventMap.values()].filter((n) => n.state === 'live' && n.eventTimeMs >= this.hotFloor && !this.ctx(n)), ingestTime, maxFolds);
   }
 
   /** The heal's pass over the live events behind `feedIds` only (each id followed to its live survivor): the
@@ -2300,6 +2345,8 @@ export class Resolver {
    *  number → smaller feed id (a total order, so the pair folds the same way whichever side
    *  moved). */
   private survivorFirst(x: EventNode, y: EventNode): [EventNode, EventNode] {
+    // The re-merge's pinned context never loses a fold (it is published already, or anchored by an older unit).
+    if (this.pinned.has(x.feedId) !== this.pinned.has(y.feedId)) return this.pinned.has(x.feedId) ? [x, y] : [y, x];
     const providers = (n: EventNode): number => new Set(n.provenance.map((r) => r.provider)).size;
     const chosenRichness = (n: EventNode): number => {
       const c = n.provenance.find((r) => r.chosen);

@@ -1,8 +1,10 @@
 import { eventDayKey, nodeToFeature } from './bitemporal.js';
+import { REMERGE_EPOCH, REMERGE_INGEST_TIME } from './config.js';
 import { afadCorrections } from './correction.js';
 import { Resolver } from './dedup.js';
 import { dayPartitionText, type PartitionFormat } from './partitions.js';
 import { configMap, priorityMap } from './providers.js';
+import { remergeNodes } from './remerge.js';
 import { byIngestOrder, emptyTally, screen } from './quality.js';
 import type { EventNode, ProviderConfig, RawObs } from './types.js';
 
@@ -209,6 +211,9 @@ export interface EditionStats {
   merged: number;
   /** Per provider: its rows on the day before and after. */
   provider_rows: Record<string, { before: number; after: number }>;
+  /** A refreshed edition of the archive re-merge (src/remerge-archives.ts): the epoch and the edition it was merged
+   *  from; the fetch fields are 0. */
+  remerge?: { epoch: number; from_edition: number };
 }
 
 /**
@@ -240,6 +245,8 @@ export function buildDayEdition(input: {
    *  2026-11-08 plan); the editions of 2026-10-04 were built without `review_status` (NO_PARTITION_FORMAT) and keep
    *  their bytes. */
   fmt: PartitionFormat;
+  /** The re-merge epoch to merge the edition to (default config REMERGE_EPOCH; 0 = built as before). */
+  remergeEpoch?: number;
 }): { text: string; nodes: EventNode[]; stats: EditionStats } {
   const map = new Map<string, EventNode>();
   for (const nodes of input.context.values()) for (const n of nodes) map.set(n.feedId, n);
@@ -309,6 +316,29 @@ export function buildDayEdition(input: {
     if (r?.changed) r.node.lastSeq = input.seqMarker;
   }
 
+  // 2b) The re-merge (config REMERGE_EPOCH, src/remerge.ts, C7): the day's events in sliding windows, the day before as
+  //     frozen context and the day after as pinned context (clones: neighbours are published by their own archive).
+  const epoch = input.remergeEpoch ?? REMERGE_EPOCH;
+  let remergeFolds = 0;
+  if (epoch > 0) {
+    const dayStart = Date.parse(`${input.day}T00:00:00Z`);
+    const own = [...map.values()].filter(inEdition);
+    const ownIds = new Set(own.map((n) => n.feedId));
+    const ctx = [...map.values()].filter((n) => !ownIds.has(n.feedId)).map((n) => structuredClone(n));
+    const res = remergeNodes({
+      own,
+      memberDay: new Map(own.map((n) => [n.feedId, input.day])),
+      startMs: dayStart,
+      endMs: dayStart + DAY_MS,
+      older: ctx.filter((n) => n.eventTimeMs < dayStart),
+      newer: ctx.filter((n) => n.eventTimeMs >= dayStart),
+      anchored: new Set(),
+      registry: input.registry,
+      ingestTime: REMERGE_INGEST_TIME,
+    });
+    remergeFolds = res.merges.length;
+  }
+
   // 3) The day.
   const nodes = [...map.values()].filter(inEdition).sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : 1));
   const after = providerRows(nodes);
@@ -331,8 +361,9 @@ export function buildDayEdition(input: {
     neighbour_joins: neighbourJoins,
     afad_retimed: afadRetimed,
     afad_moved_out: afadMovedOut,
-    merged: folds.merges.length,
+    merged: folds.merges.length + remergeFolds,
     provider_rows,
+    ...(epoch > 0 ? { remerge: { epoch, from_edition: 0 } } : {}),
   };
   return { text: dayPartitionText(nodes, input.day, input.fmt), nodes, stats };
 }
@@ -454,6 +485,8 @@ export interface EditionRef {
   context?: Record<string, AssetRef>;
   stats: EditionStats;
   built_at: string;
+  /** Withdrawn by scripts/remerge-rollback.ts: never current; the asset stays. */
+  withdrawn?: { at: string; reason: string };
 }
 /**
  * A queued refill: its days are remediated as soon as each is archived (a remediation edition supplements an archived
@@ -473,9 +506,9 @@ export interface RemediationIndex {
   refill_queue?: RefillEntry[];
 }
 export const emptyRemediationIndex = (): RemediationIndex => ({ version: 1, raw: [], editions: [], refill_queue: [] });
-/** The current edition of a day: the highest. */
+/** The current edition of a day: the highest one not withdrawn (scripts/remerge-rollback.ts). */
 export const currentEdition = (idx: RemediationIndex, day: string): EditionRef | undefined =>
-  idx.editions.filter((e) => e.day === day).sort((a, b) => b.edition - a.edition)[0];
+  idx.editions.filter((e) => e.day === day && !e.withdrawn).sort((a, b) => b.edition - a.edition)[0];
 export function indexText(idx: RemediationIndex): string {
   const raw = [...idx.raw].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : a.provider < b.provider ? -1 : 1));
   const editions = [...idx.editions].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : a.edition - b.edition));

@@ -689,7 +689,7 @@ const healthyInputs = (over: Partial<FeedInputs> = {}): FeedInputs => ({
   status: { ok: true, json: statusAt() },
   repoSize: { ok: true, kb: 6_100_000 },
   tree: { ok: true, json: todaysTree() },
-  walks: ['history', 'first-solutions', 'backfill', 'archive'].map((workflow) => ({ workflow, ok: true, marker: null })),
+  walks: ['history', 'first-solutions', 'backfill', 'archive', 'remerge'].map((workflow) => ({ workflow, ok: true, marker: null })),
   ids: IDS,
   notes: [],
   ...over,
@@ -698,7 +698,7 @@ const healthyInputs = (over: Partial<FeedInputs> = {}): FeedInputs => ({
 test('evaluateFeed: a healthy run is no finding and nothing unjudged; status.json unreadable is feed:status and three unjudged patterns', () => {
   const ok = evaluateFeed(healthyInputs());
   assert.deepEqual([ok.findings, ok.unjudged], [[], []]);
-  assert.match(ok.summary, /^v1=60 s \(contract 30 min\) v2=60 s \(contract 30 min\) queued=0 s status=2026-10-22 12:12Z sources=42 failing=\[\] silent=\[\] frozen=\[\] tls_leaf_days=\[phivolcs:27\.7,tmd:171\.6\] walks=history:clear,first-solutions:clear,backfill:clear,archive:clear$/);
+  assert.match(ok.summary, /^v1=60 s \(contract 30 min\) v2=60 s \(contract 30 min\) queued=0 s status=2026-10-22 12:12Z sources=42 failing=\[\] silent=\[\] frozen=\[\] tls_leaf_days=\[phivolcs:27\.7,tmd:171\.6\] walks=history:clear,first-solutions:clear,backfill:clear,archive:clear,remerge:clear$/);
   for (const status of [{ ok: false as const, message: 'HTTP 502 after 4 attempt(s)' }, { ok: true as const, json: { generated: 'x' } }, { ok: true as const, json: [] }]) {
     const r = evaluateFeed(healthyInputs({ status }));
     assert.deepEqual(r.findings.map((f) => [f.key, f.severity, f.rule]), [['feed:status', 'P3', 'feed:status']]);
@@ -731,8 +731,8 @@ test('evaluateFeed: watcher:feed-github for every GitHub read that fails, the re
   assert.deepEqual([noTree.unjudged, noTree.findings.map((f) => [f.key, f.members])], [['feed:size'], [['watcher:feed-github', ['data-tree']]]]);
   // One reason for many reads (GH_TOKEN missing in Actions, a lost permission) is said once.
   const why = 'HTTP 403 after 1 attempt(s)';
-  const lost = watcher({ walks: ['history', 'first-solutions', 'backfill', 'archive'].map((workflow) => ({ workflow, ok: false as const, message: why })) })!;
-  assert.match(lost.text, /: the history walk's marker, the first-solutions walk's marker, the backfill walk's marker, the archive walk's marker: HTTP 403 after 1 attempt\(s\)$/);
+  const lost = watcher({ walks: ['history', 'first-solutions', 'backfill', 'archive', 'remerge'].map((workflow) => ({ workflow, ok: false as const, message: why })) })!;
+  assert.match(lost.text, /: the history walk's marker, the first-solutions walk's marker, the backfill walk's marker, the archive walk's marker, the remerge walk's marker: HTTP 403 after 1 attempt\(s\)$/);
   // Every read fine, or a local run that reads none on purpose: no watcher.
   assert.equal(watcher({}), undefined);
   const local = 'no GH_TOKEN or GITHUB_REPOSITORY (a local run)';
@@ -945,11 +945,11 @@ test('main: every network call failing still writes a document: unreachable mani
   assert.deepEqual(doc.findings.map((f: Finding) => [f.key, f.rule, f.severity, f.members ?? null]), [
     ['feed:freshness', 'feed:freshness:unreachable', 'P2', ['v1', 'v2']],
     ['feed:status', 'feed:status', 'P3', null],
-    ['watcher:feed-github', 'watcher', 'P3', ['run', 'repository', 'data-tree', 'walks:history', 'walks:first-solutions', 'walks:backfill', 'walks:archive']],
+    ['watcher:feed-github', 'watcher', 'P3', ['run', 'repository', 'data-tree', 'walks:history', 'walks:first-solutions', 'walks:backfill', 'walks:archive', 'walks:remerge']],
   ]);
-  assert.match(doc.findings[2].text, /^feed:repo-size, feed:size, walks:history:\*, walks:first-solutions:\*, walks:backfill:\*, walks:archive:\* not judged this run: the feed evaluator's GitHub reads failed/);
+  assert.match(doc.findings[2].text, /^feed:repo-size, feed:size, walks:history:\*, walks:first-solutions:\*, walks:backfill:\*, walks:archive:\*, walks:remerge:\* not judged this run: the feed evaluator's GitHub reads failed/);
   assert.ok(doc.findings[2].text.length <= 500);
-  assert.deepEqual(doc.unjudged, ['feed:source:*', 'feed:cert:*', 'feed:systemic', 'feed:repo-size', 'feed:size', 'feed:stats', 'feed:stats-through', 'feed:stats-days', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*']);
+  assert.deepEqual(doc.unjudged, ['feed:source:*', 'feed:cert:*', 'feed:systemic', 'feed:repo-size', 'feed:size', 'feed:stats', 'feed:stats-through', 'feed:stats-days', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*']);
   assert.match(doc.notes.join('\n'), /queue time unknown \(network error: .*\): counted as 0/);
 });
 
@@ -964,7 +964,7 @@ test('main: no GH_TOKEN (a local run): the GitHub parts are unjudged, nothing is
   const doc = JSON.parse(printed);
   assert.ok(parseFindingsDocument(doc).ok);
   assert.deepEqual(doc.findings, []);
-  assert.deepEqual(doc.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*']);
+  assert.deepEqual(doc.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*']);
   assert.match(doc.notes.join(), /GitHub parts not judged: no GH_TOKEN or GITHUB_REPOSITORY \(a local run\)/);
   // A token without the run id: the queue time is 0, with a note.
   const c2 = clock();
@@ -985,9 +985,9 @@ test('main: in Actions, no GH_TOKEN or a failed created_at read is watcher:feed-
   };
   // GH_TOKEN dropped from the feed job: every GitHub part unjudged, and the watcher names the cause once.
   const noToken = (await findingsOf({ GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: '4242' })).doc;
-  assert.deepEqual(noToken.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*']);
-  assert.deepEqual(noToken.findings.map((f) => [f.key, f.members]), [['watcher:feed-github', ['run', 'repository', 'data-tree', 'walks:history', 'walks:first-solutions', 'walks:backfill', 'walks:archive']]]);
-  assert.match(noToken.findings[0]!.text, /: this run's created_at, the repository size, the data tree, the history walk's marker, .*the archive walk's marker: GH_TOKEN or GITHUB_REPOSITORY is not set in the job$/);
+  assert.deepEqual(noToken.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*']);
+  assert.deepEqual(noToken.findings.map((f) => [f.key, f.members]), [['watcher:feed-github', ['run', 'repository', 'data-tree', 'walks:history', 'walks:first-solutions', 'walks:backfill', 'walks:archive', 'walks:remerge']]]);
+  assert.match(noToken.findings[0]!.text, /: this run's created_at, the repository size, the data tree, the history walk's marker, .*the remerge walk's marker: GH_TOKEN or GITHUB_REPOSITORY is not set in t/);
   // This run's created_at unreadable: the queue time is 0, and the watcher says why.
   const runGone = await findingsOf(ENV, world([[`${API_REPO}/actions/runs/4242`, () => json({ message: 'Not Found' }, 404)]]));
   assert.deepEqual(runGone.doc.findings.map((f) => [f.key, f.members]), [['watcher:feed-github', ['run']]]);

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dataPaths } from './config.js';
 import { dayStartMs } from './backfill-cursor.js';
-import { type BackfillCursorFile, applyWindowResult, planJobs, stallReport, windowText } from './backfill-plan.js';
+import { type BackfillCursorFile, applyWindowResult, homeDayOf, planJobs, rememberHomeDay, stallReport, windowText } from './backfill-plan.js';
 import { readArchivedDays } from './archive-io.js';
 import { eventDayKey } from './bitemporal.js';
 import { Resolver } from './dedup.js';
@@ -96,12 +96,20 @@ async function main(): Promise<void> {
   // is absent). Such a day is fully in `transient`, so it stays writable even if its month's
   // archive is unreadable — see the write-back skip below.
   const inTreeDays = new Set<string>();
+  // An event kept off its time-day by the day file it is published in (a re-merged archive keeps an event whose time
+  // left the month in the member it was read from, src/remerge.ts `off_unit`): written back to that day, never moved, so
+  // a re-materialized day cannot lose it on the re-roll (C6).
+  const homeDay = new Map<string, string>();
+  const remember = (day: string, n: EventNode): void => rememberHomeDay(homeDay, day, n);
   for (let ms = dayStartMs(eventDayKey(minStart)); ms <= maxEnd; ms += DAY) {
     const day = eventDayKey(ms);
     if (day >= liveDay) continue; // never touch live-owned days
     const nodes = readDayPartitionNodes(root, day);
     if (nodes.length) inTreeDays.add(day);
-    for (const node of nodes) transient.set(node.feedId, node);
+    for (const node of nodes) {
+      transient.set(node.feedId, node);
+      remember(day, node);
+    }
   }
   // Pull the archived days this run's fetch actually lands on (from their Release tarballs)
   // into the transient BEFORE the Resolver is built, so their existing events are in its
@@ -120,7 +128,12 @@ async function main(): Promise<void> {
   const failedMonths = new Set<string>();
   if (archivedTouched.size) {
     const arch = readArchivedDays(archives.list, archivedTouched);
-    for (const nodes of arch.days.values()) for (const n of nodes) transient.set(n.feedId, n);
+    for (const [day, nodes] of arch.days) {
+      for (const n of nodes) {
+        transient.set(n.feedId, n);
+        remember(day, n);
+      }
+    }
     for (const m of arch.failedMonths) failedMonths.add(m);
     console.log(`backfill: pulled ${arch.days.size}/${archivedTouched.size} archived day(s) for merge`);
   }
@@ -207,12 +220,13 @@ async function main(): Promise<void> {
   const seqMarker = head.seq;
   let changedCount = 0;
   const changedDays = new Set<string>();
+  const dayOf = (n: EventNode): string => homeDayOf(homeDay, n);
   for (const raw of raws) {
     const r = resolver.ingest(raw, ingestTime);
     if (r.changed) {
       r.node.lastSeq = seqMarker;
       if (r.node.firstSeenSeq < 0) r.node.firstSeenSeq = seqMarker;
-      changedDays.add(eventDayKey(r.node.eventTimeMs));
+      changedDays.add(dayOf(r.node));
       changedCount++;
     }
   }
@@ -223,7 +237,7 @@ async function main(): Promise<void> {
     const r = resolver.withdrawZeroed(raw, ingestTime);
     if (r?.changed) {
       r.node.lastSeq = seqMarker;
-      changedDays.add(eventDayKey(r.node.eventTimeMs));
+      changedDays.add(dayOf(r.node));
       changedCount++;
       withdrawnCount++;
     }
@@ -232,7 +246,7 @@ async function main(): Promise<void> {
   // 5) Write back partitions for every touched day + update inventory.
   const byDay = new Map<string, EventNode[]>();
   for (const node of transient.values()) {
-    const day = eventDayKey(node.eventTimeMs);
+    const day = dayOf(node);
     if (day >= liveDay) continue;
     (byDay.get(day) ?? byDay.set(day, []).get(day)!).push(node);
   }

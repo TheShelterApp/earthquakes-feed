@@ -213,7 +213,7 @@ test('RULES: the feed thresholds (section 3b)', () => {
   // A leaf enters at 7 days left (sinceMs = notAfter - 7 d) and escalates 5 days later, at 2 days left.
   assert.deepEqual([limits('feed:cert')['leafLineMs'], RULES['feed:cert'].escalateAfterMs], [7 * DAY, 5 * DAY]);
   assert.deepEqual([limits('feed:size')['dayFileBytes'], limits('feed:size')['fileBytes'], limits('feed:repo-size')['maxKb']], [5_000_000, 45_000_000, 8_000_000]);
-  assert.deepEqual([limits('walks')['workflows'], limits('walks')['artifactPrefix'], limits('walks')['markerHoldMs'], RULES['walks'].class], [['history', 'first-solutions', 'backfill', 'archive'], 'walk-blocked-', 26 * HOUR, 'maintenance']);
+  assert.deepEqual([limits('walks')['workflows'], limits('walks')['artifactPrefix'], limits('walks')['markerHoldMs'], RULES['walks'].class], [['history', 'first-solutions', 'backfill', 'archive', 'remerge'], 'walk-blocked-', 26 * HOUR, 'maintenance']);
   // The core feed sources are the gateway's three direct agencies, by their feed ids.
   assert.deepEqual([...limits('feed:source:core')['ids']].sort(), Object.values(AGENCY_PAIRS).sort());
 });

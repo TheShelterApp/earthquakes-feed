@@ -2,7 +2,7 @@ import { type BackfillCfg, backfillCfg } from './backfill-cfg.js';
 import { type ProviderCursor, advance, narrowAfterOverflow, newCursor, nextWindow, recordAnswer, recordFailure, stallLevel } from './backfill-cursor.js';
 import { eventDayKey } from './bitemporal.js';
 import type { WindowOutcome } from './providers.js';
-import type { ProviderConfig } from './types.js';
+import type { EventNode, ProviderConfig } from './types.js';
 
 /**
  * The backfill run's decisions (src/backfill.ts), pure over their inputs so they are tested without the network or a
@@ -126,3 +126,15 @@ export function stallReport(jobs: readonly Job[]): { blockers: string[]; warning
   }
   return { blockers, warnings };
 }
+
+/** C6: remember the day file an event was read from when that is not its time-day (a re-merged archive keeps an event
+ *  whose time left the month in the member it was read from, src/remerge.ts `off_unit`). */
+export function rememberHomeDay(homeDay: Map<string, string>, day: string, n: Pick<EventNode, 'feedId' | 'eventTimeMs'>): void {
+  if (eventDayKey(n.eventTimeMs) !== day) homeDay.set(n.feedId, day);
+  else homeDay.delete(n.feedId);
+}
+
+/** The day backfill writes an event back to: the day file it was read from when that kept it off its time-day (so a
+ *  re-materialized day never loses it on the re-roll), else its time-day (a repositioned event moves as before). */
+export const homeDayOf = (homeDay: ReadonlyMap<string, string>, n: Pick<EventNode, 'feedId' | 'eventTimeMs'>): string =>
+  homeDay.get(n.feedId) ?? eventDayKey(n.eventTimeMs);

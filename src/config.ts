@@ -440,6 +440,28 @@ export const RETIRED_VISIBLE_MS = 48 * 3600_000;
  *  a heal under its rules folded 3 groups of the hot window on 2026-10-01 (one IPMA and two AFAD ids published twice,
  *  |ΔM| = 0.1), and a heal run loads the whole event-map horizon, where the sweeps' revisions reach frozen days. */
 export const HEAL_EPOCH = 2;
+/** The offline re-merge (src/remerge.ts; APIs.md, Re-merged history): the epoch every published history edition,
+ *  archive month and remediation edition is merged to. 0 = off: no history edition, archive or remediation edition is
+ *  re-merged, `buildEdition` and `buildDayEdition` build as before, and `remerge.yml` selects nothing (the kill switch).
+ *  Epoch 1 replays today's feed-side identity steps (heal.ts feedSideSteps, withdrawals off) over the published events
+ *  in sliding 7-day windows; a later rule round is epoch 2. Raise it only together with REMERGE_INGEST_TIME. */
+export const REMERGE_EPOCH: number = 0;
+/** The ingest time every re-merged event's changed lines carry (never the wall clock, so a rebuild is byte-identical);
+ *  fixed when REMERGE_EPOCH is raised. */
+export const REMERGE_INGEST_TIME: string = '2026-11-08T00:00:00.000Z';
+/** Archive months `remerge.yml` merges per run, newest first (src/remerge-archives.ts). */
+export const REMERGE_MONTHS_PER_RUN = Number(process.env.REMERGE_MONTHS_PER_RUN || 4);
+/** The widest pair-time window any merge gate accepts: two events whose rows' origin times are all further apart can
+ *  never fold, so the offline re-merge (src/remerge.ts) skips such candidates before whyNotMerged (Resolver
+ *  `pairPrefilterMs`). Every window, for tests/remerge.test.ts to keep this at or above each one:
+ *  - TEMPORAL_MS 60 s (20 s in a dense cell, Resolver.windows);
+ *  - MODERATE_EVENT_MAX_DT_MS 20 s (the regional windows share it);
+ *  - OVSICORI_WINDOW.maxDtMs 30 s (the out-of-region window);
+ *  - REVISED_ID_WINDOWS (csn) 3 s; REVIEWED_ID_WINDOWS near 4 s / far 40 s;
+ *  - LOCATION_JOIN_DT_MS 8 s; REVIEWED_DT_HARD_MS (the reviewed-vs-reviewed guard only blocks).
+ *  ComCat exact-id twins (Resolver.comcatTwin) have no time gate and are not pre-filtered. Live never passes it; enabling
+ *  it there is a separate decision after a replay proof. */
+export const MAX_PAIR_DT_MS = 60_000;
 /** The regular heal (FEED-6): every aggregate run that is not an epoch heal runs the same op:merge pass over every live
  *  event of the hot window (Resolver.heal, heal.ts runFeedSideSteps), so a rule change, or a pair a report's merge pass
  *  did not reach (a mint folds nothing; a moderate-event join waits for mutual best), folds on the next run instead of on

@@ -1,3 +1,4 @@
+import { REMERGE_EPOCH } from './config.js';
 import { type HistoryConfig, type Period, allPeriods, dayKeyOf } from './history-config.js';
 
 /**
@@ -47,6 +48,15 @@ export interface EditionEntry {
   /** Where its frozen newer neighbour came from, or null. */
   context: string | null;
   joined_newer: number;
+  /** The re-merge epoch it is merged to (config REMERGE_EPOCH; absent = never re-merged). A merged edition is built from
+   *  the edition it names in `merged_from`, not from the raw assets, so `built_from` stays that edition's. */
+  merge_epoch?: number;
+  merged_from?: { edition: number; asset: string; sha256: string };
+  /** Lines in the edition (every state) and the superseded ones among them (`events` counts the live ones). */
+  lines?: number;
+  superseded?: number;
+  /** Set by scripts/remerge-rollback.ts: the edition is no longer current (currentEdition skips it); the asset stays. */
+  withdrawn?: { at: string; reason: string };
 }
 
 /** An asset the walk does not use: left by a failed upload (incomplete or unreadable), or a second copy of a unit
@@ -113,8 +123,14 @@ export function parseIndex(text: string): HistoryIndex {
 export const rawOf = (idx: HistoryIndex, source: string, period: string): RawEntry | undefined =>
   idx.raw.find((r) => r.source === source && r.period === period);
 
+/** The edition a reader takes: the highest one not withdrawn (scripts/remerge-rollback.ts). */
 export const currentEdition = (idx: HistoryIndex, period: string): EditionEntry | undefined =>
-  idx.editions.filter((e) => e.period === period).sort((a, b) => b.edition - a.edition)[0];
+  idx.editions.filter((e) => e.period === period && !e.withdrawn).sort((a, b) => b.edition - a.edition)[0];
+
+/** True when the edition is merged to the current re-merge epoch (always with REMERGE_EPOCH 0). Separate from
+ *  editionIsCurrent, which is about the raw assets only: no staleness predicate re-seals a month because it is
+ *  unmerged (a single-source era-B month must not be forced to e2 that way). */
+export const editionIsMerged = (e: Pick<EditionEntry, 'merge_epoch'>, epoch: number = REMERGE_EPOCH): boolean => (e.merge_epoch ?? 0) >= epoch;
 
 export interface Unit {
   source: string;
@@ -159,6 +175,41 @@ export function newerNeighbour(cfg: HistoryConfig, idx: HistoryIndex, p: Period)
   if (!next) return { kind: 'none' };
   if (!editionIsCurrent(cfg, idx, next)) return { kind: 'wait' };
   return { kind: 'edition', day, edition: currentEdition(idx, next.key)! };
+}
+
+/** Periods whose current edition is current (editionIsCurrent) but not merged to `epoch`, newest first; none while the
+ *  epoch is 0. */
+export function periodsToRemerge(cfg: HistoryConfig, idx: HistoryIndex, epoch: number = REMERGE_EPOCH): Period[] {
+  if (epoch <= 0) return [];
+  return allPeriods(cfg).filter((p) => {
+    const e = currentEdition(idx, p.key);
+    return e != null && editionIsCurrent(cfg, idx, p) && !editionIsMerged(e, epoch);
+  });
+}
+
+/** The archive entries the history re-merge reads (knowledge/index/archives.json; src/archive.ts ArchiveEntry). */
+export interface ArchiveIndexEntry {
+  period: string;
+  tag: string;
+  asset: string;
+  sha256?: string;
+  days?: string[];
+  merge_epoch?: number;
+  needs_reroll?: boolean;
+}
+
+/** The newer neighbour of a month the re-merge (or, with the epoch above 0, the seal) may use, or `wait`: an `edition`
+ *  neighbour must be merged to the epoch first (the walk goes newest first), and the boundary month waits until the
+ *  archive holding the boundary day is merged. With the epoch at 0 it is newerNeighbour. */
+export function remergeNeighbour(cfg: HistoryConfig, idx: HistoryIndex, archives: readonly ArchiveIndexEntry[], p: Period, epoch: number = REMERGE_EPOCH): Neighbour {
+  const nb = newerNeighbour(cfg, idx, p);
+  if (epoch <= 0) return nb;
+  if (nb.kind === 'edition' && !editionIsMerged(nb.edition, epoch)) return { kind: 'wait' };
+  if (nb.kind === 'boundary') {
+    const a = archives.find((x) => (x.days ?? []).includes(nb.day));
+    if (!a || !editionIsMerged(a, epoch) || a.needs_reroll) return { kind: 'wait' };
+  }
+  return nb;
 }
 
 /** Periods whose raws are all fetched and whose current edition is missing or stale, newest first. */

@@ -1,10 +1,12 @@
 import { nodeToFeature } from './bitemporal.js';
+import { REMERGE_EPOCH, REMERGE_INGEST_TIME } from './config.js';
 import { Resolver } from './dedup.js';
 import { haversineKm } from './geo.js';
 import { type HistoryEra, type Period, dayKeyOf, fetchFloorOf, periodDays } from './history-config.js';
 import type { WindowLog } from './history-fetch.js';
 import { configMap, priorityMap } from './providers.js';
 import { byIngestOrder, emptyTally, screen } from './quality.js';
+import { type MergeMeta, REMERGED_FEATURE_OPTS, mergeMeta, remergeNodes } from './remerge.js';
 import type { EventNode, ProviderConfig, RawObs } from './types.js';
 
 /**
@@ -94,6 +96,8 @@ export interface BuildInput {
   boundary: string;
   /** Every day an `archive-YYYY-MM` entry lists (knowledge/index/archives.json). */
   archivedDays: ReadonlySet<string>;
+  /** The re-merge epoch to merge the new edition to (default config REMERGE_EPOCH; 0 = built as before). */
+  remergeEpoch?: number;
 }
 
 export interface JoinedRow {
@@ -136,6 +140,11 @@ export interface EditionMeta {
    *  two quakes there; for one source alone this is the usual aftershock / swarm pattern, kept as the source has it). */
   same_source_near_pairs: number;
   joined_newer: JoinedRow[];
+  /** A re-merged edition (config REMERGE_EPOCH, src/remerge.ts): how; then `events` counts the live lines, `lines` every
+   *  line and `superseded` the losers, and `rows.written` the distinct source ids over all lines. */
+  merge?: MergeMeta;
+  lines?: number;
+  superseded?: number;
 }
 
 export class HistoryBuildError extends Error {}
@@ -160,6 +169,21 @@ export function sameSourceNearPairs(nodes: EventNode[]): number {
     }
   }
   return pairs;
+}
+
+/** The era's magnitude floor, applied after the re-merge: the live events whose largest row magnitude is under it, and
+ *  every event superseded into one of them (a loser goes with its survivor). */
+export function belowFloor(nodes: Iterable<EventNode>, floor: number | null): Set<string> {
+  const out = new Set<string>();
+  if (floor == null) return out;
+  const list = [...nodes];
+  for (const n of list) {
+    if (n.state !== 'live') continue;
+    const m = maxMag(n);
+    if (m == null || m < floor) out.add(n.feedId);
+  }
+  for (const n of list) if (n.state === 'superseded' && out.has(n.supersededBy ?? '')) out.add(n.feedId);
+  return out;
 }
 
 /** Build one month's events edition. Throws HistoryBuildError when an input or an invariant is wrong; nothing is
@@ -221,16 +245,46 @@ export function buildEdition(input: BuildInput): { dayFiles: Map<string, string>
     if (contextIds.has(res.node.feedId)) joined.push({ provider: raw.provider, native_id: raw.providerEventId, feed_id: res.node.feedId });
   }
 
+  // The re-merge (config REMERGE_EPOCH, src/remerge.ts): the month's own events in sliding 7-day windows, the frozen
+  // newer neighbour as pinned context (a loser may point into it, merge.into_newer), before the magnitude floor.
+  const epoch = input.remergeEpoch ?? REMERGE_EPOCH;
+  let merge: MergeMeta | undefined;
+  if (epoch > 0) {
+    const own = [...transient.values()].filter((n) => !contextIds.has(n.feedId));
+    const ctx = [...transient.values()].filter((n) => contextIds.has(n.feedId)).map((n) => structuredClone(n));
+    const res = remergeNodes({
+      own,
+      memberDay: new Map(own.map((n) => [n.feedId, dayKeyOf(n.eventTimeMs)])),
+      startMs: period.startMs,
+      endMs: period.endMs,
+      older: [],
+      newer: ctx,
+      anchored: new Set(),
+      registry,
+      ingestTime: REMERGE_INGEST_TIME,
+    });
+    merge = mergeMeta(res, {
+      epoch,
+      ingestTime: REMERGE_INGEST_TIME,
+      from: null,
+      older: null,
+      newer: context ? { label: context.label, sha256: context.sha256 ?? null, days: [context.day] } : null,
+      anchored: new Set(),
+    });
+  }
+
+  const dropped = belowFloor([...transient.values()].filter((n) => !contextIds.has(n.feedId)), era.minMagnitude);
   const written: EventNode[] = [];
   let belowFloorEvents = 0;
   let belowFloorRows = 0;
   for (const n of transient.values()) {
     if (contextIds.has(n.feedId)) continue;
-    if (n.state !== 'live') fail(`event ${n.feedId} is ${n.state} (the merge pass is off)`);
-    const m = maxMag(n);
-    if (era.minMagnitude != null && (m == null || m < era.minMagnitude)) {
-      belowFloorEvents++;
-      belowFloorRows += n.provenance.length;
+    if (n.state !== 'live' && !(merge && n.state === 'superseded')) fail(`event ${n.feedId} is ${n.state} (the merge pass is off)`);
+    if (dropped.has(n.feedId)) {
+      if (n.state === 'live') {
+        belowFloorEvents++;
+        belowFloorRows += n.provenance.length;
+      }
       continue;
     }
     // Never seen by the live log: first_seen_seq / ingest_seq 0 (backfill writes the log position of its run).
@@ -241,19 +295,24 @@ export function buildEdition(input: BuildInput): { dayFiles: Map<string, string>
 
   // Invariants: every event inside the month, every source id once, nothing shared with the frozen neighbour, and
   // every fetched row accounted for.
+  // Keys are unique among the live lines; a re-merged loser keeps a frozen copy of the rows its survivor took, so the
+  // rows written are the distinct keys over every line.
   const keys = new Set<string>();
-  let writtenRows = 0;
+  const liveKeys = new Set<string>();
   for (const n of written) {
     const d = dayKeyOf(n.eventTimeMs);
     if (!daySet.has(d)) fail(`event ${n.feedId} falls on ${d}, outside the month`);
     for (const r of n.provenance) {
       const k = `${r.provider}:${r.nativeId}`;
-      if (keys.has(k)) fail(`${k} is in two events`);
+      if (n.state === 'live') {
+        if (liveKeys.has(k)) fail(`${k} is in two events`);
+        liveKeys.add(k);
+      }
       if (contextKeys.has(k)) fail(`${k} is written although the frozen neighbour already holds it`);
       keys.add(k);
-      writtenRows++;
     }
   }
+  const writtenRows = keys.size;
   const kept = queue.length;
   if (writtenRows + joined.length + belowFloorRows !== kept) {
     fail(`row accounting: ${kept} rows ingested, ${writtenRows} written + ${joined.length} joined the neighbour + ${belowFloorRows} below the floor`);
@@ -268,7 +327,7 @@ export function buildEdition(input: BuildInput): { dayFiles: Map<string, string>
   for (const d of [...byDay.keys()].sort()) {
     // The day partitions' order and bytes (partitions.ts writeDayPartition).
     const sorted = byDay.get(d)!.sort((a, b) => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : 1));
-    dayFiles.set(d, sorted.map((n) => JSON.stringify(nodeToFeature(n))).join('\n') + '\n');
+    dayFiles.set(d, sorted.map((n) => JSON.stringify(merge ? nodeToFeature(n, REMERGED_FEATURE_OPTS) : nodeToFeature(n))).join('\n') + '\n');
   }
 
   const meta: EditionMeta = {
@@ -287,7 +346,7 @@ export function buildEdition(input: BuildInput): { dayFiles: Map<string, string>
       return { source: s, asset: r.asset, sha256: r.sha256, rows: r.rows.length, provider_count: r.header.provider_count };
     }),
     context: context ? { label: context.label, day: context.day, events: context.nodes.length, sha256: context.sha256 ?? null } : null,
-    events: written.length,
+    events: written.filter((n) => n.state === 'live').length,
     days: [...dayFiles.keys()],
     rows: {
       fetched,
@@ -300,6 +359,7 @@ export function buildEdition(input: BuildInput): { dayFiles: Map<string, string>
     below_floor_events: belowFloorEvents,
     same_source_near_pairs: sameSourceNearPairs(written),
     joined_newer: joined,
+    ...(merge ? { merge, lines: written.length, superseded: written.filter((n) => n.state === 'superseded').length } : {}),
   };
   return { dayFiles, meta, nodes: written };
 }

@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { HEAL_EPOCH, HEAL_MAX_FOLDS_PER_RUN, dataPaths } from './config.js';
-import { HELD_REASON, type Resolver } from './dedup.js';
+import { HELD_REASON, type IngestResult, type MergeRecord, type Resolver } from './dedup.js';
 import type { LogBuffer } from './oplog.js';
 import { byIngestOrder } from './quality.js';
-import type { RawObs } from './types.js';
+import type { EventNode, RawObs } from './types.js';
 
 /** knowledge/index/heal.json — which one-time heal the data branch has had (config HEAL_EPOCH).
  *  Written by aggregate in the same commit as the heal's log lines, so the heal and its marker
@@ -91,7 +91,58 @@ export interface FeedSideResult {
   heldByProvider: Record<string, number>;
 }
 
-/** aggregate's feed-side steps, after the provider paths of the run: the coordinate-less
+/** What feedSideSteps did, in order, before anything is logged. */
+export interface FeedSideSteps {
+  /** The coordinate-less retraction (empty when `withdrawals` is off). */
+  retractions: { raw: RawObs; result: IngestResult }[];
+  rehomed: { raw: RawObs; result: IngestResult }[];
+  stranded: { raw: RawObs; result: IngestResult }[];
+  rederived: EventNode[];
+  heal: { merges: MergeRecord[]; survivors: EventNode[]; capped: boolean };
+  /** The held solutions' withdrawal (empty when `withdrawals` is off). */
+  held: { raw: RawObs; result: IngestResult }[];
+}
+
+/** Called after each step, before the next one runs (aggregate logs there: a log line reads the event as the step left
+ *  it, and a later step may change it again). */
+export interface FeedSideSink {
+  retractions?(x: FeedSideSteps['retractions']): void;
+  rehomed?(x: FeedSideSteps['rehomed']): void;
+  stranded?(x: FeedSideSteps['stranded']): void;
+  rederived?(x: FeedSideSteps['rederived']): void;
+  heal?(x: FeedSideSteps['heal']): void;
+  held?(x: FeedSideSteps['held']): void;
+}
+
+/** The feed-side identity steps, in the one order every caller runs them (the rule lives here once): the coordinate-less
+ *  retraction, the copy re-home pass (FEED-2), the re-point guard's pass (round 14), the representative re-derivation
+ *  (round 27), the heal (Resolver.heal: every fold when `healDue`, else at most `maxFolds`), then the held solutions'
+ *  withdrawal (round 26). It changes the Resolver's event map and returns what it did; it logs nothing itself (`sink`
+ *  sees each step's result as soon as it is made). `withdrawals: false` (the offline re-merge, src/remerge.ts) skips the
+ *  two steps that withdraw rows, so an offline layer never splices a row out of an immutable asset. aggregate's
+ *  runFeedSideSteps passes `withdrawals: true`. */
+export function feedSideSteps(
+  r: Resolver,
+  ingestTime: string,
+  o: { healDue: boolean; maxFolds: number; withdrawals: boolean },
+  sink: FeedSideSink = {},
+): FeedSideSteps {
+  const retractions = o.withdrawals ? r.retractCoordinateless(ingestTime) : [];
+  sink.retractions?.(retractions);
+  const rehomed = r.rehomeMisplacedCopies(ingestTime);
+  sink.rehomed?.(rehomed);
+  const stranded = r.rehomeStrandedRows(ingestTime);
+  sink.stranded?.(stranded);
+  const rederived = r.rederiveOutranked(ingestTime);
+  sink.rederived?.(rederived);
+  const heal = o.healDue ? { ...r.heal(ingestTime), capped: false } : r.heal(ingestTime, o.maxFolds);
+  sink.heal?.(heal);
+  const held = o.withdrawals ? r.retractHeld(ingestTime) : [];
+  sink.held?.(held);
+  return { retractions, rehomed, stranded, rederived, heal, held };
+}
+
+/** aggregate's feed-side steps, after the provider paths of the run (feedSideSteps, withdrawals on): the coordinate-less
  *  retraction (every run; a no-op once nothing is left), the copy re-home pass (every run, FEED-2) and, when
  *  `healDue`, the one-time heal (Resolver.heal) and its marker, else the regular heal (FEED-6), then the held
  *  solutions' withdrawal (Resolver.retractHeld, round 26). Before the heal, the events whose stored representative
@@ -106,68 +157,75 @@ export function runFeedSideSteps(
 ): FeedSideResult {
   const firstSeq = log.seq + 1;
   const retractedByProvider: Record<string, number> = {};
-  const retractions = resolver.retractCoordinateless(opts.ingestTime);
-  for (const { raw, result } of retractions) {
-    log.record(raw, result, 'tombstone', RETRACTION_REASON);
-    retractedByProvider[raw.provider] = (retractedByProvider[raw.provider] ?? 0) + 1;
-  }
-  // EMSC copies standing in an event whose rows they do not copy while another event holds the agency row they copy
-  // (Resolver.rehomeMisplacedCopies, FEED-2): an op:tombstone line with a reason, then the row's op:observe line in
-  // its new event. A no-op once nothing is misplaced.
-  const rehomed = resolver.rehomeMisplacedCopies(opts.ingestTime);
-  for (const { raw, result } of rehomed) log.record(raw, result);
-  // EMSC rows left in an event after EMSC re-pointed their id to another quake (Resolver.rehomeStranded, round 14): the
-  // same lines as a re-homed copy. A no-op once nothing is stranded.
-  const stranded = resolver.rehomeStrandedRows(opts.ingestTime);
-  for (const { raw, result } of stranded) log.record(raw, result);
-  // Events whose stored representative the current rules outrank (Resolver.rederiveOutranked, round 27): one
-  // op:correction line each, before the heal so the merge pass sees where the rules place them. A no-op once none is left.
-  const rederived = resolver.rederiveOutranked(opts.ingestTime);
-  log.recordCorrections(rederived, REDERIVED_REASON);
-  let heal: HealMarker | null = null;
-  if (opts.healDue) {
-    const { merges, survivors } = resolver.heal(opts.ingestTime);
-    log.recordHeal(merges, survivors, HEAL_EPOCH);
-    const wrote = log.seq >= firstSeq;
-    heal = {
-      epoch: HEAL_EPOCH,
-      ingest_time: opts.ingestTime,
-      first_seq: wrote ? firstSeq : null,
-      last_seq: wrote ? log.seq : null,
-      horizon_days: opts.loadDays,
-      retracted: retractions.length,
-      merged: merges.length,
-      survivors: survivors.length,
-    };
-    writeHealMarker(root, heal);
-  }
-  // The regular heal (FEED-6, config HEAL_MAX_FOLDS_PER_RUN): the same pass every other run, capped, logged like the
-  // epoch heal (op:merge lines, then one op:correction line per survivor, reason "heal: absorbed …"); the marker is
-  // the epoch heal's only.
-  let regularHeal: FeedSideResult['regularHeal'] = null;
-  if (!opts.healDue) {
-    const { merges, survivors, capped } = resolver.heal(opts.ingestTime, HEAL_MAX_FOLDS_PER_RUN);
-    log.recordFolds(merges, survivors, 'heal');
-    regularHeal = { merged: merges.length, survivors: survivors.length, capped };
-  }
-  // A regional agency's solutions outside its own region that no event takes (config REGION_RULES `hold`, round 26):
-  // after the heal, so an event the heal folds is not withdrawn; op:tombstone lines with HELD_REASON. A no-op once
-  // nothing is held.
   const heldByProvider: Record<string, number> = {};
-  const held = resolver.retractHeld(opts.ingestTime);
-  for (const { raw, result } of held) {
-    log.record(raw, result, 'tombstone', HELD_REASON);
-    heldByProvider[raw.provider] = (heldByProvider[raw.provider] ?? 0) + 1;
-  }
+  let heal: HealMarker | null = null;
+  let regularHeal: FeedSideResult['regularHeal'] = null;
+  const steps = feedSideSteps(resolver, opts.ingestTime, { healDue: opts.healDue, maxFolds: HEAL_MAX_FOLDS_PER_RUN, withdrawals: true }, {
+    retractions(retractions) {
+      for (const { raw, result } of retractions) {
+        log.record(raw, result, 'tombstone', RETRACTION_REASON);
+        retractedByProvider[raw.provider] = (retractedByProvider[raw.provider] ?? 0) + 1;
+      }
+    },
+    // EMSC copies standing in an event whose rows they do not copy while another event holds the agency row they copy
+    // (Resolver.rehomeMisplacedCopies, FEED-2): an op:tombstone line with a reason, then the row's op:observe line in
+    // its new event. A no-op once nothing is misplaced.
+    rehomed(rehomed) {
+      for (const { raw, result } of rehomed) log.record(raw, result);
+    },
+    // EMSC rows left in an event after EMSC re-pointed their id to another quake (Resolver.rehomeStranded, round 14): the
+    // same lines as a re-homed copy. A no-op once nothing is stranded.
+    stranded(stranded) {
+      for (const { raw, result } of stranded) log.record(raw, result);
+    },
+    // Events whose stored representative the current rules outrank (Resolver.rederiveOutranked, round 27): one
+    // op:correction line each, before the heal so the merge pass sees where the rules place them. A no-op once none is
+    // left.
+    rederived(rederived) {
+      log.recordCorrections(rederived, REDERIVED_REASON);
+    },
+    heal({ merges, survivors, capped }) {
+      if (opts.healDue) {
+        log.recordHeal(merges, survivors, HEAL_EPOCH);
+        const wrote = log.seq >= firstSeq;
+        heal = {
+          epoch: HEAL_EPOCH,
+          ingest_time: opts.ingestTime,
+          first_seq: wrote ? firstSeq : null,
+          last_seq: wrote ? log.seq : null,
+          horizon_days: opts.loadDays,
+          retracted: Object.values(retractedByProvider).reduce((a, b) => a + b, 0),
+          merged: merges.length,
+          survivors: survivors.length,
+        };
+        writeHealMarker(root, heal);
+        return;
+      }
+      // The regular heal (FEED-6, config HEAL_MAX_FOLDS_PER_RUN): the same pass every other run, capped, logged like the
+      // epoch heal (op:merge lines, then one op:correction line per survivor, reason "heal: absorbed …"); the marker is
+      // the epoch heal's only.
+      log.recordFolds(merges, survivors, 'heal');
+      regularHeal = { merged: merges.length, survivors: survivors.length, capped };
+    },
+    // A regional agency's solutions outside its own region that no event takes (config REGION_RULES `hold`, round 26):
+    // after the heal, so an event the heal folds is not withdrawn; op:tombstone lines with HELD_REASON. A no-op once
+    // nothing is held.
+    held(held) {
+      for (const { raw, result } of held) {
+        log.record(raw, result, 'tombstone', HELD_REASON);
+        heldByProvider[raw.provider] = (heldByProvider[raw.provider] ?? 0) + 1;
+      }
+    },
+  });
   return {
-    retracted: retractions.length,
+    retracted: steps.retractions.length,
     retractedByProvider,
     heal,
-    rehomed: rehomed.length,
-    stranded: stranded.length,
+    rehomed: steps.rehomed.length,
+    stranded: steps.stranded.length,
     regularHeal,
-    held: held.length,
+    held: steps.held.length,
     heldByProvider,
-    rederived: rederived.length,
+    rederived: steps.rederived.length,
   };
 }

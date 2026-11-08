@@ -96,7 +96,9 @@ For an **immutable, cache-forever** copy of a `frozen` partition, pin it to the
 manifest's `data_commit` (a git SHA) instead of the `@data` branch ref:
 `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@<data_commit>/events/YYYY/MM/DD.ndjson`.
 Very old months live in Release tarballs — see `manifest.archives[]` (`partitions[]`
-overrides `archives[]` for any day in both).
+overrides `archives[]` for any day in both). An archive month's asset is `events-YYYY-MM.tar.zst`, or after a re-roll
+or a re-merge `events-YYYY-MM.e<N>.tar.zst` (the entry names the current one; earlier ones stay in the Release, listed in
+`previous[]`). Re-merged assets hold `superseded` lines beside the live ones: keep `feed.state === "live"`.
 
 ### The Feature shape
 
@@ -215,6 +217,13 @@ open, reachable source appears.
   edition per day in a `remediation-YYYY` Release; refills wait in a persistent queue until
   their month is archived, and the archived day is never rewritten
   ([APIs.md](APIs.md#remediation-editions-saturated-days-and-the-2026-07-seam)).
+- **Re-merged history:** history written with the merge pass off (backfill, the deep-history build, remediation) keeps
+  a quake that reached it source by source as several events; the offline re-merge (`src/remerge.ts`, config
+  `REMERGE_EPOCH`, 0 = off) replays the live feed's identity steps over it in sliding 7-day windows and publishes the
+  result as new assets beside the old ones: history editions `events-YYYY-MM.e<N+1>.tar.zst` (the hourly `history`
+  walk), archive assets `events-YYYY-MM.e<N>.tar.zst` (`remerge.yml`, every 6 h, compare-and-set commit) and refreshed
+  remediation editions. Losers become `superseded` and keep their rows; no asset is replaced or deleted (a re-roll takes
+  the next free name too, the earlier asset listed in `previous[]`) ([APIs.md](APIs.md#re-merged-history)).
 - **Earliest solutions:** `first-solutions` collects the version histories that ComCat,
   GeoNet, INGV and several SeisComP nodes keep (every solution they still hold, with its
   publication time) into a side index of Release assets, one request per second per

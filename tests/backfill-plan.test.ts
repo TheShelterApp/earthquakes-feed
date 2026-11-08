@@ -120,3 +120,19 @@ test('stalls: a walk failing 24 runs warns, from 72 at a one-day window it turns
   assert.match(r.blockers[0]!, /has failed 72 consecutive runs/);
   assert.deepEqual(stallReport([walk()]), { blockers: [], warnings: [] });
 });
+
+test('backfill home day (C6): an event a re-merged archive kept off its time-day is written back to the day it was read from; others follow their time', async () => {
+  const { homeDayOf, rememberHomeDay } = await import('../src/backfill-plan.js');
+  const home = new Map<string, string>();
+  const off = { feedId: 'efd_off', eventTimeMs: Date.parse('2024-07-01T00:00:05Z') };
+  const on = { feedId: 'efd_on', eventTimeMs: Date.parse('2024-06-30T12:00:00Z') };
+  rememberHomeDay(home, '2024-06-30', off);
+  rememberHomeDay(home, '2024-06-30', on);
+  assert.equal(homeDayOf(home, off), '2024-06-30', 'kept in its member day');
+  assert.equal(homeDayOf(home, on), '2024-06-30');
+  // A repositioned event that was on its day moves with its time, as before.
+  assert.equal(homeDayOf(home, { ...on, eventTimeMs: Date.parse('2024-07-01T00:00:01Z') }), '2024-07-01');
+  // Read again on its own day: no longer off.
+  rememberHomeDay(home, '2024-07-01', off);
+  assert.equal(home.has('efd_off'), false);
+});

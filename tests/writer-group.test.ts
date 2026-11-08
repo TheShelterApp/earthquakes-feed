@@ -156,8 +156,8 @@ test('workflows: every commit to data is pushed by scripts/push-data.sh, nowhere
     assert.equal(viaScript, commits, `${f}: ${commits} commit(s), ${viaScript} push-data.sh call(s)`);
     pushes += viaScript;
   }
-  // aggregate, derive's steps, backfill, archive, and the history / first-solutions / remediate commit jobs.
-  assert.equal(pushes, 7);
+  // aggregate, derive's steps, backfill, archive, and the history / first-solutions / remediate / remerge commit jobs.
+  assert.equal(pushes, 8);
 });
 
 test('workflows: derive runs at the end of every aggregate job, and derive.yml only by hand', () => {
@@ -194,4 +194,22 @@ test('workflows: the side-index commit jobs push without the lock and stage only
     assert.match(steps.slice(first, first + 300), /sparse-checkout: scripts\/push-data\.sh/, f);
     assert.match(commit, /PUSH_ATTEMPTS=6 PUSH_BACKOFF_S=3 bash "\$GITHUB_WORKSPACE\/scripts\/push-data\.sh"/, f);
   }
+});
+
+test('workflows: remerge.yml shares the remediate group (both write remediation.json); its commit job applies compare-and-set and stages only archives.json and remediation.json (history.json for a rollback)', () => {
+  const yml = read('.github/workflows/remerge.yml');
+  const top = yml.slice(0, yml.indexOf('\njobs:'));
+  assert.match(top, /\nconcurrency:\n {2}group: earthquakes-feed-remediate\n {2}cancel-in-progress: false\n/);
+  assert.match(read('.github/workflows/remediate.yml'), /\nconcurrency:\n {2}group: earthquakes-feed-remediate\n/);
+  const commit = yml.slice(yml.indexOf('\n  commit:'));
+  assert.doesNotMatch(commit, /concurrency:/, 'no job-level lock (it would be cancelled while waiting)');
+  const steps = commit.slice(commit.indexOf('steps:'));
+  const first = steps.indexOf('- uses: actions/checkout@');
+  assert.ok(first > 0 && first < steps.indexOf('uses: actions/download-artifact@') && first < steps.indexOf('ref: data'));
+  assert.match(steps.slice(first, first + 400), /sparse-checkout: \|\n {12}scripts\/push-data\.sh\n {12}scripts\/remerge-commit\.mjs\n/);
+  assert.match(commit, /node scripts\/remerge-commit\.mjs apply remerge-out\/pending\.json \.data/);
+  assert.match(commit, /node scripts\/remerge-commit\.mjs rollback /);
+  assert.ok(commit.includes("allowed='knowledge/index/(archives|remediation)\\.json'"));
+  assert.ok(commit.includes('refusing to commit anything but knowledge/index/archives.json and remediation.json'));
+  assert.match(commit, /PUSH_ATTEMPTS=6 PUSH_BACKOFF_S=3 bash "\$GITHUB_WORKSPACE\/scripts\/push-data\.sh"/);
 });

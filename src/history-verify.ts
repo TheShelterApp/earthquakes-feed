@@ -27,20 +27,34 @@ function featureValidator(): ValidateFunction {
 
 interface FeatureLine {
   id?: string;
-  properties?: { time?: number; mag?: number | null; feed?: { feed_id?: string; state?: string; provenance?: { provider?: string; native_id?: string; mag?: number | null }[] } };
+  properties?: { time?: number; mag?: number | null; feed?: { feed_id?: string; state?: string; superseded_by?: string; provenance?: { provider?: string; native_id?: string; mag?: number | null }[] } };
 }
 
 export interface EditionCheck {
   errors: string[];
+  /** Live lines (every line of an edition that was never re-merged). */
   events: number;
+  /** Distinct source ids over all lines (a re-merged loser keeps a frozen copy of the rows its survivor took). */
   rows: number;
-  /** Source ids in the day files. */
+  /** Source ids in the day files (every line). */
   keys: Set<string>;
+  /** Feed ids in the day files (every line) and how many lines. */
+  ids: Set<string>;
+  lines: number;
 }
 
 export function verifyEdition(
   dayFiles: Map<string, string>,
-  opts: { period: Period; boundary: string; archivedDays: ReadonlySet<string>; meta?: EditionMeta; raws?: RawInput[] },
+  opts: {
+    period: Period;
+    boundary: string;
+    archivedDays: ReadonlySet<string>;
+    meta?: EditionMeta;
+    raws?: RawInput[];
+    /** A re-merged edition (meta.merge): the check of the edition it was merged from, in place of `raws`. Same feed
+     *  ids, the same number of lines, and every source id it held. */
+    prev?: Pick<EditionCheck, 'ids' | 'keys' | 'lines'>;
+  },
 ): EditionCheck {
   const errors: string[] = [];
   const err = (m: string): void => {
@@ -50,8 +64,13 @@ export function verifyEdition(
   const days = new Set(periodDays(opts.period));
   const ids = new Set<string>();
   const keys = new Set<string>();
+  const liveKeys = new Set<string>();
+  const states = new Map<string, string>();
+  const pointers: { at: string; from: string; to: string }[] = [];
+  const offUnit = new Set(opts.meta?.merge?.off_unit ?? []);
+  const intoNewer = new Map((opts.meta?.merge?.into_newer ?? []).map((x) => [x.loser, x.survivor]));
   let events = 0;
-  let rows = 0;
+  let lines = 0;
   for (const [day, text] of dayFiles) {
     if (!days.has(day)) err(`${day}: not a day of ${opts.period.key}`);
     if (day >= opts.boundary) err(`${day}: not before the boundary ${opts.boundary}`);
@@ -65,12 +84,17 @@ export function verifyEdition(
         err(`${day}:${i + 1} is not JSON`);
         continue;
       }
-      events++;
+      lines++;
       if (!v(f)) err(`${day}:${i + 1} schema: ${(v.errors ?? []).map((e) => `${e.instancePath} ${e.message}`).join('; ')}`);
       const feed = f.properties?.feed;
       const t = f.properties?.time;
-      if (typeof t !== 'number' || dayKeyOf(t) !== day) err(`${day}:${i + 1} time ${String(t)} is not on ${day}`);
-      if (feed?.state !== 'live') err(`${day}:${i + 1} state ${String(feed?.state)}`);
+      if ((typeof t !== 'number' || dayKeyOf(t) !== day) && !(f.id && offUnit.has(f.id))) err(`${day}:${i + 1} time ${String(t)} is not on ${day}`);
+      // A re-merged edition holds superseded losers beside the live events; nothing is ever tombstoned offline.
+      const live = feed?.state === 'live';
+      if (!live && !(feed?.state === 'superseded' && opts.meta?.merge)) err(`${day}:${i + 1} state ${String(feed?.state)}`);
+      if (live) events++;
+      if (f.id) states.set(f.id, String(feed?.state));
+      if (feed?.state === 'superseded') pointers.push({ at: `${day}:${i + 1}`, from: f.id ?? '', to: feed.superseded_by ?? '' });
       if (!f.id || f.id !== feed?.feed_id) err(`${day}:${i + 1} id ${String(f.id)} differs from feed_id ${String(feed?.feed_id)}`);
       if (f.id) {
         if (ids.has(f.id)) err(`${day}:${i + 1} feed id ${f.id} is in the edition twice`);
@@ -80,12 +104,23 @@ export function verifyEdition(
       if (!prov.length) err(`${day}:${i + 1} empty provenance`);
       for (const r of prov) {
         const k = `${r.provider}:${r.native_id}`;
-        if (keys.has(k)) err(`${day}:${i + 1} ${k} is in two events`);
         keys.add(k);
-        rows++;
+        if (!live) continue;
+        if (liveKeys.has(k)) err(`${day}:${i + 1} ${k} is in two events`);
+        liveKeys.add(k);
       }
     }
   }
+  const rows = keys.size;
+  // Every loser names a live event of the edition, or (listed in meta.merge.into_newer) one of the newer month: never a
+  // chain, never a line that is not there.
+  for (const p of pointers) {
+    const st = states.get(p.to);
+    if (st === 'live') continue;
+    if (st == null && intoNewer.get(p.from) === p.to) continue;
+    err(`${p.at} ${p.from} superseded_by ${p.to || '(none)'}, ${st == null ? 'not in the edition nor in merge.into_newer' : `a ${st} line (a chain)`}`);
+  }
+  for (const id of offUnit) if (!ids.has(id)) err(`merge.off_unit lists ${id}, which is in no day file`);
   const m = opts.meta;
   if (m) {
     if (m.period !== opts.period.key) err(`_edition.json is for ${m.period}`);
@@ -97,6 +132,20 @@ export function verifyEdition(
       err(`_edition.json row counts do not add up (${JSON.stringify(m.rows)})`);
     }
     if (m.joined_newer.length !== m.rows.joined_newer) err('_edition.json joined_newer list and count differ');
+    if (m.lines != null && m.lines !== lines) err(`_edition.json says ${m.lines} lines, the day files hold ${lines}`);
+    if (m.superseded != null && m.superseded !== lines - events) err(`_edition.json says ${m.superseded} superseded, the day files hold ${lines - events}`);
+  }
+  if (opts.prev) {
+    const prev = opts.prev;
+    if (prev.lines !== lines) err(`${prev.lines} lines in the edition merged from, ${lines} here`);
+    let lostIds = 0;
+    for (const id of prev.ids) if (!ids.has(id)) lostIds++;
+    let newIds = 0;
+    for (const id of ids) if (!prev.ids.has(id)) newIds++;
+    if (lostIds || newIds) err(`feed ids differ from the edition merged from: ${lostIds} lost, ${newIds} new`);
+    let lostKeys = 0;
+    for (const k of prev.keys) if (!keys.has(k)) lostKeys++;
+    if (lostKeys) err(`${lostKeys} source id(s) of the edition merged from are in no line`);
   }
   if (opts.raws) {
     const joined = new Set((m?.joined_newer ?? []).map((j) => `${j.provider}:${j.native_id}`));
@@ -130,5 +179,5 @@ export function verifyEdition(
     if (m && m.rows.fetched !== fetched) err(`_edition.json says ${m.rows.fetched} rows fetched, the raw assets hold ${fetched}`);
     if (m && m.rows.bad_coords + m.rows.coordinateless !== screened) err(`_edition.json says ${m.rows.bad_coords + m.rows.coordinateless} rows screened, the raw assets hold ${screened}`);
   }
-  return { errors, events, rows, keys };
+  return { errors, events, rows, keys, ids, lines };
 }

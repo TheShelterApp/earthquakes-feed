@@ -5,9 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { REPO, dataPaths } from './config.js';
-import { ghRetry, withinShrinkTolerance } from './gh.js';
+import { withinShrinkTolerance } from './gh.js';
 import { type ReleaseIo, archiveLogFiles, ghReleaseIo, loadLogArchives, saveLogArchives } from './log-archive.js';
 import { loadInventory, saveInventory } from './partitions.js';
+import { createTar } from './tar.js';
 import { isoFromMs } from './util.js';
 
 const DAY = 86_400_000;
@@ -33,29 +34,64 @@ const optionsFromEnv = (): ArchiveOptions => ({
   markerDir: process.cwd(),
 });
 
-/** The Release operations of the archive passes: the run-log pass's (never replacing) plus the event pass's
- *  replacing upload (`--clobber`: a re-roll replaces the month's asset). gh in production, a stub in tests. */
-export interface ArchiveIo extends ReleaseIo {
-  replaceAsset(tag: string, file: string): void;
+/** The Release operations of the archive passes (gh in production, a stub in tests). No pass replaces an asset (C5,
+ *  2026-11-08): a re-roll uploads under the next free name (`events-YYYY-MM.e<N>.tar.zst`; the unsuffixed asset is
+ *  edition 1) and the previous asset stays where it is, listed in the entry's `previous[]`. */
+export type ArchiveIo = ReleaseIo;
+export const ghArchiveIo: ArchiveIo = ghReleaseIo;
+
+/** A month's earlier asset (archives.json `previous[]`, newest first): a re-roll, a re-merge (src/remerge-archives.ts),
+ *  or one withdrawn by scripts/remerge-rollback.ts. Never deleted. */
+export interface PreviousAsset {
+  asset: string;
+  sha256: string;
+  bytes: number;
+  count: number;
+  edition: number;
+  /** The asset's days, when they may differ from the entry's (a re-merge can empty a day). */
+  days?: string[];
+  merge_epoch?: number;
+  withdrawn_at?: string;
+  reason?: string;
 }
 
-export const ghArchiveIo: ArchiveIo = {
-  ...ghReleaseIo,
-  replaceAsset(tag, file) {
-    ghRetry(['release', 'upload', tag, file, '-R', REPO, '--clobber']);
-  },
-};
+/** A remediation edition a re-merged archive month includes (src/remerge-archives.ts). */
+export interface ArchiveRemediationRef {
+  day: string;
+  edition: number;
+  sha256: string;
+}
 
-interface ArchiveEntry {
+export interface ArchiveEntry {
   period: string;
   tag: string;
   asset: string;
   url: string;
   bytes: number;
   sha256: string;
+  /** Lines in the asset, every state. */
   count: number;
   days: string[];
   needs_reroll?: boolean;
+  /** The asset's edition: 1 = the unsuffixed asset, N = `events-YYYY-MM.eN.tar.zst`. Absent = 1. */
+  edition?: number;
+  /** The re-merge epoch the asset is merged to (src/remerge-archives.ts); absent = never merged. A re-roll clears it. */
+  merge_epoch?: number;
+  /** A merged asset: its live and superseded lines, the asset it was merged from, and the remediation days it took. */
+  live?: number;
+  superseded?: number;
+  built_on?: { asset: string; sha256: string; count: number };
+  remediation?: ArchiveRemediationRef[];
+  previous?: PreviousAsset[];
+}
+
+/** An asset of an `archive-YYYY-MM` Release that no entry uses (an upload whose index commit never landed and that
+ *  could not be adopted): never reused, never deleted. */
+export interface ArchiveUnused {
+  tag: string;
+  asset: string;
+  reason: string;
+  seen_at: string;
 }
 interface LogArchiveEntry {
   period: string;
@@ -65,9 +101,31 @@ interface LogArchiveEntry {
   sha256: string;
   files: number;
 }
-interface Archives {
+export interface Archives {
   list: ArchiveEntry[];
   log_list?: LogArchiveEntry[];
+  unused?: ArchiveUnused[];
+}
+
+/** `<base>.tar.<ext>` for edition 1, `<base>.e<N>.tar.<ext>` after it. */
+export const archiveAssetName = (base: string, edition: number, ext: string): string => `${base}${edition > 1 ? `.e${edition}` : ''}.tar.${ext}`;
+
+/** The first edition from `from` whose name is not taken in the Release (assets are never replaced). */
+export function nextFreeEdition(names: ReadonlySet<string>, base: string, ext: string, from = 1): number {
+  let n = Math.max(1, from);
+  while (names.has(archiveAssetName(base, n, ext))) n++;
+  return n;
+}
+
+/** Upload without replacing. A retried upload can fail with "already exists" after a first attempt landed: judged by
+ *  the listing; the caller's read-back verifies the bytes. */
+export function uploadNew(io: ReleaseIo, tag: string, file: string): void {
+  try {
+    io.upload(tag, file);
+  } catch (e) {
+    const name = file.split('/').pop()!;
+    if (!io.assets(tag).some((a) => a.name === name)) throw e;
+  }
 }
 
 const dayKey = (ms: number): string => isoFromMs(ms).slice(0, 10);
@@ -82,21 +140,24 @@ const HAS_ZSTD = (() => {
   }
 })();
 
-/** tar a directory then compress (zstd -19, gzip fallback). Returns {path, asset}. */
-function makeTarball(memberDir: string, members: string[], baseName: string): { path: string; asset: string } {
-  const base = `${baseName}.tar`;
+const TAR_EXT = HAS_ZSTD ? 'zst' : 'gz';
+
+/** tar a directory (deterministically, src/tar.ts) then compress (zstd -19, gzip fallback). Returns {path, asset}.
+ *  `name` is the asset name without `.tar.<ext>`. */
+export function makeTarball(memberDir: string, members: string[], name: string): { path: string; asset: string } {
+  const base = `${name}.tar`;
   const tar = join(memberDir, '..', base);
-  execFileSync('tar', ['-cf', tar, '-C', memberDir, ...members]);
+  createTar(tar, memberDir, members);
   if (HAS_ZSTD) {
     execFileSync('zstd', ['-19', '-q', '-f', '--rm', tar]);
     return { path: `${tar}.zst`, asset: `${base}.zst` };
   }
-  execFileSync('gzip', ['-9', '-f', tar]);
+  execFileSync('gzip', ['-9', '-f', '-n', tar]);
   return { path: `${tar}.gz`, asset: `${base}.gz` };
 }
 
 /** Extract an archive asset (.tar.zst or .tar.gz) into a directory. */
-function extractTarball(file: string, intoDir: string): void {
+export function extractTarball(file: string, intoDir: string): void {
   if (file.endsWith('.zst')) {
     const tar = file.replace(/\.zst$/, '');
     execFileSync('zstd', ['-d', '-q', '-f', file, '-o', tar]);
@@ -106,11 +167,11 @@ function extractTarball(file: string, intoDir: string): void {
   }
 }
 
-function loadArchives(root: string): Archives {
+export function loadArchives(root: string): Archives {
   const f = dataPaths(root).archivesIndex;
   return existsSync(f) ? (JSON.parse(readFileSync(f, 'utf8')) as Archives) : { list: [] };
 }
-function saveArchives(root: string, a: Archives): void {
+export function saveArchives(root: string, a: Archives): void {
   a.list.sort((x, y) => (x.period < y.period ? -1 : 1));
   writeFileSync(dataPaths(root).archivesIndex, JSON.stringify(a, null, 2) + '\n');
 }
@@ -172,6 +233,15 @@ function observationMonths(obsDir: string): Map<string, { files: string[]; days:
   return months;
 }
 
+/** The asset names of a Release; empty when it does not exist yet. */
+function listNames(io: ReleaseIo, tag: string): Set<string> {
+  try {
+    return new Set(io.assets(tag).map((a) => a.name));
+  } catch {
+    return new Set();
+  }
+}
+
 /** Roll fully-cold ingest-months of the observation log into Release tarballs, then prune. */
 function archiveLog(root: string, cutoff: string, archives: Archives, staging: string, io: ArchiveIo, opts: ArchiveOptions): number {
   const obsDir = dataPaths(root).observationsDir;
@@ -183,13 +253,16 @@ function archiveLog(root: string, cutoff: string, archives: Archives, staging: s
     mkdirSync(memberDir, { recursive: true });
     for (const f of files) cpSync(f, join(memberDir, f.split('/').slice(-3).join('_'))); // YYYY_MM_DD_HH.ndjson? use DD_HH
     const members = readdirSync(memberDir).sort();
-    const { path: tarPath, asset } = makeTarball(memberDir, members, `observations-${month}`);
     const tag = `archive-${month}`;
+    // The next free name: an upload of an earlier run whose index commit never landed is never replaced.
+    const taken = opts.dryRun ? new Set<string>() : listNames(io, tag);
+    const name = archiveAssetName(`observations-${month}`, nextFreeEdition(taken, `observations-${month}`, TAR_EXT), TAR_EXT).replace(/\.tar\.(zst|gz)$/, '');
+    const { path: tarPath, asset } = makeTarball(memberDir, members, name);
     const bytes = statSync(tarPath).size;
     const sha256 = sha256File(tarPath);
     if (!opts.dryRun) {
       io.ensureRelease(tag, `Archive for ${month}.`);
-      io.replaceAsset(tag, tarPath);
+      uploadNew(io, tag, tarPath);
       const verify = join(staging, `verify-${asset}`);
       io.download(tag, asset, verify);
       if (sha256File(verify) !== sha256) throw new Error(`log archive verify failed for ${month}`);
@@ -247,9 +320,6 @@ export function runArchive(root: string, nowMs: number, io: ArchiveIo, opts: Arc
 
       const memberDir = join(staging, month);
       mkdirSync(memberDir, { recursive: true });
-      // The intact prior asset on disk, once downloaded — the only copy that can undo a
-      // half-failed `upload --clobber` below.
-      let prior: string | null = null;
       // Re-roll: extract the old archive first so in-tree days overlay it (in-tree wins). Done
       // under DRY_RUN too — the download is read-only, and without it memberDir holds the in-tree
       // overlay alone, which makes both the preview and the shrink guard below meaningless.
@@ -262,10 +332,11 @@ export function runArchive(root: string, nowMs: number, io: ArchiveIo, opts: Arc
         try {
           io.download(entry.tag, entry.asset, old);
           extractTarball(old, memberDir);
-          prior = old;
+          // A merged asset's metadata (`_archive.json`) describes that asset only: the re-roll is merged again.
+          for (const m of readdirSync(memberDir)) if (m.startsWith('_') && m.endsWith('.json')) rmSync(join(memberDir, m));
         } catch (e) {
-          // The prior asset is gone — e.g. a failed `upload --clobber` deleted it before the
-          // re-upload landed (2026-01). Recover IFF the tree already holds every day the entry
+          // The prior asset is gone or unreadable — e.g. (before 2026-11-08, when re-rolls replaced the asset) a failed
+          // `upload --clobber` deleted it before the re-upload landed (2026-01). Recover IFF the tree already holds every day the entry
           // claims: re-materialized re-roll days are COMPLETE merged days, so an in-tree
           // superset of entry.days fully replaces the lost asset. If any archived day is
           // missing from the tree, skip the month (keep needs_reroll + in-tree) rather than
@@ -312,30 +383,21 @@ export function runArchive(root: string, nowMs: number, io: ArchiveIo, opts: Arc
         continue;
       }
 
-      const { path: tarPath, asset } = makeTarball(memberDir, members, `events-${month}`);
+      const tag = `archive-${month}`;
+      // Never --clobber (C5): the next free name after the entry's edition and every asset in the Release, so a re-roll
+      // leaves the published asset where it is (2026-07-07: a failed `--clobber` left 2026-01 without an asset for 10.7 h)
+      // and an upload whose index commit never landed is never overwritten.
+      const taken = listNames(io, tag);
+      const edition = nextFreeEdition(taken, `events-${month}`, TAR_EXT, entry ? (entry.edition ?? 1) + 1 : 1);
+      const name = archiveAssetName(`events-${month}`, edition, TAR_EXT).replace(/\.tar\.(zst|gz)$/, '');
+      const { path: tarPath, asset } = makeTarball(memberDir, members, name);
       const bytes = statSync(tarPath).size;
       const sha256 = sha256File(tarPath);
-      const tag = `archive-${month}`;
       const url = `https://github.com/${REPO}/releases/download/${tag}/${asset}`;
 
       if (!opts.dryRun) {
         io.ensureRelease(tag, `Archived event partitions for ${month}.`);
-        try {
-          io.replaceAsset(tag, tarPath);
-        } catch (e) {
-          // `--clobber` DELETES the asset before uploading, so exhausted retries leave the month
-          // with NO asset at all (2026-07-07: events-2026-01.tar.zst missing for 10.7h). Put the
-          // copy we downloaded back so the release survives; never mask the original failure.
-          if (prior && existsSync(prior)) {
-            try {
-              io.replaceAsset(tag, prior);
-              console.warn(`::warning::archive ${month}: upload failed; restored the prior ${entry!.asset}`);
-            } catch (e2) {
-              console.error(`::error::archive ${month}: upload failed AND restoring the prior ${entry!.asset} failed: ${String(e2)}`);
-            }
-          }
-          throw e;
-        }
+        uploadNew(io, tag, tarPath);
         const verify = join(staging, `verify-${asset}`);
         io.download(tag, asset, verify);
         if (sha256File(verify) !== sha256) throw new Error(`archive verify failed for ${month}`);
@@ -346,7 +408,18 @@ export function runArchive(root: string, nowMs: number, io: ArchiveIo, opts: Arc
       // leaving archives.json — which derive copies verbatim into the published manifest —
       // advertising a checksum no consumer could match.
       if (!opts.dryRun) {
-        const next: ArchiveEntry = { period: month, tag, asset, url, bytes, sha256, count, days: allDays, needs_reroll: false };
+        // The new asset is not merged (merge_epoch absent): remerge.yml merges it again. The one it replaces is listed.
+        const previous: PreviousAsset[] = entry
+          ? [
+              { asset: entry.asset, sha256: entry.sha256, bytes: entry.bytes, count: entry.count, edition: entry.edition ?? 1, days: entry.days, ...(entry.merge_epoch != null ? { merge_epoch: entry.merge_epoch } : {}) },
+              ...(entry.previous ?? []),
+            ]
+          : [];
+        const next: ArchiveEntry = {
+          period: month, tag, asset, url, bytes, sha256, count, days: allDays, needs_reroll: false,
+          ...(edition > 1 ? { edition } : {}),
+          ...(previous.length ? { previous } : {}),
+        };
         const idx = archives.list.findIndex((a) => a.period === month);
         if (idx >= 0) archives.list[idx] = next;
         else archives.list.push(next);

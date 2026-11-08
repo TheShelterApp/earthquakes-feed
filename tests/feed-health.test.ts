@@ -573,6 +573,9 @@ test('feed:repo-size: over 8,000,000 KB is P3; at the line nothing; not a number
 // --- walk markers ---
 
 const IDS = registryIds(readFileSync(REGISTRY_PATH, 'utf8'));
+/** The checkout's files, with the statistics switches off whatever providers/stats.json says today (its own tests are
+ *  below): a run's findings must not depend on the rollout state. */
+const switchesOff = (p: string): string => (p === STATS_CONFIG_PATH ? '{"derive_publish":"off","history_enabled":false}' : readFileSync(p, 'utf8'));
 
 test('the registry: 42 ids from providers/registry.json; a bare array works; anything else throws', () => {
   assert.equal(IDS.length, 42);
@@ -786,7 +789,7 @@ test('collect: a stale first read is read again 60 s later (once) and judged on 
     [MANIFEST_V1_URL, (_u, n) => json(v1Manifest(n === 1 ? NOW - 40 * MIN : NOW + 30 * SEC))],
     [MANIFEST_V2_URL, (_u, n) => json(v2Envelope(n === 1 ? NOW - 40 * MIN : NOW + 30 * SEC))],
   ]);
-  const inputs = await collect({ env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep });
+  const inputs = await collect({ readFile: switchesOff, env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep });
   assert.equal(c.sleeps.filter((ms) => ms === 60_000).length, 1);
   assert.equal(inputs.reRead, true);
   assert.equal(inputs.nowMs, NOW + 60_000);
@@ -800,14 +803,14 @@ test('collect: a stale first read is read again 60 s later (once) and judged on 
     [MANIFEST_V1_URL, () => json(v1Manifest(NOW - 40 * MIN))],
     [MANIFEST_V2_URL, () => json(v2Envelope(NOW - 40 * MIN))],
   ]);
-  const r2 = evaluateFeed(await collect({ env: ENV, fetchImpl: stale.fetchImpl, now: c2.now, sleep: c2.sleep }));
+  const r2 = evaluateFeed(await collect({ readFile: switchesOff, env: ENV, fetchImpl: stale.fetchImpl, now: c2.now, sleep: c2.sleep }));
   assert.equal(c2.sleeps.filter((ms) => ms === 60_000).length, 1, 'at most once');
   assert.deepEqual(r2.findings.map((f) => [f.key, f.rule, f.severity]), [['feed:freshness', 'feed:freshness', 'P2']]);
   assert.match(r2.findings[0]!.text, /^live manifest is 41 min stale .*; confirmed by a re-read 60 s later; the feed has stopped publishing/);
   // A failed re-read keeps the first copy.
   const c3 = clock();
   const flaky = world([[MANIFEST_V2_URL, (_u, n) => (n === 1 ? json(v2Envelope(NOW - 40 * MIN)) : json({ message: 'gone' }, 404))]]);
-  const in3 = await collect({ env: ENV, fetchImpl: flaky.fetchImpl, now: c3.now, sleep: c3.sleep });
+  const in3 = await collect({ readFile: switchesOff, env: ENV, fetchImpl: flaky.fetchImpl, now: c3.now, sleep: c3.sleep });
   assert.deepEqual(in3.v2, okRead(NOW - 40 * MIN));
   assert.match(in3.notes.join('\n'), /the re-read failed \(v2\/manifest\.json: HTTP 404 after 1 attempt\(s\)\): v2 is judged on its first copy/);
 });
@@ -815,7 +818,7 @@ test('collect: a stale first read is read again 60 s later (once) and judged on 
 test('collect: a run queued 12 min re-reads even when fresh, and says so; a fresh run on time reads once', async () => {
   const c = clock();
   const w = world([], NOW - 12 * MIN);
-  const inputs = await collect({ env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep });
+  const inputs = await collect({ readFile: switchesOff, env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep });
   assert.equal(inputs.queuedMs, 12 * MIN);
   assert.equal(inputs.reRead, true);
   assert.deepEqual(c.sleeps, [60_000]);
@@ -826,12 +829,12 @@ test('collect: a run queued 12 min re-reads even when fresh, and says so; a fres
   // Queued and stale: the alarm names the queue.
   const c2 = clock();
   const stale = world([[MANIFEST_V2_URL, () => json(v2Envelope(NOW - 50 * MIN))]], NOW - 12 * MIN);
-  const f = evaluateFeed(await collect({ env: ENV, fetchImpl: stale.fetchImpl, now: c2.now, sleep: c2.sleep })).findings[0]!;
+  const f = evaluateFeed(await collect({ readFile: switchesOff, env: ENV, fetchImpl: stale.fetchImpl, now: c2.now, sleep: c2.sleep })).findings[0]!;
   assert.match(f.text, /confirmed by a re-read 60 s later — this run itself waited 12 min in the runner queue; v1 is fresh, so the signing of v2 has stopped/);
   // On time and fresh: one read, no sleep at all.
   const c3 = clock();
   const calm = world();
-  const in3 = await collect({ env: ENV, fetchImpl: calm.fetchImpl, now: c3.now, sleep: c3.sleep });
+  const in3 = await collect({ readFile: switchesOff, env: ENV, fetchImpl: calm.fetchImpl, now: c3.now, sleep: c3.sleep });
   assert.deepEqual([in3.reRead, c3.sleeps, in3.queuedMs], [false, [], 30 * SEC]);
   assert.equal(calm.calls.filter((x) => x.url === MANIFEST_V1_URL).length, 1);
 });
@@ -839,7 +842,7 @@ test('collect: a run queued 12 min re-reads even when fresh, and says so; a fres
 test('collect: manifests use 4 tries 3 s apart; a 404 or a garbage v2 payload is the unreachable rule', async () => {
   const c = clock();
   const w = world([[MANIFEST_V2_URL, () => new Response('Bad Gateway', { status: 502 })]]);
-  const inputs = await collect({ env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep });
+  const inputs = await collect({ readFile: switchesOff, env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep });
   assert.equal(w.calls.filter((x) => x.url === MANIFEST_V2_URL).length, 4);
   assert.deepEqual(c.sleeps, [3_000, 3_000, 3_000]);
   const f = evaluateFeed(inputs).findings[0]!;
@@ -847,12 +850,12 @@ test('collect: manifests use 4 tries 3 s apart; a 404 or a garbage v2 payload is
   assert.match(f.text, /HTTP 502 after 4 attempt\(s\)/);
   const c2 = clock();
   const garbage = world([[MANIFEST_V2_URL, () => json({ payload: 'bm90IGpzb24=', sig: 'x', kid: 'y' })]]);
-  const g = evaluateFeed(await collect({ env: ENV, fetchImpl: garbage.fetchImpl, now: c2.now, sleep: c2.sleep })).findings[0]!;
+  const g = evaluateFeed(await collect({ readFile: switchesOff, env: ENV, fetchImpl: garbage.fetchImpl, now: c2.now, sleep: c2.sleep })).findings[0]!;
   assert.deepEqual([g.rule, g.members], ['feed:freshness:unreachable', ['v2']]);
   assert.match(g.text, /payload is not JSON/);
   const c3 = clock();
   const gone = world([[MANIFEST_V2_URL, () => json({ message: 'Not Found' }, 404)]]);
-  assert.equal(evaluateFeed(await collect({ env: ENV, fetchImpl: gone.fetchImpl, now: c3.now, sleep: c3.sleep })).findings[0]!.rule, 'feed:freshness:unreachable');
+  assert.equal(evaluateFeed(await collect({ readFile: switchesOff, env: ENV, fetchImpl: gone.fetchImpl, now: c3.now, sleep: c3.sleep })).findings[0]!.rule, 'feed:freshness:unreachable');
   assert.deepEqual(c3.sleeps, [], 'a 404 is not retried');
 });
 
@@ -867,7 +870,7 @@ test('collect: walk markers: the newest artifact under 26 h is downloaded and re
     [listing('archive'), () => json({ total_count: 2, artifacts: [{ ...artifact(31, HOUR, { expired: true }), name: 'walk-blocked-archive' }] })],
     [listing('history'), () => new Response('oops', { status: 500 })],
   ]);
-  const r = evaluateFeed(await collect({ env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep }));
+  const r = evaluateFeed(await collect({ readFile: switchesOff, env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep }));
   assert.deepEqual(keys(r.findings), ['walks:first-solutions:emsc', 'watcher:feed-github']);
   assert.match(r.findings[0]!.text, /\(marker of 2026-10-22 10:14Z, run 911\)$/);
   assert.deepEqual(r.unjudged, ['walks:history:*']);
@@ -884,7 +887,7 @@ test('collect: walk markers: the newest artifact under 26 h is downloaded and re
     [listing('archive'), () => json({ artifacts: [{ ...artifact(41, HOUR), name: 'walk-blocked-archive' }] })],
     [`${API_REPO}/actions/artifacts/41/zip`, () => new Response('<html>not a zip</html>')],
   ]);
-  const r2 = evaluateFeed(await collect({ env: ENV, fetchImpl: w2.fetchImpl, now: c2.now, sleep: c2.sleep }));
+  const r2 = evaluateFeed(await collect({ readFile: switchesOff, env: ENV, fetchImpl: w2.fetchImpl, now: c2.now, sleep: c2.sleep }));
   assert.deepEqual(keys(r2.findings), ['walks:history:run', 'watcher:feed-github']);
   assert.deepEqual(byKey(r2.findings)['watcher:feed-github']!.members, ['walks:archive']);
   assert.deepEqual(r2.unjudged, ['walks:archive:*']);
@@ -896,7 +899,7 @@ test('main --findings: a healthy run writes a valid document and exits 0; only G
   const w = world();
   const logs: string[] = [];
   const written: Record<string, string> = {};
-  const code = await main({ argv: ['--findings', 'findings/feed.json'], env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep, log: (l) => logs.push(l), writeFile: (p, d) => void (written[p] = d) });
+  const code = await main({ readFile: switchesOff, argv: ['--findings', 'findings/feed.json'], env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep, log: (l) => logs.push(l), writeFile: (p, d) => void (written[p] = d) });
   assert.equal(code, 0);
   const doc = JSON.parse(written['findings/feed.json']!);
   const parsed = parseFindingsDocument(doc);
@@ -920,7 +923,7 @@ test('main --findings: an unhealthy feed is still exit 0, with plain log lines (
   const written: Record<string, string> = {};
   const dir = mkdtempSync(join(tmpdir(), 'feed-health-'));
   const summary = join(dir, 'summary.md');
-  const code = await main({ argv: ['--findings', 'f.json'], env: { ...ENV, GITHUB_STEP_SUMMARY: summary }, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep, log: (l) => logs.push(l), writeFile: (p, d) => void (written[p] = d) });
+  const code = await main({ readFile: switchesOff, argv: ['--findings', 'f.json'], env: { ...ENV, GITHUB_STEP_SUMMARY: summary }, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep, log: (l) => logs.push(l), writeFile: (p, d) => void (written[p] = d) });
   assert.equal(code, 0);
   const doc = JSON.parse(written['f.json']!);
   assert.deepEqual(doc.findings.map((f: Finding) => f.key).sort(), ['feed:repo-size', 'feed:source:tmd']);
@@ -935,7 +938,7 @@ test('main: every network call failing still writes a document: unreachable mani
   const c = clock();
   const w = stub([]);
   const written: Record<string, string> = {};
-  const code = await main({ argv: ['--findings', 'f.json'], env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep, log: () => {}, writeFile: (p, d) => void (written[p] = d) });
+  const code = await main({ readFile: switchesOff, argv: ['--findings', 'f.json'], env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep, log: () => {}, writeFile: (p, d) => void (written[p] = d) });
   assert.equal(code, 0);
   const doc = JSON.parse(written['f.json']!);
   assert.ok(parseFindingsDocument(doc).ok);
@@ -954,7 +957,7 @@ test('main: no GH_TOKEN (a local run): the GitHub parts are unjudged, nothing is
   const c = clock();
   const w = world();
   const logs: string[] = [];
-  const code = await main({ argv: [], env: {}, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep, log: (l) => logs.push(l) });
+  const code = await main({ readFile: switchesOff, argv: [], env: {}, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep, log: (l) => logs.push(l) });
   assert.equal(code, 0);
   assert.equal(w.calls.filter((x) => x.url.startsWith(GITHUB_API)).length, 0);
   const printed = logs.find((l) => l.startsWith('{'))!;
@@ -965,7 +968,7 @@ test('main: no GH_TOKEN (a local run): the GitHub parts are unjudged, nothing is
   assert.match(doc.notes.join(), /GitHub parts not judged: no GH_TOKEN or GITHUB_REPOSITORY \(a local run\)/);
   // A token without the run id: the queue time is 0, with a note.
   const c2 = clock();
-  const inputs = await collect({ env: { GH_TOKEN: TOKEN, GITHUB_REPOSITORY: REPO }, fetchImpl: world().fetchImpl, now: c2.now, sleep: c2.sleep });
+  const inputs = await collect({ readFile: switchesOff, env: { GH_TOKEN: TOKEN, GITHUB_REPOSITORY: REPO }, fetchImpl: world().fetchImpl, now: c2.now, sleep: c2.sleep });
   assert.equal(inputs.queuedMs, 0);
   assert.match(inputs.notes.join(), /no GITHUB_RUN_ID/);
 });
@@ -975,7 +978,7 @@ test('main: in Actions, no GH_TOKEN or a failed created_at read is watcher:feed-
   const findingsOf = async (env: Record<string, string>, w = world()): Promise<{ doc: { findings: Finding[]; unjudged: string[] }; logs: string[] }> => {
     const c = clock();
     const logs: string[] = [];
-    assert.equal(await main({ argv: ['--findings', 'f.json'], env, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep, log: (l) => logs.push(l), writeFile: (p, d) => void (written[p] = d) }), 0);
+    assert.equal(await main({ readFile: switchesOff, argv: ['--findings', 'f.json'], env, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep, log: (l) => logs.push(l), writeFile: (p, d) => void (written[p] = d) }), 0);
     const doc = JSON.parse(written['f.json']!);
     assert.ok(parseFindingsDocument(doc).ok);
     return { doc, logs };
@@ -1011,21 +1014,21 @@ test('main: the registry unreadable files marker lines by status.json\'s ids', a
 
 test('main: exit 3 for a bad argument or an unwritable --findings path; the default writer creates the directory', async () => {
   const logs: string[] = [];
-  assert.equal(await main({ argv: ['--findings'], env: {}, fetchImpl: stub([]).fetchImpl, log: (l) => logs.push(l) }), 3);
+  assert.equal(await main({ readFile: switchesOff, argv: ['--findings'], env: {}, fetchImpl: stub([]).fetchImpl, log: (l) => logs.push(l) }), 3);
   assert.match(logs.join('\n'), /^::error title=Feed health misconfigured::--findings needs a path$/m);
-  assert.equal(await main({ argv: ['--bogus'], env: {}, fetchImpl: stub([]).fetchImpl, log: () => {} }), 3);
+  assert.equal(await main({ readFile: switchesOff, argv: ['--bogus'], env: {}, fetchImpl: stub([]).fetchImpl, log: () => {} }), 3);
   assert.throws(() => parseArgs(['--findings', '--x']), /needs a path/);
   assert.deepEqual(parseArgs(['--findings', 'a/b.json']), { findingsPath: 'a/b.json' });
   const c = clock();
   const out: string[] = [];
-  const code = await main({ argv: ['--findings', 'x.json'], env: ENV, fetchImpl: world().fetchImpl, now: c.now, sleep: c.sleep, log: (l) => out.push(l), writeFile: () => { throw new Error('EACCES: permission denied'); } });
+  const code = await main({ readFile: switchesOff, argv: ['--findings', 'x.json'], env: ENV, fetchImpl: world().fetchImpl, now: c.now, sleep: c.sleep, log: (l) => out.push(l), writeFile: () => { throw new Error('EACCES: permission denied'); } });
   assert.equal(code, 3);
   assert.match(out.join('\n'), /^::error title=Feed health could not write its findings::x\.json: EACCES: permission denied$/m);
   // The real writer: findings/feed.json in a fresh checkout has no findings/ yet.
   const dir = mkdtempSync(join(tmpdir(), 'feed-health-write-'));
   const path = join(dir, 'findings', 'feed.json');
   const c2 = clock();
-  assert.equal(await main({ argv: ['--findings', path], env: ENV, fetchImpl: world().fetchImpl, now: c2.now, sleep: c2.sleep, log: () => {} }), 0);
+  assert.equal(await main({ readFile: switchesOff, argv: ['--findings', path], env: ENV, fetchImpl: world().fetchImpl, now: c2.now, sleep: c2.sleep, log: () => {} }), 0);
   assert.ok(existsSync(path));
   assert.ok(parseFindingsDocument(JSON.parse(readFileSync(path, 'utf8'))).ok);
 });
@@ -1069,7 +1072,8 @@ test('evaluateStats: through behind the last frozen day by more than 3 days (his
 });
 
 test('readStatsConfig and statsPointerOf: anything unreadable is off; the pointer from the raw v1 JSON', () => {
-  assert.deepEqual(readStatsConfig(readFileSync(STATS_CONFIG_PATH, 'utf8')), { mode: 'off', history: false, message: null });
+  const committed = readStatsConfig(readFileSync(STATS_CONFIG_PATH, 'utf8'));
+  assert.equal(committed.message, null, 'the committed providers/stats.json reads cleanly');
   assert.deepEqual(readStatsConfig('{"derive_publish":"on","history_enabled":true}'), { mode: 'on', history: true, message: null });
   assert.equal(readStatsConfig('{"derive_publish":"loud"}').mode, 'off');
   assert.match(readStatsConfig('{').message!, /unreadable/);
@@ -1093,7 +1097,7 @@ test('collect: the stats index is read only when the v1 manifest points at it; e
   // No pointer: the index is not asked for.
   const c2 = clock();
   const w2 = world();
-  const off = await collect({ env: ENV, fetchImpl: w2.fetchImpl, now: c2.now, sleep: c2.sleep });
+  const off = await collect({ env: ENV, fetchImpl: w2.fetchImpl, now: c2.now, sleep: c2.sleep, readFile: files('{"derive_publish":"shadow","history_enabled":false}') });
   assert.equal(off.stats?.pointer, null);
   assert.ok(!w2.calls.some((x) => x.url === STATS_INDEX_URL));
   assert.deepEqual(evaluateFeed(off).findings, []);

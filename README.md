@@ -57,9 +57,13 @@ columnar table per UTC day for the last 61 days (every live event with its magni
 provider, review status and report delay; the non-earthquakes and unusable rows counted), the current year and the two
 before it as per-day magnitude bins plus their M5+ events, and every year since 1973 on a 0.1° grid for "near me" counts
 (M4.5+ before 2000 from USGS ComCat). The index lists every file with its sha256 and the signed v2 manifest names the
-index's sha256, so a client re-reads only the files whose fingerprint changed. The rows are the feed's own events: stats
-add no deduplication of their own. Format, row rule and completeness epochs: [APIs.md](APIs.md#get-v1statsindexjson--statistics).
-`providers/stats.json` holds the switches (`derive_publish` off / shadow / on, `history_enabled`).
+index's sha256, so a client re-reads only the files whose fingerprint changed. The rows are the feed's own events,
+merged by the feed's own rule: where an input is not yet re-merged (*Re-merged history*), the stats builder runs the same
+`remergeNodes` over it in memory. The year and area files come from the `stats` workflow (`src/stats-history.ts`, every
+6 h): it rebuilds a year when the checksums of its inputs change, checks each year against USGS ComCat's M6+ and M4.5+
+counts before it commits the files to `data`, and keeps a year's previous files when the check fails. Format, row rule,
+inputs and completeness epochs: [APIs.md](APIs.md#get-v1statsindexjson--statistics). `providers/stats.json` holds the
+switches (`derive_publish` off / shadow / on, `history_enabled`).
 
 ### Rolling summary feeds (USGS-style matrix)
 
@@ -388,7 +392,7 @@ hundred, the board is not written at all: exit 3). The label `health:p1` … `he
 | `feed:stats` | P2 (after 30 min) | `providers/stats.json` says `derive_publish: "on"` and the live v1 manifest has no `stats` pointer | derive's `::warning::stats dropped: …` says why; the live feed is unaffected and the app keeps its last verified statistics |
 | `feed:stats-through` | P3 | With `history_enabled`, the statistics index's `through` null or more than 3 days behind the last frozen day | The stats builder's runs (`stats.yml`) and its ComCat gate |
 | `feed:stats-days` | P3 | The statistics index names `missing_days` | A window day with neither an event-map day nor a partition on `data` |
-| `walks:<workflow>:<source>` | P3 | A blocked marker of `history`, `first-solutions`, `backfill` or `archive` in the last 26 h (`run` for a line about the walk itself) | The walk run's warning; the row resolves 26 h after the last marker |
+| `walks:<workflow>:<source>` | P3 | A blocked marker of `history`, `first-solutions`, `backfill`, `archive`, `remerge` or `stats` (a year that failed its ComCat gate or its build, a failed verify) in the last 26 h (`run` for a line about the walk itself) | The walk run's warning; the row resolves 26 h after the last marker |
 | `platform:api` | P2 | `/v1/health` not 200 `ok: true` after 3 tries over 60 s, or `sessionKeySource: "ephemeral"` | The API Worker; an ephemeral key means its session signing secret is missing (random 401s in the app) |
 | `platform:api:envelope` | P3 | `providerTokenEnvelope: "missing"` | Account deletion cannot revoke at Apple until the envelope key is set |
 | `platform:config-worker` | P3 | `/healthz` not 200 `ok: true`; escalates at 6 h | Apps read the data copy first and keep their last good config: the config Worker |
@@ -416,7 +420,7 @@ change a red run; an expired or malformed entry is named in the run's warnings. 
 P1 `alerts:selftest`: the run must be red, which proves the red path and the email. `reconcile` records the last selftest
 on the boards; GitHub can drop a scheduled run, so 35 days without one opens `watcher:selftest-overdue`.
 
-**Walks and writers.** `history`, `first-solutions`, `backfill` and `archive` keep a blocked run green: a `::warning::`,
+**Walks and writers.** `history`, `first-solutions`, `backfill`, `archive`, `remerge` and `stats` keep a blocked run green: a `::warning::`,
 and the marker as the artifact `walk-blocked-<workflow>`, which the `feed` job files as `walks:<workflow>:<source>`.
 `aggregate` and `derive` still go red on a failed publish (owner decision 2026-10-22); `feed:freshness` is the symptom
 either way.

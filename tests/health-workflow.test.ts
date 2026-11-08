@@ -192,6 +192,7 @@ const WALKS: Array<{ workflow: string; marker: string; writer: [string, string] 
   { workflow: 'backfill', marker: 'backfill-blocked.txt', writer: ['src/backfill.ts', "'backfill-blocked.txt'"] },
   { workflow: 'archive', marker: 'archive-blocked.txt', writer: ['src/archive.ts', "'archive-blocked.txt'"] },
   { workflow: 'remerge', marker: 'remerge-blocked.txt', writer: ['src/remerge-archives.ts', "'remerge-blocked.txt'"] },
+  { workflow: 'stats', marker: 'stats-blocked.txt', writer: ['src/stats-history.ts', "'stats-blocked.txt'"] },
 ];
 
 test('walks: a blocked marker is a warning on a green run and the artifact walk-blocked-<workflow>, kept past the 26 h hold', () => {

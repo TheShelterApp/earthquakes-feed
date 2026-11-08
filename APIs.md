@@ -279,7 +279,9 @@ noise, not existing, other event, volcanic eruption) is **filtered** (counted by
 live event is a row: `status` is the review status of its chosen provenance row (*Review status*: 1 reviewed, 0
 automatic, null when the source does not say), `upd` is 1 when `updated − time` is more than 3,600,000 ms (0 otherwise,
 null without `updated`), `delay` the seconds from origin to the feed's `first_ingest_time`, `intensity` `mmi`, else
-`cdi`. Statistics add no deduplication: the feed's own merge is the single one (*Realtime + client dedup*).
+`cdi`. Statistics add no deduplication rule of their own: the feed's merge is the single one (*Realtime + client
+dedup*, *Re-merged history*); the year and area files count an input that is not yet re-merged after running that same
+merge over it (below).
 
 **Event table** (format 1, shared by the three file kinds): `{format, kind, t0, count, providers, id, t, lat, lon, mag,
 …optional columns}`, rows sorted by (time, id). `id` is the feed id (`efd_…`, the feature id). `t` holds ms deltas:
@@ -312,9 +314,45 @@ below 6,480,000. `total` counts the rows, `m45` the M4.5+ rows, `mmax` the large
 the M6+ rows (exact positions). `min_mag: 4.5` (era B) means every record is M4.5+ (`m45 == total`). A radius count over
 cell centres is approximate (median 0.5 %, p90 3.4 % at 100 km); the M6+ rows are exact.
 
-Inputs per day, first match wins: a remediation edition (*Saturated days*), the frozen partition, the archive month,
-the deep-history edition (*Deep history*); a change of any input's `sha256` (or partition blob) rebuilds that year. The
-stats builder checks each year against USGS ComCat counts (M6+ and M4.5+) before it publishes it.
+**How the year and area files are built** (`stats.yml`, `src/stats-history.ts`, every 6 h while `providers/stats.json`
+has `history_enabled: true`). They run through `through`, the last frozen day (today − 11); later days come from the
+day tables.
+
+- **Inputs per day, first match wins:** the day's current remediation edition (*Saturated days*; it supersedes the
+  archived day and the partition), the frozen day partition on `data` (by its git blob), the archive month that lists the
+  day, the current deep-history edition that lists it (*Deep history*; era B editions carry `min_magnitude: 4.5`). A
+  year with a day that has no input waits (the era B walk) and is not published.
+- **Rebuild:** a year is rebuilt when the digest of its inputs changes: sha256 of the canonical JSON of the builder
+  version, the format, the re-merge epoch, `through` and every input's `{kind, key, sha256 or blob}` (plus the inputs of
+  the 7 days on each side when the year is re-merged in memory). A new frozen day rebuilds the current year; a re-merged
+  archive or edition, a new remediation edition or a re-roll rebuilds its year with no other action; a builder bump
+  rebuilds them all. The current year and the two before it first, then newest first, at most `max_years_per_run` a run.
+- **The in-memory re-merge** (owner decision A6): an input below the re-merge epoch (an archive or edition without
+  `merge_epoch` ≥ 1 — except an edition of a single source, era B, which has nothing to fold —, a remediation edition
+  without `stats.remerge`, every frozen partition) still holds the split
+  duplicates the merge-off paths made. The builder runs the feed's own `remergeNodes` (*Re-merged history*) over each
+  such month in memory — the month's days as the unit, the 7 days before it as frozen and the 7 days after it as pinned
+  context, each read from its own input, the fixed `REMERGE_INGEST_TIME` — and counts the result. The ledger records
+  `remerged_in_memory: true` for such a year; once the merged assets are published, their checksums change the digest
+  and the year is rebuilt from them. The epoch the statistics count at is at least 1 whatever `REMERGE_EPOCH` says.
+- **Era B** (1973–1999, USGS ComCat M4.5+): rows under M4.5 and the filtered events are left out, so `min_mag: 4.5` and
+  `m45 == total`. Compare a count across the `completeness` epochs on M4.5+ only: the number of contributing agencies
+  grows from one (era B) to 17 (era A, 2000 → 2023-07-05), more with the archives (→ 2026-07-04) and about 40 live.
+- **ComCat gate:** before a rebuilt year's files are written, its M6+ (the `m6` rows) and M4.5+ (Σ `m45`) are compared
+  with `count?eventtype=earthquake` over `[Y-01-01, min(Y+1-01-01, through + 1 day))`, one request at a time, at most
+  0.5 a second. Era B must be within ±2 %, later years within the `gate` bands of `providers/stats.json` (M6+ ratio
+  0.85–1.20, M4.5+ 0.85–1.40); the open current year only warns. A year that fails keeps its previous files (a first
+  build stays absent) and is not retried until its inputs change; the run's marker `walk-blocked-stats` reaches the
+  health board (`walks:stats:run`).
+- **Ledger** `knowledge/stats/state.json` on `data` (derive reads `through` and each file's `sha256` from it):
+  `{version, builder, through, generated, run_id, years: {Y: {inputs_digest, through, complete, area: {bytes, sha256,
+  records, m6}, year?: {bytes, sha256}, check: {gate: ok|warn|fail|error, era, window, feed, comcat, ratio, bands},
+  remerged_in_memory, inputs: {remediation, partition, archive, edition, unmerged_months}, dup_suspects: {count, n45,
+  ratio, sample}, months: {YYYY-MM: {n45, m6, dup}}, failed_digest?, error?, waiting?}}}`. `dup_suspects` (diagnostics
+  only) counts pairs of M4.5+ rows of different chosen providers within 60 s and 100 km: splits the merge left.
+- **Verify:** a dispatch with `verify: sample` (the last 13 months and 6 older ones) or `full` (every month) compares
+  each month's M4.5+ and M6+ with ComCat in the run's summary and `report.md`; a failing month adds a
+  `stats-verify-failed` line to the marker.
 
 Versioning: a new optional column or field keeps `format: 1`; an incompatible change is a new directory and a new
 manifest key `stats2`, with `stats` kept for a deprecation window.

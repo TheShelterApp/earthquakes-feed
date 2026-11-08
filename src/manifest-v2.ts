@@ -1,5 +1,16 @@
 import { createHash } from 'node:crypto';
-import { decodeJsonPayload, jcsBytes, openBytes, sealJson, type SignedEnvelope, type Signer, type Verifier } from '@theshelter/signing';
+import {
+  Ed25519Verifier,
+  EnvelopeError,
+  decodeJsonPayload,
+  decodeRawPublicKey,
+  jcsBytes,
+  openBytes,
+  sealJson,
+  type SignedEnvelope,
+  type Signer,
+  type Verifier,
+} from '@theshelter/signing';
 import { DOMAIN, JSDELIVR_BASE, REPO } from './config.js';
 import type { ManifestPartition } from './partitions.js';
 
@@ -99,7 +110,40 @@ export interface BuildInput {
   offlineAfterSeconds?: number;
 }
 
-export const DEFAULT_KID = 'feed-2026a';
+/** The kid the manifest is signed under when FEED_SIGNING_KID is unset or empty (CI sets it; APIs.md lists the keys). */
+export const DEFAULT_KID = 'feed-2026c';
+
+/**
+ * Public halves of the feed signing keys (raw Ed25519, base64): the current signer and the standby. They match the
+ * iOS embedded keyring and the APIs.md signing-key table (tests/manifest-v2.test.ts guards the table).
+ */
+export const FEED_PUBLIC_KEYS: Readonly<Record<string, string>> = {
+  'feed-2026c': 'XZDJ7WeMnQd1bziaAJGt/tu8n5+Z/taWj+sOjb3cFUo=',
+  'feed-2026d': 'NvhpNHdWYEi1cyuc5G51KDRqW//JwRRrqcXtopHzRLc=',
+};
+/** Kids no reader may trust any more (listed in APIs.md as retired). */
+export const RETIRED_FEED_KIDS = ['feed-2026a'] as const;
+
+/**
+ * The signed envelope checked against the published public key of its kid, so a signing secret that does not belong
+ * to the kid it is published under is caught before readers see it. Needs no secret. `unknown-kid`: the kid has no
+ * published key here; `mismatch`: the signature does not verify under the published key (or the envelope is malformed).
+ */
+export async function envelopeKeyCheck(
+  envelope: SignedEnvelope,
+  keys: Readonly<Record<string, string>> = FEED_PUBLIC_KEYS,
+): Promise<'ok' | 'unknown-kid' | 'mismatch'> {
+  const raw = keys[envelope.kid];
+  if (raw === undefined) return 'unknown-kid';
+  const verifier = await Ed25519Verifier.fromRawPublicKeys('feed', { [envelope.kid]: decodeRawPublicKey(raw) });
+  try {
+    await openBytes(verifier, envelope);
+    return 'ok';
+  } catch (e) {
+    if (e instanceof EnvelopeError) return e.code === 'UnknownKid' ? 'unknown-kid' : 'mismatch';
+    throw e;
+  }
+}
 export const PAGES_BASE = `https://${DOMAIN}/`;
 
 export const sha256Hex = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');

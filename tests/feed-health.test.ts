@@ -417,7 +417,7 @@ const v1Manifest = (generated: number, staleAfter: number | null = 1800): Record
 const v2Envelope = (generated: number, staleAfter: number | null = 1800): Record<string, unknown> => ({
   payload: Buffer.from(JSON.stringify({ ...v1Manifest(generated, staleAfter), schema_version: 2 })).toString('base64'),
   sig: 'c2lnbmF0dXJl',
-  kid: 'feed-2026a',
+  kid: 'feed-2026c',
 });
 const okRead = (generatedMs: number, staleAfterMs = 1_800 * SEC): ManifestRead => ({ ok: true, generatedMs, staleAfterMs });
 

@@ -21,7 +21,7 @@ each row carrying `license`, `attribution`, and `doi`.
 - **RéNaSS / BCSF (France)** (`renass`) — CC-BY-4.0 — Réseau National de Surveillance Sismique (RéNaSS), Université de Strasbourg / BCSF
 - **IPGP (France + overseas volcano observatories)** (`ipgp`) — CC-BY-4.0 — Institut de Physique du Globe de Paris (IPGP)
 - **ETH Zürich / Swiss Seismological Service** (`ethz`) — CC-BY-4.0 — Swiss Seismological Service (SED) at ETH Zürich
-- **Earthquakes Canada (NRCan)** (`nrcan`) — OGL-Canada-2.0 — Natural Resources Canada — Earthquakes Canada
+- **Earthquakes Canada (NRCan)** (`nrcan`) — [OGL-Canada-2.0](https://open.canada.ca/en/open-government-licence-canada) — Natural Resources Canada — Earthquakes Canada. Contains information licensed under the Open Government Licence – Canada.
 - **Northern California Earthquake Data Center** (`ncedc`) — CC-BY-4.0, DOI [10.7932/NCEDC](https://doi.org/10.7932/NCEDC) — NCEDC (UC Berkeley Seismological Laboratory & USGS)
 - **Southern California Earthquake Data Center** (`scedc`) — CC-BY-4.0, DOI [10.7909/C3WD3xH1](https://doi.org/10.7909/C3WD3xH1) — SCEDC (Caltech / USGS)
 - **AEC — Alaska Earthquake Center (University of Alaska Fairbanks)** (`aec`) — unknown, DOI [10.7914/SN/AK](https://doi.org/10.7914/SN/AK) — Alaska Earthquake Center, Univ. of Alaska Fairbanks (1987). Alaska Regional Network [Data set]; supported in part by USGS ANSS cooperative agreement #G25AC00133 and NSF award #2024208
@@ -38,7 +38,7 @@ each row carrying `license`, `attribution`, and `doi`.
 - **ISC — International Seismological Centre (global, reviewed, delayed)** (`isc`) — CC-BY-4.0, DOI [10.31905/D808B830](https://doi.org/10.31905/D808B830) — International Seismological Centre (ISC) On-line Bulletin
 - **IGP — Instituto Geofísico del Perú (Peru)** (`igp`) — IGP-Peru — Instituto Geofísico del Perú (IGP)
 - **ENSN — Egyptian National Seismic Network (NRIAG)** (`egypt`) — ENSN-NRIAG — Egyptian National Seismic Network (ENSN), NRIAG
-- **BGS — British Geological Survey (UK)** (`bgs`) — OGL-3.0 — British Geological Survey © UKRI (Open Government Licence v3.0)
+- **BGS — British Geological Survey (UK)** (`bgs`) — [OGL-3.0](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/) — British Geological Survey © UKRI (Open Government Licence v3.0). Contains public sector information licensed under the Open Government Licence v3.0.
 - **IGN — Instituto Geográfico Nacional (Spain)** (`ign`) — CC-BY-4.0 — © Instituto Geográfico Nacional de España (IGN)
 - **IMO — Icelandic Met Office (Veðurstofa Íslands)** (`imo`) — CC-BY-4.0 — Icelandic Meteorological Office (Veðurstofa Íslands)
 - **INPRES — Instituto Nacional de Prevención Sísmica (Argentina)** (`inpres`) — gov-open — INPRES — Instituto Nacional de Prevención Sísmica (Argentina)

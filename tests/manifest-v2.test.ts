@@ -1,10 +1,24 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
-import { generateEd25519, jcsBytes, toBase64 } from '@theshelter/signing';
-import { buildManifestV2, manifestV2Bytes, sha256Hex, signManifestV2, verifyManifestV2, type ManifestV1 } from '../src/manifest-v2.js';
+import { decodeRawPublicKey, generateEd25519, generateEd25519KeyMaterial, jcsBytes, toBase64 } from '@theshelter/signing';
+import {
+  DEFAULT_KID,
+  FEED_PUBLIC_KEYS,
+  RETIRED_FEED_KIDS,
+  buildManifestV2,
+  envelopeKeyCheck,
+  manifestV2Bytes,
+  sha256Hex,
+  signManifestV2,
+  verifyManifestV2,
+  type ManifestV1,
+} from '../src/manifest-v2.js';
 
 const COMMIT = '9c1e0d3b5e5f4b0c8f6d1c1d0a2b3c4d5e6f7a8b';
 const v1 = (): ManifestV1 => ({
@@ -120,4 +134,75 @@ test('the payload validates against schema/manifest-v2.schema.json; a bad data_c
 
 test('a missing artifact fails the build instead of signing a manifest that lies', () => {
   assert.throws(() => build({ read: (p) => (p.endsWith('01.ndjson') ? read('events/2025/09/04.ndjson') : (() => { throw new Error(`missing ${p}`); })()) }), /missing/);
+});
+
+// ---- Signing kid and the published keys (stream C3) ----
+
+test('DEFAULT_KID is the current signer and every published key is a raw 32-byte Ed25519 key', () => {
+  assert.equal(DEFAULT_KID, 'feed-2026c');
+  assert.ok(DEFAULT_KID in FEED_PUBLIC_KEYS);
+  for (const [kid, b64] of Object.entries(FEED_PUBLIC_KEYS)) assert.equal(decodeRawPublicKey(b64).byteLength, 32, kid);
+  for (const kid of RETIRED_FEED_KIDS) assert.ok(!(kid in FEED_PUBLIC_KEYS), `${kid} is retired`);
+});
+
+test('envelopeKeyCheck: ok under its own key, mismatch under a foreign key of the same kid, unknown-kid otherwise', async () => {
+  const mine = await generateEd25519('feed-test', 'feed');
+  const other = await generateEd25519('feed-test', 'feed');
+  const env = await signManifestV2(buildManifestV2({ v1: v1(), dataCommit: COMMIT, read }), mine.signer);
+  assert.equal(await envelopeKeyCheck(env, { 'feed-test': toBase64(mine.rawPublicKey) }), 'ok');
+  assert.equal(await envelopeKeyCheck(env, { 'feed-test': toBase64(other.rawPublicKey) }), 'mismatch');
+  assert.equal(await envelopeKeyCheck(env, { 'feed-other': toBase64(mine.rawPublicKey) }), 'unknown-kid');
+  assert.equal(await envelopeKeyCheck(env), 'unknown-kid', 'the default keyring knows only the feed kids');
+  assert.equal(await envelopeKeyCheck({ ...env, sig: env.sig.replace(/^./, (c) => (c === 'A' ? 'B' : 'A')) }, { 'feed-test': toBase64(mine.rawPublicKey) }), 'mismatch');
+  assert.equal(await envelopeKeyCheck({ ...env, sig: 'not base64!' }, { 'feed-test': toBase64(mine.rawPublicKey) }), 'mismatch');
+});
+
+test('doc drift: the APIs.md signing-key table matches FEED_PUBLIC_KEYS and marks every retired kid', () => {
+  const doc = readFileSync(new URL('../APIs.md', import.meta.url), 'utf8');
+  const rows = [...doc.matchAll(/^\| `(feed-[0-9a-z]+)` \| `([A-Za-z0-9+/=]+)` \| (.+) \|$/gm)].map((m) => ({ kid: m[1]!, key: m[2]!, status: m[3]! }));
+  assert.ok(rows.length >= 3, 'the table is found');
+  const live = Object.fromEntries(rows.filter((r) => !/retired/i.test(r.status)).map((r) => [r.kid, r.key]));
+  assert.deepEqual(live, { ...FEED_PUBLIC_KEYS });
+  for (const kid of RETIRED_FEED_KIDS) {
+    const row = rows.find((r) => r.kid === kid);
+    assert.ok(row && /retired/i.test(row.status), `${kid} is listed as retired`);
+  }
+  assert.match(doc, /"kid": "feed-2026c"/);
+});
+
+test('sign-manifest: a key that is not the published key of its kid writes no v2 manifest and sets v2_failed; an unknown kid warns and writes', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sign-manifest-'));
+  const pub = join(root, 'public');
+  const data = join(root, 'data');
+  mkdirSync(join(pub, 'v1'), { recursive: true });
+  mkdirSync(data);
+  const m = { ...v1(), summaries: {}, partitions: [] };
+  writeFileSync(join(pub, 'v1', 'manifest.json'), JSON.stringify(m));
+  // A throwaway test key: it is no feed key, so under kid feed-2026c it must be refused.
+  const material = await generateEd25519KeyMaterial('feed-test');
+  const run = (kid: string) => {
+    const out = join(root, `out-${kid || 'empty'}`);
+    writeFileSync(out, '');
+    rmSync(join(pub, 'v2'), { recursive: true, force: true });
+    const r = spawnSync(process.execPath, ['--import', 'tsx', 'src/sign-manifest.ts'], {
+      cwd: new URL('..', import.meta.url),
+      env: { ...process.env, FEED_SIGNING_KEY: material.privateKeyPkcs8Base64, FEED_SIGNING_KID: kid, DATA_COMMIT: COMMIT, DATA_DIR: data, PUBLIC_DIR: pub, GITHUB_OUTPUT: out, TILES_POINTER: '', R2_PUBLIC_BASE: '' },
+      encoding: 'utf8',
+    });
+    return { status: r.status, log: r.stdout + r.stderr, output: readFileSync(out, 'utf8'), written: existsSync(join(pub, 'v2', 'manifest.json')) };
+  };
+  for (const kid of ['feed-2026c', '']) {
+    const r = run(kid);
+    assert.equal(r.status, 0, r.log);
+    assert.equal(r.written, false, `${kid || 'empty → DEFAULT_KID'}: no v2 manifest`);
+    assert.equal(r.output, 'v2_failed=1\n');
+    assert.match(r.log, /::error::v2 manifest signature does not verify under the published key of kid=feed-2026c/);
+    assert.ok(!r.log.includes(material.privateKeyPkcs8Base64), 'no key material in the log');
+  }
+  const u = run('feed-test');
+  assert.equal(u.status, 0, u.log);
+  assert.equal(u.written, true);
+  assert.equal(u.output, '');
+  assert.match(u.log, /::warning::kid=feed-test has no published public key/);
+  assert.match(u.log, /sign-manifest: v2\/manifest\.json kid=feed-test key=unknown-kid /);
 });

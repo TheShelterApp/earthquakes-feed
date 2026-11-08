@@ -48,7 +48,7 @@ The same catalog, wrapped so a client can trust it from **any** origin (Pages, j
 raw.githubusercontent, a mirror):
 
 ```json
-{ "payload": "<base64>", "sig": "<base64>", "kid": "feed-2026a" }
+{ "payload": "<base64>", "sig": "<base64>", "kid": "feed-2026c" }
 ```
 
 `payload` is the exact bytes that were signed — RFC 8785 canonical JSON of the object below —
@@ -68,11 +68,17 @@ forward with the same names, plus:
 | `partitions[]` | v1 entries plus `sha256`; `frozen: true` means the bytes never change again (a day is frozen once it is older than the 10 days the 5-minute run can still revise, delete or add to — see *Late publications*) |
 | `tiles` | the offline region bundle `{version, url, sizeBytes, sha256}` (from `region-tiles/regions-db.json`), or `null` |
 
-Current signing keys (raw Ed25519 public key, base64):
+Signing keys (raw Ed25519 public key, base64). Trust the signer and the standby; a retired key must not be trusted:
 
-| `kid` | public key | since |
+| `kid` | public key | status |
 |---|---|---|
-| `feed-2026a` | `d3VM4u2RaSbJ7BC3HPI8PX9XCS7xTlUHA5hRKID9hKo=` | 2026-09-06 |
+| `feed-2026c` | `XZDJ7WeMnQd1bziaAJGt/tu8n5+Z/taWj+sOjb3cFUo=` | signer since 2026-09-26 (first envelope 04:45 UTC, derive run 36218629756) |
+| `feed-2026d` | `NvhpNHdWYEi1cyuc5G51KDRqW//JwRRrqcXtopHzRLc=` | standby (trusted, not signing) |
+| `feed-2026a` | `d3VM4u2RaSbJ7BC3HPI8PX9XCS7xTlUHA5hRKID9hKo=` | retired 2026-09-26 (signed from 2026-09-06): do not trust |
+
+Before publishing, each run checks the envelope against the published key of its `kid` (`envelopeKeyCheck` in
+`src/manifest-v2.ts`, whose `FEED_PUBLIC_KEYS` this table must match: `tests/manifest-v2.test.ts`). On a mismatch no
+v2 manifest is published in that run, v1 still is, and the run fails.
 
 A `sha256` that does not match the bytes you fetched means the origin is stale or lying —
 try the next origin. Signing is done by the `derive` workflow after the data commit exists
@@ -1419,6 +1425,11 @@ drop EMSC's `auth: "AFAD"` copy of it.
 
 ## Canada (NRCan)
 
+NRCan's data is under the Open Government Licence – Canada 2.0, which asks for this statement and a link to the
+licence: "Contains information licensed under the Open Government Licence – Canada"
+(https://open.canada.ca/en/open-government-licence-canada). The feed carries it in `metadata.attribution`, NOTICE and
+ATTRIBUTIONS.md.
+
 Earthquakes Canada's FDSN text answer has eight columns
 (`EventID|Time|Latitude|Longitude|Depth/km|MagType|Magnitude|EventLocationName`) where most services send the
 standard thirteen or fourteen. Until 2026-10-01 the feed read every FDSN text column at its standard position, so
@@ -1695,3 +1706,10 @@ serves (`nc`, `ci`, `ak`, …) stay `US-PD`, as ComCat distributes them. A row k
 already stored (day partitions, archives, history editions) change only when they are built again. The Global CMT
 Project licenses nothing but asks to be cited (its moment magnitudes are in many ComCat records): the citation is in
 [NOTICE](NOTICE).
+
+Two licences ask for a fixed statement and a link beside the source's attribution, and `metadata.attribution` carries
+both: NRCan's rows (`OGL-Canada-2.0`): "Contains information licensed under the Open Government Licence – Canada"
+([licence](https://open.canada.ca/en/open-government-licence-canada)); BGS's rows (`OGL-3.0`): "Contains public sector
+information licensed under the Open Government Licence v3.0"
+([licence](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/)). A redistribution that keeps
+`metadata.attribution`, or NOTICE, keeps both.

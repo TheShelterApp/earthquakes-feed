@@ -137,7 +137,12 @@ export interface ProviderConfig {
   frozenBudgetHours?: number | null;
   refreshSeconds: number;
   license: string;
+  /** The licence text's URL, linked wherever the licence is named (NOTICE, ATTRIBUTIONS.md). */
+  licenseUrl?: string;
   attribution: string;
+  /** The statement the licence asks for verbatim beside the source's attribution (OGL – Canada 2.0, OGL v3.0 UK),
+   *  rendered with the licence URL by scripts/gen-attributions.mjs; never part of the per-row provenance. */
+  attributionNotice?: string;
   doi: string | null;
   /** Catalogues this provider distributes whose rows carry their own licence, keyed by the row's `fields.net` in
    *  lower case (ComCat: ISC-GEM's `iscgem`, `iscgemsup`). src/row-license.ts applies them; scripts/gen-attributions.mjs

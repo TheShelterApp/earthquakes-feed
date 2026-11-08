@@ -30,8 +30,10 @@ const SIZE_CEILING = MAX_PUBLISHED_BYTES * 0.9;
 /** Growth is visible here, ~months before it becomes a failed run. */
 const SIZE_WARN = MAX_PUBLISHED_BYTES * 0.75;
 
+/** `metadata.attribution` of summaries, live day/month and detail files. It carries verbatim the statement each licence
+ *  that asks for one requires (OGL – Canada 2.0 for NRCan, OGL v3.0 for BGS; tests/attributions.test.ts). */
 export const NOTICE =
-  'Aggregated by earthquakes-feed (https://earthquakes-feed.theshelter.app). Per-source attribution and each provider\'s full solution are in properties.feed.provenance[] of the day files (/v1/events/) and NDJSON partitions; summaries are compact. Sources include USGS/ANSS (public domain), EMSC/CSEM and FDSN networks (CC-BY-4.0).';
+  'Aggregated by earthquakes-feed (https://earthquakes-feed.theshelter.app). Per-source attribution and each provider\'s full solution are in properties.feed.provenance[] of the day files (/v1/events/) and NDJSON partitions; summaries are compact. Sources include USGS/ANSS (public domain), EMSC/CSEM and FDSN networks (CC-BY-4.0). Contains information licensed under the Open Government Licence – Canada (https://open.canada.ca/en/open-government-licence-canada). Contains public sector information licensed under the Open Government Licence v3.0 (https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).';
 
 function collectionJson(name: string, feats: Feat[], nowMs: number, headIngestTime: string, minMag?: number | null, truncated = false): string {
   const ageSeconds = headIngestTime ? Math.max(0, Math.round((nowMs - Date.parse(headIngestTime)) / 1000)) : null;

@@ -1,27 +1,11 @@
 // Regenerate NOTICE + ATTRIBUTIONS.md from providers/registry.json so attribution
 // never drifts from the source of truth. Run: node scripts/gen-attributions.mjs
+// tests/attributions.test.ts checks the committed files equal renderAttributions(registry) byte for byte.
 import { readFileSync, writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 
-const reg = JSON.parse(readFileSync('providers/registry.json', 'utf8'));
-const providers = [...reg.providers].sort((a, b) => a.priority - b.priority);
-const active = providers.filter((p) => p.active);
-
-const line = (p) =>
-  `- **${p.name}** (\`${p.id}\`) — ${p.license}${p.doi ? `, DOI [${p.doi}](https://doi.org/${p.doi})` : ''} — ${p.attribution}`;
-
-// Catalogues a provider distributes whose rows carry their own licence (registry `catalogues`, keyed by the row's
-// `fields.net`; src/row-license.ts): ISC-GEM's solutions served by ComCat.
-const catalogues = active.flatMap((p) =>
-  Object.entries(p.catalogues ?? {}).map(([net, c]) => ({ net, provider: p, ...c })),
-);
-// One line per catalogue (several nets of one catalogue share it).
-const byCatalogue = [...new Map(catalogues.map((c) => [`${c.provider.id}|${c.name}`, c])).values()].map((c) => ({
-  ...c,
-  nets: catalogues.filter((x) => x.provider.id === c.provider.id && x.name === c.name).map((x) => x.net),
-}));
-const doiText = (doi) => (doi ? ` (DOI: ${doi})` : '');
-const doiLink = (doi) => (doi ? `, DOI [${doi}](https://doi.org/${doi})` : '');
-const netList = (c) => c.nets.map((n) => `\`${n}\``).join(', ');
+/** A licence's required statement with its link: the statement verbatim, the URL before its closing period. */
+export const statementWithLink = (notice, url) => `${notice.replace(/\.$/, '')} (${url}).`;
 
 // The Global CMT Project licenses nothing but asks to be cited: ComCat's records carry its moment magnitudes
 // (magSource hrv / gcmt) and, for a few events, its preferred origin (net gcmt).
@@ -30,14 +14,41 @@ const GCMT_CITATION =
   'J. H. Woodhouse (1981), J. Geophys. Res. 86, 2825-2852, doi:10.1029/JB086iB04p02825; Ekström, G., M. Nettles and ' +
   'A. M. Dziewonski (2012), Phys. Earth Planet. Inter. 200-201, 1-9, doi:10.1016/j.pepi.2012.04.002';
 
-const notice = `earthquakes-feed — attribution notice
+/** NOTICE and ATTRIBUTIONS.md for a parsed registry ({providers: [...]}); pure. */
+export function renderAttributions(reg) {
+  const providers = [...reg.providers].sort((a, b) => a.priority - b.priority);
+  const active = providers.filter((p) => p.active);
+
+  // A licence that asks for a fixed statement beside the attribution (OGL – Canada, OGL v3.0 UK): registry
+  // `attributionNotice`, linked to `licenseUrl`.
+  const license = (p) => (p.licenseUrl ? `[${p.license}](${p.licenseUrl})` : p.license);
+  const line = (p) =>
+    `- **${p.name}** (\`${p.id}\`) — ${license(p)}${p.doi ? `, DOI [${p.doi}](https://doi.org/${p.doi})` : ''} — ${p.attribution}${p.attributionNotice ? `. ${p.attributionNotice}` : ''}`;
+  const noticeLine = (p) =>
+    `- ${p.attribution}${p.doi ? ` (DOI: ${p.doi})` : ''}${p.attributionNotice ? `. ${statementWithLink(p.attributionNotice, p.licenseUrl)}` : ''}`;
+
+  // Catalogues a provider distributes whose rows carry their own licence (registry `catalogues`, keyed by the row's
+  // `fields.net`; src/row-license.ts): ISC-GEM's solutions served by ComCat.
+  const catalogues = active.flatMap((p) =>
+    Object.entries(p.catalogues ?? {}).map(([net, c]) => ({ net, provider: p, ...c })),
+  );
+  // One line per catalogue (several nets of one catalogue share it).
+  const byCatalogue = [...new Map(catalogues.map((c) => [`${c.provider.id}|${c.name}`, c])).values()].map((c) => ({
+    ...c,
+    nets: catalogues.filter((x) => x.provider.id === c.provider.id && x.name === c.name).map((x) => x.net),
+  }));
+  const doiText = (doi) => (doi ? ` (DOI: ${doi})` : '');
+  const doiLink = (doi) => (doi ? `, DOI [${doi}](https://doi.org/${doi})` : '');
+  const netList = (c) => c.nets.map((n) => `\`${n}\``).join(', ');
+
+  const notice = `earthquakes-feed — attribution notice
 =====================================
 
 This dataset aggregates publicly available earthquake parameters from multiple
 seismic networks. Per-event attribution is preserved in every Feature under
 properties.feed.provenance[]. Please keep the attributions below when redistributing.
 
-${active.map((p) => `- ${p.attribution}${p.doi ? ` (DOI: ${p.doi})` : ''}`).join('\n')}
+${active.map(noticeLine).join('\n')}
 
 Catalogues reached through another source, whose records carry their own license
 (provenance[].fields.net names the catalogue):
@@ -51,7 +62,7 @@ CDLA-Permissive-2.0. Individual observations remain under each source's own
 license, recorded per record in provenance[].license.
 `;
 
-const attributions = `# Attributions
+  const attributions = `# Attributions
 
 > Generated from \`providers/registry.json\` — do not edit by hand; run \`node scripts/gen-attributions.mjs\`.
 
@@ -84,6 +95,12 @@ one feed is the original contribution of **earthquakes-feed**, licensed
 [TAKEDOWN.md](TAKEDOWN.md).
 `;
 
-writeFileSync('NOTICE', notice);
-writeFileSync('ATTRIBUTIONS.md', attributions);
-console.log(`wrote NOTICE + ATTRIBUTIONS.md (${active.length} active, ${providers.length - active.length} inactive)`);
+  return { notice, attributions, active: active.length, inactive: providers.length - active.length };
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const out = renderAttributions(JSON.parse(readFileSync('providers/registry.json', 'utf8')));
+  writeFileSync('NOTICE', out.notice);
+  writeFileSync('ATTRIBUTIONS.md', out.attributions);
+  console.log(`wrote NOTICE + ATTRIBUTIONS.md (${out.active} active, ${out.inactive} inactive)`);
+}

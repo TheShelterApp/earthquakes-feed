@@ -28,6 +28,20 @@
       "fetched_at": "2026-10-04T12:00:40.941Z"
     },
     {
+      "provider": "usgs",
+      "day": "2025-04-01",
+      "tag": "remediation-2025",
+      "asset": "raw-usgs-2025-04-01.ndjson.gz",
+      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/remediation-2025/raw-usgs-2025-04-01.ndjson.gz",
+      "sha256": "1e1fb36d412965da24875c1285c17e68fb740a2e7f06c2d283010503486cb1e5",
+      "bytes": 43861,
+      "rows": 427,
+      "requests": 4,
+      "partial": false,
+      "fetched_at": "2026-11-08T15:09:46.602Z",
+      "reason": "seam"
+    },
+    {
       "provider": "imo",
       "day": "2025-05-24",
       "tag": "remediation-2025",
@@ -1276,6 +1290,78 @@
         }
       },
       "built_at": "2026-10-04T12:00:40.941Z"
+    },
+    {
+      "day": "2025-04-01",
+      "edition": 2,
+      "tag": "remediation-2025",
+      "asset": "events-2025-04-01.e2.ndjson.gz",
+      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/remediation-2025/events-2025-04-01.e2.ndjson.gz",
+      "sha256": "5715a89dbb0e49564f8b3f352327632fa8e087c512777e7fdea82f6542a76d13",
+      "bytes": 492161,
+      "built_on": {
+        "tag": "archive-2025-04",
+        "asset": "events-2025-04.tar.zst",
+        "sha256": "c9faf5af0fb16ac55f1c947e0d39f92280b6235354c211f444ed927b831d68f3"
+      },
+      "built_from": [
+        "raw-imo-2025-04-01.ndjson.gz",
+        "raw-usgs-2025-04-01.ndjson.gz"
+      ],
+      "reason": "seam",
+      "context": {
+        "2025-03-31": {
+          "tag": "archive-2025-03",
+          "asset": "events-2025-03.tar.zst",
+          "sha256": "73eb37fb331f597fabae8f348a949a22f3722e9562803a92d8a44c7cec03e980"
+        },
+        "2025-04-01": {
+          "tag": "archive-2025-04",
+          "asset": "events-2025-04.tar.zst",
+          "sha256": "c9faf5af0fb16ac55f1c947e0d39f92280b6235354c211f444ed927b831d68f3"
+        },
+        "2025-04-02": {
+          "tag": "archive-2025-04",
+          "asset": "events-2025-04.tar.zst",
+          "sha256": "c9faf5af0fb16ac55f1c947e0d39f92280b6235354c211f444ed927b831d68f3"
+        }
+      },
+      "stats": {
+        "archived_events": 2953,
+        "events": 2953,
+        "live_before": 2953,
+        "live_after": 2738,
+        "rows": 2191,
+        "changed": 0,
+        "unchanged": 2191,
+        "screened": 0,
+        "new_events": 0,
+        "retired": 215,
+        "off_day": 4,
+        "neighbour_joins": 0,
+        "afad_retimed": 59,
+        "afad_moved_out": 0,
+        "merged": 215,
+        "provider_rows": {
+          "usgs": {
+            "before": 427,
+            "after": 427
+          },
+          "imo": {
+            "before": 1764,
+            "after": 1764
+          },
+          "afad": {
+            "before": 59,
+            "after": 56
+          }
+        },
+        "remerge": {
+          "epoch": 1,
+          "from_edition": 0
+        }
+      },
+      "built_at": "2026-11-08T15:09:46.602Z"
     },
     {
       "day": "2025-05-24",

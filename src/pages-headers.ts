@@ -29,7 +29,8 @@ export const CACHE_CONTROL = {
   v2: 'public, max-age=0, s-maxage=60, stale-while-revalidate=120, stale-if-error=86400',
   /** The live index's day files (live-sync.ts): stable bytes that a client fetches when the index's sha256 for the day
    *  differs from its copy, so a cached copy must never be served without asking (an ETag revalidation is a 304). The
-   *  month index's day files likewise (live-month.ts, round 27). Also the unfrozen day partitions (`/events/YYYY/MM/DD.ndjson`, round 25): the v2 manifest's sha256 names their current
+   *  month index's day files likewise (live-month.ts, round 27). The statistics files (stats.ts, 2026-11): the index is
+   *  rewritten every run and names every file's sha256, so all of them are revalidated. Also the unfrozen day partitions (`/events/YYYY/MM/DD.ndjson`, round 25): the v2 manifest's sha256 names their current
    *  bytes, and a reader that gets other bytes moves to the next origin. */
   liveDay: 'public, max-age=0, must-revalidate',
 } as const;
@@ -71,6 +72,9 @@ export function pagesHeaders(nowMs: number, dayKeys: Iterable<string>): string {
     rule('/v1/live/month/:file', CACHE_CONTROL.liveDay),
     // The per-hour detail files (event-detail.ts): recent hours still fill, like the hot day files.
     rule('/v1/detail/:file', CACHE_CONTROL.hotDay),
+    // The statistics index and its day, year and area files (stats.ts): one rule for the whole tree, which no other
+    // rule reaches (`/v1/:file` is one segment).
+    rule('/v1/stats/*', CACHE_CONTROL.liveDay),
     // The unfrozen day partitions (NDJSON, partitions.ts writePagesPartition): the manifest's `url` and the v2 `pages`
     // origin. Outside /v1/, so no other rule matches them.
     rule('/events/*', CACHE_CONTROL.liveDay, NDJSON_CONTENT_TYPE),

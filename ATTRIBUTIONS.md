@@ -64,6 +64,13 @@ Citation requested: Global CMT Project (moment magnitudes and a few preferred or
 
 
 
+## Statistics
+
+The statistics files under `/v1/stats/` (APIs.md, *Statistics*) are adapted material: counts and columns computed from
+the feed's events, each row naming its event by feed id, whose `properties.feed.provenance[]` carries the sources'
+licences and attributions. Events before 2000 (era B) are USGS ComCat, public domain. Keep this file's attributions
+when redistributing them.
+
 ## The compilation
 
 The selection, normalization, deduplication, and arrangement of these sources into

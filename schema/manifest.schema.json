@@ -75,6 +75,17 @@
         "window_days": { "type": "integer" }
       }
     },
+    "stats": {
+      "type": "object",
+      "description": "The statistics index (APIs.md, Statistics): the 61 day tables, the year and area files with sha256. Present only when derive published it and it passed its check. Additive (2026-11).",
+      "required": ["path", "url", "head_seq", "format"],
+      "properties": {
+        "path": { "const": "v1/stats/index.json" },
+        "url": { "type": "string" },
+        "head_seq": { "type": "integer" },
+        "format": { "const": 1 }
+      }
+    },
     "event_detail": {
       "type": "object",
       "description": "Per-hour full-fat detail files (APIs.md, Event detail): put a UTC hour key YYYY-MM-DDTHH into url_template; every hour from first_hour to last_hour has a file. Additive (2026-10).",

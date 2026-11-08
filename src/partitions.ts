@@ -189,14 +189,14 @@ export function readDayPartitionNodes(root: string, dayKey: string): EventNode[]
  * per `opts.fmt` (PartitionFormat), the Pages day file on every day.
  * The Pages day file carries the live events full-fat plus, in compact form, the recently
  * retired ones (superseded or tombstoned) flagged non-live (publishesRetired) — the summaries
- * follow the same rule. Returns the NDJSON it wrote (derive copies an unfrozen day's to Pages).
+ * follow the same rule. Returns the NDJSON it wrote (derive copies an unfrozen day's to Pages) and its features.
  */
 export function writeDayPartition(
   root: string,
   dayKey: string,
   nodes: EventNode[],
   opts: { publicV1?: string; nowMs: number; headIngestTime: string; fmt: PartitionFormat },
-): { written: boolean; stat: PartStat; ndjson: string } {
+): { written: boolean; stat: PartStat; ndjson: string; feats: unknown[] } {
   const sorted = partitionOrder(nodes);
   const on = partitionCarriesReviewStatus(dayKey, opts.fmt);
   const feats = sorted.map((n) => partitionFeature(n, dayKey, opts.fmt));
@@ -240,6 +240,8 @@ export function writeDayPartition(
     written,
     stat: { count: nodes.length, bytes: Buffer.byteLength(ndjson), min_mag: mags.length ? Math.min(...mags) : null, max_mag: mags.length ? Math.max(...mags) : null },
     ndjson,
+    // The day's full-fat features, partition order (derive builds the day's stats table from them, src/stats.ts).
+    feats,
   };
 }
 

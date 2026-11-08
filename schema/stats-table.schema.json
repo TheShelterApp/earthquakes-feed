@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://earthquakes-feed.theshelter.app/schema/stats-table.schema.json",
+  "title": "Statistics day table (v1/stats/days/YYYY-MM-DD.json)",
+  "description": "One UTC day of live feed events as columns (format 1), the Statistics screen's input for 24 h, week and month: the event table of kind \"day\" plus the day's filtered (non-earthquake) times and skipped count. count + filtered.length + skipped = the day's live, non-tombstoned features. APIs.md, Statistics. $defs/eventTable is shared with the year and area files.",
+  "allOf": [{ "$ref": "#/$defs/eventTable" }],
+  "type": "object",
+  "required": ["date", "filtered", "skipped", "attribution", "depth", "place", "prov", "felt", "intensity", "alert", "tsunami", "status", "upd", "nst", "rms", "delay"],
+  "properties": {
+    "kind": { "const": "day" },
+    "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+    "filtered": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 86399999 }, "description": "times of the filtered live events, ms from t0 (each from t0, not cumulative), ascending" },
+    "skipped": { "type": "integer", "minimum": 0, "description": "live events without a usable magnitude or position" },
+    "attribution": { "type": "string" }
+  },
+  "$defs": {
+    "intOrNull": { "type": ["integer", "null"] },
+    "eventTable": {
+      "type": "object",
+      "description": "Rows sorted by (time, id). time[i] = t0 + t[0] + ... + t[i] (ms). lat/lon x 1e4, mag x 100, depth km x 100, intensity x 10 (mmi, else cdi), rms x 1000, each Math.round. An absent optional column means all null. A new optional column keeps format 1.",
+      "required": ["format", "kind", "t0", "count", "providers", "id", "t", "lat", "lon", "mag"],
+      "properties": {
+        "format": { "const": 1 },
+        "kind": { "enum": ["day", "year", "area"] },
+        "t0": { "type": "integer", "description": "ms epoch the first delta counts from" },
+        "count": { "type": "integer", "minimum": 0 },
+        "providers": { "type": "array", "items": { "type": "string" }, "uniqueItems": true, "description": "sorted chosen providers of the rows; prov indexes it" },
+        "id": { "type": "array", "items": { "type": "string", "pattern": "^efd_[0-9A-HJKMNP-TV-Z]{26}$" } },
+        "t": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "lat": { "type": "array", "items": { "type": "integer", "minimum": -900000, "maximum": 900000 } },
+        "lon": { "type": "array", "items": { "type": "integer", "minimum": -1800000, "maximum": 1800000 } },
+        "mag": { "type": "array", "items": { "type": "integer", "minimum": -200, "maximum": 1050 } },
+        "depth": { "type": "array", "items": { "$ref": "#/$defs/intOrNull" } },
+        "place": { "type": "array", "items": { "type": ["string", "null"] } },
+        "prov": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "felt": { "type": "array", "items": { "$ref": "#/$defs/intOrNull" } },
+        "intensity": { "type": "array", "items": { "$ref": "#/$defs/intOrNull" } },
+        "alert": { "type": "array", "items": { "type": ["string", "null"] } },
+        "tsunami": { "type": "array", "items": { "enum": [0, 1] } },
+        "status": { "type": "array", "items": { "enum": [0, 1, null] }, "description": "1 reviewed, 0 automatic, null not said (from the chosen provenance row)" },
+        "upd": { "type": "array", "items": { "enum": [0, 1, null] }, "description": "1 when updated - time > 3,600,000 ms, null without updated" },
+        "nst": { "type": "array", "items": { "$ref": "#/$defs/intOrNull" } },
+        "rms": { "type": "array", "items": { "$ref": "#/$defs/intOrNull" } },
+        "delay": { "type": "array", "items": { "$ref": "#/$defs/intOrNull" }, "description": "seconds from origin to the feed's first ingest" }
+      }
+    }
+  }
+}

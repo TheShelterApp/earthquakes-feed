@@ -12,6 +12,7 @@ archival, redaction).
 | Surface | Base | Use | Cache |
 |---|---|---|---|
 | Cloudflare Pages | `https://earthquakes-feed.theshelter.app/v1/` | live feed, recent day files, manifest, live index, month index, per-hour detail | summaries + manifest + live index, deltas and month index `max-age=30` + SWR; day files `max-age=300` (today, yesterday) / `3600` (older); live index and month index day files `max-age=0, must-revalidate`; detail hours `max-age=300` |
+| Cloudflare Pages | `https://earthquakes-feed.theshelter.app/v1/stats/` | statistics: the index, 61 day tables, the year and area files (*Statistics*; since 2026-11, while `providers/stats.json` has `derive_publish: "on"`) | `max-age=0, must-revalidate` (the index names every file's `sha256`) |
 | Cloudflare Pages | `https://earthquakes-feed.theshelter.app/events/` | the unfrozen day partitions (NDJSON, the last 11 days), byte for byte the `data` branch files (since 2026-10); served as `text/plain; charset=utf-8`, brotli or gzip when the request accepts it (since 2026-10-14; the manifest's `sha256` and `bytes` name the decoded bytes) | `max-age=0, must-revalidate` |
 | jsDelivr (branch) | `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/` | full-history partitions; **from 2026-11-04 frozen days only** (*Historical day partitions*) | ~12 h |
 | jsDelivr (`@sha`) | `…@<data_commit>/` | immutable frozen partitions | 1 year, immutable |
@@ -39,6 +40,7 @@ The catalog. Fields:
 | `live` | the live index: `{path, url, head_seq, window_days}` (see *Live index* below; since 2026-10) |
 | `live_month` | the month index: `{path, url, head_seq, min_mag, window_days}` (see *Month index* below; since 2026-10-14) |
 | `event_detail` | the per-hour detail files: `{path_template, url_template, first_hour, last_hour}` (see *Event detail* below; since 2026-10) |
+| `stats` | the statistics index: `{path, url, head_seq, format}` (see *Statistics* below; since 2026-11); present only when this run published the statistics and they passed their check |
 
 `partitions[]` overrides `archives[]` for any day present in both.
 
@@ -67,6 +69,7 @@ forward with the same names, plus:
 | `summaries` | v1 entries plus `bytes` and `sha256` of the file |
 | `partitions[]` | v1 entries plus `sha256`; `frozen: true` means the bytes never change again (a day is frozen once it is older than the 10 days the 5-minute run can still revise, delete or add to — see *Late publications*) |
 | `tiles` | the offline region bundle `{version, url, sizeBytes, sha256}` (from `region-tiles/regions-db.json`), or `null` |
+| `stats` | the statistics index `{path, url, bytes, sha256, format}`, or `null` when the run published none (see *Statistics*); the index lists every statistics file's `sha256`, so this one signature covers all of them |
 
 Signing keys (raw Ed25519 public key, base64). Trust the signer and the standby; a retired key must not be trusted:
 
@@ -233,6 +236,88 @@ Cloudflare Pages' 20,000 files per site on the free plan (developers.cloudflare.
 2026-10-06); hours are 1,104 files (the deploy goes from 69 to about 1,170 files and from 145 to 258 MB, derive from
 2.5 to 3.1 s). A feed id → byte range index into the day files would need no new files, but Pages serves the day
 files compressed, and a range of a compressed body is not a range of the JSON.
+
+### `GET /v1/stats/index.json` — statistics
+
+What a statistics screen reads instead of whole day files or ComCat (since 2026-11; the `providers/stats.json` switch
+`derive_publish` is `"off"`, `"shadow"` — built and checked in the runner, never deployed — or `"on"`). Every derive run
+writes the index and the day tables; the year and area files are built by the stats builder (`stats.yml`), committed on
+the `data` branch at the same path and copied by derive byte for byte, only when the builder's ledger
+(`knowledge/stats/state.json`) names their `sha256`. All files are JSON (served brotli; the `sha256` and `bytes` name
+the decoded bytes), keys in a fixed order, no run clock inside a table, year or area file: the same events give the same
+bytes. Schemas: `schema/stats-index.schema.json`, `stats-table.schema.json`, `stats-year.schema.json`,
+`stats-area.schema.json`.
+
+**How to use it.** Verify the v2 manifest, take `stats.url` and check the index's bytes against `stats.sha256` (and
+`index.generated == manifest.generated`; the v2 edge cache is 60 s, so on a mismatch read the manifest once more, then
+keep your last verified index). Keep the files you fetched with their `sha256`; fetch only the entries whose `sha256`
+differs from your copy, drop the files the index no longer lists. A day, year or area file that does not hash to its
+entry is not used. Entries marked `mirrorable` are byte for byte the `data` branch file at the same `path`, so the v2
+origins `jsdelivr-sha` and `raw-sha` serve them too (a mirror at `data_commit` may hold older or newer bytes: the
+`sha256` decides). Day tables exist on Pages only.
+
+**Index** (`v1/stats/index.json`):
+
+| Field | Meaning |
+|---|---|
+| `schema_version`, `format` | `1`, `1` |
+| `generated`, `generated_iso`, `head_seq` | the run, equal to the v1 manifest's |
+| `days[]` | `{date, path, count, filtered, bytes, sha256}` for each UTC day today − 60 … today, oldest first; a day missing here is named in `missing_days` |
+| `missing_days[]` | window days with no table this run (neither in the 45-day event map nor as a partition on `data`): count them as missing, never as quiet |
+| `through` | the last day the year and area files cover (the stats builder's last frozen day), or `null` before its first run |
+| `years[]` | `{year, path, bytes, sha256, first, through, complete, mirrorable}`: the current year and the two before it |
+| `area[]` | `{year, path, bytes, sha256, min_mag, records, m6, complete, mirrorable}`: one per year from 1973 |
+| `completeness[]` | `{from, to, key, min_mag?}`: the completeness regimes (`eraB` 1973–1999 M4.5+ from USGS ComCat, `eraA` 2000 → 2023-07-06 17 sources, `archives` → 2026-07-05, `live` since). A count compared across two regimes is compared on M4.5+ only |
+| `attribution` | the licence line |
+
+**Row rule** (`src/stats-table.ts` `statsEventOf`, the same for every table): a feature counts only when
+`feed.state == "live"` and not `feed.tombstone`. A live event whose `type` names another kind of event (the app's
+`isNonEarthquake`: the EMSC/QuakeML codes `km sm kx sx kn sn kr sr qb ls sb` and the words blast, explosion, quarry,
+mining, mine collapse, rock burst, ice quake, landslide, rock slide, sonic boom, collapse, avalanche, meteor, acoustic
+noise, not existing, other event, volcanic eruption) is **filtered** (counted by its time). One without a magnitude in
+[−2, 10.5], without a valid position, or the 0,0 M0 placeholder (*Retired events*) is **skipped** (counted). Every other
+live event is a row: `status` is the review status of its chosen provenance row (*Review status*: 1 reviewed, 0
+automatic, null when the source does not say), `upd` is 1 when `updated − time` is more than 3,600,000 ms (0 otherwise,
+null without `updated`), `delay` the seconds from origin to the feed's `first_ingest_time`, `intensity` `mmi`, else
+`cdi`. Statistics add no deduplication: the feed's own merge is the single one (*Realtime + client dedup*).
+
+**Event table** (format 1, shared by the three file kinds): `{format, kind, t0, count, providers, id, t, lat, lon, mag,
+…optional columns}`, rows sorted by (time, id). `id` is the feed id (`efd_…`, the feature id). `t` holds ms deltas:
+`time[i] = t0 + t[0] + … + t[i]`. Integer scales: `lat`/`lon` × 10⁴, `mag` × 100, `depth` km × 100, `intensity` × 10,
+`rms` × 1000, each `Math.round` (half toward +∞); compare thresholds (M4.5, M5, M6) on the scaled integers. `prov[i]`
+indexes `providers` (the sorted chosen providers). Optional columns, an absent one meaning all null: `depth`, `place`,
+`prov`, `felt`, `intensity`, `alert`, `tsunami` (0/1), `status`, `upd`, `nst`, `rms`, `delay`. A day table carries all
+of them, a year table all but `delay`, an area table `depth`, `place`, `prov`.
+
+**Day table** (`v1/stats/days/YYYY-MM-DD.json`): the event table of `kind: "day"` with `date` (after `kind`),
+`t0` = the day's 00:00 UTC, plus `filtered` (the filtered events' times, ms from `t0` each, ascending), `skipped` (a
+count) and `attribution`. `count + filtered.length + skipped` = the day's live, non-tombstoned features. The day tables
+of the 45 event-map days are built from the run's own events; today − 60 … today − 46 from the frozen partitions on
+`data`. A day's bytes change only when its events do: ~140 KB a day, 8.6 MB for the 61 days on 2026-11-08 (2.8 MB at brotli
+quality 4: the random part of the feed ids does not compress), so a first sync is a few MB and a refresh moves the index
+and the days that changed (today, yesterday, a revised day).
+
+**Year file** (`v1/stats/year/YYYY.json`): `{format, kind: "year", year, builder, first, through, complete,
+mag_edges_e2: [200, 250, 300, 350, 400, 450, 500, 600, 700], provider_names, days: {total, filtered, bins, providers,
+missing}, events, inputs_digest, attribution}`. Per day of the year from `first` through `through`: `total` rows,
+`filtered`, `bins` (10 counts: < 2, [2, 2.5), … [6, 7), ≥ 7; `atLeast[m]` is the sum of the bins whose lower edge is
+≥ m), `providers` (indexes into `provider_names`), and `missing` (day indexes with no input). `events` is an event table
+of the M5+ rows. Days after `through` come from the day tables.
+
+**Area file** (`v1/stats/area/YYYY.json`): `{format, kind: "area", year, builder, min_mag, through, complete, cell_deg:
+0.1, records, cell, total, m45, mmax, m6, inputs_digest, attribution}`. One record per occupied 0.1° cell: `row =
+min(1799, floor((latE4 + 900000) / 1000))`, `col = floor(((lonE4 + 1800000) mod 3600000) / 1000)`, `cell = row × 3600
++ col` (centre `−90 + (row + 0.5) / 10`, `−180 + (col + 0.5) / 10`); `cell` is delta-coded and strictly increasing
+below 6,480,000. `total` counts the rows, `m45` the M4.5+ rows, `mmax` the largest `mag × 100`; `m6` is an event table of
+the M6+ rows (exact positions). `min_mag: 4.5` (era B) means every record is M4.5+ (`m45 == total`). A radius count over
+cell centres is approximate (median 0.5 %, p90 3.4 % at 100 km); the M6+ rows are exact.
+
+Inputs per day, first match wins: a remediation edition (*Saturated days*), the frozen partition, the archive month,
+the deep-history edition (*Deep history*); a change of any input's `sha256` (or partition blob) rebuilds that year. The
+stats builder checks each year against USGS ComCat counts (M6+ and M4.5+) before it publishes it.
+
+Versioning: a new optional column or field keeps `format: 1`; an incompatible change is a new directory and a new
+manifest key `stats2`, with `stats` kept for a deprecation window.
 
 ### Historical day partitions (full history)
 
@@ -1733,7 +1818,8 @@ const ed = h.editions.filter(e => e.period === '2022-12').sort((a, b) => b.editi
 
 Everything is under `/v1/`. Fields are additive within a major version (new optional
 fields never break old parsers). A breaking change ships as `/v2/` with `/v1/` kept
-for a deprecation window.
+for a deprecation window. The statistics (*Statistics*) version on their own: a new optional column keeps
+`format: 1`; an incompatible change is a new directory and the manifest key `stats2`.
 
 ## Licensing
 

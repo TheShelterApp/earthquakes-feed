@@ -51,6 +51,11 @@ test('every published path gets exactly one Cache-Control and one Access-Control
     '/v1/live/month.json',
     '/v1/live/month/2026-09-20.geojson',
     '/v1/detail/2026-09-28T13.geojson',
+    // The statistics (2026-11): the index and its day, year and area files.
+    '/v1/stats/index.json',
+    '/v1/stats/days/2026-09-28.json',
+    '/v1/stats/year/2026.json',
+    '/v1/stats/area/2010.json',
     ...DAYS.map((d) => `/v1/events/${d}.geojson`),
     // The unfrozen day partitions (round 25), outside /v1/.
     '/events/2026/09/28.ndjson',
@@ -86,6 +91,11 @@ test('lifetimes: top-level 30 s, today and yesterday 300 s, older days 3600 s, c
   // The unfrozen day partitions: the v2 manifest's sha256 names their current bytes, so a copy is always revalidated.
   assert.equal(served(body, '/events/2026/09/28.ndjson').get('Cache-Control'), CACHE_CONTROL.liveDay);
   assert.equal(served(body, '/events/2026/09/19.ndjson').get('Cache-Control'), CACHE_CONTROL.liveDay);
+  // The statistics: the index names every file's sha256, so all of them are revalidated.
+  for (const p of ['/v1/stats/index.json', '/v1/stats/days/2026-09-28.json', '/v1/stats/year/2026.json', '/v1/stats/area/2010.json']) {
+    assert.equal(served(body, p).get('Cache-Control'), CACHE_CONTROL.liveDay, p);
+    assert.equal(served(body, p).get('Content-Type'), undefined, `${p}: Pages' own type (application/json, compressed)`);
+  }
   // A future-dated day file (an event minutes past midnight) is hot too.
   assert.equal(served(pagesHeaders(NOW, [...DAYS, '2026-09-29']), '/v1/events/2026-09-29.geojson').get('Cache-Control'), CACHE_CONTROL.hotDay);
 });
@@ -125,11 +135,11 @@ test('within the Pages limits; a day list past the rule limit shares one placeho
   const body = pagesHeaders(NOW, DAYS);
   const rules = parse(body);
   assert.ok(rules.length <= PAGES_HEADER_RULE_LIMIT, `${rules.length} rules`);
-  assert.equal(rules.length, 8 + DAYS.length);
+  assert.equal(rules.length, 9 + DAYS.length);
   assert.ok(body.split('\n').every((l) => l.length <= 2000));
   const many = Array.from({ length: 150 }, (_, i) => new Date(NOW - i * 86_400_000).toISOString().slice(0, 10));
   const big = pagesHeaders(NOW, many);
-  assert.equal(parse(big).length, 9);
+  assert.equal(parse(big).length, 10);
   for (const d of [many[0]!, many[149]!]) {
     assert.equal(served(big, `/v1/events/${d}.geojson`).get('Cache-Control'), CACHE_CONTROL.hotDay);
     assert.equal(served(big, `/v1/events/${d}.geojson`).get('Access-Control-Allow-Origin'), '*');

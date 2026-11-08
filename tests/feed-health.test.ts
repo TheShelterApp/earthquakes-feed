@@ -13,6 +13,7 @@ import {
   evaluateRepoSize,
   evaluateSizes,
   evaluateSources,
+  evaluateStats,
   evaluateWalks,
   GITHUB_API,
   main,
@@ -23,8 +24,12 @@ import {
   pickMarkerArtifact,
   readManifestV1,
   readZipEntries,
+  readStatsConfig,
   REGISTRY_PATH,
   registryIds,
+  STATS_CONFIG_PATH,
+  STATS_INDEX_URL,
+  statsPointerOf,
   STATUS_V1_URL,
   statusRefMs,
   ZIP_MAX_ENTRY_BYTES,
@@ -941,7 +946,7 @@ test('main: every network call failing still writes a document: unreachable mani
   ]);
   assert.match(doc.findings[2].text, /^feed:repo-size, feed:size, walks:history:\*, walks:first-solutions:\*, walks:backfill:\*, walks:archive:\* not judged this run: the feed evaluator's GitHub reads failed/);
   assert.ok(doc.findings[2].text.length <= 500);
-  assert.deepEqual(doc.unjudged, ['feed:source:*', 'feed:cert:*', 'feed:systemic', 'feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*']);
+  assert.deepEqual(doc.unjudged, ['feed:source:*', 'feed:cert:*', 'feed:systemic', 'feed:repo-size', 'feed:size', 'feed:stats', 'feed:stats-through', 'feed:stats-days', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*']);
   assert.match(doc.notes.join('\n'), /queue time unknown \(network error: .*\): counted as 0/);
 });
 
@@ -1023,4 +1028,73 @@ test('main: exit 3 for a bad argument or an unwritable --findings path; the defa
   assert.equal(await main({ argv: ['--findings', path], env: ENV, fetchImpl: world().fetchImpl, now: c2.now, sleep: c2.sleep, log: () => {} }), 0);
   assert.ok(existsSync(path));
   assert.ok(parseFindingsDocument(JSON.parse(readFileSync(path, 'utf8'))).ok);
+});
+
+// --- statistics (APIs.md, Statistics; providers/stats.json) ---
+
+const statsCfg = (mode: 'off' | 'shadow' | 'on', history = false) => ({ mode, history, message: null });
+const statsIndex = (through: string | null, missing: string[] = []) => ({ ok: true as const, json: { format: 1, through, missing_days: missing, days: [] } });
+const POINTER = { path: 'v1/stats/index.json', headSeq: 7 };
+
+test('evaluateStats: on without a pointer is feed:stats (P2, held 30 min); shadow or off never', () => {
+  const on = evaluateStats({ nowMs: NOW, v1Ok: true, pointer: null, config: statsCfg('on'), index: null });
+  assert.deepEqual(keys(on.findings), ['feed:stats']);
+  const f = on.findings[0]!;
+  assert.deepEqual([f.rule, f.severity, f.class, f.board, f.check], ['feed:stats', 'P2', 'config', 'feed', 'gh-feed']);
+  assert.equal(RULES['feed:stats'].holdMs, 30 * MIN);
+  for (const mode of ['off', 'shadow'] as const) assert.deepEqual(evaluateStats({ nowMs: NOW, v1Ok: true, pointer: null, config: statsCfg(mode), index: null }).findings, []);
+  // v1 unreadable: feed:freshness speaks, the stats keys freeze.
+  assert.deepEqual(evaluateStats({ nowMs: NOW, v1Ok: false, pointer: null, config: statsCfg('on'), index: null }).unjudged, ['feed:stats', 'feed:stats-through', 'feed:stats-days']);
+  // On with the pointer and a clean index: nothing.
+  const clean = evaluateStats({ nowMs: NOW, v1Ok: true, pointer: POINTER, config: statsCfg('on', true), index: statsIndex('2026-10-10') });
+  assert.deepEqual([clean.findings, clean.unjudged], [[], []]);
+});
+
+test('evaluateStats: through behind the last frozen day by more than 3 days (history on), missing days, an unreadable index', () => {
+  // NOW is 2026-10-22: the last frozen day is 10-11, the line 10-08.
+  const at = (through: string | null, history = true) => keys(evaluateStats({ nowMs: NOW, v1Ok: true, pointer: POINTER, config: statsCfg('on', history), index: statsIndex(through) }).findings);
+  assert.deepEqual(at('2026-10-08'), []);
+  assert.deepEqual(at('2026-10-07'), ['feed:stats-through']);
+  assert.deepEqual(at(null), ['feed:stats-through']);
+  assert.deepEqual(at(null, false), [], 'the builder is off: no year files expected');
+  const t = evaluateStats({ nowMs: NOW, v1Ok: true, pointer: POINTER, config: statsCfg('on', true), index: statsIndex('2026-10-01') }).findings[0]!;
+  assert.deepEqual([t.severity, t.class, t.check], ['P3', 'maintenance', null]);
+  assert.equal(mayTurnRed(t.class), false);
+  const d = evaluateStats({ nowMs: NOW, v1Ok: true, pointer: POINTER, config: statsCfg('shadow'), index: statsIndex(null, ['2026-09-01', '2026-09-02']) });
+  assert.deepEqual(keys(d.findings), ['feed:stats-days']);
+  assert.match(d.findings[0]!.text, /2 missing day\(s\): 2026-09-01, 2026-09-02/);
+  const u = evaluateStats({ nowMs: NOW, v1Ok: true, pointer: POINTER, config: statsCfg('on', true), index: { ok: false, message: 'HTTP 404 after 4 attempt(s)' } });
+  assert.deepEqual([u.findings, u.unjudged], [[], ['feed:stats-through', 'feed:stats-days']]);
+  assert.match(u.notes.join(), /index\.json unreadable \(HTTP 404/);
+});
+
+test('readStatsConfig and statsPointerOf: anything unreadable is off; the pointer from the raw v1 JSON', () => {
+  assert.deepEqual(readStatsConfig(readFileSync(STATS_CONFIG_PATH, 'utf8')), { mode: 'off', history: false, message: null });
+  assert.deepEqual(readStatsConfig('{"derive_publish":"on","history_enabled":true}'), { mode: 'on', history: true, message: null });
+  assert.equal(readStatsConfig('{"derive_publish":"loud"}').mode, 'off');
+  assert.match(readStatsConfig('{').message!, /unreadable/);
+  assert.deepEqual(statsPointerOf({ stats: { path: 'v1/stats/index.json', head_seq: 9 } }), { path: 'v1/stats/index.json', headSeq: 9 });
+  assert.equal(statsPointerOf({}), null);
+  assert.equal(statsPointerOf(null), null);
+});
+
+test('collect: the stats index is read only when the v1 manifest points at it; evaluateFeed judges it', async () => {
+  const files = (stats: string) => (p: string): string => (p === STATS_CONFIG_PATH ? stats : readFileSync(p, 'utf8'));
+  const c = clock();
+  const w = world([
+    [MANIFEST_V1_URL, () => json({ ...v1Manifest(NOW - MIN), stats: { path: 'v1/stats/index.json', url: STATS_INDEX_URL, head_seq: 7, format: 1 } })],
+    [STATS_INDEX_URL, () => json({ format: 1, through: null, missing_days: ['2026-09-01'], days: [] })],
+  ]);
+  const inputs = await collect({ env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep, readFile: files('{"derive_publish":"on","history_enabled":true}') });
+  assert.deepEqual(inputs.stats?.pointer, { path: 'v1/stats/index.json', headSeq: 7 });
+  assert.ok(w.calls.some((x) => x.url === STATS_INDEX_URL));
+  assert.deepEqual(keys(evaluateFeed(inputs).findings), ['feed:stats-days', 'feed:stats-through']);
+  assert.match(evaluateFeed(inputs).summary, / stats=on pointer /);
+  // No pointer: the index is not asked for.
+  const c2 = clock();
+  const w2 = world();
+  const off = await collect({ env: ENV, fetchImpl: w2.fetchImpl, now: c2.now, sleep: c2.sleep });
+  assert.equal(off.stats?.pointer, null);
+  assert.ok(!w2.calls.some((x) => x.url === STATS_INDEX_URL));
+  assert.deepEqual(evaluateFeed(off).findings, []);
 });

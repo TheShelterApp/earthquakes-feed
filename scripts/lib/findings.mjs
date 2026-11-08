@@ -414,6 +414,26 @@ export const RULES = Object.freeze({
     // GitHub reports `size` in KB; 8 GB, under GitHub's recommended 10 GB.
     limits: { maxKb: 8_000_000 },
   }),
+  'feed:stats': rule('feed:stats', {
+    title: 'feed statistics not published',
+    // providers/stats.json says derive_publish "on" but the live v1 manifest has no `stats` pointer: derive dropped the
+    // statistics on every run for 30 min (its `::warning::stats dropped: …` says why). The live feed is unaffected;
+    // the app keeps its last verified statistics.
+    board: 'feed', class: 'config', severity: 'P2', key: 'feed:stats', check: 'gh-feed',
+    holdMs: 30 * MIN,
+  }),
+  'feed:stats:through': rule('feed:stats:through', {
+    title: 'feed statistics year files behind',
+    // With history_enabled, the index's `through` (the stats builder's last day) more than lagDays behind the last
+    // frozen day (the run's day - frozenAfterDays - 1), or null: stats.yml has not run or keeps failing.
+    board: 'feed', class: 'maintenance', severity: 'P3', key: 'feed:stats-through',
+    limits: { frozenAfterDays: 10, lagDays: 3 },
+  }),
+  'feed:stats:days': rule('feed:stats:days', {
+    title: 'feed statistics days missing',
+    // The index names missing_days: a window day with neither an event-map day nor a partition on `data`.
+    board: 'feed', class: 'config', severity: 'P3', key: 'feed:stats-days',
+  }),
   'walks': rule('walks', {
     title: 'maintenance walk blocked',
     // A blocked marker of history, first-solutions, backfill or archive (those runs stay green with a ::warning:: and

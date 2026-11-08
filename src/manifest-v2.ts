@@ -39,6 +39,17 @@ export interface ManifestV1 {
   summaries: Record<string, { path: string; url: string; count: number }>;
   partitions: ManifestPartition[];
   archives: unknown[];
+  /** The statistics index (APIs.md, Statistics): present only when derive published it and it passed checkStats. */
+  stats?: { path: string; url: string; head_seq: number; format: number };
+}
+
+/** The signed pointer to the statistics index: its bytes and sha256 (the index lists every stats file's sha256). */
+export interface StatsRef {
+  path: string;
+  url: string;
+  bytes: number;
+  sha256: string;
+  format: number;
 }
 
 /** `regions-db.json` from TheShelterApp/region-tiles — the offline SQLite bundle pointer. */
@@ -89,10 +100,12 @@ export interface ManifestV2 {
   changes: ChangesRef | null;
   tiles: TilesPointer | null;
   archives: unknown[];
+  /** The statistics index, or null when this run published none (derive_publish off or shadow, or dropped). */
+  stats: StatsRef | null;
 }
 
 /** Bytes of one artifact, keyed by the manifest `path` it is listed under. Missing → throw. */
-export type ArtifactReader = (path: string, kind: 'partition' | 'summary') => Uint8Array;
+export type ArtifactReader = (path: string, kind: 'partition' | 'summary' | 'stats') => Uint8Array;
 
 export interface BuildInput {
   v1: ManifestV1;
@@ -191,6 +204,12 @@ export function buildManifestV2(input: BuildInput): ManifestV2 {
     return { ...p, bytes: bytes.byteLength, sha256: sha256Hex(bytes) };
   });
 
+  let stats: StatsRef | null = null;
+  if (v1.stats) {
+    const b = read(v1.stats.path, 'stats');
+    stats = { path: v1.stats.path, url: v1.stats.url, bytes: b.byteLength, sha256: sha256Hex(b), format: v1.stats.format };
+  }
+
   return {
     schema_version: 2,
     generated: v1.generated,
@@ -212,6 +231,7 @@ export function buildManifestV2(input: BuildInput): ManifestV2 {
     changes: input.changes ? changesRef(input.changes) : null,
     tiles: input.tiles ?? null,
     archives: v1.archives,
+    stats,
   };
 }
 

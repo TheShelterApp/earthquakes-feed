@@ -45,7 +45,7 @@ const manifest = buildManifestV2({
   ...(changes ? { changes } : {}),
   // When R2 is the data origin (SD-E2) the manifest advertises it first; absent → Pages/mirrors only.
   ...(process.env.R2_PUBLIC_BASE ? { r2PublicBase: process.env.R2_PUBLIC_BASE } : {}),
-  // partitions live in the data checkout, summaries only on Pages (public/)
+  // partitions live in the data checkout, summaries and the statistics index only on Pages (public/)
   read: (path, kind) => new Uint8Array(readFileSync(join(kind === 'partition' ? DATA_DIR : PUBLIC_DIR, path))),
 });
 
@@ -77,5 +77,5 @@ writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(envelope) + '\n');
 
 const bytes = manifestV2Bytes(manifest);
 console.log(
-  `sign-manifest: v2/manifest.json kid=${kid} key=${check} payload=${bytes.byteLength}B sha256=${sha256Hex(bytes).slice(0, 16)}… data_commit=${dataCommit.slice(0, 8)} partitions=${manifest.partitions.length} summaries=${Object.keys(manifest.summaries).length} tiles=${tiles ? tiles.version : 'none'}`,
+  `sign-manifest: v2/manifest.json kid=${kid} key=${check} payload=${bytes.byteLength}B sha256=${sha256Hex(bytes).slice(0, 16)}… data_commit=${dataCommit.slice(0, 8)} partitions=${manifest.partitions.length} summaries=${Object.keys(manifest.summaries).length} tiles=${tiles ? tiles.version : 'none'} stats=${manifest.stats ? manifest.stats.sha256.slice(0, 8) : 'none'}`,
 );

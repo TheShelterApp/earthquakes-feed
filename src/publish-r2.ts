@@ -21,6 +21,7 @@ interface V2Manifest {
   summaries: Record<string, { path: string }>;
   partitions: Array<{ path: string; frozen: boolean }>;
   changes: { path: string } | null;
+  stats?: { path: string } | null;
 }
 
 const settings = r2Settings(process.env);
@@ -53,6 +54,15 @@ function plan(manifest: V2Manifest): Array<{ key: string; local: string; frozen?
   for (const s of Object.values(manifest.summaries)) items.push({ key: s.path, local: join(publicDir, s.path) });
   for (const p of manifest.partitions) items.push({ key: p.path, local: join(DATA_DIR, p.path), frozen: p.frozen });
   if (manifest.changes) items.push({ key: manifest.changes.path, local: join(publicDir, manifest.changes.path) });
+  // The statistics index and every file it lists (their sha256 are in the index, which the manifest signs).
+  if (manifest.stats) {
+    const indexLocal = join(publicDir, manifest.stats.path);
+    items.push({ key: manifest.stats.path, local: indexLocal });
+    if (existsSync(indexLocal)) {
+      const idx = JSON.parse(readFileSync(indexLocal, 'utf8')) as { days?: { path: string }[]; years?: { path: string }[]; area?: { path: string }[] };
+      for (const e of [...(idx.days ?? []), ...(idx.years ?? []), ...(idx.area ?? [])]) items.push({ key: e.path, local: join(publicDir, e.path) });
+    }
+  }
   return items;
 }
 

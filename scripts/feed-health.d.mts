@@ -91,10 +91,31 @@ export interface FeedInputs {
   walks: WalkRead[];
   /** Source ids a marker line is filed under. */
   ids: string[];
+  /** The statistics (providers/stats.json, the v1 pointer, the index); absent: not judged. */
+  stats?: StatsInputs;
   notes: string[];
 }
 
 /** Every feed finding of one run; a failed GitHub read (unless `githubSkipped`) adds watcher:feed-github. */
+export interface StatsConfigRead {
+  mode: 'off' | 'shadow' | 'on';
+  history: boolean;
+  message: string | null;
+}
+export interface StatsInputs {
+  config: StatsConfigRead | null;
+  /** The live v1 manifest's `stats` pointer, or null. */
+  pointer: { path: string; headSeq: number | null } | null;
+  /** v1/stats/index.json, read only when the pointer exists. */
+  index: { ok: true; json: unknown } | { ok: false; message: string } | null;
+}
+export const STATS_INDEX_URL: string;
+export const STATS_CONFIG_PATH: string;
+export function readStatsConfig(text: string): StatsConfigRead;
+export function statsPointerOf(json: unknown): StatsInputs['pointer'];
+/** feed:stats (P2, held 30 min), feed:stats-through (P3), feed:stats-days (P3). */
+export function evaluateStats(opts: { nowMs: number; v1Ok: boolean; pointer: StatsInputs['pointer']; config: StatsConfigRead | null; index: StatsInputs['index'] }): { findings: Finding[]; unjudged: string[]; notes: string[] };
+
 export function evaluateFeed(inputs: FeedInputs): { findings: Finding[]; unjudged: string[]; notes: string[]; summary: string };
 
 export function collect(opts?: {

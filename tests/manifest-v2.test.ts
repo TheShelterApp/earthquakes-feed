@@ -206,3 +206,35 @@ test('sign-manifest: a key that is not the published key of its kid writes no v2
   assert.match(u.log, /::warning::kid=feed-test has no published public key/);
   assert.match(u.log, /sign-manifest: v2\/manifest\.json kid=feed-test key=unknown-kid /);
 });
+
+test('stats: the index pointer is carried with its bytes and sha256 and signed; absent in v1 gives null', async () => {
+  const index = '{"schema_version":1,"format":1,"days":[]}';
+  const reads: string[] = [];
+  const withStats = (path: string, kind: 'partition' | 'summary' | 'stats'): Uint8Array => {
+    reads.push(`${kind}:${path}`);
+    return path === 'v1/stats/index.json' ? new TextEncoder().encode(index) : read(path);
+  };
+  const v = { ...v1(), stats: { path: 'v1/stats/index.json', url: 'https://earthquakes-feed.theshelter.app/v1/stats/index.json', head_seq: 8_812_345, format: 1 } };
+  const m = buildManifestV2({ v1: v, dataCommit: COMMIT, read: withStats });
+  assert.deepEqual(m.stats, { path: 'v1/stats/index.json', url: 'https://earthquakes-feed.theshelter.app/v1/stats/index.json', bytes: index.length, sha256: sha256Hex(new TextEncoder().encode(index)), format: 1 });
+  assert.ok(reads.includes('stats:v1/stats/index.json'), 'read with the stats kind (sign-manifest reads it from public/)');
+  assert.equal(build().stats, null);
+  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  addFormats(ajv);
+  const validate = ajv.compile(JSON.parse(readFileSync('schema/manifest-v2.schema.json', 'utf8')) as object);
+  assert.equal(validate(m), true, ajv.errorsText(validate.errors));
+  assert.equal(validate({ ...m, stats: { ...m.stats, sha256: 'x' } }), false);
+  const { stats: _drop, ...noStats } = build();
+  assert.equal(validate(noStats), false, 'v2 always names stats (null when none)');
+  // Signed: the envelope verifies and carries the pointer.
+  const pair = await generateEd25519('feed-test', 'feed');
+  const env = await signManifestV2(m, pair.signer);
+  const back = await verifyManifestV2(env, pair.verifier);
+  assert.deepEqual(back.stats, m.stats);
+  // The reader throws on a missing index: no signed pointer to a file that is not there.
+  assert.throws(() => buildManifestV2({ v1: v, dataCommit: COMMIT, read }), /missing v1\/stats\/index\.json/);
+  // The v1 schema takes the pointer.
+  const v1schema = ajv.compile(JSON.parse(readFileSync('schema/manifest.schema.json', 'utf8')) as object);
+  assert.equal(v1schema({ ...v, summaries: {}, partitions: [], archives: [] }), true, ajv.errorsText(v1schema.errors));
+  assert.equal(v1schema({ ...v, summaries: {}, partitions: [], archives: [], stats: { ...v.stats, format: 2 } }), false);
+});

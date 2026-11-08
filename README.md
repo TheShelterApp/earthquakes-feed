@@ -44,7 +44,22 @@ curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2
 
 # A day of the last 11 (not frozen yet) as NDJSON: the manifest's `url` for it, on Pages:
 curl -s https://earthquakes-feed.theshelter.app/events/2026/10/13.ndjson
+
+# Statistics: the catalog of the columnar day tables (today - 60 .. today) and the year and area files, each with
+# its sha256 (APIs.md, Statistics; listed while providers/stats.json has derive_publish "on"):
+curl -s https://earthquakes-feed.theshelter.app/v1/stats/index.json
 ```
+
+### Statistics
+
+`/v1/stats/` holds what a statistics screen needs without downloading day files or asking ComCat: one compact
+columnar table per UTC day for the last 61 days (every live event with its magnitude, position, depth, place, chosen
+provider, review status and report delay; the non-earthquakes and unusable rows counted), the current year and the two
+before it as per-day magnitude bins plus their M5+ events, and every year since 1973 on a 0.1° grid for "near me" counts
+(M4.5+ before 2000 from USGS ComCat). The index lists every file with its sha256 and the signed v2 manifest names the
+index's sha256, so a client re-reads only the files whose fingerprint changed. The rows are the feed's own events: stats
+add no deduplication of their own. Format, row rule and completeness epochs: [APIs.md](APIs.md#get-v1statsindexjson--statistics).
+`providers/stats.json` holds the switches (`derive_publish` off / shadow / on, `history_enabled`).
 
 ### Rolling summary feeds (USGS-style matrix)
 
@@ -360,6 +375,9 @@ hundred, the board is not written at all: exit 3). The label `health:p1` … `he
 | `feed:cert:<id>` | P3 | A pinned leaf with under 7 days left; escalates at 2 days left | Pin the new leaf's intermediate if its issuer changed ([providers/tls/README.md](providers/tls/README.md)) |
 | `feed:size` | P3 | A status-history day file over 5 MB, or any other file on `data` over 45 MB | Slim what grows ([APIs.md](APIs.md#run-logs)): GitHub rejects a pushed file above 100 MiB |
 | `feed:repo-size` | P3 | The repository over 8,000,000 KB | [APIs.md](APIs.md#repository-size) |
+| `feed:stats` | P2 (after 30 min) | `providers/stats.json` says `derive_publish: "on"` and the live v1 manifest has no `stats` pointer | derive's `::warning::stats dropped: …` says why; the live feed is unaffected and the app keeps its last verified statistics |
+| `feed:stats-through` | P3 | With `history_enabled`, the statistics index's `through` null or more than 3 days behind the last frozen day | The stats builder's runs (`stats.yml`) and its ComCat gate |
+| `feed:stats-days` | P3 | The statistics index names `missing_days` | A window day with neither an event-map day nor a partition on `data` |
 | `walks:<workflow>:<source>` | P3 | A blocked marker of `history`, `first-solutions`, `backfill` or `archive` in the last 26 h (`run` for a line about the walk itself) | The walk run's warning; the row resolves 26 h after the last marker |
 | `platform:api` | P2 | `/v1/health` not 200 `ok: true` after 3 tries over 60 s, or `sessionKeySource: "ephemeral"` | The API Worker; an ephemeral key means its session signing secret is missing (random 401s in the app) |
 | `platform:api:envelope` | P3 | `providerTokenEnvelope: "missing"` | Account deletion cannot revoke at Apple until the envelope key is set |

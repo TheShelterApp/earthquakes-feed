@@ -357,14 +357,20 @@ export function dayTableJson(date: string, features: Iterable<unknown>, priority
 // --- the statistical reconciliation (APIs.md, Statistics: "Reconciliation") ---
 
 /** The rule's version, named in the files (`reconciled.rule`) and in the stats builder's digest. */
-export const RECONCILE_RULE = 'v1';
+export const RECONCILE_RULE = 'v2';
 export const RECONCILE_DT_MS = 60_000;
 export const RECONCILE_KM = 100;
 /** |delta mag| x 100 at most. */
 export const RECONCILE_DMAG_E2 = 100;
+/** The great-quake tier (rule v2): a pair whose larger magnitude is M7.0+ (x 100) links up to |delta mag| 1.5 and
+ *  200 km (agencies' locations and magnitudes of a great quake scatter more). */
+export const RECONCILE_GREAT_E2 = 700;
+export const RECONCILE_GREAT_KM = 200;
+export const RECONCILE_GREAT_DMAG_E2 = 150;
 /** A pair links only when one of the two is M4.5+ (x 100). */
 export const RECONCILE_MIN_E2 = 450;
-/** Rows below this (x 100) can never link: RECONCILE_MIN_E2 - RECONCILE_DMAG_E2. */
+/** Rows below this (x 100) can never link: RECONCILE_MIN_E2 - RECONCILE_DMAG_E2 (a great-quake partner is at least
+ *  M5.5). */
 export const RECONCILE_CANDIDATE_E2 = RECONCILE_MIN_E2 - RECONCILE_DMAG_E2;
 const RECONCILE_CELL_DEG = 1;
 
@@ -373,7 +379,7 @@ const RECONCILE_CELL_DEG = 1;
  * map is untouched): a catalogue-level collapse of the reports of one quake that the feed still keeps as several events.
  * Two rows link when they share no provenance provider (a provider's own catalogue is self-consistent), their origin
  * times are within 60 s, their epicentres within 100 km, their magnitudes within 1.0, and one of them is M4.5+ (all on
- * the scaled integers). Links are taken closest first (time gap, then distance, then ids) and join two groups only while
+ * the scaled integers); rule v2: when the larger of the two is M7.0+, within 200 km and 1.5 magnitude units. Links are taken closest first (time gap, then distance, then ids) and join two groups only while
  * the groups still share no provider (single link under that constraint). Each group keeps one representative: the
  * member holding a `usgs` provenance row (ComCat's magnitude is the reference), else the member whose chosen provider
  * ranks first in the feed's provider priority (`priority`, lower first, as the Resolver ranks), then the earliest origin,
@@ -399,13 +405,17 @@ export function reconcileRows(rows: readonly StatsEvent[], priority: ReadonlyMap
       list.splice(list.indexOf(lo), 1);
       lo++;
     }
-    for (const k of gatherCellKeys(lat[i]!, lon[i]!, RECONCILE_KM, RECONCILE_CELL_DEG)) {
+    // A row that may pair with a great quake (M5.5+) looks as far as the great-quake tier.
+    const reach = x.magE2 >= RECONCILE_GREAT_E2 - RECONCILE_GREAT_DMAG_E2 ? RECONCILE_GREAT_KM : RECONCILE_KM;
+    for (const k of gatherCellKeys(lat[i]!, lon[i]!, reach, RECONCILE_CELL_DEG)) {
       for (const j of cells.get(k) ?? []) {
         const y = cand[j]!;
-        if (Math.abs(x.magE2 - y.magE2) > RECONCILE_DMAG_E2 || Math.max(x.magE2, y.magE2) < RECONCILE_MIN_E2) continue;
+        const top = Math.max(x.magE2, y.magE2);
+        const great = top >= RECONCILE_GREAT_E2;
+        if (Math.abs(x.magE2 - y.magE2) > (great ? RECONCILE_GREAT_DMAG_E2 : RECONCILE_DMAG_E2) || top < RECONCILE_MIN_E2) continue;
         if (x.sources.some((p) => y.sources.includes(p))) continue;
         const km = haversineKm(lat[i]!, lon[i]!, lat[j]!, lon[j]!);
-        if (km > RECONCILE_KM) continue;
+        if (km > (great ? RECONCILE_GREAT_KM : RECONCILE_KM)) continue;
         edges.push({ dt: x.timeMs - y.timeMs, km, a: j, b: i });
       }
     }

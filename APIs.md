@@ -283,14 +283,16 @@ null without `updated`), `delay` the seconds from origin to the feed's `first_in
 files count an input that is not yet re-merged after running that same merge over it (below). The statistics products
 then apply one more step of their own, the reconciliation.
 
-**Reconciliation** (rule `v1`, `reconcileRows` in `src/stats-table.ts`; statistics products only). Even merged, the
+**Reconciliation** (rule `v2`, `reconcileRows` in `src/stats-table.ts`; statistics products only). Even merged, the
 feed keeps some quakes as several events: agencies place and size one quake differently, and the merge (an identity
 rule: it must never join two real quakes) leaves such reports apart. Counted as they are, they put M6+ 1.2–1.7× above
 USGS ComCat. The statistics collapse them at catalogue level, which is explicitly not event identity: the events, the
 day partitions, the live map and the detail pages are unchanged. Two live earthquake rows link when all of these hold:
 they share no provenance provider (a provider's own catalogue is self-consistent, so two events that share one never
-collapse), their origin times are at most 60 s apart, their epicentres at most 100 km apart, their magnitudes at most
-1.0 apart, and one of them is M4.5+ (all on the scaled integers: `mag × 100`). Links are taken closest first (time gap,
+collapse), their origin times are at most 60 s apart, and one of them is M4.5+, with limits in two tiers by the larger
+magnitude of the two: below M7.0 epicentres at most 100 km and magnitudes at most 1.0 apart; M7.0 and above (great
+quakes, whose locations and magnitudes scatter more between agencies) at most 200 km and 1.5 apart (all on the scaled
+integers: `mag × 100`). Rule `v1` (2026-11-08) had the first tier only. Links are taken closest first (time gap,
 then distance, then ids) and join two groups only while the groups share no provider (single link under that
 constraint). Each group keeps one row, its representative: the member holding a `usgs` provenance row (ComCat's
 magnitude is the reference), else the member whose chosen provider ranks first in the registry's provider `priority`

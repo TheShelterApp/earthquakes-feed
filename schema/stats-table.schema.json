@@ -11,7 +11,7 @@
     "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
     "filtered": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 86399999 }, "description": "times of the filtered live events, ms from t0 (each from t0, not cumulative), ascending" },
     "skipped": { "type": "integer", "minimum": 0, "description": "live events without a usable magnitude or position" },
-    "collapsed": { "type": "integer", "minimum": 0, "description": "live earthquake rows the statistical reconciliation left out: another provider's report of a quake the table keeps (rule v1; APIs.md, Statistics, Reconciliation)" },
+    "collapsed": { "type": "integer", "minimum": 0, "description": "live earthquake rows the statistical reconciliation left out: another provider's report of a quake the table keeps (rule v2; APIs.md, Statistics, Reconciliation)" },
     "attribution": { "type": "string" }
   },
   "$defs": {

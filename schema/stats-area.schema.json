@@ -23,7 +23,7 @@
       "allOf": [{ "$ref": "stats-table.schema.json#/$defs/eventTable" }],
       "properties": { "kind": { "const": "area" } }
     },
-    "reconciled": { "type": "object", "required": ["rule", "collapsed"], "additionalProperties": false, "properties": { "rule": { "const": "v1" }, "collapsed": { "type": "integer", "minimum": 0 } }, "description": "the statistical reconciliation: its rule and the rows it left out (APIs.md, Statistics, Reconciliation)" },
+    "reconciled": { "type": "object", "required": ["rule", "collapsed"], "additionalProperties": false, "properties": { "rule": { "const": "v2" }, "collapsed": { "type": "integer", "minimum": 0 } }, "description": "the statistical reconciliation: its rule and the rows it left out (APIs.md, Statistics, Reconciliation)" },
     "inputs_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "attribution": { "type": "string" }
   }

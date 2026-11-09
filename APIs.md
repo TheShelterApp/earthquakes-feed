@@ -377,8 +377,9 @@ day tables.
   with `count?eventtype=earthquake` over `[Y-01-01, min(Y+1-01-01, through + 1 day))`, one request at a time, at most
   0.5 a second. Era B must be within ±2 %, later years within the `gate` bands of `providers/stats.json` (M6+ ratio
   0.85–1.20, M4.5+ 0.85–1.40); the open current year only warns. A year that fails keeps its previous files (a first
-  build stays absent) and is not retried until its inputs change; the run's marker `walk-blocked-stats` reaches the
-  health board (`walks:stats:run`).
+  build stays absent) and is not retried until its inputs change; every real run names each year whose ledger entry
+  failed in its marker `walk-blocked-stats`, which reaches the health board (`walks:stats:run`), and a run with
+  nothing blocked uploads a marker with only a `#` line, which resolves the board entry on the next health run.
 - **Ledger** `knowledge/stats/state.json` on `data` (derive reads `through` and each file's `sha256` from it):
   `{version, builder, through, generated, run_id, years: {Y: {inputs_digest, through, complete, area: {bytes, sha256,
   records, m6}, year?: {bytes, sha256}, check: {gate: ok|warn|fail|error, era, window, feed, comcat, ratio, bands},

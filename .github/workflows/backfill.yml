@@ -52,6 +52,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Backfill
+        id: run
         env:
           DATA_DIR: .data
           # gh release download: lets backfill pull archived (cold) months back to merge a
@@ -82,11 +83,13 @@ jobs:
       # The signal AFTER the durable work: backfill exits 0 and drops a marker instead of failing
       # its own step, because a failed step skips every later step without `if:` — the commit
       # would never land and each run would repeat and re-discard identical work.
-      # The marker names each reason: an unreadable archived month, a dispatched window that failed
-      # or overflowed, or a provider whose walk has kept failing at a one-day window (about once a day).
-      # It keeps the run green (alerting plan of 2026-10-22): a warning here, and the marker as the artifact
-      # walk-blocked-backfill, which the health workflow's feed evaluator (scripts/feed-health.mjs) files on the
-      # "[health] feed" board as walks:backfill:<source> (a P3: one comment; it resolves once no marker is newer than 26 h).
+      # The marker states every standing block, on every run: an unreadable archived month, a dispatched window not
+      # filled yet (knowledge/index/backfill.json `dispatched`: open until dispatched ranges that answered in full
+      # cover it), a provider whose walk keeps failing at a one-day window. It keeps the run green (alerting plan of
+      # 2026-10-22): a warning here, and the marker as the artifact walk-blocked-backfill, which the health workflow's
+      # feed evaluator (scripts/feed-health.mjs) files on the "[health] feed" board as walks:backfill:<source> (a P3:
+      # one comment). A run whose backfill step finished with nothing blocked uploads a marker without a blocked line
+      # (only a "#" line): the board resolves on the next health run, not after the 26 h hold.
       - name: Warn if backfill was blocked or a walk is stalled
         if: always()
         run: |
@@ -94,6 +97,9 @@ jobs:
             cat backfill-blocked.txt
             echo '::warning::backfill: blocked or stalled (see above); this run'"'"'s other work was still committed, and the health workflow files the marker on the "[health] feed" board'
           fi
+      - name: Mark a run with nothing blocked
+        if: always() && steps.run.outcome == 'success'
+        run: '[ -f backfill-blocked.txt ] || echo "# nothing blocked: run ${{ github.run_id }}" > backfill-blocked.txt'
       - name: Upload the blocked marker (read by the health workflow)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

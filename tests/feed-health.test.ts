@@ -603,6 +603,8 @@ test('parseMarker: each line under the leftmost whole-word registry id, else run
   assert.equal(lines[0]!.line, 'first-solutions emsc: 30 failed runs in a row since 2026-10-20T10:00:00.000Z: HTTP 503');
   assert.deepEqual(parseMarker('usgs and emsc', ['emsc', 'usgs']).map((l) => l.source), ['usgs']);
   assert.deepEqual(parseMarker('  \n\n', IDS), []);
+  // '#' lines are comments (the marker of a run with nothing blocked), even when they name an id.
+  assert.deepEqual(parseMarker('# nothing blocked: run 7\n  # usgs\nusgs # x', IDS).map((l) => l.source), ['usgs']);
   // An id that cannot be part of a key is never used.
   assert.deepEqual(parseMarker('Bad: x', ['Bad']).map((l) => l.source), ['run']);
 });
@@ -634,8 +636,11 @@ test('evaluateWalks: a marker under 26 h is one P3 per walks:<workflow>:<source>
   assert.match(old.notes.join(), /history: newest marker 27\.0 h old: the walk has moved on/);
   assert.equal(RULES.walks.limits.markerHoldMs, 26 * HOUR);
   assert.equal(evaluateWalks([walk('history', 'x', NOW - 25.9 * HOUR)], NOW, IDS).findings.length, 1);
-  // An empty marker: a note.
-  assert.match(evaluateWalks([walk('history', '\n')], NOW, IDS).notes.join(), /is empty/);
+  // An empty marker, or one with only '#' lines (a run with nothing blocked): a note, no finding.
+  assert.match(evaluateWalks([walk('history', '\n')], NOW, IDS).notes.join(), /names nothing blocked/);
+  const clean = evaluateWalks([walk('stats', '# nothing blocked: run 42520416260\n')], NOW, IDS);
+  assert.deepEqual([clean.findings, clean.unjudged], [[], []]);
+  assert.match(clean.notes.join(), /walks: stats: the marker of .* names nothing blocked/);
   // A very long line is cut to one line of 240.
   const long = evaluateWalks([walk('history', `history: tmd ${'z'.repeat(600)}`)], NOW, IDS).findings[0]!;
   assert.ok(long.text.length < 300);

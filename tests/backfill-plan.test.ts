@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { STALL_ALARM_FAILURES, STALL_WARN_FAILURES, dayStartMs } from '../src/backfill-cursor.js';
-import { type BackfillCursorFile, type Job, applyWindowResult, planJobs, stallReport } from '../src/backfill-plan.js';
+import { type BackfillCursorFile, type Job, type OpenDispatch, applyWindowResult, openDispatchLines, planJobs, recordDispatchOutcome, stallReport } from '../src/backfill-plan.js';
 import { loadRegistry } from '../src/providers.js';
 import type { ProviderConfig, RawObs } from '../src/types.js';
 
@@ -106,6 +106,50 @@ test('window: a window holding an unreadable archived day is ingested but the wa
   assert.equal(j.cur!.filledBackTo, before.filledBackTo);
   assert.equal(j.cur!.windowDays, before.windowDays);
   assert.equal(j.cur!.lastCount, 30, 'the answer still ends a failure streak');
+});
+
+test('stalls: from 72 failures at a one-day window a stall is a blocker on every run (the marker states it until the source answers); done walks and dispatch jobs never', () => {
+  const alarm = walk(1);
+  Object.assign(alarm.cur!, { failures: STALL_ALARM_FAILURES + 1, failingSince: '2026-10-01T10:41:00Z', lastError: 'HTTP 500' });
+  assert.equal(stallReport([alarm]).blockers.length, 1, 'not only on every 24th failure');
+  const wide = walk(2);
+  Object.assign(wide.cur!, { failures: STALL_ALARM_FAILURES + 1 });
+  assert.deepEqual(stallReport([wide]).blockers, [], 'a window that can still narrow only warns');
+  Object.assign(alarm.cur!, { done: true });
+  assert.deepEqual(stallReport([alarm, { p: byId('usgs'), cur: null }]), { blockers: [], warnings: [] });
+});
+
+test('dispatched windows: an overflow, a failure or a held-back day stays open until dispatched ranges that answered in full cover it', () => {
+  const cursor: BackfillCursorFile = { targetStart: '2023-07-06', providers: {} };
+  const dispatch = (from: string, to: string, ids = ['usgs']): Job => plan(cursor, { dispatch: { startMs: Date.parse(from), endMs: Date.parse(to) }, only: new Set(ids) })[0]!;
+  const opts = { ingestTime: INGEST, untouchable: false };
+  const answered = { kind: 'answered', saturated: false, advanced: false } as const;
+  const usgs = new Set(['usgs', 'emsc']);
+  // The 2026-11-08 case: 2026-06-01..07-01 of usgs filled the page cap.
+  let open: OpenDispatch[] = recordDispatchOutcome([], dispatch('2026-06-01T00:00:00Z', '2026-07-01T00:00:00Z'), { kind: 'narrowed' }, opts);
+  assert.deepEqual(open, [{ provider: 'usgs', start: '2026-06-01T00:00:00.000Z', end: '2026-07-01T00:00:00.000Z', since: INGEST, reason: 'overflow' }]);
+  assert.deepEqual(openDispatchLines(open, usgs), [`backfill: dispatched window 2026-06-01..2026-07-01 (30 d) of usgs (open since ${INGEST}) filled the page cap and was not ingested; dispatch narrower ranges inside it`]);
+  // Another provider's answer over the same range closes nothing of usgs.
+  open = recordDispatchOutcome(open, dispatch('2026-06-01T00:00:00Z', '2026-07-01T00:00:00Z', ['emsc']), answered, opts);
+  assert.equal(open.length, 1);
+  // A narrower answer splits it; one that overflowed again stays open over its own range.
+  open = recordDispatchOutcome(open, dispatch('2026-06-10T00:00:00Z', '2026-06-20T00:00:00Z'), answered, opts);
+  assert.deepEqual(open.map((o) => [o.start.slice(0, 10), o.end.slice(0, 10)]), [['2026-06-01', '2026-06-10'], ['2026-06-20', '2026-07-01']]);
+  open = recordDispatchOutcome(open, dispatch('2026-06-01T00:00:00Z', '2026-06-10T00:00:00Z'), { kind: 'narrowed' }, opts);
+  assert.equal(open.length, 2);
+  // An answer that held back a day (an unreadable archive) keeps its range open; a failure keeps its error.
+  open = recordDispatchOutcome(open, dispatch('2026-06-01T00:00:00Z', '2026-06-10T00:00:00Z'), answered, { ...opts, untouchable: true });
+  assert.deepEqual(open.map((o) => o.reason).sort(), ['held', 'overflow']);
+  open = recordDispatchOutcome(open, dispatch('2026-06-01T00:00:00Z', '2026-06-10T00:00:00Z'), { kind: 'failed', error: 'HTTP 503' }, opts);
+  assert.match(openDispatchLines(open, usgs).join('\n'), /2026-06-01\.\.2026-06-10 \(9 d\) of usgs .* failed \(HTTP 503\); dispatch it again/);
+  // Full answers close the rest; an end at 23:59:59 leaves no one-second piece behind.
+  open = recordDispatchOutcome(open, dispatch('2026-06-01T00:00:00Z', '2026-06-09T23:59:59Z'), answered, opts);
+  open = recordDispatchOutcome(open, dispatch('2026-06-20T00:00:00Z', '2026-07-01T00:00:00Z'), answered, opts);
+  assert.deepEqual(open, []);
+  // A walk job (a cursor) never touches the list; a provider no longer eligible is not reported.
+  const kept: OpenDispatch[] = [{ provider: 'jma', start: '2026-01-01T00:00:00.000Z', end: '2026-01-02T00:00:00.000Z', reason: 'overflow', since: INGEST }];
+  assert.deepEqual(recordDispatchOutcome(kept, walk(8), { kind: 'narrowed' }, opts), kept);
+  assert.deepEqual(openDispatchLines(kept, usgs), []);
 });
 
 test('stalls: a walk failing 24 runs warns, from 72 at a one-day window it turns the run red', () => {

@@ -464,14 +464,16 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
  * The lines of a blocked marker, each filed under the registry id that matches leftmost as a whole word (not inside a
- * longer id-like word: letters, digits, '_' and '-' delimit it), else 'run' (a line about the walk itself).
+ * longer id-like word: letters, digits, '_' and '-' delimit it), else 'run' (a line about the walk itself). A line
+ * starting with '#' is a comment, not a block: a walk that states every standing block on every run (backfill, stats)
+ * uploads `# nothing blocked: run <id>` when it has none, so its newest marker clears the board.
  */
 export function parseMarker(text, ids) {
   const res = [...new Set([...ids].filter((id) => typeof id === 'string' && SAFE_ID.test(id)))].map((id) => [id, new RegExp(`(?<![a-z0-9_-])${escapeRe(id)}(?![a-z0-9_-])`)]);
   const out = [];
   for (const raw of String(text ?? '').split(/\r?\n/)) {
     const line = raw.trim();
-    if (line === '') continue;
+    if (line === '' || line.startsWith('#')) continue;
     let source = 'run';
     let at = Infinity;
     for (const [id, re] of res) {
@@ -505,7 +507,9 @@ export function pickMarkerArtifact(listing, name) {
 
 /**
  * walks:<workflow>:<source> (P3, class maintenance: never red) for each line of the newest marker younger than 26 h;
- * the lines of one key merge into one finding. A read that failed (listing or zip): `walks:<workflow>:*` unjudged.
+ * the lines of one key merge into one finding. Only the newest marker counts: a newer marker without a blocked line
+ * (a walk's run with nothing blocked) supersedes an older blocked one at once. A read that failed (listing or zip):
+ * `walks:<workflow>:*` unjudged.
  */
 export function evaluateWalks(reads, nowMs, ids) {
   const { markerHoldMs } = RULES.walks.limits;
@@ -526,7 +530,7 @@ export function evaluateWalks(reads, nowMs, ids) {
     }
     const lines = parseMarker(m.text, ids);
     if (lines.length === 0) {
-      notes.push(`walks: ${r.workflow}: the marker of ${utcText(m.createdAtMs)} is empty`);
+      notes.push(`walks: ${r.workflow}: the marker of ${utcText(m.createdAtMs)} names nothing blocked`);
       continue;
     }
     const bySource = new Map();

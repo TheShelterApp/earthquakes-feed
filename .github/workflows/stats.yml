@@ -99,7 +99,10 @@ jobs:
           retention-days: ${{ inputs.dry_run && 3 || 7 }}
       # A year that failed its ComCat gate (or its build, or a verify) keeps the run green: a warning here, and the
       # marker as the artifact walk-blocked-stats, which the health workflow's feed evaluator (scripts/feed-health.mjs)
-      # files on the "[health] feed" board (a P3). A dry run's marker stays a warning only.
+      # files on the "[health] feed" board (a P3). A dry run's marker stays a warning only. The marker states every
+      # standing block (a year whose ledger entry failed its gate is named on every run until its inputs change and it
+      # passes), so a real run whose build step finished with nothing blocked uploads a marker without a blocked line
+      # (only a "#" line): the board resolves on the next health run, not after the 26 h hold.
       - name: Warn if a year was blocked
         if: always()
         run: |
@@ -107,6 +110,9 @@ jobs:
             cat stats-blocked.txt
             echo '::warning::stats: a year failed its ComCat gate or its build (see above); its previous files stay, and the health workflow files the marker on the "[health] feed" board'
           fi
+      - name: Mark a run with nothing blocked
+        if: always() && !inputs.dry_run && steps.run.outcome == 'success'
+        run: '[ -f stats-blocked.txt ] || echo "# nothing blocked: run ${{ github.run_id }}" > stats-blocked.txt'
       - name: Upload the blocked marker (read by the health workflow)
         if: always() && !inputs.dry_run
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

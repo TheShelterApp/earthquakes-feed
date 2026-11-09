@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dataPaths } from './config.js';
 import { dayStartMs } from './backfill-cursor.js';
-import { type BackfillCursorFile, applyWindowResult, homeDayOf, planJobs, rememberHomeDay, stallReport, windowText } from './backfill-plan.js';
+import { backfillCfg } from './backfill-cfg.js';
+import { type BackfillCursorFile, applyWindowResult, homeDayOf, openDispatchLines, planJobs, recordDispatchOutcome, rememberHomeDay, stallReport, windowText } from './backfill-plan.js';
 import { readArchivedDays } from './archive-io.js';
 import { eventDayKey } from './bitemporal.js';
 import { Resolver } from './dedup.js';
@@ -37,6 +38,28 @@ function loadCursor(root: string, nowMs: number, liveDay: string): Cursor {
   const f = dataPaths(root).backfillCursor;
   if (existsSync(f)) return JSON.parse(readFileSync(f, 'utf8')) as Cursor;
   return { targetStart: eventDayKey(nowMs - BACKFILL_TARGET_YEARS * 365 * DAY), providers: {} };
+}
+
+/**
+ * The blocked marker (backfill-blocked.txt in the workspace root, never .data: a marker there would be committed to the
+ * data branch), read by the health workflow as the artifact walk-blocked-backfill. It states every standing block: the
+ * open dispatched windows, the stalled walks, this run's unreadable archives. A run with none writes nothing here and
+ * the workflow uploads an empty marker, which clears the board.
+ */
+function writeMarker(blockers: readonly string[]): void {
+  if (!blockers.length) return;
+  for (const msg of blockers) console.error(`::error::${msg}`);
+  // Marker + exit 0, NOT process.exitCode = 1: a non-zero tool step makes Actions skip every later step lacking `if:`,
+  // so the commit never lands and each run redoes and re-discards the same work.
+  writeFileSync('backfill-blocked.txt', blockers.join('\n') + '\n');
+}
+
+/** The standing blocks every run reports, walk jobs or not: the stalled walks and the open dispatched windows. */
+function standing(providers: ReturnType<typeof activeProviders>, cursor: Cursor): { blockers: string[]; warnings: string[] } {
+  const eligible = providers.filter((p) => backfillCfg(p) !== null);
+  const stalls = stallReport(eligible.map((p) => ({ p, cur: cursor.providers[p.id] ?? null })));
+  const open = openDispatchLines(cursor.dispatched ?? [], new Set(eligible.map((p) => p.id)));
+  return { blockers: [...open, ...stalls.blockers], warnings: stalls.warnings };
 }
 
 async function main(): Promise<void> {
@@ -82,6 +105,9 @@ async function main(): Promise<void> {
   if (!jobs.length) {
     writeFileSync(dataPaths(root).backfillCursor, JSON.stringify(cursor, null, 2) + '\n');
     console.log('backfill: nothing to do (all providers done or none eligible)');
+    const st = standing(providers, cursor);
+    for (const w of st.warnings) console.log(`::warning::${w}`);
+    writeMarker(st.blockers);
     return;
   }
 
@@ -174,8 +200,15 @@ async function main(): Promise<void> {
     // as saturated); a failure counts and halves; an answer advances and adapts the window — unless the window holds a
     // day we must leave unwritten below, when advancing would walk the cursor past it for good (the 2026-07 truncation
     // failure mode): the provider then retries the identical window once the Releases are reachable.
-    const { verdict, blocker } = applyWindowResult(j, res, { ingestTime, targetMs, untouchable: windowHasUntouchable(j.startMs, j.endMs) });
-    if (blocker) blockers.push(blocker);
+    const untouchable = windowHasUntouchable(j.startMs, j.endMs);
+    const { verdict } = applyWindowResult(j, res, { ingestTime, targetMs, untouchable });
+    // A dispatched window's overflow, failure or held-back day stays open in the cursor file (reported by every run
+    // below until dispatched ranges that answered in full cover it); a full answer closes what it covers.
+    if (!j.cur) {
+      const open = recordDispatchOutcome(cursor.dispatched ?? [], j, verdict, { ingestTime, untouchable });
+      if (open.length) cursor.dispatched = open;
+      else delete cursor.dispatched;
+    }
     if (verdict.kind === 'narrowed') {
       overflowCount++;
       continue;
@@ -204,10 +237,6 @@ async function main(): Promise<void> {
     }
     for (const o of heldBack) if (eventDayKey(o.eventTimeMs) < liveDay) zeroed.push(o);
   }
-  // A walk that keeps failing is reported, never silent (backfill-cursor.ts stallLevel).
-  const stalls = stallReport(jobs);
-  for (const w of stalls.warnings) console.log(`::warning::${w}`);
-  blockers.push(...stalls.blockers);
 
   raws.sort(byIngestOrder);
   zeroed.sort(byIngestOrder);
@@ -308,14 +337,12 @@ async function main(): Promise<void> {
         `rather than rewrite them from fresh rows alone, and held back the cursor of every provider whose window overlapped them; re-run once Releases are reachable`,
     );
   }
-  if (blockers.length) {
-    for (const msg of blockers) console.error(`::error::${msg}`);
-    // Marker + exit 0, NOT process.exitCode = 1: a non-zero tool step makes Actions skip every
-    // later step lacking `if:`, so the commit never lands and each run redoes and re-discards the
-    // same work. The workflow's final always()-step reads this and goes red AFTER the push.
-    // Workspace root, never .data — a marker under .data would be committed to the data branch.
-    writeFileSync('backfill-blocked.txt', blockers.join('\n') + '\n');
-  }
+  // A walk that keeps failing, and a dispatched window not filled yet, are reported on every run, never silent
+  // (backfill-plan.ts stallReport, openDispatchLines).
+  const st = standing(providers, cursor);
+  for (const w of st.warnings) console.log(`::warning::${w}`);
+  blockers.push(...st.blockers);
+  writeMarker(blockers);
 }
 
 main().catch((err) => {

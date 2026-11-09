@@ -299,6 +299,20 @@ const maxUpdated = (node: EventNode): number | null => {
   return m === -Infinity ? null : m;
 };
 
+/**
+ * The event's merged auxiliary fields and place, as its feature shows them: the chosen provider's coherent solution
+ * leads, then gaps fill from the other providers (first non-null per canonical field wins). Core geometry and
+ * magnitude stay from the chosen solution only — never mixed across providers.
+ */
+export function canonicalOf(node: EventNode): { canon: Extra; place: string | null } {
+  const chosen = node.provenance.find((r) => r.chosen) ?? node.provenance[0];
+  const ordered = chosen ? [chosen, ...node.provenance.filter((r) => r !== chosen)] : node.provenance;
+  return {
+    canon: mergeCanonical(ordered.map((r) => r.fields)),
+    place: node.place ?? ordered.map((r) => r.place).find((p) => p != null) ?? null,
+  };
+}
+
 /** Materialize an EventNode into a USGS-GeoJSON-superset Feature, losslessly.
  *
  *  `compact` omits `feed.provenance[]` (each provider's full solution + original
@@ -319,13 +333,7 @@ export function nodeToFeature(node: EventNode, opts?: { compact?: boolean; revie
       ? [round6(node.lon), round6(node.lat)]
       : [round6(node.lon), round6(node.lat), node.depth];
 
-  // Fill-only field merge: the chosen provider's coherent solution leads, then gaps fill
-  // from the other providers (first non-null per canonical field wins). Core geometry and
-  // magnitude stay from the chosen solution only — never mixed across providers.
-  const chosen = node.provenance.find((r) => r.chosen) ?? node.provenance[0];
-  const ordered = chosen ? [chosen, ...node.provenance.filter((r) => r !== chosen)] : node.provenance;
-  const canon = mergeCanonical(ordered.map((r) => r.fields));
-  const place = node.place ?? ordered.map((r) => r.place).find((p) => p != null) ?? null;
+  const { canon, place } = canonicalOf(node);
 
   const properties: Record<string, unknown> = {
     mag: node.mag,

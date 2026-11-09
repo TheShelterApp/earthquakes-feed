@@ -1,3 +1,5 @@
+import { SHARE_HEADERS } from './share-pages.js';
+
 /**
  * Cloudflare Pages `_headers` for the published tree (written by derive).
  *
@@ -78,6 +80,9 @@ export function pagesHeaders(nowMs: number, dayKeys: Iterable<string>): string {
     // The unfrozen day partitions (NDJSON, partitions.ts writePagesPartition): the manifest's `url` and the v2 `pages`
     // origin. Outside /v1/, so no other rule matches them.
     rule('/events/*', CACHE_CONTROL.liveDay, NDJSON_CONTENT_TYPE),
+    // The static share pages and their generic 404 page (share-pages.ts): HTML for people and link-preview bots, so
+    // the security headers instead of CORS. No other rule reaches /share/.
+    ['/share/*', ...SHARE_HEADERS.map(([k, v]) => `  ${k}: ${v}`)],
   ];
   const perDay = fixed.length + days.length <= PAGES_HEADER_RULE_LIMIT;
   const dayRules = perDay

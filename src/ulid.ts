@@ -42,3 +42,19 @@ export function deterministicFeedId(eventTimeMs: number, lat: number, lon: numbe
   const seed = createHash('sha256').update(seedInput).digest().subarray(0, 10);
   return FEED_ID_PREFIX + encodeTime(timeBucket) + encodeSeed(seed);
 }
+
+/** A feed id: the prefix and a 26-character Crockford ULID (the same pattern as the statistics' FEED_ID_RE). */
+const FEED_ID = new RegExp(`^${FEED_ID_PREFIX}[0-9A-HJKMNP-TV-Z]{26}$`);
+
+/**
+ * The time a feed id encodes: its first 10 ULID characters, the 30 s bucket the id was minted at (deterministicFeedId:
+ * the origin time of the minting report, rounded). A hint for the hour, day and year of the event, never its exact
+ * time: the bucket can fall in the next hour or day, and a later revision can move the origin while the id stays
+ * pinned. Null for a string that is not a feed id.
+ */
+export function feedIdTimeMs(id: string): number | null {
+  if (!FEED_ID.test(id)) return null;
+  let ms = 0;
+  for (const c of id.slice(FEED_ID_PREFIX.length, FEED_ID_PREFIX.length + 10)) ms = ms * 32 + CROCKFORD.indexOf(c);
+  return ms;
+}

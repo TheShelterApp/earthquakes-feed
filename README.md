@@ -39,6 +39,10 @@ curl -s https://earthquakes-feed.theshelter.app/v1/live/month.json
 # One event's full detail: the live events of its UTC hour, full-fat (APIs.md, Event detail):
 curl -s https://earthquakes-feed.theshelter.app/v1/detail/2026-10-05T09.geojson
 
+# The share page of a significant event (M4+, felt, a tsunami flag or a PAGER alert, the event map's 45 days): static
+# HTML for people and link previews, the target of https://theshelter.app/event/<feed id> (APIs.md, Share pages):
+curl -s https://earthquakes-feed.theshelter.app/share/event/efd_01M6Z5Z7N0YS0YZKJ7H5HDQMVE
+
 # Any frozen day as NDJSON, straight from the data branch (full history):
 curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2026/07/04.ndjson
 
@@ -61,7 +65,8 @@ index's sha256, so a client re-reads only the files whose fingerprint changed. T
 merged by the feed's own rule (where an input is not yet re-merged, the stats builder runs the same `remergeNodes` over
 it in memory); the statistics then collapse the reports of one quake that the merge keeps apart (the reconciliation:
 other catalogues within 60 s, 100 km and 1.0 magnitude of an M4.5+ row, 200 km and 1.5 for M7+, ComCat's row kept) and leave out regional networks' M4.5+ solutions far outside their own
-regions (ComCat's authoritative-region practice), counted per file. The year and area files come from the `stats` workflow (`src/stats-history.ts`, every
+regions (ComCat's authoritative-region practice), counted per file; `collapsed_into` names the row each collapsed id
+folded into, so an id shared from the live map still resolves after the collapse. The year and area files come from the `stats` workflow (`src/stats-history.ts`, every
 6 h): it rebuilds a year when the checksums of its inputs change, checks each year against USGS ComCat's M6+ and M4.5+
 counts before it commits the files to `data`, and keeps a year's previous files when the check fails. Format, row rule,
 inputs and completeness epochs: [APIs.md](APIs.md#get-v1statsindexjson--statistics). `providers/stats.json` holds the
@@ -246,7 +251,9 @@ open, reachable source appears.
   manifest under 15 minutes old keeps the run green with a warning (the next run deploys
   again), and `health`'s 30-minute freshness check stays the alarm. The R2 origin
   (`publish-r2`) is off while its settings are blank, and an R2 error never skips the
-  Pages deploy. Full-history partitions serve from the `data` branch via
+  Pages deploy. The same deploy carries the static share pages (`share/event/<feed id>.html`, at most 5,000, and a
+  generic `404.html`; `src/share-pages.ts`), which `theshelter.app/event/<feed id>` redirects to: no Worker or Function
+  runs for a shared link ([APIs.md](APIs.md#get-shareeventfeed-id--share-pages)). Full-history partitions serve from the `data` branch via
   **jsDelivr** (branch refs cache ~12 h — resolve through the manifest). Never
   `raw.githubusercontent.com` (60 req/hr/IP).
 

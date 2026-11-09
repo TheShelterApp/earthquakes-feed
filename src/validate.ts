@@ -7,6 +7,10 @@ import { DATA_DIR, DOMAIN, MAX_PUBLISHED_BYTES, PUBLIC_DIR, SCHEMA_DIR, dataPath
 import { deltaBoundViolations, readSilentLog } from './live-sync.js';
 import { loadPartitionFormat, partitionFormatProblems } from './partitions.js';
 import { STATS_INDEX_PATH, checkStats, loadStatsConfig } from './stats.js';
+import { FEED_ID_RE } from './stats-table.js';
+import { feedIdTimeMs } from './ulid.js';
+import { hourKey } from './event-detail.js';
+import { APP_STORE_ID, PAGE_CSS, PAGE_CSS_HASH, SHARE_CSP, SHARE_DIR, SHARE_NOT_FOUND, SHARE_PAGE_CAP, eventUrl } from './share-pages.js';
 
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 addFormats(ajv);
@@ -78,6 +82,9 @@ try {
 //    feed.provenance[]. A retired feature (superseded or tombstoned) rides along compact and
 //    flagged non-live for RETIRED_VISIBLE_MS by contract, so it is exempt.
 const nowMs = Date.now();
+// The per-hour detail files' feature ids and `moved` members, checked across files after the pass (2b).
+const detailIds = new Map<string, Set<string>>();
+const detailMoved = new Map<string, Record<string, unknown>>();
 for (const file of walk(publicV1, (f) => f.endsWith('.geojson'))) {
   const bytes = statSync(file).size;
   // The hard gate stays the invariant — derive's own budget guard is a producer-side courtesy,
@@ -87,8 +94,20 @@ for (const file of walk(publicV1, (f) => f.endsWith('.geojson'))) {
   else if (bytes > MAX_PUBLISHED_BYTES * 0.75) {
     console.warn(`::warning::${file}: ${bytes} bytes — ${((bytes / MAX_PUBLISHED_BYTES) * 100).toFixed(1)}% of the ${MAX_PUBLISHED_BYTES}-byte budget`);
   }
-  const fc = JSON.parse(readFileSync(file, 'utf8')) as { metadata?: { generated?: unknown }; features?: { properties?: { time?: number; feed?: { state?: string; provenance?: unknown[] } } }[] };
+  const fc = JSON.parse(readFileSync(file, 'utf8')) as {
+    metadata?: { generated?: unknown };
+    features?: { id?: string; properties?: { time?: number; feed?: { state?: string; provenance?: unknown[] } } }[];
+    moved?: unknown;
+  };
   if (typeof fc.metadata?.generated !== 'number') fail(`${file}: metadata.generated must be ms-epoch int`);
+  const detailHour = /[/\\]detail[/\\](\d{4}-\d{2}-\d{2}T\d{2})\.geojson$/.exec(file)?.[1];
+  if (detailHour) {
+    detailIds.set(detailHour, new Set((fc.features ?? []).map((f) => String(f.id))));
+    if (fc.moved !== undefined) {
+      if (fc.moved === null || typeof fc.moved !== 'object' || Array.isArray(fc.moved)) fail(`${file}: moved is not an object`);
+      else detailMoved.set(detailHour, fc.moved as Record<string, unknown>);
+    }
+  }
   // The per-hour detail files (EVT-5) are full-fat like the day files, live events only.
   const isDayFile = file.includes(join(publicV1, 'events')) || file.includes(join(publicV1, 'detail'));
   for (const [i, feat] of (fc.features ?? []).entries()) {
@@ -108,6 +127,70 @@ for (const file of walk(publicV1, (f) => f.endsWith('.geojson'))) {
     const t = feat.properties?.time;
     if (typeof t === 'number' && t > nowMs + 15 * 60_000) fail(`${file}: future-timestamped event (time=${t})`);
   }
+}
+
+// 2b. The detail files' `moved` members (event-detail.ts, share links): each key is a feed id whose ULID hour is the
+//     file's hour and which is not among the file's features; `to` is a feature of the hour file `hour` names.
+{
+  let problems = 0;
+  for (const [hour, moved] of detailMoved) {
+    for (const [id, entry] of Object.entries(moved)) {
+      const e = entry as { to?: unknown; hour?: unknown } | null;
+      const minted = feedIdTimeMs(id);
+      const why =
+        minted == null ? 'is not a feed id'
+        : hourKey(minted) !== hour ? `has its ULID hour ${hourKey(minted)}`
+        : detailIds.get(hour)!.has(id) ? 'is a feature of the same file'
+        : e == null || typeof e !== 'object' || typeof e.to !== 'string' || !FEED_ID_RE.test(e.to) || typeof e.hour !== 'string' ? 'has no {to, hour}'
+        : !detailIds.has(e.hour) ? `points at the hour ${e.hour}, which has no file`
+        : !detailIds.get(e.hour)!.has(e.to) ? `points at ${e.to}, which is not in the hour ${e.hour}`
+        : null;
+      if (why && problems++ < 5) fail(`detail ${hour}: moved ${id} ${why}`);
+    }
+  }
+  if (problems > 5) fail(`detail: ${problems} moved entries break the contract in all`);
+}
+
+// 2c. The share pages (share-pages.ts, APIs.md Share pages): the generic page exists, every page is named by a feed id,
+//     at most SHARE_PAGE_CAP, no script, its canonical link names a feed id on the site, its only stylesheet is the one
+//     whose hash the CSP names, and `_headers` serves /share/* with that CSP. The generic page shows no id and no date.
+const shareDir = join(PUBLIC_DIR, SHARE_DIR);
+const sharePages = walk(shareDir, (f) => f.endsWith('.html') && !f.endsWith(`${sep}${SHARE_NOT_FOUND}`));
+if (existsSync(shareDir)) {
+  if (sharePages.length > SHARE_PAGE_CAP) fail(`share: ${sharePages.length} pages, over the cap of ${SHARE_PAGE_CAP}`);
+  const styleOf = (html: string): string[] => [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((m) => m[1]!);
+  const shareProblem = (file: string, html: string, page: boolean): string | null => {
+    if (/<script/i.test(html)) return 'holds a script';
+    if (/\sstyle=/i.test(html)) return 'holds a style attribute (the CSP allows the one stylesheet only)';
+    const styles = styleOf(html);
+    if (styles.length !== 1 || styles[0] !== PAGE_CSS) return 'does not embed exactly the stylesheet the CSP hashes';
+    if (!page) {
+      if (/efd_/.test(html)) return 'names a feed id';
+      if (/\b(19|20)\d\d\b/.test(html.replace(/https?:\/\/[^"\s]*/g, ''))) return 'shows a year';
+      return null;
+    }
+    const canonical = /<link rel="canonical" href="([^"]+)">/.exec(html)?.[1];
+    const id = canonical?.slice(eventUrl('').length);
+    if (!canonical || !id || canonical !== eventUrl(id) || !FEED_ID_RE.test(id)) return `has no canonical ${eventUrl('<feed id>')} (got ${canonical ?? 'none'})`;
+    if (!html.includes(`content="app-id=${APP_STORE_ID}, app-argument=${canonical}"`)) return 'has no Smart App Banner for its canonical URL';
+    return null;
+  };
+  let problems = 0;
+  for (const file of sharePages) {
+    const name = file.slice(shareDir.length + 1);
+    const why = !FEED_ID_RE.test(name.replace(/\.html$/, '')) ? 'is not named by a feed id' : shareProblem(file, readFileSync(file, 'utf8'), true);
+    if (why && problems++ < 5) fail(`share: ${name} ${why}`);
+  }
+  if (problems > 5) fail(`share: ${problems} pages break the contract in all`);
+  const notFound = join(shareDir, SHARE_NOT_FOUND);
+  if (!existsSync(notFound)) fail(`share: ${SHARE_DIR}/${SHARE_NOT_FOUND} is missing (an unknown id would get no page)`);
+  else {
+    const why = shareProblem(notFound, readFileSync(notFound, 'utf8'), false);
+    if (why) fail(`share: ${SHARE_NOT_FOUND} ${why}`);
+  }
+  const headers = existsSync(join(PUBLIC_DIR, '_headers')) ? readFileSync(join(PUBLIC_DIR, '_headers'), 'utf8') : '';
+  const rule = /^\/share\/\*\n((?: {2}.*\n?)*)/m.exec(headers)?.[1] ?? '';
+  if (!rule.includes(`  Content-Security-Policy: ${SHARE_CSP}\n`) || !SHARE_CSP.includes(PAGE_CSS_HASH)) fail('share: _headers serves /share/* without the CSP that hashes the stylesheet');
 }
 
 // 3. Committed day partitions: plain NDJSON, size gate, first lines parse as Features.
@@ -325,7 +408,12 @@ if (deployed.length) {
     total += size;
     if (size > PAGES_MAX_FILE_BYTES) fail(`Pages: ${f} is ${size} bytes, over the ${PAGES_MAX_FILE_BYTES}-byte file limit`);
   }
-  console.log(`validate: Pages deploy ${deployed.length} files (limit ${PAGES_MAX_FILES}), ${(total / 1e6).toFixed(1)} MB, ${pagesNdjson.length} NDJSON partition(s)`);
+  // The share pages grow with a busy month up to their cap: the deploy must have room for all of them.
+  const atCap = deployed.length - sharePages.length + SHARE_PAGE_CAP;
+  if (atCap > PAGES_MAX_FILES * 0.75) {
+    console.warn(`::warning::Pages: ${deployed.length - sharePages.length} files besides the share pages + their cap of ${SHARE_PAGE_CAP} = ${atCap}, ${((atCap / PAGES_MAX_FILES) * 100).toFixed(1)}% of the ${PAGES_MAX_FILES}-file limit`);
+  }
+  console.log(`validate: Pages deploy ${deployed.length} files (limit ${PAGES_MAX_FILES}; ${sharePages.length} share page(s), cap ${SHARE_PAGE_CAP}), ${(total / 1e6).toFixed(1)} MB, ${pagesNdjson.length} NDJSON partition(s)`);
 }
 
 if (errors) {

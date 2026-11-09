@@ -8,7 +8,7 @@ import { Resolver } from '../src/dedup.js';
 import type { EditionEntry, HistoryIndex } from '../src/history-index.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import type { EditionRef, RemediationIndex } from '../src/remediation.js';
-import { parseStatsConfig, type StatsConfig } from '../src/stats.js';
+import { checkCollapsedInto, parseStatsConfig, type StatsConfig } from '../src/stats.js';
 import {
   type ComcatCount,
   type InputIndex,
@@ -33,7 +33,7 @@ import {
   verifyRow,
   yearDays,
 } from '../src/stats-history.js';
-import { cellOf } from '../src/stats-table.js';
+import { STATS_BUILDER_VERSION, cellOf } from '../src/stats-table.js';
 import type { EventNode, RawObs } from '../src/types.js';
 
 // The stats builder (src/stats-history.ts; APIs.md, Statistics): inputs per day, digests, order and budget, the area and
@@ -266,6 +266,39 @@ test('accumulator: bins and the M4.5/M5/M6 cuts on mag x 100, mmax per cell, fil
   assert.deepEqual([...b.area.values()][0], [2, 2, 610]);
 });
 
+test('collapsed_into of the year and area tables: every collapsed row whose representative is at or above the table\'s floor', () => {
+  const days = yearDays(2024, '2024-01-02');
+  const acc = new YearAccumulator(2024, days, true);
+  const t = Date.parse('2024-01-01T01:00:00Z');
+  const rows = [feat(t, 6.2), feat(t, 5.6), feat(t, 5.2), feat(t, 4.6), feat(t, 4.9), feat(t, 4.2)];
+  for (const f of rows) acc.add(f, null);
+  const id = (i: number): string => rows[i]!['id'] as string;
+  // 5.6 into 6.2 (an M6 representative), 4.6 into 5.2 (M5), 4.2 into 4.9 (below both floors); a context row of the
+  // next year as a representative counts by its own magnitude.
+  const next = 'efd_01M6Q2J4WGZZZZZZZZZZZZZZZZ';
+  const dropped = new Map([[id(1), id(0)], [id(3), id(2)], [id(5), id(4)]]);
+  const magOf = new Map(rows.map((f) => [f['id'] as string, Math.round((f['properties'] as { mag: number }).mag * 100)]));
+  acc.finish({ dropped, outOfRegion: new Set() }, magOf);
+  assert.deepEqual(acc.collapsedIntoAtLeast(600), [[id(1), id(0)]]);
+  assert.deepEqual(acc.collapsedIntoAtLeast(500).sort(), [[id(1), id(0)], [id(3), id(2)]].sort());
+  assert.equal(acc.collapsedTotal, 3);
+  const ctx = new YearAccumulator(2024, days, false);
+  const lone = feat(t, 6.1);
+  ctx.add(lone, null);
+  ctx.finish({ dropped: new Map([[lone['id'] as string, next]]), outOfRegion: new Set() }, new Map([[lone['id'] as string, 610], [next, 640]]));
+  assert.deepEqual(ctx.collapsedIntoAtLeast(600), [[lone['id'] as string, next]]);
+  // A representative the reconciliation never saw is a bug, not a silent gap.
+  const bad = new YearAccumulator(2024, days, false);
+  const r = feat(t, 6.0);
+  bad.add(r, null);
+  assert.throws(() => bad.finish({ dropped: new Map([[r['id'] as string, next]]), outOfRegion: new Set() }), /not among the reconciled rows/);
+});
+
+test('the builder version: providers/stats.json and STATS_BUILDER_VERSION agree (3: collapsed_into)', () => {
+  assert.equal(config.builder, STATS_BUILDER_VERSION);
+  assert.equal(STATS_BUILDER_VERSION, 3);
+});
+
 test('dupSuspects: M4.5+ pairs of different providers within 60 s and 100 km', () => {
   const t = Date.parse('2024-03-01T00:00:00Z');
   const rows = [
@@ -347,6 +380,13 @@ test('in-memory re-merge: an unmerged archive month counts one M6 quake once (re
     assert.equal(b.acc.m6.length, 1);
     assert.equal(b.acc.m6[0]!.provider, 'usgs', 'the representative holds the usgs row');
     assert.equal(b.yearBody, null);
+    // Share links: the collapsed ids name the representative, the row the area M6+ table keeps.
+    const area = JSON.parse(b.areaBody) as { m6: { id: string[]; collapsed_into: Record<string, string> } };
+    const into = Object.entries(area.m6.collapsed_into);
+    assert.equal(into.length, 2);
+    assert.ok(into.every(([id, rep]) => rep === area.m6.id[0] && !area.m6.id.includes(id)));
+    assert.deepEqual(Object.keys(area.m6.collapsed_into), Object.keys(area.m6.collapsed_into).sort(), 'keys in feed-id order');
+    assert.deepEqual(checkCollapsedInto(area.m6, 'area 2024 m6'), []);
   }
 });
 

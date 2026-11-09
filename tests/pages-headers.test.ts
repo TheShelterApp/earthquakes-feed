@@ -135,11 +135,11 @@ test('within the Pages limits; a day list past the rule limit shares one placeho
   const body = pagesHeaders(NOW, DAYS);
   const rules = parse(body);
   assert.ok(rules.length <= PAGES_HEADER_RULE_LIMIT, `${rules.length} rules`);
-  assert.equal(rules.length, 9 + DAYS.length);
+  assert.equal(rules.length, 10 + DAYS.length);
   assert.ok(body.split('\n').every((l) => l.length <= 2000));
   const many = Array.from({ length: 150 }, (_, i) => new Date(NOW - i * 86_400_000).toISOString().slice(0, 10));
   const big = pagesHeaders(NOW, many);
-  assert.equal(parse(big).length, 10);
+  assert.equal(parse(big).length, 11);
   for (const d of [many[0]!, many[149]!]) {
     assert.equal(served(big, `/v1/events/${d}.geojson`).get('Cache-Control'), CACHE_CONTROL.hotDay);
     assert.equal(served(big, `/v1/events/${d}.geojson`).get('Access-Control-Allow-Origin'), '*');

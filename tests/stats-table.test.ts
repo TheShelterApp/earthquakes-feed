@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import Ajv2020 from 'ajv/dist/2020.js';
 import { loadRegistry, priorityMap } from '../src/providers.js';
+import { checkCollapsedInto } from '../src/stats.js';
 import {
   AREA_COLUMNS,
   CELL_COUNT,
@@ -281,6 +283,34 @@ test('reconcile: across midnight in the window; the day table counts collapsed a
   assert.deepEqual([t1.count, t1.collapsed, t2.count, t2.collapsed], [1, 1, 1, 0], 'the usgs report on the 7th stays');
   assert.equal(t1.count + t1.filtered + t1.skipped + t1.collapsed + t1.out_of_region, 2);
   assert.equal((JSON.parse(t1.body) as { collapsed: number }).collapsed, 1);
+});
+
+test('collapsed_into (share links): each collapsed row names its representative, across midnight too; schema and checks', () => {
+  const late = feat(1, { props: { mag: 5.5, time: T0 + 86_399_000 }, feed: { chosen_provider: 'emsc', provenance: [{ provider: 'emsc', chosen: true, fields: {} }] } });
+  const early = feat(2, { props: { mag: 5.6, time: T0 + 86_400_000 + 5_000 } });
+  const d1 = dayRows(DAY, [late, feat(3)]);
+  const d2 = dayRows('2026-11-07', [early]);
+  const rec = reconcileRows([...d1.rows, ...d2.rows], prio);
+  type Doc = { id: string[]; collapsed: number; collapsed_into: Record<string, string> };
+  const t1 = JSON.parse(dayTableFromRows(d1, rec).body) as Doc;
+  const t2 = JSON.parse(dayTableFromRows(d2, rec).body) as Doc;
+  assert.deepEqual(t1.collapsed_into, { [late.id]: early.id }, 'the representative is the next day\'s row');
+  assert.ok(t2.id.includes(early.id) && !t1.id.includes(late.id));
+  assert.deepEqual(t2.collapsed_into, {}, 'present, empty, on a day without collapsed rows');
+  assert.equal(Object.keys(t1.collapsed_into).length, t1.collapsed);
+  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  const validate = ajv.compile(JSON.parse(readFileSync('schema/stats-table.schema.json', 'utf8')) as object);
+  assert.ok(validate(t1), ajv.errorsText(validate.errors));
+  const { collapsed_into: _drop, ...without } = t1;
+  assert.ok(!validate(without), 'a day table without collapsed_into is not format 1 any more');
+  assert.ok(!validate({ ...t1, collapsed_into: { [late.id]: 'usgs:us1' } }));
+  // The checks derive and validate.ts run on every table.
+  assert.deepEqual(checkCollapsedInto(t1 as unknown as Record<string, unknown>, 'd'), []);
+  assert.deepEqual(checkCollapsedInto({ id: [] }, 'd'), [], 'absent: none listed (files of builder 2)');
+  assert.match(checkCollapsedInto({ id: [late.id], collapsed_into: { [late.id]: early.id } }, 'd').join(), /a row of the table/);
+  assert.match(checkCollapsedInto({ id: [], collapsed_into: { [late.id]: late.id } }, 'd').join(), /not one feed id to another/);
+  assert.match(checkCollapsedInto({ id: [], collapsed_into: { [early.id]: late.id, [late.id]: early.id } }, 'd').join(), /feed-id order/);
+  assert.match(checkCollapsedInto({ id: [], collapsed_into: [] }, 'd').join(), /not an object/);
 });
 
 test('reconcile v2: a pair whose larger magnitude is M7.0+ links within 200 km and 1.5; below M7.0 the first tier holds', () => {

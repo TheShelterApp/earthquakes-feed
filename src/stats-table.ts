@@ -19,8 +19,10 @@ import type { Extra } from './types.js';
 export const STATS_FORMAT = 1;
 /** Day tables published by derive: today - 60 .. today (UTC). */
 export const STATS_DAYS = 61;
-/** The year and area builder's version: bumping it rebuilds every year (stats.yml). 2: the statistical reconciliation. */
-export const STATS_BUILDER_VERSION = 2;
+/** The year and area builder's version (providers/stats.json `builder`, the one the builder reads; tests keep the two
+ *  equal): bumping it rebuilds every year (stats.yml). 2: the statistical reconciliation. 3: `collapsed_into` in the
+ *  year M5+ and area M6+ tables (share links). */
+export const STATS_BUILDER_VERSION = 3;
 /** Every stats product lives under this path, on Pages and (year and area files) on the `data` branch. */
 export const STATS_DIR = 'v1/stats';
 /** The app's "revised later" line (StatisticsLogic.revisionDelay): `updated - time` strictly above one hour. */
@@ -221,15 +223,31 @@ export interface EventTable {
   nst?: (number | null)[];
   rms?: (number | null)[];
   delay?: (number | null)[];
+  /** Feed ids the reconciliation collapsed -> their representative's id (share links: a shared id that was folded
+   *  still resolves). Day tables: every collapsed row of the day. Year and area tables: every collapsed row of the
+   *  year whose representative is at or above the table's magnitude floor. Keys in feed-id order. */
+  collapsed_into?: Record<string, string>;
+}
+
+/** The `collapsed_into` member of a table: the pairs as an object, keys in feed-id order (stable bytes). */
+export function collapsedIntoObject(pairs: Iterable<readonly [string, string]>): Record<string, string> {
+  return Object.fromEntries([...pairs].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
 export const compareEvents = (a: StatsEvent, b: StatsEvent): number => a.timeMs - b.timeMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
 /**
- * The event table of `rows` with the optional `columns` (in OPTIONAL_COLUMNS order whatever order they are given in).
- * `t0` must be at or before the earliest row. The object's key order is the file's.
+ * The event table of `rows` with the optional `columns` (in OPTIONAL_COLUMNS order whatever order they are given in)
+ * and, when given, `collapsed_into` after them. `t0` must be at or before the earliest row. The object's key order is
+ * the file's.
  */
-export function buildEventTable(kind: TableKind, t0: number, rows: readonly StatsEvent[], columns: readonly StatsColumn[]): EventTable {
+export function buildEventTable(
+  kind: TableKind,
+  t0: number,
+  rows: readonly StatsEvent[],
+  columns: readonly StatsColumn[],
+  collapsedInto?: Iterable<readonly [string, string]>,
+): EventTable {
   const sorted = [...rows].sort(compareEvents);
   if (sorted.length && sorted[0]!.timeMs < t0) throw new Error(`stats table: a row at ${sorted[0]!.timeMs} is before t0 ${t0}`);
   const providers = [...new Set(sorted.map((r) => r.provider))].sort();
@@ -269,6 +287,7 @@ export function buildEventTable(kind: TableKind, t0: number, rows: readonly Stat
       case 'delay': table.delay = sorted.map((r) => r.delay); break;
     }
   }
+  if (collapsedInto) table.collapsed_into = collapsedIntoObject(collapsedInto);
   return table;
 }
 
@@ -336,20 +355,23 @@ export function dayRows(date: string, features: Iterable<unknown>): DayRows {
 
 /**
  * The day table `v1/stats/days/<date>.json` of a day's rows, without the rows the reconciliation dropped (`dropped`,
- * feed ids): the bytes and the counts the index lists. Invariant: count + filtered + skipped + collapsed = the day's
- * live, non-tombstoned features.
+ * feed ids): the bytes and the counts the index lists. Invariant: count + filtered + skipped + collapsed + out_of_region
+ * = the day's live, non-tombstoned features. `collapsed_into` names every collapsed row's representative (its row is in
+ * this day's table or, across midnight, the neighbouring day's).
  */
 export function dayTableFromRows(d: DayRows, rec: Reconciliation = EMPTY_RECONCILIATION): DayTableResult {
   const t0 = dayStartMs(d.date);
-  let collapsed = 0;
   let outOfRegion = 0;
+  const into: [string, string][] = [];
   const kept = d.rows.filter((r) => {
+    const rep = rec.dropped.get(r.id);
     if (rec.outOfRegion.has(r.id)) outOfRegion++;
-    else if (rec.dropped.has(r.id)) collapsed++;
+    else if (rep != null) into.push([r.id, rep]);
     else return true;
     return false;
   });
-  const table = buildEventTable('day', t0, kept, DAY_COLUMNS);
+  const collapsed = into.length;
+  const table = buildEventTable('day', t0, kept, DAY_COLUMNS, into);
   // Key order of the file: format, kind, date, then the table, then the day's extras.
   const { format, kind, ...rest } = table;
   const day = { format, kind, date: d.date, ...rest, filtered: d.filtered, skipped: d.skipped, collapsed, out_of_region: outOfRegion, attribution: STATS_ATTRIBUTION };

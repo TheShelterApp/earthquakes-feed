@@ -24,7 +24,9 @@ import { FRESHNESS_EXPECTED_INTERVAL_SECONDS, FRESHNESS_STALE_AFTER_SECONDS } fr
 import { pagesHeaders } from './pages-headers.js';
 import { detectSilentChanges, liveWindowDays, nextSilentLog, readSilentLog, silentChangesAgainst, writeLiveIndex, writeSilentLog } from './live-sync.js';
 import { baselineDays, baselineRecord, previousWindowLines, readBaselineRecord, readBaselineSnapshot, writeBaselineRecord } from './live-baseline.js';
-import { writeDetailHours } from './event-detail.js';
+import { detailWindow, writeDetailHours } from './event-detail.js';
+import { deriveSharePages } from './share-pages.js';
+import { loadRegistry } from './providers.js';
 import { writeLiveMonth } from './live-month.js';
 import { tmpdir } from 'node:os';
 import { deriveStats, loadStatsConfig, statsDays } from './stats.js';
@@ -146,6 +148,13 @@ function main(): void {
   const month = writeLiveMonth(feats, { publicV1, nowMs, headSeq: state.head.seq });
   // EVT-5: per-hour full-fat files for the event detail, over the same days as the Pages day files.
   const detail = writeDetailHours(allNodes, pagesDays, { publicV1, nowMs });
+  // Share links (2026-11, APIs.md Share pages): a static page per significant live event of the detail window, under
+  // its id and the ids it absorbed, plus the generic share/event/404.html. A failure drops them, never the feed.
+  const share = deriveSharePages(allNodes, {
+    publicDir: PUBLIC_DIR,
+    window: detailWindow(pagesDays, nowMs),
+    providerNames: () => new Map(loadRegistry().map((p) => [p.id, p.name])),
+  });
   // Statistics: "on" publishes under public/v1/stats/ with the manifest pointer, "shadow" builds and checks the same
   // files in the runner's temp directory (never deployed); a drop leaves neither files nor pointer (safeStats).
   const { stats, pointer: statsPointer } = deriveStats({
@@ -252,8 +261,16 @@ function main(): void {
       ` silent=${silentNow.length} (kept ${silentWith.length})` +
       `; month days=${month.index.days.length} ${month.index.days[0]?.date ?? '-'}..${month.index.days.at(-1)?.date ?? '-'}` +
       ` (${month.index.days.reduce((s, d) => s + d.bytes, 0)} B, ${month.index.count} live)` +
-      (detail ? `; detail hours=${detail.files} (${detail.bytes} B, largest ${detail.maxBytes} B)` : ''),
+      (detail ? `; detail hours=${detail.files} (${detail.bytes} B, largest ${detail.maxBytes} B, moved ${detail.moved})` : ''),
   );
+  if (share) {
+    console.log(
+      `derive: share pages=${share.pages} (live ${share.live}, retired ${share.retired}, left out by the cap ${share.capped})` +
+        ` ${share.bytes} B, largest ${share.maxBytes} B, ${Math.round(share.ms)} ms` +
+        (share.removed ? `, removed ${share.removed} stale` : '') +
+        (share.rejected.length ? `, ${share.rejected.length} event(s) left out by the page check` : ''),
+    );
+  }
   console.log(
     `stats: ${statsCfg.mode}` +
       (stats

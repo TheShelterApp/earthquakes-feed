@@ -443,6 +443,25 @@ export function checkEventTable(table: Record<string, unknown>, where: string, b
   const providers = table['providers'] as unknown[];
   const prov = table['prov'] as number[] | undefined;
   if (prov && prov.some((i) => !(Number.isInteger(i) && i >= 0 && i < providers.length))) errs.push(`${where}: a prov index outside providers`);
+  errs.push(...checkCollapsedInto(table, where));
+  return errs;
+}
+
+/** `collapsed_into` (when present): feed id -> another feed id, keys in feed-id order, no key among the table's rows. */
+export function checkCollapsedInto(table: Record<string, unknown>, where: string): string[] {
+  const into = table['collapsed_into'];
+  if (into === undefined) return [];
+  if (!isObj(into)) return [`${where}: collapsed_into is not an object`];
+  const rows = new Set(Array.isArray(table['id']) ? (table['id'] as unknown[]) : []);
+  const keys = Object.keys(into);
+  const errs: string[] = [];
+  for (const k of keys) {
+    const v = into[k];
+    if (!FEED_ID_RE.test(k) || typeof v !== 'string' || !FEED_ID_RE.test(v) || k === v) errs.push(`${where}: collapsed_into ${JSON.stringify(k)} -> ${JSON.stringify(v)} is not one feed id to another`);
+    else if (rows.has(k)) errs.push(`${where}: collapsed_into names ${k}, a row of the table`);
+    if (errs.length >= 3) break;
+  }
+  if (keys.join() !== [...keys].sort().join()) errs.push(`${where}: collapsed_into keys not in feed-id order`);
   return errs;
 }
 
@@ -531,6 +550,8 @@ export function checkStats(publicDir: string, nowMs: number, schemaDir = SCHEMA_
     const filtered = doc['filtered'] as number[];
     if (filtered.length !== d.filtered) errs.push(`day ${d.path}: ${filtered.length} filtered, the index says ${d.filtered}`);
     if (filtered.some((x, i) => x < 0 || x >= DAY_MS || (i > 0 && x < filtered[i - 1]!))) errs.push(`day ${d.path}: filtered times not ascending inside the day`);
+    const into = isObj(doc['collapsed_into']) ? Object.keys(doc['collapsed_into']).length : -1;
+    if (into !== doc['collapsed']) errs.push(`day ${d.path}: collapsed_into has ${into} entries, collapsed is ${String(doc['collapsed'])}`);
     errs.push(...checkEventTable(doc, `day ${d.path}`, { from: t0, to: t0 + DAY_MS }));
   }
   for (const y of index.years) {

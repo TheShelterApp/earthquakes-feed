@@ -2,10 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://earthquakes-feed.theshelter.app/schema/stats-table.schema.json",
   "title": "Statistics day table (v1/stats/days/YYYY-MM-DD.json)",
-  "description": "One UTC day of live feed events as columns (format 1), the Statistics screen's input for 24 h, week and month: the event table of kind \"day\" plus the day's filtered (non-earthquake) times and skipped count. count + filtered.length + skipped + collapsed + out_of_region = the day's live, non-tombstoned features. APIs.md, Statistics. $defs/eventTable is shared with the year and area files.",
+  "description": "One UTC day of live feed events as columns (format 1), the Statistics screen's input for 24 h, week and month: the event table of kind \"day\" plus the day's filtered (non-earthquake) times and skipped count. count + filtered.length + skipped + collapsed + out_of_region = the day's live, non-tombstoned features; collapsed_into has exactly `collapsed` entries. APIs.md, Statistics. $defs/eventTable is shared with the year and area files.",
   "allOf": [{ "$ref": "#/$defs/eventTable" }],
   "type": "object",
-  "required": ["date", "filtered", "skipped", "collapsed", "out_of_region", "attribution", "depth", "place", "prov", "felt", "intensity", "alert", "tsunami", "status", "upd", "nst", "rms", "delay"],
+  "required": ["date", "collapsed_into", "filtered", "skipped", "collapsed", "out_of_region", "attribution", "depth", "place", "prov", "felt", "intensity", "alert", "tsunami", "status", "upd", "nst", "rms", "delay"],
   "properties": {
     "kind": { "const": "day" },
     "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
@@ -43,7 +43,13 @@
         "upd": { "type": "array", "items": { "enum": [0, 1, null] }, "description": "1 when updated - time > 3,600,000 ms, null without updated" },
         "nst": { "type": "array", "items": { "$ref": "#/$defs/intOrNull" } },
         "rms": { "type": "array", "items": { "$ref": "#/$defs/intOrNull" } },
-        "delay": { "type": "array", "items": { "$ref": "#/$defs/intOrNull" }, "description": "seconds from origin to the feed's first ingest" }
+        "delay": { "type": "array", "items": { "$ref": "#/$defs/intOrNull" }, "description": "seconds from origin to the feed's first ingest" },
+        "collapsed_into": {
+          "type": "object",
+          "propertyNames": { "pattern": "^efd_[0-9A-HJKMNP-TV-Z]{26}$" },
+          "additionalProperties": { "type": "string", "pattern": "^efd_[0-9A-HJKMNP-TV-Z]{26}$" },
+          "description": "feed ids the statistical reconciliation collapsed -> their representative's feed id, keys in feed-id order (share links: a shared id that was folded still resolves). A day table lists every collapsed row of the day (the representative is in this day's table or the neighbouring day's); a year (M5+) or area (M6+) table every collapsed row of the year whose representative is at or above the table's floor (its row is in this table or, across New Year, the neighbouring year's). An absent member means none listed (files of builder 2)."
+        }
       }
     }
   }

@@ -14,6 +14,7 @@ archival, redaction).
 | Cloudflare Pages | `https://earthquakes-feed.theshelter.app/v1/` | live feed, recent day files, manifest, live index, month index, per-hour detail | summaries + manifest + live index, deltas and month index `max-age=30` + SWR; day files `max-age=300` (today, yesterday) / `3600` (older); live index and month index day files `max-age=0, must-revalidate`; detail hours `max-age=300` |
 | Cloudflare Pages | `https://earthquakes-feed.theshelter.app/v1/stats/` | statistics: the index, 61 day tables, the year and area files (*Statistics*; since 2026-11, while `providers/stats.json` has `derive_publish: "on"`) | `max-age=0, must-revalidate` (the index names every file's `sha256`) |
 | Cloudflare Pages | `https://earthquakes-feed.theshelter.app/events/` | the unfrozen day partitions (NDJSON, the last 11 days), byte for byte the `data` branch files (since 2026-10); served as `text/plain; charset=utf-8`, brotli or gzip when the request accepts it (since 2026-10-14; the manifest's `sha256` and `bytes` name the decoded bytes) | `max-age=0, must-revalidate` |
+| Cloudflare Pages | `https://earthquakes-feed.theshelter.app/share/event/` | static HTML share pages of significant events, the target of `https://theshelter.app/event/<feed id>` links (*Share pages*; since 2026-11); for people and link-preview bots, not for programs | `max-age=300`; CSP, `nosniff`, `no-referrer`, `noindex` |
 | jsDelivr (branch) | `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/` | full-history partitions; **from 2026-11-04 frozen days only** (*Historical day partitions*) | ~12 h |
 | jsDelivr (`@sha`) | `…@<data_commit>/` | immutable frozen partitions | 1 year, immutable |
 | GitHub Releases | `archive-YYYY-MM` assets | very old months (bulk) | immutable, no CORS |
@@ -231,11 +232,120 @@ events are not in these files (the day files keep their 48-hour markers). The by
 (`metadata.generated` is the newest `ingest_time` among the features, or the hour's start), so an hour's file changes
 only when its events do and a deploy uploads only the hours that changed.
 
+**`moved`** (share links, 2026-11): a foreign member of the FeatureCollection, present only when the hour has an
+entry: `"moved": {"<feed id>": {"to": "<live feed id>", "hour": "YYYY-MM-DDTHH"}}`, keys in feed-id order. A feed id's
+first 10 ULID characters are the time it was minted at (the minting report's origin rounded to 30 s; *Resolving a shared
+id* below), so an id names its hour, but only as a hint: the rounding can cross an hour, a revision can move the origin
+while the id stays pinned, and an id shared in a quake's first minutes is often retired (`superseded`) when the agencies'
+solutions fold together. The file of an id's **ULID hour** therefore lists, under `moved`, every id whose ULID hour it
+is but which is not among its features: each retired id whose final live survivor is in a detail file (`to` = that
+survivor after following the whole `superseded_by` chain, `hour` = the survivor's hour) and each live event whose origin
+hour is another hour (`to` = the id itself). Tombstoned ids, ids retired into a tombstoned or unknown event and ids
+whose ULID hour is outside `first_hour` … `last_hour` are not listed. Built from the run's whole event map (45 days,
+every state) on every derive, nothing persisted, so any id of the window resolves in at most two hour reads: its ULID
+hour, then the hour `moved` names, which holds `to` as a feature. `validate.ts` checks every entry: a feed id whose ULID
+hour is the file's, not a feature of the file, `to` a feature of the hour `hour` names.
+
+Measured on `data` ba509fd5a33 (2026-11-09 04:47 UTC; 51,273 event-map nodes, 1,085 hour files): 1,940 entries, 1,492
+retired ids and 448 live ids whose origin left their ULID hour, in 632 hour files; 192,560 bytes over all the hour files
+(about 300 bytes in an hour that has entries); building the map takes about 50 ms of derive.
+
 Why hours: on 2026-10-06 the 46 published days held about 54k live events; a file per event would be 54k files, past
 Cloudflare Pages' 20,000 files per site on the free plan (developers.cloudflare.com/pages/platform/limits, read
 2026-10-06); hours are 1,104 files (the deploy goes from 69 to about 1,170 files and from 145 to 258 MB, derive from
 2.5 to 3.1 s). A feed id → byte range index into the day files would need no new files, but Pages serves the day
 files compressed, and a range of a compressed body is not a range of the JSON.
+
+### `GET /share/event/<feed id>` — share pages
+
+The page a shared event link shows to a person without the app and to a messenger's link-preview bot (share links,
+2026-11). The app shares `https://theshelter.app/event/<feed id>`; the site answers that path with one static
+`_redirects` rule, a `302` to `https://earthquakes-feed.theshelter.app/share/event/<feed id>` (a fixed host, the id
+only in the path), and Pages serves `share/event/<feed id>.html` from this project. Nothing runs anywhere: no Worker or
+Pages Function, so a shared link on a big-quake day costs no request quota. With the app installed and the site's
+association file claiming `/event/`, the link opens the app and never reaches HTTP.
+
+**Which ids have a page.** Every derive writes one page per **live** event of the detail files' window (*Event
+detail*: the event map's days through now + 10 minutes) that is significant: magnitude 4.0 or more as shown (one
+decimal), or `felt` ≥ 1, or a tsunami flag, or a PAGER alert (`alert` green, yellow, orange or red). The same bytes are
+also written under each **retired** id whose final live survivor has a page, so a link shared before a fold keeps its
+preview; its canonical URL is the survivor's. At most `SHARE_PAGE_CAP` = 5,000 pages, the most significant first (PAGER
+level, tsunami flag, magnitude, felt reports, then the newer event), an event always with all its retired ids. Every
+other path under `/share/event/` gets `share/event/404.html` with status 404: "An earthquake on Shelter", which shows no
+id, no date and nothing else a crafted link could put on a preview. A page leaves with its event (after about 45 days, a
+tombstone, a magnitude revised below 4.0); a link then shows the generic page.
+
+**What a page shows**, only from the feed's event, never from the URL: the magnitude (`M 6.4`), the place, the origin
+time in UTC (`9 November 2026, 03:34 UTC`), the depth, the number of agencies that reported it, the chosen agency's own
+event page when its solution carries a `url` that parses as `https:` on an allow-listed host (exactly
+`earthquake.usgs.gov` today: no other source sends a `url`), an "Open in Shelter" link and the Smart App Banner
+(`app-id=6767608845, app-argument=https://theshelter.app/event/<id>`), the App Store badge
+(`https://apps.apple.com/app/id6767608845`), and a data line naming the chosen agency and the others' count with a link
+to `ATTRIBUTIONS.md`. The place is shown only when, after NFC normalization, it is Latin letters (never the fullwidth forms
+U+FF00–FFEF, at most two combining diacritical marks U+0300–036F on a letter, no other mark), printable ASCII and a few
+typographic marks, at most 80 characters, with no control, format or bidi character (U+200B–200F, U+202A–202E,
+U+2066–2069 and the rest of Unicode's `C` categories reject it); otherwise the page shows the coordinates
+(`near 10.9°S 165.6°E`, the hemisphere of the rounded value, `0.0°N 0.0°E` at zero). Every value is
+HTML-escaped; there is no script and no form. `canonical`, `og:url` and the banner's `app-argument` are
+`https://theshelter.app/event/<id>`; `og:image` is the site's static card for the magnitude band,
+`https://theshelter.app/og/event/{lt3,3,4,5,6,7}.png` (below 3, then by whole magnitude, 7 and above) or `generic.png`
+(1200 × 630); `noindex` in a meta tag and in `X-Robots-Tag`. The bytes hold no run clock: a page changes only when its
+event does, so a deploy uploads only the pages that changed.
+
+**Headers** (the `/share/*` rule of `_headers`, `src/pages-headers.ts`; the only rule that reaches `/share/`):
+`Cache-Control: public, max-age=300`, `Content-Security-Policy: default-src 'none'; img-src https://theshelter.app;
+style-src 'sha256-<hash of the one stylesheet>'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+`X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex`. The CSP allows the page's
+single `<style>` element by its sha256 (`PAGE_CSS` in `src/share-pages.ts`; no element carries a `style` attribute) and
+blocks every script on purpose, Cloudflare's injected ones included: never add `script-src`.
+
+**Checks.** A share page never stops the live feed. The page check (`sharePageProblem` in `src/share-pages.ts`) rejects a
+page holding a script, a `style` attribute on an element (escaped text that reads `style=` is fine), a stylesheet other
+than the hashed one, or, for an event page, no canonical `https://theshelter.app/event/<feed id>` and banner for it;
+the generic page must also name no feed id and show no year. derive leaves out an event whose page the check rejects,
+with its retired ids (`::warning::share page <id> left out: <why>`); a throw in the page writer, or a rejected generic
+page, drops the run's share pages (`::warning::share pages dropped`) and the links get Pages' plain 404 until the next
+run. `validate.ts` (the deploy gate) fails only on more than 5,000 pages or a `_headers` without the hashed CSP; it
+re-runs the page check on the deployed files and warns on a page the check rejects or not named by a feed id and on a
+missing generic page, and it warns when the deploy's other files plus the full cap would pass 75 % of Pages' 20,000
+files.
+
+**Limits.** The generic page answers with status 404 (`share/event/404.html` is Pages' not-found page for the
+directory). Some link-preview bots (Telegram, iMessage, Facebook) draw no card for a 404 and cache that, so a link
+shared before its event has a page (an event in its first minutes, before the next derive) may keep no preview there.
+Pages treats a project without a top-level `404.html` as a single-page app; the nested `share/event/404.html` lookup was
+checked on wrangler's Pages asset server, and an unknown `/share/event/efd_…` on a Pages preview deployment must answer
+the generic page before the site's `/event/*` redirect relies on it.
+
+Measured on `data` ba509fd5a33 (2026-11-09 04:47 UTC, the 46 event-map days): 3,437 pages (3,040 live events, 397
+retired ids; the cap left none out; the page check rejected none), 138 of them with the coordinates instead of the
+place; 17.2 MB in all (6.2 MB gzip, 4.9 MB brotli), a page 4,750–5,268 bytes (median 5,047), the generic page 4,229
+bytes. Writing and checking them adds about 0.4 s to derive (0.5 s with `moved`). The deploy grows from about 1,330 to about 4,770 files (24 % of the 20,000 a
+Pages deploy may hold; about 6,330 at the cap).
+
+#### Resolving a shared id
+
+What the app does with `https://theshelter.app/event/<feed id>` (or `theshelter://event/<feed id>`). Only data read
+from the feed by the id is ever shown; nothing derived from an id that was not found (a crafted ULID can claim any
+date).
+
+1. Accept only `^efd_[0-9A-HJKMNP-TV-Z]{26}$`. Its **ULID time** (the first 10 characters after `efd_`, Crockford
+   base32, most significant first, in ms since the epoch) is the 30 s bucket the id was minted at: a hint for the hour,
+   day and year, never the event's time.
+2. **Hour files** (`manifest.event_detail`, the last ~45 days): read the ULID hour's file. The id is a feature: done.
+   It is in `moved`: read `moved[id].hour` and take the feature `moved[id].to` (one hop; `to` is live, show `to`'s
+   data). Neither: read the hours either side (the bucket's rounding) and look again, features then `moved`. An hour
+   outside `first_hour` … `last_hour` has no file.
+3. **Day tables** (`v1/stats/index.json` `days[]`, today − 60 … today): the ULID day's table, and the day either side
+   when the ULID time is within an hour of midnight. The id is in `id`: done (a row, all magnitudes). It is a key of
+   `collapsed_into`: look up the representative in the same table or the neighbouring day's.
+4. **Year M5+ and area M6+ tables** (`years[]` `events`, the current year and the two before it; `area[]` `m6`, 1973 →):
+   the ULID year's file, and the year either side when the ULID time is within a day of New Year; the same `id` then
+   `collapsed_into` lookup (the representative is a row of the same table). Across New Year an id can be a row of one
+   year's table and a `collapsed_into` key of the other's (two reconciliations with different context): take the row.
+   Files of builder 2 have no `collapsed_into` (read it as empty).
+5. Not found: the event is no longer available (an M < 5 older than 61 days, an M5–6 older than the current year and
+   the two before it, a tombstone, an id the reconciliation left out as out of region, or no such event).
 
 ### `GET /v1/stats/index.json` — statistics
 
@@ -314,7 +424,8 @@ reconciles the rows of its whole 61-day window together before writing the day t
 counts once; the stats builder reconciles each year with the day before and the day after it as context. Counters:
 `collapsed` and `out_of_region` in each day table, `days.collapsed` and `days.out_of_region` per day and
 `reconciled: {rule, collapsed, out_of_region}` in a year file, `reconciled: {rule, collapsed, out_of_region}` in an
-area file.
+area file. Which row a collapsed id folded into: `collapsed_into` in the event tables (below), so a shared id the
+reconciliation left out still resolves (*Resolving a shared id*).
 
 **Event table** (format 1, shared by the three file kinds): `{format, kind, t0, count, providers, id, t, lat, lon, mag,
 …optional columns}`, rows sorted by (time, id). `id` is the feed id (`efd_…`, the feature id). `t` holds ms deltas:
@@ -322,12 +433,24 @@ area file.
 `rms` × 1000, each `Math.round` (half toward +∞); compare thresholds (M4.5, M5, M6) on the scaled integers. `prov[i]`
 indexes `providers` (the sorted chosen providers). Optional columns, an absent one meaning all null: `depth`, `place`,
 `prov`, `felt`, `intensity`, `alert`, `tsunami` (0/1), `status`, `upd`, `nst`, `rms`, `delay`. A day table carries all
-of them, a year table all but `delay`, an area table `depth`, `place`, `prov`.
+of them, a year table all but `delay`, an area table `depth`, `place`, `prov`. After the columns, `collapsed_into`
+(share links, 2026-11): `{"<feed id>": "<representative's feed id>"}`, keys in feed-id order, for rows the
+reconciliation collapsed (never a row of the table itself). A day table lists every collapsed row of the day (its
+representative is in that day's table or, across midnight, the neighbouring day's). A year table's `events` (M5+) and
+an area table's `m6` (M6+) list every row the year's reconciliation collapsed into one of the year's own rows at or
+above the table's floor, whatever the collapsed row's own magnitude (the live map may share a member's id rather than
+the representative's): the representative's row is always in that same table. The collapsed row is of the year or,
+across New Year, of the day before or after it (the build's context); a row of the year collapsed into a row of the
+neighbouring year is listed by the neighbouring year's table, when that year has one (year files cover the current
+year and the two before it, area files every year). Absent in year and area files of builder 2:
+none listed.
 
 **Day table** (`v1/stats/days/YYYY-MM-DD.json`): the event table of `kind: "day"` with `date` (after `kind`),
 `t0` = the day's 00:00 UTC, plus `filtered` (the filtered events' times, ms from `t0` each, ascending), `skipped` (a
 count), `collapsed` and `out_of_region` (counts: rows the reconciliation left out) and `attribution`. `count +
-filtered.length + skipped + collapsed + out_of_region` = the day's live, non-tombstoned features. The day tables
+filtered.length + skipped + collapsed + out_of_region` = the day's live, non-tombstoned features, and `collapsed_into`
+(always present in a day table) has exactly `collapsed` entries: 208 over the 46 event-map days on 2026-11-09, about
+70 bytes each (14.6 KB in all). The day tables
 of the 45 event-map days are built from the run's own events; today − 60 … today − 46 from the frozen partitions on
 `data`. A day's bytes change only when its events do: ~140 KB a day, 8.6 MB for the 61 days on 2026-11-08 (2.8 MB at brotli
 quality 4: the random part of the feed ids does not compress), so a first sync is a few MB and a refresh moves the index
@@ -361,6 +484,14 @@ day tables.
   the 7 days on each side when the year is re-merged in memory). A new frozen day rebuilds the current year; a re-merged
   archive or edition, a new remediation edition or a re-roll rebuilds its year with no other action; a builder bump
   rebuilds them all. The current year and the two before it first, then newest first, at most `max_years_per_run` a run.
+  Builder 3 (2026-11, share links) adds `collapsed_into` to the year and area tables: the bump changes every year's
+  digest, so the scheduled runs rebuild all 54 years (1973 → 2026) by themselves, 6 a run (`max_years_per_run`), each
+  checked against ComCat as usual; the cron delivers about 4 runs a day, so the paced rebuild takes 9 runs, about 2–3
+  days. Each run builds 6 years in about 4–8 minutes (the builder 2 rebuild of 2026-11-08 took 1,262 s for 57 year
+  builds, 16–102 s a year, the current year the slowest), inside `budget_minutes`. Until a year is rebuilt its files
+  stay builder 2, without `collapsed_into`; a year that fails its gate keeps them. Dispatching `stats.yml` with
+  `max_years: 60` (not a dry run) instead takes two runs of under 25 minutes each: `budget_minutes` (20) stops a run from
+  starting more years (on 2026-11-08 the first such run built 43 years in 18 minutes, the next the other 14).
 - **The in-memory re-merge** (owner decision A6): an input below the re-merge epoch or rules (an archive or edition
   without `merge_epoch` ≥ 1 and `merge_rules` ≥ `REMERGE_RULES` — except an edition of a single source, era B, which has nothing to fold —, a remediation edition
   not refreshed on its month's merged asset, every frozen partition) still holds the split
@@ -383,7 +514,7 @@ day tables.
 - **Ledger** `knowledge/stats/state.json` on `data` (derive reads `through` and each file's `sha256` from it):
   `{version, builder, through, generated, run_id, years: {Y: {inputs_digest, through, complete, area: {bytes, sha256,
   records, m6}, year?: {bytes, sha256}, check: {gate: ok|warn|fail|error, era, window, feed, comcat, ratio, bands},
-  remerged_in_memory, collapsed, inputs: {remediation, partition, archive, edition, unmerged_months}, dup_suspects: {count, n45,
+  remerged_in_memory, collapsed, out_of_region, inputs: {remediation, partition, archive, edition, unmerged_months}, dup_suspects: {count, n45,
   ratio, sample}, months: {YYYY-MM: {n45, m6, dup}}, failed_digest?, error?, waiting?}}}`. `dup_suspects` (diagnostics
   only) counts pairs of M4.5+ rows of different chosen providers within 60 s and 100 km: splits the merge left.
 - **Verify:** a dispatch with `verify: sample` (the last 13 months and 6 older ones) or `full` (every month) compares

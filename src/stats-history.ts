@@ -431,10 +431,22 @@ export class YearAccumulator {
   outOfRegionTotal = 0;
   private finished = false;
 
-  /** Counts the waiting rows the reconciliation kept and the ones it left out (collapsed, out of region). */
+  /**
+   * The `collapsed_into` pairs of the year: [feed id, representative id, the representative's mag x 100] for every row
+   * the reconciliation collapsed into one of the year's own rows. The collapsed row is the year's own or a context row
+   * (the day before or after the year); a row of the year collapsed into a context row is listed by the neighbouring
+   * year, whose own row the representative is: a pair always sits in the file that holds its representative's row.
+   */
+  readonly collapsedInto: [string, string, number][] = [];
+
+  /**
+   * Counts the waiting rows the reconciliation kept and the ones it left out (collapsed, out of region), and collects
+   * `collapsedInto`. `rec` covers the waiting rows and the context rows the build reconciled with them.
+   */
   finish(rec: Reconciliation): void {
     if (this.finished) throw new Error('YearAccumulator.finish called twice');
     this.finished = true;
+    const ownMag = new Map(this.pending.map((ev) => [ev.id, ev.magE2]));
     for (const ev of this.pending) {
       const di = this.dayIndex.get(eventDayKey(ev.timeMs))!;
       if (rec.outOfRegion.has(ev.id)) {
@@ -445,7 +457,18 @@ export class YearAccumulator {
         this.collapsedTotal++;
       } else this.count(ev, di);
     }
+    for (const [id, rep] of rec.dropped) {
+      const repMag = ownMag.get(rep);
+      if (repMag == null || rec.dropped.has(rep) || rec.outOfRegion.has(rep)) continue;
+      this.collapsedInto.push([id, rep, repMag]);
+    }
     this.pending.length = 0;
+  }
+
+  /** The `collapsed_into` pairs of a table whose rows are M(minE2 / 100)+: the representative is at or above it (so
+   *  it is a row of that table). */
+  collapsedIntoAtLeast(minE2: number): [string, string][] {
+    return this.collapsedInto.filter(([, , m]) => m >= minE2).map(([id, rep]) => [id, rep]);
   }
 
   private count(ev: StatsEvent, di: number): void {
@@ -518,7 +541,7 @@ export function areaFileJson(acc: YearAccumulator, plan: YearPlan, builder: numb
     total: cells.map((c) => acc.area.get(c)![0]),
     m45: cells.map((c) => acc.area.get(c)![1]),
     mmax: cells.map((c) => acc.area.get(c)![2]),
-    m6: buildEventTable('area', t0, acc.m6, AREA_COLUMNS),
+    m6: buildEventTable('area', t0, acc.m6, AREA_COLUMNS, acc.collapsedIntoAtLeast(600)),
     reconciled: { rule: RECONCILE_RULE, collapsed: acc.collapsedTotal, out_of_region: acc.outOfRegionTotal },
     inputs_digest: plan.digest,
     attribution: STATS_ATTRIBUTION,
@@ -550,7 +573,7 @@ export function yearFileJson(acc: YearAccumulator, plan: YearPlan, builder: numb
       providers: acc.providers.map((s) => [...s].map((p) => pIndex.get(p)!).sort((a, b) => a - b)),
       missing: plan.days.flatMap((d, i) => (missing.has(d) ? [i] : [])),
     },
-    events: buildEventTable('year', Date.UTC(plan.year, 0, 1), acc.m5, YEAR_COLUMNS),
+    events: buildEventTable('year', Date.UTC(plan.year, 0, 1), acc.m5, YEAR_COLUMNS, acc.collapsedIntoAtLeast(500)),
     reconciled: { rule: RECONCILE_RULE, collapsed: acc.collapsedTotal, out_of_region: acc.outOfRegionTotal },
     inputs_digest: plan.digest,
     attribution: STATS_ATTRIBUTION,

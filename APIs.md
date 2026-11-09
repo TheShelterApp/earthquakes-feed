@@ -902,8 +902,15 @@ ComCat-anchored events for global figures: the residual over-count after epoch 1
 M4.5+ events without a ComCat row near one or not, every M6+ fold).
 
 **What is published.** With `REMERGE_EPOCH` 0 (the kill switch) nothing is re-merged. Epoch 1 is on since 2026-11-08
-(`REMERGE_INGEST_TIME` 2026-11-08T00:00:00.000Z); the archive months are merged first, newest first, then the deep
-history from 2023-07 back. Above 0:
+(`REMERGE_INGEST_TIME` 2026-11-08T00:00:00.000Z, `REMERGE_RULES` 3). The campaign ended 2026-11-09 02:45 UTC: all 36
+archive months (2023-07-06 → 2026-06-30) and all 283 deep-history months of eras pilot and A (2000-01 → 2023-07-05)
+are merged; era B is single-source and not re-merged. Measured against ComCat (`scripts/remerge-verify.ts --comcat`,
+2026-11-08/09): the archives went from 54,267 to 31,920 live M4.5+ events and from 1,574 to 567 M6+ (ComCat 22,476
+M4.5+ and 387 M6+ earthquakes; the feed's ComCat-anchored counts 22,485 and 387), the deep history from 199,815 to
+197,002 M4.5+ and from 4,487 to 4,269 M6+ (ComCat 162,768 and 3,559; anchored 162,839 and 3,560). The anchored side is
+higher where ComCat deleted events since, or types them as non-earthquakes (Kīlauea's 2018 collapse events). The
+remaining over-count is events the current rules keep apart (an ISC copy of a NEIC or GFZ origin at 0 km / 0 s, one
+agency's distant solution); a later rule round is epoch 2. Above 0:
 
 - *Deep history:* the hourly `history` walk gives each month whose current edition is not merged a new edition
   `events-YYYY-MM.e<N+1>.tar.zst`, built from edition N and nothing else, newest month first; a month waits until its

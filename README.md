@@ -424,6 +424,12 @@ on the boards; GitHub can drop a scheduled run, so 35 days without one opens `wa
 
 **Walks and writers.** `history`, `first-solutions`, `backfill`, `archive`, `remerge` and `stats` keep a blocked run green: a `::warning::`,
 and the marker as the artifact `walk-blocked-<workflow>`, which the `feed` job files as `walks:<workflow>:<source>`.
+Only the newest marker of a walk counts, for 26 h. `backfill` and `stats` state every standing block on every run (an
+open dispatched window, a stalled walk, an unreadable archive; a year whose ledger entry failed its ComCat gate), and a
+run of theirs with nothing blocked uploads a marker with only a `#` line: the entry resolves on the next health run, no
+hand clearing. A dispatched backfill window that overflowed, failed or held back a day stays open in
+`knowledge/index/backfill.json` (`dispatched`) until dispatched ranges of that provider that answered in full cover it
+(dispatch narrower ranges inside it). The other walks report a block once and rely on the 26 h hold.
 `aggregate` and `derive` still go red on a failed publish (owner decision 2026-10-22); `feed:freshness` is the symptom
 either way.
 

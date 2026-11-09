@@ -1,5 +1,5 @@
 import { type BackfillCfg, backfillCfg } from './backfill-cfg.js';
-import { type ProviderCursor, advance, narrowAfterOverflow, newCursor, nextWindow, recordAnswer, recordFailure, stallLevel } from './backfill-cursor.js';
+import { type ProviderCursor, STALL_ALARM_FAILURES, advance, narrowAfterOverflow, newCursor, nextWindow, recordAnswer, recordFailure, stallLevel } from './backfill-cursor.js';
 import { eventDayKey } from './bitemporal.js';
 import type { WindowOutcome } from './providers.js';
 import type { EventNode, ProviderConfig } from './types.js';
@@ -15,6 +15,26 @@ const DAY = 86_400_000;
 export interface BackfillCursorFile {
   targetStart: string;
   providers: Record<string, ProviderCursor>;
+  /**
+   * The dispatched windows still open: a dispatched range that overflowed, failed or held back a day is asked once,
+   * so the run records it here and every later run (cron or dispatch) reports what is left of it in its blocked marker,
+   * until dispatched ranges that answered in full cover it (recordDispatchOutcome). Absent = none.
+   */
+  dispatched?: OpenDispatch[];
+}
+
+/** A part of a dispatched window that has not been filled yet. */
+export interface OpenDispatch {
+  provider: string;
+  /** ISO times, half-open [start, end). */
+  start: string;
+  end: string;
+  /** Why it is open: 'overflow' (filled the page cap), 'failed' (the fetch failed) or 'held' (a day of it could only
+   *  be rebuilt from an archive that could not be read, so the run left it unwritten). */
+  reason: 'overflow' | 'failed' | 'held';
+  error?: string;
+  /** The ingest time of the run that opened it. */
+  since: string;
 }
 
 export interface Job {
@@ -109,14 +129,20 @@ export function applyWindowResult(
   return { verdict: { kind: 'answered', saturated, advanced } };
 }
 
-/** The stalled walks of this run: an alarm is a blocker (the run goes red), a warning an annotation. */
-export function stallReport(jobs: readonly Job[]): { blockers: string[]; warnings: string[] } {
+/**
+ * The stalled walks: an alarm is a blocker (the run's marker, a P3 on the "[health] feed" board), a warning an
+ * annotation. Backfill's marker states every standing block on every run, so an empty marker clears the board (the
+ * health workflow reads only the newest one): a walk at one day with STALL_ALARM_FAILURES or more failures is a
+ * blocker on EVERY run, not only on stallLevel's every 24th failure, until the source answers again. Pass every eligible
+ * provider's cursor (a dispatched run has no walk jobs, yet must still report the walks' stalls).
+ */
+export function stallReport(walks: ReadonlyArray<Pick<Job, 'p' | 'cur'>>): { blockers: string[]; warnings: string[] } {
   const blockers: string[] = [];
   const warnings: string[] = [];
-  for (const j of jobs) {
+  for (const j of walks) {
     const cur = j.cur;
-    if (!cur) continue;
-    const level = stallLevel(cur);
+    if (!cur || cur.done) continue;
+    const level = cur.failures >= STALL_ALARM_FAILURES && cur.windowDays <= 1 ? 'alarm' : stallLevel(cur);
     if (level === 'ok') continue;
     const msg =
       `backfill: ${j.p.id} has failed ${cur.failures} consecutive runs since ${cur.failingSince} (last error: ${cur.lastError}); ` +
@@ -125,6 +151,68 @@ export function stallReport(jobs: readonly Job[]): { blockers: string[]; warning
     else warnings.push(msg);
   }
   return { blockers, warnings };
+}
+
+const MIN_OPEN_MS = 60_000;
+
+/** [a, b) minus [c, d): zero, one or two pieces, dropping a piece shorter than a minute (an ISO end like 23:59:59Z). */
+function subtract(a: number, b: number, c: number, d: number): Array<[number, number]> {
+  if (d <= a || c >= b) return [[a, b]];
+  const out: Array<[number, number]> = [];
+  if (c - a >= MIN_OPEN_MS) out.push([a, c]);
+  if (b - d >= MIN_OPEN_MS) out.push([d, b]);
+  return out;
+}
+
+/** The provider's open dispatched windows minus [startMs, endMs). */
+function closeRange(open: OpenDispatch[], provider: string, startMs: number, endMs: number): OpenDispatch[] {
+  const out: OpenDispatch[] = [];
+  for (const o of open) {
+    if (o.provider !== provider) {
+      out.push(o);
+      continue;
+    }
+    for (const [s, e] of subtract(Date.parse(o.start), Date.parse(o.end), startMs, endMs)) out.push({ ...o, start: new Date(s).toISOString(), end: new Date(e).toISOString() });
+  }
+  return out;
+}
+
+/**
+ * How one dispatched window's outcome moves the open list (BackfillCursorFile.dispatched): an answer whose days were
+ * all written closes that range for its provider (the narrower ranges an operator dispatches after an overflow close
+ * the overflowed window piece by piece); an overflow, a failure, or an answer that left a day unwritten opens it
+ * (replacing whatever was open over the same range). A walk job (cursor set) changes nothing: the walk asks again.
+ */
+export function recordDispatchOutcome(
+  open: readonly OpenDispatch[],
+  j: Pick<Job, 'p' | 'cur' | 'startMs' | 'endMs'>,
+  verdict: WindowVerdict,
+  opts: { ingestTime: string; untouchable: boolean },
+): OpenDispatch[] {
+  if (j.cur) return [...open];
+  const rest = closeRange([...open], j.p.id, j.startMs, j.endMs);
+  const range = { provider: j.p.id, start: new Date(j.startMs).toISOString(), end: new Date(j.endMs).toISOString(), since: opts.ingestTime };
+  if (verdict.kind === 'narrowed') rest.push({ ...range, reason: 'overflow' });
+  else if (verdict.kind === 'failed') rest.push({ ...range, reason: 'failed', error: verdict.error.slice(0, 200) });
+  else if (opts.untouchable) rest.push({ ...range, reason: 'held' });
+  return rest;
+}
+
+/** The marker lines of the open dispatched windows of the given providers (each names its provider id). */
+export function openDispatchLines(open: readonly OpenDispatch[], providers: ReadonlySet<string>): string[] {
+  const out: string[] = [];
+  for (const o of open) {
+    if (!providers.has(o.provider)) continue;
+    const w = windowText({ startMs: Date.parse(o.start), endMs: Date.parse(o.end) });
+    const why =
+      o.reason === 'overflow'
+        ? 'filled the page cap and was not ingested; dispatch narrower ranges inside it'
+        : o.reason === 'failed'
+          ? `failed (${o.error ?? 'error'}); dispatch it again`
+          : 'held back a day whose archive could not be read; dispatch it again once the Releases are readable';
+    out.push(`backfill: dispatched window ${w} of ${o.provider} (open since ${o.since}) ${why}`);
+  }
+  return out;
 }
 
 /** C6: remember the day file an event was read from when that is not its time-day (a re-merged archive keeps an event

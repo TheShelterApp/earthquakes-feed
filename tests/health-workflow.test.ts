@@ -214,6 +214,20 @@ test('walks: a blocked marker is a warning on a green run and the artifact walk-
     const days = Number(/\n {10}retention-days: (\d+)\n/.exec(upload[0]!)?.[1]);
     assert.ok(days * 86_400_000 > lim.markerHoldMs, `${workflow}: the marker outlives the hold`);
   }
+  // backfill and stats state every standing block on every run: a run whose tool step finished with nothing blocked
+  // uploads a marker with only a '#' line, after the warning step (which must not see it) and before the upload, so the
+  // board resolves on the next health run (feed-health.mjs parseMarker skips '#' lines).
+  for (const { workflow, marker } of WALKS.filter((w) => w.workflow === 'backfill' || w.workflow === 'stats')) {
+    const all = steps(read(`.github/workflows/${workflow}.yml`));
+    const at = (pred: (s: string) => boolean): number => all.findIndex(pred);
+    const tool = at((s) => /\n {8}id: run\n/.test(s));
+    const warn = at((s) => s.includes(`if [ -f ${marker} ]`));
+    const mark = at((s) => s.includes('name: Mark a run with nothing blocked'));
+    const upload = at((s) => s.includes(`name: ${lim.artifactPrefix}${workflow}\n`));
+    assert.ok(tool >= 0 && tool < warn && warn < mark && mark < upload, `${workflow}: tool ${tool} < warn ${warn} < mark ${mark} < upload ${upload}`);
+    assert.match(all[mark]!, /\n {8}if: always\(\)( && !inputs\.dry_run)? && steps\.run\.outcome == 'success'\n/, workflow);
+    assert.ok(all[mark]!.includes(`[ -f ${marker} ] || echo "# nothing blocked: run \${{ github.run_id }}" > ${marker}`), workflow);
+  }
   // first-solutions' collect writes its marker under FIRST_SOLUTIONS_OUT, which the workflow sets to fs-out.
   assert.match(read('.github/workflows/first-solutions.yml'), /\n {10}FIRST_SOLUTIONS_OUT: fs-out\n/);
 });

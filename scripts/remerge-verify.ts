@@ -26,6 +26,9 @@ import { join } from 'node:path';
 import { featureToNode } from '../src/bitemporal.js';
 import { REPO } from '../src/config.js';
 import { ghRetry } from '../src/gh.js';
+import type { EditionMeta } from '../src/history-build.js';
+import { allPeriods, loadHistoryConfig } from '../src/history-config.js';
+import { verifyEdition } from '../src/history-verify.js';
 import type { MergeMeta } from '../src/remerge.js';
 import { anchorCounts, magnitudeCounts, usgsResidual } from '../src/remerge.js';
 import type { EventNode } from '../src/types.js';
@@ -53,6 +56,7 @@ interface Row {
   folds: Fold[];
   comcat?: { m45: number; m6: number };
   warnings: string[];
+  verify_errors?: number;
 }
 
 const args = process.argv.slice(2);
@@ -74,10 +78,31 @@ function members(file: string): Map<string, string> {
   rmSync(d, { recursive: true, force: true });
   return out;
 }
+/** A Release asset: the public download URL first (no API budget), with retries (it answers 504 now and then), then
+ *  gh as the fallback. */
 function download(tag: string, asset: string): string {
   const f = join(work, asset);
-  if (!existsSync(f)) ghRetry(['release', 'download', tag, '-R', REPO, '-p', asset, '-O', f, '--clobber']);
+  if (existsSync(f)) return f;
+  const url = `https://github.com/${REPO}/releases/download/${tag}/${asset}`;
+  for (let i = 0; i < 4; i++) {
+    try {
+      execFileSync('curl', ['-sSfL', '--max-time', '120', '-o', f, url], { stdio: ['ignore', 'ignore', 'pipe'] });
+      return f;
+    } catch {
+      execFileSync('sleep', [String(2 + i * 3)]);
+    }
+  }
+  ghRetry(['release', 'download', tag, '-R', REPO, '-p', asset, '-O', f, '--clobber']);
   return f;
+}
+/** members() of a downloaded asset, the file removed afterwards (a full pass reads about 1.7 GB). */
+function take(tag: string, asset: string): Map<string, string> {
+  const f = download(tag, asset);
+  try {
+    return members(f);
+  } finally {
+    rmSync(f, { force: true });
+  }
 }
 const nodesOf = (m: Map<string, string>): EventNode[] =>
   [...m]
@@ -130,7 +155,8 @@ if (flag('--history')) {
   }
 } else if (flag('--from-index')) {
   const dir = opt('--from-index')!;
-  const archives = JSON.parse(readFileSync(join(dir, 'knowledge/index/archives.json'), 'utf8')) as {
+  const apath = join(dir, 'knowledge/index/archives.json');
+  const archives = (existsSync(apath) && !flag('--skip-archives') ? JSON.parse(readFileSync(apath, 'utf8')) : { list: [] }) as {
     list: { period: string; tag: string; asset: string; merge_epoch?: number; built_on?: { asset: string }; days: string[] }[];
   };
   for (const e of archives.list) {
@@ -151,13 +177,30 @@ if (flag('--history')) {
   }
   const hpath = join(dir, 'knowledge/index/history.json');
   if (existsSync(hpath)) {
-    const idx = JSON.parse(readFileSync(hpath, 'utf8')) as { editions: { period: string; tag: string; asset: string; merged_from?: { asset: string }; withdrawn?: unknown }[] };
-    for (const e of idx.editions) {
-      if (!e.merged_from || e.withdrawn || (only && !only.includes(e.period))) continue;
-      const after = members(download(e.tag, e.asset));
-      const before = members(download(e.tag, e.merged_from.asset));
-      const meta = JSON.parse(after.get('_edition.json')!) as { merge: MergeMeta; days: string[] };
-      rows.push(rowFromNodes(`history ${e.period}`, nodesOf(before), nodesOf(after), meta.merge, meta.days));
+    const idx = JSON.parse(readFileSync(hpath, 'utf8')) as { boundary: string; editions: { period: string; edition: number; tag: string; asset: string; merged_from?: { asset: string }; withdrawn?: unknown }[] };
+    // The current edition of each month (the highest not withdrawn), when it is a re-merged one.
+    const current = new Map<string, (typeof idx.editions)[number]>();
+    for (const e of idx.editions) if (!e.withdrawn && (!current.has(e.period) || e.edition > current.get(e.period)!.edition)) current.set(e.period, e);
+    const periods = new Map(allPeriods(loadHistoryConfig()).map((p) => [p.key, p]));
+    for (const e of [...current.values()].sort((a, b) => (a.period < b.period ? -1 : 1))) {
+      if (!e.merged_from || (only && !only.includes(e.period))) continue;
+      const after = take(e.tag, e.asset);
+      const before = take(e.tag, e.merged_from.asset);
+      const meta = JSON.parse(after.get('_edition.json')!) as EditionMeta;
+      const row = rowFromNodes(`history ${e.period}`, nodesOf(before), nodesOf(after), meta.merge!, meta.days);
+      // The edition's own checks against the edition it was merged from (history-verify.ts's per-edition check with
+      // `prev` in place of the raw assets: the same ids, lines and source ids, pointers, live keys, counts).
+      const p = periods.get(e.period);
+      if (p) {
+        const files = (m: Map<string, string>) => new Map([...m].filter(([k]) => /^\d{2}\.ndjson$/.test(k)).map(([k, v]) => [`${e.period}-${k.slice(0, 2)}`, v]));
+        const prevMeta = JSON.parse(before.get('_edition.json')!) as EditionMeta;
+        const prevCheck = verifyEdition(files(before), { period: p, boundary: idx.boundary, archivedDays: new Set(), meta: prevMeta });
+        const check = verifyEdition(files(after), { period: p, boundary: idx.boundary, archivedDays: new Set(), meta, prev: prevCheck });
+        row.verify_errors = check.errors.length;
+        if (check.errors.length) row.warnings.push(`verifyEdition: ${check.errors.slice(0, 3).join('; ')}`);
+      }
+      rows.push(row);
+      process.stderr.write(`${e.period} `);
     }
   }
 } else {

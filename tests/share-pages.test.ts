@@ -24,6 +24,7 @@ import {
   notFoundPageHtml,
   planSharePages,
   sharePageHtml,
+  sharePageProblem,
   significanceOf,
   utcText,
   writeSharePages,
@@ -130,10 +131,32 @@ test('latinText: Latin script, ASCII and a few marks only; control, format and b
   assert.equal(latinText('x'.repeat(81)), null, 'over the length cap');
 });
 
+test('latinText: NFC, combining diacritical marks only on a letter and at most two, no fullwidth forms', () => {
+  assert.equal(latinText('Bragan\u0063\u0327a'), 'Bragan\u00E7a', 'NFC composes c + cedilla');
+  assert.equal(latinText('Ha\u0323\u0302 Long'), 'H\u1EAD Long', 'two marks compose into one letter');
+  assert.equal(latinText('q\u0307\u0323'), 'q\u0323\u0307', 'two marks a letter keeps, in canonical order');
+  for (const bad of [
+    'Lata\u0489',
+    'L\u0430ta\u0301',
+    'q\u0300\u0301\u0302',
+    'a' + '\u0300'.repeat(8),
+    '\u0301Lata',
+    'Lata \u0301',
+    '90\u0301 km',
+    '\uFF2C\uFF41\uFF54\uFF41',
+    'Lata\uFF0C Solomon',
+  ]) {
+    assert.equal(latinText(bad), null, JSON.stringify(bad));
+  }
+});
+
 test('coordinates, UTC time, magnitude bands', () => {
   assert.equal(coordinateText(-10.94, 165.56), 'near 10.9°S 165.6°E');
   assert.equal(coordinateText(51.6, -159.85), 'near 51.6°N 159.9°W');
   assert.equal(coordinateText(0, 0), 'near 0.0°N 0.0°E');
+  assert.equal(coordinateText(-0.04, -0.04), 'near 0.0°N 0.0°E', 'the hemisphere of the rounded value');
+  assert.equal(coordinateText(-0.05, -0.05), 'near 0.1°S 0.1°W');
+  assert.equal(coordinateText(-0, 179.96), 'near 0.0°N 180.0°E');
   assert.equal(utcText(Date.parse('2026-11-09T03:34:59.466Z')), '9 November 2026, 03:34 UTC');
   assert.equal(utcText(Date.parse('2025-01-01T00:00:00Z')), '1 January 2025, 00:00 UTC');
   assert.equal(magE1(3.96), 40);
@@ -212,6 +235,21 @@ test('the page escapes upstream text and falls back to coordinates for text it m
   assert.ok(nomag.includes('<h1>Earthquake</h1>') && nomag.includes('og/event/generic.png') && !nomag.includes('<dt>Depth</dt>'));
 });
 
+test('page check: a script, a style attribute on an element, another stylesheet, no canonical or banner; text reading style= is fine', () => {
+  const ok = sharePageHtml(node({ place: '5 km N of X style=Y' }));
+  assert.ok(ok.includes('<p class="text">5 km N of X style=Y</p>') && ok.includes('content="Magnitude 6.4 earthquake · 5 km N of X style=Y'));
+  assert.equal(sharePageProblem(ok, false), null);
+  assert.equal(sharePageProblem(notFoundPageHtml(), true), null);
+  assert.match(sharePageProblem(ok.replace('</body>', '<script>x</script></body>'), false)!, /script/);
+  assert.match(sharePageProblem(ok.replace('<p class="text">', '<p class="text" style="color:red">'), false)!, /style attribute/);
+  assert.match(sharePageProblem(ok.replace('<h1>', '<h1 STYLE = x>'), false)!, /style attribute/);
+  assert.match(sharePageProblem(ok.replace('</head>', '<style>a{}</style></head>'), false)!, /stylesheet/);
+  assert.match(sharePageProblem(ok.replace(/<link rel="canonical"[^>]*>/, ''), false)!, /canonical/);
+  assert.match(sharePageProblem(ok.replace(/app-argument=[^"]*"/, 'app-argument=https://evil.example/"'), false)!, /Smart App Banner/);
+  assert.match(sharePageProblem(notFoundPageHtml().replace('</h1>', ' efd_x</h1>'), true)!, /feed id/);
+  assert.match(sharePageProblem(notFoundPageHtml().replace('</h1>', ' 2026</h1>'), true)!, /year/);
+});
+
 test('the generic page shows no id, no date and no year; no script; the hashed stylesheet', () => {
   const html = notFoundPageHtml();
   assert.ok(!html.includes('efd_'));
@@ -275,6 +313,37 @@ test('write: one page per id (a retired id gets its survivor\'s bytes), the gene
     assert.ok(out.maxBytes > 0 && out.bytes > out.maxBytes);
     writeSharePages([live, retired], { publicDir: dir, window: WINDOW });
     assert.equal(readFileSync(join(share, `${live.feedId}.html`), 'utf8'), a);
+    assert.deepEqual(out.rejected, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('write and derive step: a page the check rejects is left out with its retired ids and a warning; the rest ship', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'share-reject-'));
+  try {
+    const bad = node({ mag: 6.0 });
+    const badRetired = node({ mag: 5.9, state: 'superseded', supersededBy: bad.feedId });
+    const good = node({ mag: 5.0 });
+    const share = join(dir, SHARE_DIR);
+    mkdirSync(share, { recursive: true });
+    writeFileSync(join(share, `${badRetired.feedId}.html`), 'an earlier run');
+    const render = (n: EventNode, names?: ReadonlyMap<string, string>): string => {
+      const html = sharePageHtml(n, names);
+      return n.feedId === bad.feedId ? html.replace('</body>', '<script>x</script></body>') : html;
+    };
+    const warnings: string[] = [];
+    const out = deriveSharePages([bad, badRetired, good], {
+      publicDir: dir,
+      window: WINDOW,
+      warn: (m) => warnings.push(m),
+      write: (nodes, o) => writeSharePages(nodes, { ...o, render }),
+    });
+    assert.ok(out);
+    assert.deepEqual([out.pages, out.live, out.retired], [1, 1, 0]);
+    assert.deepEqual(out.rejected, [{ id: bad.feedId, why: 'holds a script' }]);
+    assert.deepEqual(readdirSync(share).sort(), [SHARE_NOT_FOUND, `${good.feedId}.html`].sort(), 'the retired id\'s old page is gone too');
+    assert.deepEqual(warnings, [`share page ${bad.feedId} left out: holds a script`]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -298,7 +367,20 @@ test('derive step: a throw drops share/ for the run with a warning, never the fe
     assert.ok(!existsSync(join(dir, 'share')));
     assert.deepEqual(warnings, ['share pages dropped: boom']);
     assert.equal(deriveSharePages([], { publicDir: dir, window: null }), null, 'no window (no days): nothing');
-    const ok = deriveSharePages([node({ mag: 5 })], { publicDir: dir, window: WINDOW, warn: (m) => warnings.push(m) });
+    // The provider names are read inside the step: a registry error drops the pages, not derive.
+    mkdirSync(join(dir, SHARE_DIR), { recursive: true });
+    const unread = deriveSharePages([node({ mag: 5 })], {
+      publicDir: dir,
+      window: WINDOW,
+      warn: (m) => warnings.push(m),
+      providerNames: () => {
+        throw new Error('registry unreadable');
+      },
+    });
+    assert.equal(unread, null);
+    assert.ok(!existsSync(join(dir, 'share')));
+    assert.equal(warnings.pop(), 'share pages dropped: registry unreadable');
+    const ok = deriveSharePages([node({ mag: 5 })], { publicDir: dir, window: WINDOW, warn: (m) => warnings.push(m), providerNames: () => new Map([['usgs', 'USGS']]) });
     assert.equal(ok?.pages, 1);
     assert.equal(warnings.length, 1);
   } finally {

@@ -39,7 +39,7 @@ curl -s https://earthquakes-feed.theshelter.app/v1/live/month.json
 # One event's full detail: the live events of its UTC hour, full-fat (APIs.md, Event detail):
 curl -s https://earthquakes-feed.theshelter.app/v1/detail/2026-10-05T09.geojson
 
-# The share page of a significant event (M4+, felt, a tsunami flag or a PAGER alert, the event map's 45 days): static
+# The share page of a significant event (M4+, felt, a tsunami flag or a PAGER alert, about the last 45 days): static
 # HTML for people and link previews, the target of https://theshelter.app/event/<feed id> (APIs.md, Share pages):
 curl -s https://earthquakes-feed.theshelter.app/share/event/efd_01M6Z5Z7N0YS0YZKJ7H5HDQMVE
 

@@ -431,35 +431,42 @@ export class YearAccumulator {
   outOfRegionTotal = 0;
   private finished = false;
 
-  /** The year's collapsed rows: [feed id, representative id, the representative's mag x 100] (`collapsed_into`). */
+  /**
+   * The `collapsed_into` pairs of the year: [feed id, representative id, the representative's mag x 100] for every row
+   * the reconciliation collapsed into one of the year's own rows. The collapsed row is the year's own or a context row
+   * (the day before or after the year); a row of the year collapsed into a context row is listed by the neighbouring
+   * year, whose own row the representative is: a pair always sits in the file that holds its representative's row.
+   */
   readonly collapsedInto: [string, string, number][] = [];
 
   /**
-   * Counts the waiting rows the reconciliation kept and the ones it left out (collapsed, out of region). `magOf` gives
-   * the magnitude (x 100) of every row the reconciliation saw, context rows included: a collapsed row is listed in a
-   * table's `collapsed_into` when its representative is at or above that table's floor (collapsedIntoAtLeast).
+   * Counts the waiting rows the reconciliation kept and the ones it left out (collapsed, out of region), and collects
+   * `collapsedInto`. `rec` covers the waiting rows and the context rows the build reconciled with them.
    */
-  finish(rec: Reconciliation, magOf: ReadonlyMap<string, number> = new Map()): void {
+  finish(rec: Reconciliation): void {
     if (this.finished) throw new Error('YearAccumulator.finish called twice');
     this.finished = true;
+    const ownMag = new Map(this.pending.map((ev) => [ev.id, ev.magE2]));
     for (const ev of this.pending) {
       const di = this.dayIndex.get(eventDayKey(ev.timeMs))!;
-      const rep = rec.dropped.get(ev.id);
       if (rec.outOfRegion.has(ev.id)) {
         this.outOfRegion[di]!++;
         this.outOfRegionTotal++;
-      } else if (rep != null) {
+      } else if (rec.dropped.has(ev.id)) {
         this.collapsed[di]!++;
         this.collapsedTotal++;
-        const repMag = magOf.get(rep);
-        if (repMag == null) throw new Error(`${this.year}: the representative ${rep} of ${ev.id} is not among the reconciled rows`);
-        this.collapsedInto.push([ev.id, rep, repMag]);
       } else this.count(ev, di);
+    }
+    for (const [id, rep] of rec.dropped) {
+      const repMag = ownMag.get(rep);
+      if (repMag == null || rec.dropped.has(rep) || rec.outOfRegion.has(rep)) continue;
+      this.collapsedInto.push([id, rep, repMag]);
     }
     this.pending.length = 0;
   }
 
-  /** The `collapsed_into` pairs of a table whose rows are M(minE2 / 100)+: the representative is at or above it. */
+  /** The `collapsed_into` pairs of a table whose rows are M(minE2 / 100)+: the representative is at or above it (so
+   *  it is a row of that table). */
   collapsedIntoAtLeast(minE2: number): [string, string][] {
     return this.collapsedInto.filter(([, , m]) => m >= minE2).map(([id, rep]) => [id, rep]);
   }
@@ -771,9 +778,8 @@ export function buildYear(plan: YearPlan, reader: InputReader, o: { builder: num
   }
   const own = new Set(acc.pending.map((e) => e.id));
   const r0 = performance.now();
-  const reconciled = [...acc.pending, ...context.filter((e) => !own.has(e.id))];
-  const rec = reconcileRows(reconciled, priority);
-  acc.finish(rec, new Map(reconciled.map((e) => [e.id, e.magE2])));
+  const rec = reconcileRows([...acc.pending, ...context.filter((e) => !own.has(e.id))], priority);
+  acc.finish(rec);
   o.log?.(`stats: ${plan.year} reconciled: ${acc.collapsedTotal} row(s) collapsed, ${acc.outOfRegionTotal} out of region, ${Math.round(performance.now() - r0)} ms`);
   return {
     acc,

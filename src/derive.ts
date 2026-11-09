@@ -153,7 +153,7 @@ function main(): void {
   const share = deriveSharePages(allNodes, {
     publicDir: PUBLIC_DIR,
     window: detailWindow(pagesDays, nowMs),
-    providerNames: new Map(loadRegistry().map((p) => [p.id, p.name])),
+    providerNames: () => new Map(loadRegistry().map((p) => [p.id, p.name])),
   });
   // Statistics: "on" publishes under public/v1/stats/ with the manifest pointer, "shadow" builds and checks the same
   // files in the runner's temp directory (never deployed); a drop leaves neither files nor pointer (safeStats).
@@ -267,7 +267,8 @@ function main(): void {
     console.log(
       `derive: share pages=${share.pages} (live ${share.live}, retired ${share.retired}, left out by the cap ${share.capped})` +
         ` ${share.bytes} B, largest ${share.maxBytes} B, ${Math.round(share.ms)} ms` +
-        (share.removed ? `, removed ${share.removed} stale` : ''),
+        (share.removed ? `, removed ${share.removed} stale` : '') +
+        (share.rejected.length ? `, ${share.rejected.length} event(s) left out by the page check` : ''),
     );
   }
   console.log(

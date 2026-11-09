@@ -272,7 +272,7 @@ also written under each **retired** id whose final live survivor has a page, so 
 preview; its canonical URL is the survivor's. At most `SHARE_PAGE_CAP` = 5,000 pages, the most significant first (PAGER
 level, tsunami flag, magnitude, felt reports, then the newer event), an event always with all its retired ids. Every
 other path under `/share/event/` gets `share/event/404.html` with status 404: "An earthquake on Shelter", which shows no
-id, no date and nothing else a crafted link could put on a preview. A page leaves with its event (after 45 days, a
+id, no date and nothing else a crafted link could put on a preview. A page leaves with its event (after about 45 days, a
 tombstone, a magnitude revised below 4.0); a link then shows the generic page.
 
 **What a page shows**, only from the feed's event, never from the URL: the magnitude (`M 6.4`), the place, the origin
@@ -281,9 +281,11 @@ event page when its solution carries a `url` that parses as `https:` on an allow
 `earthquake.usgs.gov` today: no other source sends a `url`), an "Open in Shelter" link and the Smart App Banner
 (`app-id=6767608845, app-argument=https://theshelter.app/event/<id>`), the App Store badge
 (`https://apps.apple.com/app/id6767608845`), and a data line naming the chosen agency and the others' count with a link
-to `ATTRIBUTIONS.md`. The place is shown only when it is Latin script, printable ASCII and a few typographic marks, at
-most 80 characters, with no control, format or bidi character (U+200B–200F, U+202A–202E, U+2066–2069 and the rest of
-Unicode's `C` categories reject it); otherwise the page shows the coordinates (`near 10.9°S 165.6°E`). Every value is
+to `ATTRIBUTIONS.md`. The place is shown only when, after NFC normalization, it is Latin letters (never the fullwidth forms
+U+FF00–FFEF, at most two combining diacritical marks U+0300–036F on a letter, no other mark), printable ASCII and a few
+typographic marks, at most 80 characters, with no control, format or bidi character (U+200B–200F, U+202A–202E,
+U+2066–2069 and the rest of Unicode's `C` categories reject it); otherwise the page shows the coordinates
+(`near 10.9°S 165.6°E`, the hemisphere of the rounded value, `0.0°N 0.0°E` at zero). Every value is
 HTML-escaped; there is no script and no form. `canonical`, `og:url` and the banner's `app-argument` are
 `https://theshelter.app/event/<id>`; `og:image` is the site's static card for the magnitude band,
 `https://theshelter.app/og/event/{lt3,3,4,5,6,7}.png` (below 3, then by whole magnitude, 7 and above) or `generic.png`
@@ -297,17 +299,28 @@ style-src 'sha256-<hash of the one stylesheet>'; base-uri 'none'; form-action 'n
 single `<style>` element by its sha256 (`PAGE_CSS` in `src/share-pages.ts`; no element carries a `style` attribute) and
 blocks every script on purpose, Cloudflare's injected ones included: never add `script-src`.
 
-**Checks.** A failure in the page writer drops the run's share pages (`::warning::share pages dropped`), never the live
-feed; the links then get Pages' plain 404 until the next run. `validate.ts` (the deploy gate) fails on a page not named
-by a feed id, more than 5,000 pages, a script or a `style` attribute, a stylesheet other than the hashed one, a page
-without its canonical `https://theshelter.app/event/<feed id>` and banner, a missing or id- or date-bearing generic page,
-or a `_headers` without the hashed CSP; it warns when the deploy's other files plus the full cap would pass 75 % of
-Pages' 20,000 files.
+**Checks.** A share page never stops the live feed. The page check (`sharePageProblem` in `src/share-pages.ts`) rejects a
+page holding a script, a `style` attribute on an element (escaped text that reads `style=` is fine), a stylesheet other
+than the hashed one, or, for an event page, no canonical `https://theshelter.app/event/<feed id>` and banner for it;
+the generic page must also name no feed id and show no year. derive leaves out an event whose page the check rejects,
+with its retired ids (`::warning::share page <id> left out: <why>`); a throw in the page writer, or a rejected generic
+page, drops the run's share pages (`::warning::share pages dropped`) and the links get Pages' plain 404 until the next
+run. `validate.ts` (the deploy gate) fails only on more than 5,000 pages or a `_headers` without the hashed CSP; it
+re-runs the page check on the deployed files and warns on a page the check rejects or not named by a feed id and on a
+missing generic page, and it warns when the deploy's other files plus the full cap would pass 75 % of Pages' 20,000
+files.
+
+**Limits.** The generic page answers with status 404 (`share/event/404.html` is Pages' not-found page for the
+directory). Some link-preview bots (Telegram, iMessage, Facebook) draw no card for a 404 and cache that, so a link
+shared before its event has a page (an event in its first minutes, before the next derive) may keep no preview there.
+Pages treats a project without a top-level `404.html` as a single-page app; the nested `share/event/404.html` lookup was
+checked on wrangler's Pages asset server, and an unknown `/share/event/efd_…` on a Pages preview deployment must answer
+the generic page before the site's `/event/*` redirect relies on it.
 
 Measured on `data` ba509fd5a33 (2026-11-09 04:47 UTC, the 46 event-map days): 3,437 pages (3,040 live events, 397
-retired ids; the cap left none out), 162 of them with the coordinates instead of the place; 17.2 MB in all (6.2 MB
-gzip, 4.9 MB brotli), a page 4,750–5,268 bytes (median 5,047), the generic page 4,223 bytes. Writing them adds about
-0.34 s to derive (0.4 s with `moved`). The deploy grows from about 1,330 to about 4,770 files (24 % of the 20,000 a
+retired ids; the cap left none out; the page check rejected none), 138 of them with the coordinates instead of the
+place; 17.2 MB in all (6.2 MB gzip, 4.9 MB brotli), a page 4,750–5,268 bytes (median 5,047), the generic page 4,229
+bytes. Writing and checking them adds about 0.4 s to derive (0.5 s with `moved`). The deploy grows from about 1,330 to about 4,770 files (24 % of the 20,000 a
 Pages deploy may hold; about 6,330 at the cap).
 
 #### Resolving a shared id
@@ -328,7 +341,9 @@ date).
    `collapsed_into`: look up the representative in the same table or the neighbouring day's.
 4. **Year M5+ and area M6+ tables** (`years[]` `events`, the current year and the two before it; `area[]` `m6`, 1973 →):
    the ULID year's file, and the year either side when the ULID time is within a day of New Year; the same `id` then
-   `collapsed_into` lookup. Files of builder 2 have no `collapsed_into` (read it as empty).
+   `collapsed_into` lookup (the representative is a row of the same table). Across New Year an id can be a row of one
+   year's table and a `collapsed_into` key of the other's (two reconciliations with different context): take the row.
+   Files of builder 2 have no `collapsed_into` (read it as empty).
 5. Not found: the event is no longer available (an M < 5 older than 61 days, an M5–6 older than the current year and
    the two before it, a tombstone, an id the reconciliation left out as out of region, or no such event).
 
@@ -422,9 +437,12 @@ of them, a year table all but `delay`, an area table `depth`, `place`, `prov`. A
 (share links, 2026-11): `{"<feed id>": "<representative's feed id>"}`, keys in feed-id order, for rows the
 reconciliation collapsed (never a row of the table itself). A day table lists every collapsed row of the day (its
 representative is in that day's table or, across midnight, the neighbouring day's). A year table's `events` (M5+) and
-an area table's `m6` (M6+) list every collapsed row of the year whose representative is at or above the table's floor
-(its row is in that table or, across New Year, the neighbouring year's), whatever the collapsed row's own magnitude:
-the live map may share a member's id rather than the representative's. Absent in year and area files of builder 2:
+an area table's `m6` (M6+) list every row the year's reconciliation collapsed into one of the year's own rows at or
+above the table's floor, whatever the collapsed row's own magnitude (the live map may share a member's id rather than
+the representative's): the representative's row is always in that same table. The collapsed row is of the year or,
+across New Year, of the day before or after it (the build's context); a row of the year collapsed into a row of the
+neighbouring year is listed by the neighbouring year's table, when that year has one (year files cover the current
+year and the two before it, area files every year). Absent in year and area files of builder 2:
 none listed.
 
 **Day table** (`v1/stats/days/YYYY-MM-DD.json`): the event table of `kind: "day"` with `date` (after `kind`),

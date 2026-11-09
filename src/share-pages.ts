@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { EVENT_MAP_HORIZON_DAYS, REPO } from './config.js';
 import { canonicalOf, writeIfChanged } from './bitemporal.js';
 import { inDetailWindow, liveSurvivor } from './event-detail.js';
+import { FEED_ID_RE } from './stats-table.js';
 import type { EventNode } from './types.js';
 
 /**
@@ -114,28 +115,59 @@ export function escapeHtml(text: string): string {
 /** Control, format (U+200B–200F, U+202A–202E, U+2066–2069, U+FEFF, …), surrogate, private-use and unassigned code
  *  points, and line or paragraph separators: any one rejects the text. */
 const REJECTED = /[\p{C}\p{Zl}\p{Zp}]/u;
-const LATIN = /^[\p{Script=Latin}\p{M}]$/u;
+/** A letter of the Latin script (Script=Latin also holds the fullwidth forms, which isShown rejects). */
+const LATIN_LETTER = /^\p{Script=Latin}$/u;
+/** The combining diacritical marks (U+0300–036F), the only marks shown: a mark of another script (e.g. U+0489) is not. */
+const COMBINING = /^[\u0300-\u036F]$/u;
+/** At most this many combining marks on one letter (NFC composes the usual ones, so a real name rarely keeps any). */
+export const MAX_MARKS_PER_LETTER = 2;
 /** Typographic marks a place name uses beside ASCII: degree, quotes, dashes, middle dot. */
 const MARKS = new Set(['°', '‘', '’', '“', '”', '–', '—', '·']);
-/** Letters of the Latin script, combining marks, printable ASCII and MARKS: nothing else is shown. */
-const isShownChar = (c: string): boolean => (c >= ' ' && c <= '~') || MARKS.has(c) || LATIN.test(c);
 
 /**
- * A place or name as a share page may show it: space separators collapsed to one space and trimmed, or null when the
- * text is empty, holds a control, format or bidi character, a character outside the Latin script, printable ASCII and
- * a few typographic marks, or more than `max` code points.
+ * Printable ASCII, MARKS and Latin letters (never the fullwidth forms, U+FF00–FFEF), each letter with at most
+ * MAX_MARKS_PER_LETTER combining diacritical marks: nothing else is shown.
+ */
+function isShown(chars: readonly string[]): boolean {
+  let marks = 0;
+  let afterLetter = false;
+  for (const c of chars) {
+    if (COMBINING.test(c)) {
+      if (!afterLetter || ++marks > MAX_MARKS_PER_LETTER) return false;
+      continue;
+    }
+    marks = 0;
+    if ((c >= ' ' && c <= '~') || MARKS.has(c)) {
+      afterLetter = /^[A-Za-z]$/.test(c);
+      continue;
+    }
+    const cp = c.codePointAt(0)!;
+    if ((cp >= 0xff00 && cp <= 0xffef) || !LATIN_LETTER.test(c)) return false;
+    afterLetter = true;
+  }
+  return true;
+}
+
+/**
+ * A place or name as a share page may show it: NFC-normalized, space separators collapsed to one space and trimmed, or
+ * null when the text is empty, holds a control, format or bidi character, a character outside the Latin script,
+ * printable ASCII and a few typographic marks, a fullwidth form, a combining mark outside U+0300–036F or not on a
+ * letter, more than MAX_MARKS_PER_LETTER marks on one letter, or more than `max` code points.
  */
 export function latinText(text: string | null | undefined, max = PLACE_MAX): string | null {
   if (typeof text !== 'string' || REJECTED.test(text)) return null;
-  const chars = Array.from(text.replace(/\p{Zs}+/gu, ' ').trim());
-  if (!chars.length || chars.length > max || !chars.every(isShownChar)) return null;
+  const chars = Array.from(text.normalize('NFC').replace(/\p{Zs}+/gu, ' ').trim());
+  if (!chars.length || chars.length > max || !isShown(chars)) return null;
   return chars.join('');
 }
 
-/** "near 10.9°S 165.6°E": one decimal, hemisphere letters. */
+/** "near 10.9°S 165.6°E": one decimal, hemisphere letters of the rounded value (0.0 is N and E). */
 export function coordinateText(lat: number, lon: number): string {
-  const one = (v: number): string => (Math.round(Math.abs(v) * 10) / 10).toFixed(1);
-  return `near ${one(lat)}°${lat < 0 ? 'S' : 'N'} ${one(lon)}°${lon < 0 ? 'W' : 'E'}`;
+  const one = (v: number, pos: string, neg: string): string => {
+    const tenths = Math.round(Math.abs(v) * 10);
+    return `${(tenths / 10).toFixed(1)}°${tenths > 0 && v < 0 ? neg : pos}`;
+  };
+  return `near ${one(lat, 'N', 'S')} ${one(lon, 'E', 'W')}`;
 }
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -329,7 +361,7 @@ ${BRAND_HEADER}
 <article class="card">
 <p class="label">Earthquake</p>
 <h1>${title}</h1>
-<p class="text">This link has no page here. Pages cover the last ${EVENT_MAP_HORIZON_DAYS} days: earthquakes of magnitude 4 and above, felt earthquakes and those with a tsunami flag or an impact alert. Shelter shows the latest earthquakes around the world.</p>
+<p class="text">This link has no page here. Pages cover about the last ${EVENT_MAP_HORIZON_DAYS} days: earthquakes of magnitude 4 and above, felt earthquakes and those with a tsunami flag or an impact alert. Shelter shows the latest earthquakes around the world.</p>
 <p class="open"><a class="button" href="${SITE_ORIGIN}/">Get Shelter</a></p>
 </article>
 ${STORE_BADGE}
@@ -338,6 +370,30 @@ ${LEGAL_FOOTER}
 </body>
 </html>
 `;
+}
+
+/**
+ * What makes a page unfit to serve, or null: a script; a `style` attribute (outside quoted attribute values, which hold
+ * only escaped text, so a place reading "style=" is fine); a stylesheet other than PAGE_CSS, the one the CSP hashes.
+ * An event page (`generic` false) must also carry its canonical `https://theshelter.app/event/<feed id>` and the Smart
+ * App Banner for it; the generic page must name no feed id and show no year outside URLs. derive drops a page this
+ * rejects (writeSharePages); validate.ts re-checks the deployed files with it.
+ */
+export function sharePageProblem(html: string, generic: boolean): string | null {
+  if (/<script/i.test(html)) return 'holds a script';
+  if (/<[^>]*\sstyle\s*=/i.test(html.replace(/"[^"]*"/g, '""'))) return 'holds a style attribute (the CSP allows the one stylesheet only)';
+  const styles = [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((m) => m[1]!);
+  if (styles.length !== 1 || styles[0] !== PAGE_CSS) return 'does not embed exactly the stylesheet the CSP hashes';
+  if (generic) {
+    if (/efd_/.test(html)) return 'names a feed id';
+    if (/\b(19|20)\d\d\b/.test(html.replace(/https?:\/\/[^"\s]*/g, ''))) return 'shows a year';
+    return null;
+  }
+  const canonical = /<link rel="canonical" href="([^"]+)">/.exec(html)?.[1];
+  const id = canonical?.slice(eventUrl('').length);
+  if (!canonical || !id || canonical !== eventUrl(id) || !FEED_ID_RE.test(id)) return `has no canonical ${eventUrl('<feed id>')} (got ${canonical ?? 'none'})`;
+  if (!html.includes(`content="app-id=${APP_STORE_ID}, app-argument=${canonical}"`)) return 'has no Smart App Banner for its canonical URL';
+  return null;
 }
 
 /** One share page: the id it is served under and the live event it shows. */
@@ -400,19 +456,38 @@ export interface ShareWrite {
   maxBytes: number;
   /** Page files of an earlier local run removed (CI starts from an empty public/). */
   removed: number;
+  /** Events whose page sharePageProblem rejected, left out with their retired ids: the live id and why. */
+  rejected: { id: string; why: string }[];
   ms: number;
 }
 
-/** Writes the run's share pages under `<publicDir>/share/event/` and removes any other file there. */
+/**
+ * Writes the run's share pages under `<publicDir>/share/event/` and removes any other file there. A page that
+ * sharePageProblem rejects is not written (nor under its retired ids) and is listed in `rejected`; a rejected generic
+ * page throws (deriveSharePages then drops share/ for the run). `render` is the page template (tests replace it).
+ */
 export function writeSharePages(
   nodes: Iterable<EventNode>,
-  opts: { publicDir: string; window: { startMs: number; endMs: number }; providerNames?: ReadonlyMap<string, string>; cap?: number },
+  opts: {
+    publicDir: string;
+    window: { startMs: number; endMs: number };
+    providerNames?: ReadonlyMap<string, string>;
+    cap?: number;
+    render?: typeof sharePageHtml;
+  },
 ): ShareWrite {
   const started = performance.now();
+  const render = opts.render ?? sharePageHtml;
   const dir = join(opts.publicDir, SHARE_DIR);
   const plan = planSharePages(nodes, opts.window, opts.cap);
+  const notFound = notFoundPageHtml();
+  const notFoundWhy = sharePageProblem(notFound, true);
+  if (notFoundWhy) throw new Error(`the generic page ${notFoundWhy}`);
   const written = new Set<string>();
-  const html = new Map<string, string>();
+  const html = new Map<string, string | null>();
+  const rejected: { id: string; why: string }[] = [];
+  let live = 0;
+  let retired = 0;
   let bytes = 0;
   let maxBytes = 0;
   const put = (name: string, body: string): void => {
@@ -424,10 +499,21 @@ export function writeSharePages(
   };
   for (const p of plan.pages) {
     let body = html.get(p.event.feedId);
-    if (body == null) html.set(p.event.feedId, (body = sharePageHtml(p.event, opts.providerNames)));
+    if (body === undefined) {
+      body = render(p.event, opts.providerNames);
+      const why = sharePageProblem(body, false);
+      if (why) {
+        rejected.push({ id: p.event.feedId, why });
+        body = null;
+      }
+      html.set(p.event.feedId, body);
+    }
+    if (body == null) continue;
     put(`${p.id}.html`, body);
+    if (p.id === p.event.feedId) live++;
+    else retired++;
   }
-  put(SHARE_NOT_FOUND, notFoundPageHtml());
+  put(SHARE_NOT_FOUND, notFound);
   let removed = 0;
   if (existsSync(dir)) {
     for (const f of readdirSync(dir)) {
@@ -436,22 +522,36 @@ export function writeSharePages(
       removed++;
     }
   }
-  return { pages: plan.pages.length, live: plan.live, retired: plan.retired, capped: plan.capped, bytes, maxBytes, removed, ms: performance.now() - started };
+  return { pages: live + retired, live, retired, capped: plan.capped, bytes, maxBytes, removed, rejected, ms: performance.now() - started };
 }
 
+/** At most this many rejected pages are named in warnings; the rest are counted. */
+const REJECTED_NAMED = 5;
+
 /**
- * derive's share-page step: the pages are an extra for link previews and must never stop the live feed, so a throw
- * removes `<publicDir>/share/` (every shared link then gets the site's fallback until the next run), prints
- * `::warning::share pages dropped: <reason>` and returns null.
+ * derive's share-page step: the pages are an extra for link previews and must never stop the live feed. A page that
+ * sharePageProblem rejects is left out with `::warning::share page <id> left out: <why>`; a throw (the provider names
+ * included, read inside the step) removes `<publicDir>/share/` (every shared link then gets the site's fallback until
+ * the next run), prints `::warning::share pages dropped: <reason>` and returns null.
  */
 export function deriveSharePages(
   nodes: Iterable<EventNode>,
-  opts: { publicDir: string; window: { startMs: number; endMs: number } | null; providerNames?: ReadonlyMap<string, string>; warn?: (m: string) => void; write?: typeof writeSharePages },
+  opts: {
+    publicDir: string;
+    window: { startMs: number; endMs: number } | null;
+    providerNames?: () => ReadonlyMap<string, string>;
+    warn?: (m: string) => void;
+    write?: typeof writeSharePages;
+  },
 ): ShareWrite | null {
   const warn = opts.warn ?? ((m: string) => console.warn(`::warning::${m}`));
   if (!opts.window) return null;
   try {
-    return (opts.write ?? writeSharePages)(nodes, { publicDir: opts.publicDir, window: opts.window, ...(opts.providerNames ? { providerNames: opts.providerNames } : {}) });
+    const providerNames = opts.providerNames?.();
+    const out = (opts.write ?? writeSharePages)(nodes, { publicDir: opts.publicDir, window: opts.window, ...(providerNames ? { providerNames } : {}) });
+    for (const r of out.rejected.slice(0, REJECTED_NAMED)) warn(`share page ${r.id} left out: ${r.why}`);
+    if (out.rejected.length > REJECTED_NAMED) warn(`share pages: ${out.rejected.length} events left out in all`);
+    return out;
   } catch (err) {
     let reason = err instanceof Error ? err.message : String(err);
     try {

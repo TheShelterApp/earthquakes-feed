@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { writeDetailHours } from '../src/event-detail.js';
 import { pagesHeaders } from '../src/pages-headers.js';
-import { SHARE_DIR, SHARE_NOT_FOUND, writeSharePages } from '../src/share-pages.js';
+import { SHARE_DIR, SHARE_NOT_FOUND, SHARE_PAGE_CAP, writeSharePages } from '../src/share-pages.js';
 import type { EventNode } from '../src/types.js';
 import { deterministicFeedId } from '../src/ulid.js';
 
@@ -72,7 +72,7 @@ test('validate passes the share pages and the moved members derive writes', () =
   }
 });
 
-test('validate fails a page with a script, a page not named by a feed id, a missing generic page, a broken moved entry and a CSP without the hash', () => {
+test('validate warns on share-page and moved content problems and still passes: a share page never stops the feed', () => {
   const f = fixture();
   try {
     const dir = join(f.pub, SHARE_DIR);
@@ -80,24 +80,38 @@ test('validate fails a page with a script, a page not named by a feed id, a miss
     writeFileSync(page, readFileSync(page, 'utf8').replace('</body>', '<script>alert(1)</script></body>'));
     writeFileSync(join(dir, 'hello.html'), readFileSync(join(dir, `${f.retired.feedId}.html`)));
     rmSync(join(dir, SHARE_NOT_FOUND));
-    const headers = join(f.pub, '_headers');
-    writeFileSync(headers, readFileSync(headers, 'utf8').replace(/style-src 'sha256-[^']+'/, "style-src 'unsafe-inline'"));
     const hour = new Date(Math.floor(f.retired.eventTimeMs / HOUR) * HOUR).toISOString().slice(0, 13);
     const file = join(f.pub, 'v1', 'detail', `${hour}.geojson`);
     const fc = JSON.parse(readFileSync(file, 'utf8')) as { moved: Record<string, { to: string; hour: string }> };
     fc.moved[f.retired.feedId]!.to = 'efd_00000000000000000000000000';
     writeFileSync(file, JSON.stringify(fc));
     const r = validate(f.pub, f.data);
-    assert.equal(r.code, 1, r.out);
+    assert.equal(r.code, 0, r.out);
     for (const msg of [
-      /share: efd_\w+\.html holds a script/,
-      /share: hello\.html is not named by a feed id/,
-      /share: share\/event\/404\.html is missing/,
-      /_headers serves \/share\/\* without the CSP/,
-      /moved efd_\w+ points at efd_0{26}, which is not in the hour/,
+      /::warning::share: efd_\w+\.html holds a script/,
+      /::warning::share: hello\.html is not named by a feed id/,
+      /::warning::share: share\/event\/404\.html is missing/,
+      /::warning::detail [\dT-]+: moved efd_\w+ points at efd_0{26}, which is not in the hour/,
     ]) {
       assert.match(r.out, msg);
     }
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('validate fails a CSP without the stylesheet hash and more pages than the cap', () => {
+  const f = fixture();
+  try {
+    const headers = join(f.pub, '_headers');
+    writeFileSync(headers, readFileSync(headers, 'utf8').replace(/style-src 'sha256-[^']+'/, "style-src 'unsafe-inline'"));
+    const dir = join(f.pub, SHARE_DIR);
+    const body = readFileSync(join(dir, `${f.live.feedId}.html`));
+    for (let i = 0; i < SHARE_PAGE_CAP; i++) writeFileSync(join(dir, `${deterministicFeedId(NOW - 7 * 86_400_000 + i * 60_000, 0, 0)}.html`), body);
+    const r = validate(f.pub, f.data);
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /✗ share: _headers serves \/share\/\* without the CSP/);
+    assert.match(r.out, new RegExp(`✗ share: ${SHARE_PAGE_CAP + 2} pages, over the cap of ${SHARE_PAGE_CAP}`));
   } finally {
     f.cleanup();
   }

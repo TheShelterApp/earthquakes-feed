@@ -10,7 +10,7 @@ import { STATS_INDEX_PATH, checkStats, loadStatsConfig } from './stats.js';
 import { FEED_ID_RE } from './stats-table.js';
 import { feedIdTimeMs } from './ulid.js';
 import { hourKey } from './event-detail.js';
-import { APP_STORE_ID, PAGE_CSS, PAGE_CSS_HASH, SHARE_CSP, SHARE_DIR, SHARE_NOT_FOUND, SHARE_PAGE_CAP, eventUrl } from './share-pages.js';
+import { PAGE_CSS_HASH, SHARE_CSP, SHARE_DIR, SHARE_NOT_FOUND, SHARE_PAGE_CAP, sharePageProblem } from './share-pages.js';
 
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 addFormats(ajv);
@@ -33,6 +33,8 @@ const fail = (msg: string): void => {
   errors++;
   console.error(`✗ ${msg}`);
 };
+/** A problem in an extra of the share links (`moved`, share pages) that must not stop the live feed's deploy. */
+const warn = (msg: string): void => console.warn(`::warning::${msg}`);
 
 function walk(dir: string, match: (f: string) => boolean): string[] {
   const out: string[] = [];
@@ -130,7 +132,9 @@ for (const file of walk(publicV1, (f) => f.endsWith('.geojson'))) {
 }
 
 // 2b. The detail files' `moved` members (event-detail.ts, share links): each key is a feed id whose ULID hour is the
-//     file's hour and which is not among the file's features; `to` is a feature of the hour file `hour` names.
+//     file's hour and which is not among the file's features; `to` is a feature of the hour file `hour` names. A broken
+//     entry only costs a shared link its hop (the app checks `to` in the file it reads), so it warns and never stops
+//     the live feed's deploy.
 {
   let problems = 0;
   for (const [hour, moved] of detailMoved) {
@@ -145,48 +149,32 @@ for (const file of walk(publicV1, (f) => f.endsWith('.geojson'))) {
         : !detailIds.has(e.hour) ? `points at the hour ${e.hour}, which has no file`
         : !detailIds.get(e.hour)!.has(e.to) ? `points at ${e.to}, which is not in the hour ${e.hour}`
         : null;
-      if (why && problems++ < 5) fail(`detail ${hour}: moved ${id} ${why}`);
+      if (why && problems++ < 5) warn(`detail ${hour}: moved ${id} ${why}`);
     }
   }
-  if (problems > 5) fail(`detail: ${problems} moved entries break the contract in all`);
+  if (problems > 5) warn(`detail: ${problems} moved entries break the contract in all`);
 }
 
-// 2c. The share pages (share-pages.ts, APIs.md Share pages): the generic page exists, every page is named by a feed id,
-//     at most SHARE_PAGE_CAP, no script, its canonical link names a feed id on the site, its only stylesheet is the one
-//     whose hash the CSP names, and `_headers` serves /share/* with that CSP. The generic page shows no id and no date.
+// 2c. The share pages (share-pages.ts, APIs.md Share pages). Fails: more than SHARE_PAGE_CAP pages, a `_headers` that
+//     does not serve /share/* with the CSP hashing the stylesheet. Warns (derive already left out every page
+//     sharePageProblem rejects, so these only re-check the deployed files, and a share page never stops the live
+//     feed): a page not named by a feed id or one sharePageProblem rejects, a missing or rejected generic page.
 const shareDir = join(PUBLIC_DIR, SHARE_DIR);
 const sharePages = walk(shareDir, (f) => f.endsWith('.html') && !f.endsWith(`${sep}${SHARE_NOT_FOUND}`));
 if (existsSync(shareDir)) {
   if (sharePages.length > SHARE_PAGE_CAP) fail(`share: ${sharePages.length} pages, over the cap of ${SHARE_PAGE_CAP}`);
-  const styleOf = (html: string): string[] => [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((m) => m[1]!);
-  const shareProblem = (file: string, html: string, page: boolean): string | null => {
-    if (/<script/i.test(html)) return 'holds a script';
-    if (/\sstyle=/i.test(html)) return 'holds a style attribute (the CSP allows the one stylesheet only)';
-    const styles = styleOf(html);
-    if (styles.length !== 1 || styles[0] !== PAGE_CSS) return 'does not embed exactly the stylesheet the CSP hashes';
-    if (!page) {
-      if (/efd_/.test(html)) return 'names a feed id';
-      if (/\b(19|20)\d\d\b/.test(html.replace(/https?:\/\/[^"\s]*/g, ''))) return 'shows a year';
-      return null;
-    }
-    const canonical = /<link rel="canonical" href="([^"]+)">/.exec(html)?.[1];
-    const id = canonical?.slice(eventUrl('').length);
-    if (!canonical || !id || canonical !== eventUrl(id) || !FEED_ID_RE.test(id)) return `has no canonical ${eventUrl('<feed id>')} (got ${canonical ?? 'none'})`;
-    if (!html.includes(`content="app-id=${APP_STORE_ID}, app-argument=${canonical}"`)) return 'has no Smart App Banner for its canonical URL';
-    return null;
-  };
   let problems = 0;
   for (const file of sharePages) {
     const name = file.slice(shareDir.length + 1);
-    const why = !FEED_ID_RE.test(name.replace(/\.html$/, '')) ? 'is not named by a feed id' : shareProblem(file, readFileSync(file, 'utf8'), true);
-    if (why && problems++ < 5) fail(`share: ${name} ${why}`);
+    const why = !FEED_ID_RE.test(name.replace(/\.html$/, '')) ? 'is not named by a feed id' : sharePageProblem(readFileSync(file, 'utf8'), false);
+    if (why && problems++ < 5) warn(`share: ${name} ${why}`);
   }
-  if (problems > 5) fail(`share: ${problems} pages break the contract in all`);
+  if (problems > 5) warn(`share: ${problems} pages break the contract in all`);
   const notFound = join(shareDir, SHARE_NOT_FOUND);
-  if (!existsSync(notFound)) fail(`share: ${SHARE_DIR}/${SHARE_NOT_FOUND} is missing (an unknown id would get no page)`);
+  if (!existsSync(notFound)) warn(`share: ${SHARE_DIR}/${SHARE_NOT_FOUND} is missing (an unknown id would get no page)`);
   else {
-    const why = shareProblem(notFound, readFileSync(notFound, 'utf8'), false);
-    if (why) fail(`share: ${SHARE_NOT_FOUND} ${why}`);
+    const why = sharePageProblem(readFileSync(notFound, 'utf8'), true);
+    if (why) warn(`share: ${SHARE_NOT_FOUND} ${why}`);
   }
   const headers = existsSync(join(PUBLIC_DIR, '_headers')) ? readFileSync(join(PUBLIC_DIR, '_headers'), 'utf8') : '';
   const rule = /^\/share\/\*\n((?: {2}.*\n?)*)/m.exec(headers)?.[1] ?? '';

@@ -266,32 +266,30 @@ test('accumulator: bins and the M4.5/M5/M6 cuts on mag x 100, mmax per cell, fil
   assert.deepEqual([...b.area.values()][0], [2, 2, 610]);
 });
 
-test('collapsed_into of the year and area tables: every collapsed row whose representative is at or above the table\'s floor', () => {
+test('collapsed_into of the year and area tables: the pairs whose representative is a row of the year at or above the table\'s floor', () => {
   const days = yearDays(2024, '2024-01-02');
   const acc = new YearAccumulator(2024, days, true);
   const t = Date.parse('2024-01-01T01:00:00Z');
-  const rows = [feat(t, 6.2), feat(t, 5.6), feat(t, 5.2), feat(t, 4.6), feat(t, 4.9), feat(t, 4.2)];
+  const rows = [feat(t, 6.2), feat(t, 5.6), feat(t, 5.2), feat(t, 4.6), feat(t, 4.9), feat(t, 4.2), feat(t, 6.1)];
   for (const f of rows) acc.add(f, null);
   const id = (i: number): string => rows[i]!['id'] as string;
   // 5.6 into 6.2 (an M6 representative), 4.6 into 5.2 (M5), 4.2 into 4.9 (below both floors); a context row of the
-  // next year as a representative counts by its own magnitude.
-  const next = 'efd_01M6Q2J4WGZZZZZZZZZZZZZZZZ';
-  const dropped = new Map([[id(1), id(0)], [id(3), id(2)], [id(5), id(4)]]);
-  const magOf = new Map(rows.map((f) => [f['id'] as string, Math.round((f['properties'] as { mag: number }).mag * 100)]));
-  acc.finish({ dropped, outOfRegion: new Set() }, magOf);
-  assert.deepEqual(acc.collapsedIntoAtLeast(600), [[id(1), id(0)]]);
-  assert.deepEqual(acc.collapsedIntoAtLeast(500).sort(), [[id(1), id(0)], [id(3), id(2)]].sort());
-  assert.equal(acc.collapsedTotal, 3);
-  const ctx = new YearAccumulator(2024, days, false);
-  const lone = feat(t, 6.1);
-  ctx.add(lone, null);
-  ctx.finish({ dropped: new Map([[lone['id'] as string, next]]), outOfRegion: new Set() }, new Map([[lone['id'] as string, 610], [next, 640]]));
-  assert.deepEqual(ctx.collapsedIntoAtLeast(600), [[lone['id'] as string, next]]);
-  // A representative the reconciliation never saw is a bug, not a silent gap.
-  const bad = new YearAccumulator(2024, days, false);
-  const r = feat(t, 6.0);
-  bad.add(r, null);
-  assert.throws(() => bad.finish({ dropped: new Map([[r['id'] as string, next]]), outOfRegion: new Set() }), /not among the reconciled rows/);
+  // year before (the day before New Year) into the 6.2; the year's own 6.1 into a context row of the year before,
+  // which only the year before can list (its file holds the representative's row).
+  const prevCtx = 'efd_01HK0ZZZZZZZZZZZZZZZZZZZZZ';
+  const prevRep = 'efd_01HK0YYYYYYYYYYYYYYYYYYYYY';
+  const dropped = new Map([[id(1), id(0)], [id(3), id(2)], [id(5), id(4)], [prevCtx, id(0)], [id(6), prevRep]]);
+  acc.finish({ dropped, outOfRegion: new Set() });
+  assert.deepEqual(acc.collapsedIntoAtLeast(600).sort(), [[id(1), id(0)], [prevCtx, id(0)]].sort());
+  assert.deepEqual(acc.collapsedIntoAtLeast(500).sort(), [[id(1), id(0)], [id(3), id(2)], [prevCtx, id(0)]].sort());
+  assert.equal(acc.collapsedTotal, 4, 'the counters hold the year\'s own rows only');
+  assert.deepEqual(acc.m6.map((e) => e.id), [id(0)]);
+  assert.deepEqual(acc.m5.map((e) => e.id).sort(), [id(0), id(2)].sort());
+  // Every pair of a table names a representative that is a row of that table.
+  for (const [floor, table] of [[600, acc.m6], [500, acc.m5]] as const) {
+    const ids = new Set(table.map((e) => e.id));
+    assert.ok(acc.collapsedIntoAtLeast(floor).every(([k, rep]) => ids.has(rep) && !ids.has(k)));
+  }
 });
 
 test('the builder version: providers/stats.json and STATS_BUILDER_VERSION agree (3: collapsed_into)', () => {

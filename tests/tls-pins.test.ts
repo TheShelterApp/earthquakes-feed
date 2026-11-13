@@ -183,3 +183,12 @@ test('pinned fetch: the leaf a pinned host presented is kept by host name (statu
     await new Promise<void>((r) => server.close(() => r()));
   }
 });
+
+test('tls pins: PHIVOLCS pins GlobalSign\'s current OV CAs beside the one of its leaf, ahead of the 2026-11-19 renewal', () => {
+  // The leaf under GlobalSign RSA OV SSL CA 2018 expires 2026-11-19; GlobalSign issues OV leaves under its GCC R3 OV TLS
+  // CA 2024 and GCC R46 OV TLS CA 2025 now. Both are pinned so the renewed leaf verifies on the first fetch, instead of
+  // the source failing until someone pins the new intermediate (TMD, 2026-10-09).
+  const phivolcs = registry.find((p) => p.id === 'phivolcs')!;
+  const subjects = pinnedCa(phivolcs, registryPath).map((pem) => /CN=([^\n]+)/.exec(new X509Certificate(pem).subject)?.[1]);
+  assert.deepEqual(subjects, ['GlobalSign RSA OV SSL CA 2018', 'GlobalSign GCC R3 OV TLS CA 2024', 'GlobalSign GCC R46 OV TLS CA 2025']);
+});

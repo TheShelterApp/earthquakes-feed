@@ -603,6 +603,27 @@ history), and a source with no rows for longer than its activity budget is **sil
 is never empty that long), `activityBudgetHours` in `providers/registry.json` for a quiet one (72 h: ETHZ, IPMA, NRCan,
 USP) and none for KNMI and LMU (regions that go weeks without an event) or a source the live path does not ask (ISC).
 The published v2 status adds `providers.<id>.silent`, `providers.<id>.lastNonEmptyAt` (ms) and `silentProviders`.
+
+**Circuit breaker (SHLTR-147).** A source whose live fetch gets no answer at all (a timeout, an abort, a refused or
+reset connection; not an HTTP error status, not an empty answer, not a pinned certificate failure) on 5 runs in a row
+(about 25 minutes) is no longer asked: its breaker opens, it is skipped for 2 runs, then one run probes it. An answer of
+any kind closes the breaker; no answer opens it again for 3 runs, less a deterministic jitter of 0 or 1 run (a hash of
+the source and the run's seq; it only ever shortens a back-off), so a source that comes back is read again within 20
+minutes and sources that failed together do not all come back on the same run. The numbers favour freshness over run
+time: on the week 2026-11-07 → 11-13 (2,010 runs) the breaker would have skipped 6 source-runs, 4 of which would have
+answered (98 with 3 runs to trip and a back-off up to 12), while a host down for a whole day still costs only 86 of its
+288 runs. A skipped source costs the run nothing, and is a failing one in
+`status.json`: `ok: false`, `skipped: "breaker"`, `error` (`not asked: circuit breaker open after N runs without an
+answer (last: …)`), and `breaker` (`open_since`, the run that opened it; `next_probe`, from when a run probes it;
+`failures`, the runs without an answer, probes included; `skip_runs`). A probe that gets no answer also carries
+`breaker`, without `skipped`. It is in `degraded`, keeps its `lastSuccessAt`, and goes silent like any failing source;
+the health workflow files it as `feed:source:<id>` and, after 6 hours open, `feed:breaker:<id>` (README *Health
+watchdogs*). Not tracked: the core sources `usgs`, `emsc` and `geofon` (always asked: the sweeps of the first two ask
+the same host every run, so a skip would save nothing, and GEOFON's misses come in short streaks between answers) and
+the sources the live path does not ask. A run in which more than half of the sources asked got no answer (at least
+6 asked) is the runner's network, not theirs: it counts toward no breaker. The state is
+`knowledge/index/provider_breakers.json` (committed with the run; a missing or unreadable file, or entry, means closed),
+and the run's log names each skip, opening, re-opening and closing (`breaker_skipped=N[ids]` in its summary line).
 On 2026-10-04 three sources were silent the moment this went live: ENSN Egypt (no rows since 2026-07-29), Geoscience
 Australia (since 07-30) and TMD (since 08-18). None had stopped publishing: ENSN moved to a new site whose old JSON URL
 lists only stations (the feed now reads its RSS, `/en/events/feed.rss`), GA rewrote its RSS descriptions so no item

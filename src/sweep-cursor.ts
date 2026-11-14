@@ -229,20 +229,31 @@ export interface RunFetches {
   sweeps: SweepRun[];
 }
 
+export interface RunFetchOptions extends SweepOptions {
+  /** Live sources not asked this run (an open circuit breaker, src/breaker.ts breakerPlan): their outcome is this
+   *  status, with no rows and no request. */
+  skipLive?: Readonly<Record<string, ProviderStatus>>;
+}
+
 /**
  * aggregate's fetches, all concurrent: the sweeps are started first, so their first requests (and
- * the name lookups behind them) are issued ahead of the live ones, then every live source.
- * UV_THREADPOOL_SIZE (aggregate.yml) keeps the lookups from queueing at all; the order is the
- * second line of defence.
+ * the name lookups behind them) are issued ahead of the live ones, then every live source not in
+ * `skipLive`. UV_THREADPOOL_SIZE (aggregate.yml) keeps the lookups from queueing at all; the order
+ * is the second line of defence.
  */
 export async function fetchRunInputs(
   active: readonly ProviderConfig[],
   specs: readonly SweepSpec[],
   cursors: SweepCursors,
-  opts: SweepOptions,
+  opts: RunFetchOptions,
 ): Promise<RunFetches> {
   const sweeps = Promise.all(specs.map((s) => runSweep(s, cursors[sweepKey(s.provider.id, s.kind)], opts)));
-  const live = Promise.all(active.map((p) => fetchProvider(p, opts.nowMs, opts.fetcher ?? fetchText)));
+  const skip = opts.skipLive ?? {};
+  const live = Promise.all(
+    active.map((p): Promise<FetchOutcome> =>
+      Object.hasOwn(skip, p.id) ? Promise.resolve({ provider: p.id, obs: [], status: skip[p.id]! }) : fetchProvider(p, opts.nowMs, opts.fetcher ?? fetchText),
+    ),
+  );
   const [s, l] = await Promise.all([sweeps, live]);
   return { live: l, sweeps: s };
 }

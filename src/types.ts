@@ -179,6 +179,22 @@ export interface ProviderStatus {
   newest_origin?: string;
   /** Pinned sources (tlsIntermediates): the leaf certificate the host presented (custom.ts, FEED-SEC-1). */
   tls_leaf?: TlsLeafStatus;
+  /** Present when the source was not asked this run: its circuit breaker is open (src/breaker.ts). `ok` is false. */
+  skipped?: 'breaker';
+  /** Present while the source's circuit breaker is open (src/breaker.ts): skipped, or probed this run without an answer. */
+  breaker?: BreakerStatus;
+}
+
+/** status.json `providers.<id>.breaker` (src/breaker.ts). */
+export interface BreakerStatus {
+  /** ISO time of the run that opened it (the first opening of this streak). */
+  open_since: string;
+  /** ISO time from which the next run probes the source (one request; an answer closes the breaker). */
+  next_probe: string;
+  /** Consecutive runs without an answer, probes included. */
+  failures: number;
+  /** Runs it skips before that probe. */
+  skip_runs: number;
 }
 
 export interface TlsLeafStatus {

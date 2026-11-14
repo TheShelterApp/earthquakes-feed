@@ -39,6 +39,7 @@ export type RuleId =
   | 'feed:source:core'
   | 'feed:source:definite'
   | 'feed:source:quiet'
+  | 'feed:breaker'
   | 'feed:cert'
   | 'feed:size'
   | 'feed:repo-size'

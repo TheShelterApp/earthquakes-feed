@@ -14,7 +14,8 @@ import { type HistoryConfig, type HistoryEra, allPeriods, editionAssetName, hist
 import { type EditionEntry, type HistoryIndex, currentEdition, editionIsCurrent, editionIsMerged, emptyIndex, periodsToRemerge, remergeNeighbour } from '../src/history-index.js';
 import { LocalStore } from '../src/history-store.js';
 import { verifyEdition } from '../src/history-verify.js';
-import { type Ctx, adoptOrphans, emptyReport, remergePeriods } from '../src/history.js';
+import { loadState } from '../src/history-state.js';
+import { type Ctx, adoptOrphans, emptyReport, remergePeriods, runWalk } from '../src/history.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import { remergeNodes, remergedDayFiles, mergeMeta } from '../src/remerge.js';
 import { createTar } from '../src/tar.js';
@@ -239,4 +240,23 @@ test('buildEdition floor after the re-merge: a live event under the floor goes w
   const dropped = belowFloor(nodes, 4.5);
   assert.deepEqual([...dropped].sort(), small.map((n) => n.feedId).sort(), 'the survivor and its loser');
   assert.equal(belowFloor(nodes, null).size, 0);
+});
+
+test('history re-merge cut by the time budget: the run is not complete, so the walk uploads no "nothing blocked" marker (SHLTR-151)', { skip: !hasZstd && 'zstd not installed' }, async () => {
+  // No source is asked: both months are sealed (every raw indexed), and any request would fail the test.
+  const calls: string[] = [];
+  const fetchOptions = { fetcher: async (url: string): Promise<never> => { calls.push(url); throw new Error('no request in this test'); }, sleep: async () => {}, now: () => Date.now() };
+  const ctx = ctxOf({ deadline: Date.now() - 1, fetchOptions });
+  publishE1(ctx, '2022-12', split(quake(Date.parse('2022-12-10T05:00:00Z'), 'dec')));
+  publishE1(ctx, '2022-11', split(quake(Date.parse('2022-11-15T05:00:00Z'), 'nov')));
+  const cut = await runWalk(ctx, loadState(ctx.idx, null), 4);
+  assert.deepEqual(ctx.report.budget, ['re-merging 2022-12 on']);
+  assert.deepEqual(ctx.report.blocked, []);
+  assert.equal(cut.complete, false, 'a month the run never reached may be one blocked before');
+  const full = ctxOf({ fetchOptions });
+  publishE1(full, '2022-12', split(quake(Date.parse('2022-12-10T05:00:00Z'), 'dec')));
+  publishE1(full, '2022-11', split(quake(Date.parse('2022-11-15T05:00:00Z'), 'nov')));
+  const done = await runWalk(full, loadState(full.idx, null), 4);
+  assert.deepEqual([full.report.remerged.length, full.report.blocked, done.complete], [2, [], true]);
+  assert.deepEqual(calls, []);
 });

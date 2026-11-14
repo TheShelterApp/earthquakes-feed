@@ -25,16 +25,63 @@ on:
         description: 'Join the writer queue even when 2 writer runs already wait (README.md "Writer group"): every aggregate run waits behind it'
         type: boolean
         default: false
+      dry_run:
+        description: 'Dry run: print the plan (each window, each provider and day: fetch or retention) and nothing else: no request, no write, no marker, no writer lock'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
+  # A dry run (input dry_run): the plan of this dispatch (src/backfill.ts BACKFILL_PHASE=plan: every window to fetch, and
+  # every provider and day, `fetch` or `retention` for a source's days before its retention, SHLTR-146), from a sparse
+  # checkout of the index files. No request to any source, no write, no marker; outside the writer group.
+  plan:
+    if: ${{ inputs.dry_run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: data
+          path: .data
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: /knowledge/index/*.json
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Plan
+        env:
+          DATA_DIR: .data
+          BACKFILL_PHASE: plan
+          BACKFILL_PLAN_OUT: backfill-plan.json
+          BACKFILL_STARTTIME: ${{ inputs.starttime }}
+          BACKFILL_ENDTIME: ${{ inputs.endtime }}
+          BACKFILL_PROVIDERS: ${{ inputs.providers }}
+        run: npx --no-install tsx src/backfill.ts
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backfill-plan
+          path: backfill-plan.json
+          if-no-files-found: error
+          retention-days: 3
+
   # Outside every group: the writer lock is taken by the `backfill` job below, and only when this gate admits it
   # (SHLTR-149; scripts/writer-queue.mjs, README.md "Writer group"). Pacing many windows: dispatch at most 2 at a time;
   # a third is refused here in seconds with an ::error:: that names what waits. A refused walk (the hourly cron, or the
   # heartbeat Worker's dispatch without a window) is a ::warning:: and a green run: the next tick walks on.
   gate:
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

@@ -115,6 +115,7 @@ jobs:
           sparse-checkout: scripts/push-data.sh
           sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        id: out
         with:
           name: first-solutions-out
           path: fs-out
@@ -150,7 +151,10 @@ jobs:
       # After the commit. A stalled source keeps the run green (alerting plan of 2026-10-22): a warning here, and the
       # marker as the artifact walk-blocked-first-solutions, which the health workflow's feed evaluator
       # (scripts/feed-health.mjs) files on the "[health] feed" board as walks:first-solutions:<source> (a P3: one
-      # comment; it resolves once no marker is newer than 26 h).
+      # comment). The collect job states every standing block on every run (SHLTR-151: each lane that has failed 72
+      # runs or more in a row, from the cursor), so a run with nothing blocked uploads a marker without a blocked line
+      # (only a "#" line): the board resolves on the next health run; the 26 h hold is the fallback for a walk that
+      # stops running (FIRST_SOLUTIONS_SCHEDULE off).
       - name: Warn if a source's walk is stalled
         if: always()
         run: |
@@ -158,6 +162,9 @@ jobs:
             cat fs-out/blocked.txt
             echo '::warning::first-solutions: a source has failed for days (see above); the other sources'"'"' work was committed, and the health workflow files the marker on the "[health] feed" board'
           fi
+      - name: Mark a run with nothing blocked
+        if: always() && steps.out.outcome == 'success'
+        run: '[ -f fs-out/blocked.txt ] || echo "# nothing blocked: run ${{ github.run_id }}" > fs-out/blocked.txt'
       - name: Upload the blocked marker (read by the health workflow)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

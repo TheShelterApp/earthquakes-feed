@@ -1324,12 +1324,22 @@ does not move the walk's cursor. Pace them: at most 2 writer runs wait for the `
 naming what waits (dispatch it again once one has finished, or with `force=true`, which every aggregate run then waits
 behind); the hourly walk is refused with a warning only and walks on at its next tick. A backfill run holds the group for
 seconds: it checks out only the index files and the months of its windows (SHLTR-149, after 47 dispatches of a usgs
-refill held the live feed 1 h 47 min on 2026-11-08).
+refill held the live feed 1 h 47 min on 2026-11-08). A dispatch with `dry_run=true` only prints the plan (each window
+to fetch, and each provider and day with `fetch` or `retention`) and writes, asks and uploads nothing; it takes no
+writer lock.
+
+**Retention.** A source whose registry entry has `retentionDays` (AFAD: 7, *Turkey (AFAD)*) answers a time-range query
+only for that many recent days; an older window answers no rows, which used to be recorded as filled. The planner
+(`src/backfill-plan.ts` `planWindows`) never asks such a source for a day before its retention: the window, or the part
+of it before the edge, is skipped with the reason `retention` (a `::notice::` line per window), a walk whose next
+window lies wholly before the edge is done (`stoppedBy: "retention"`), and an open dispatched window before the edge is
+closed. Nothing of it reaches the health board: it is not a block, nothing more can be fetched.
 
 A source's walk reports its failures: a window that fails is halved for the next run (a window whose answer is too
 large to stream within the timeout fails as a timeout, never as an overflow), each failure is logged with its error,
 the cursor keeps `lastError` and `failingSince`, a streak of 24 runs adds a warning to every run, and from 72 runs at a
-one-day window the run turns red about once a day. Before 2026-10-01 a failing walk stayed silent and kept its
+one-day window the stall is a block on the run's marker (`walks:backfill:<source>`) on every run while it lasts.
+Before 2026-10-01 a failing walk stayed silent and kept its
 window: ISC's 21-day window (more than 5,000 rows, about 35 s against ISC's 30 s timeout) failed 1,861 runs in a row,
 all green, from July to 2026-10-01. ISC's walk is paused since (`backfill.enabled: false` in the registry): every
 day it has left before the target lies in a frozen month already rolled to a Release, and finishing it means pulling
@@ -1653,9 +1663,11 @@ holds a group of its own, so a delivery that finds nothing to do never waits beh
 and takes over nothing is a no-progress run. It is explained when it only waited for a source's Retry-After, was
 rate-limited, or ran out of its time budget, and nothing failed for another reason. The 24th unexplained no-progress run
 in a row (a day of hourly runs), or the 72nd of any kind (a walk that only ever waits, or a month never fetched whole
-within `maxSecondsPerRun`, has stopped too), turns the run red with what is left and the months that keep failing, and
-then one run a day while it lasts (23 h apart at least); the streak is `stall` in `history-state.json`. Progress, or no
-work left, ends it. Round 24 added it: since round 23 a month that never succeeds lets its source's older months go on,
+within `maxSecondsPerRun`, has stopped too), is a block with what is left and the months that keep failing, stated in
+the walk's marker (`walks:history:run`) by every run while it lasts (SHLTR-151; until then one run a day, 23 h apart,
+and the 26 h hold carried the board in between; `alarmed_at` still records that daily repeat); the streak is `stall`
+in `history-state.json`. A source month that has failed 24 runs is a block of its own (`walks:history:<source>`) on
+every run until it is fetched. Progress, or no work left, ends the stall. Round 24 added it: since round 23 a month that never succeeds lets its source's older months go on,
 so its own alarm (one red run, at its 24th failure) came long before the walk ran out of other work, and the walk then
 stopped silently once only that month was left.
 
@@ -1674,7 +1686,17 @@ Three kinds of days are incomplete for some sources although they are frozen:
   (the day is partial for that source) and listed the day in its cursor (`saturatedDays` in
   `knowledge/index/backfill.json`). On 2026-10-04 that was KAGSR 2025-07-30 (the day after the M8.8 Kamchatka
   mainshock), 23 AFAD days of the Sındırgı sequences (2025-08-11 to 08-25 and 2025-10-28 to 11-12) and IMO 2023-11-11,
-  2025-04-01 and 2025-05-24.
+  2025-04-01 and 2025-05-24. All but KAGSR 2025-07-30 got their editions on 2026-10-04 (dispatches named their days;
+  the scheduled run then took the refill queue only). KAGSR 2025-07-30, measured read only on 2026-11-14: KAGSR's
+  answer for the whole day holds 676 events (and one for 2025-07-29 .. 08-01, 1,004: KAGSR applies no 500-row cap; the
+  backfill's custom-source rule, an answer of 490 rows or more is an overflow, marked the day), the 24 hour windows of
+  the day sum to the same 676 ids, and the archived day (`archive-2025-07`, `events-2025-07.e3.tar.zst`) holds 578 of
+  them: 98 KAGSR events of the day are missing (60 with ids above the newest one archived: KAGSR added them after the
+  backfill fetched the day in July 2026). Since SHLTR-151 such a day is a block on backfill's marker
+  (`walks:backfill:<source>`) on every run until an edition completes it (a raw asset of the source and day, not
+  partial, in the day's current edition), and the daily scheduled run takes the saturated days too: those of an
+  archived month (a frozen day whose month is not archived yet waits for it), never a day older than the source's
+  retention (a warning instead), and a day whose raws were uploaded without an edition is built again from them.
 - **The seam** 2026-06-28 → 07-03 05:42 UTC, which 15 sources never fetched (*History and backfill*).
 - **Late ComCat** (since 2026-11, SHLTR-150): ComCat's M4.5+ solutions published or revised after the live day froze
   (*Late publications*).
@@ -1686,12 +1708,16 @@ frozen days not archived yet (late ComCat):
 - the saturated days are its default tasks on a dispatch; an explicit refill (inputs `refill`, a range of at most 31
   days, and `providers`, a comma list or `bootstrap-2026-07-05` for the 15 seam sources) is added to the PERSISTENT
   refill queue, `refill_queue` in the index (`range`, `providers`, `reason`, `queued_at`). Every run, and a scheduled
-  run once a day (04:43 UTC, the queue only), takes the queue's days whose month is archived and leaves the others
+  run once a day (04:43 UTC: the queue and, since SHLTR-151, the saturated days, at most 3 days a run), takes the
+  queue's days whose month is archived and leaves the others
   queued; a day leaves the queue once every source of its entry has a raw asset of it and its current edition is
   built from all of the day's raws. 2026-07-01…07-03 are queued so and are taken by the first scheduled run after
-  `archive` rolls July (on or after 2026-11-29);
+  `archive` rolls July (on or after 2026-11-29). A source the day is older than the retention of (registry
+  `retentionDays`; AFAD, SHLTR-146) is not asked and needs no raw asset: the day is built from its other sources and
+  the edition names it in `not_fetched` (`provider`, `reason: "retention"`, `retained_from`, `note`), so 2026-07-01…07-03
+  carry `usgs`, `emsc` and the other 12 sources, not AFAD;
 - a run works day by day (ascending, at most `max_days`); each source of the day is asked again for the whole day in
-  6-hour windows, each halved while its answer fills the cap (down to 5 minutes; a window still full there marks the
+  6-hour windows (a saturated day in 1-hour windows, since SHLTR-151), each halved while its answer fills the cap (down to 5 minutes; a window still full there marks the
   day `partial`), one request at a time, at least 1.1 s apart. When a source fails, the day's successful raw assets are
   uploaded and indexed, and no edition is built: the next run asks only the sources that have no raw asset of the day
   yet and builds the edition from all of them;
@@ -1745,7 +1771,8 @@ checksum, `built_from`: the raw assets, `reason`: `saturated` or `seam` (absent 
 `context`: by day, the archive asset or the neighbour's edition the build read, with its checksum (absent on the
 entries of 2026-10-04: archives only), and `stats`: events before and after, new, retired, off the day, rows changed /
 unchanged, rows that joined a neighbouring day, AFAD rows re-read, rows per source before and after; `reason`
-`late_usgs` on the late ComCat entries). The archived day, its `archive-YYYY-MM` asset, the frozen partition and the
+`late_usgs` on the late ComCat entries; `not_fetched`, the sources of the day's tasks not asked, on an edition built
+without one). The archived day, its `archive-YYYY-MM` asset, the frozen partition and the
 manifests (`manifest.json` and the signed v2 manifest, which list neither) are unchanged: a consumer that wants the
 repaired day reads the current edition (the highest `edition` of the day not `withdrawn`) instead of the archived day or
 the frozen partition, as the statistics builder does.
@@ -2037,6 +2064,26 @@ that history can shift a feature's time by +3 h when its chosen provider is `afa
 drop EMSC's `auth: "AFAD"` copy of it. The feed's own readers of that history (the offline re-merge, the statistics
 builder) apply this through `normalizeRows` (src/row-normalize.ts, below *ISC*): an AFAD row in an event of AFAD's
 rows only is re-timed; one that joined another source's event at its wrong time is left there.
+
+**Retention (SHLTR-146).** AFAD's event service (`apiv2/event/filter`) answers a time-range query from its newest
+1,000 events only. Measured on 2026-11-14 16:34 UTC with one-day queries 1.5 s apart: every day from 2026-11-03 on
+answered in full (37 to 117 rows a day), 2026-11-02 answered its last 11 events (21:18:10 on), every older day
+(2026-11-01, 10-31, 10-28, 10-24, 10-17, 09-30, 08-01, 2025-08-11) answered 0 rows with HTTP 200; the days from
+2026-11-02 21:18 on sum to exactly 1,000 rows, a query for 2026-11-02 .. 11-15 with `limit=2000` returns exactly those
+1,000, and one for 2026-01-01 .. 11-02 21:00 with `minmag=4` returns none. At AFAD's rate then (about 85 events a day)
+that is about 11.8 days; a swarm shortens it (the Sındırgı sequence listed 400–600 events a day). On 2026-10-04 the
+same service still answered 2025-08 in full (the remediation of 23 Sındırgı days), so the limit is newer than that;
+on 2026-11-08 the seam days 2026-06-28..30 already answered 0 rows. The registry says `retentionDays: 7` for `afad`
+(src/retention.ts): backfill and remediation never ask it for a day before the last 7 whole days. A backfill window
+older than that is skipped with the reason `retention` (the run's log and the dry run's plan list it day by day; a walk
+whose next window lies wholly before it is done with `stoppedBy: "retention"` in `knowledge/index/backfill.json`; a
+dispatched window that is still open there is closed), and a remediation day older than that is built without AFAD,
+its edition naming it in `not_fetched` (*Remediation editions*). Neither is a block on the health board: nothing more
+can be fetched. The live path asks AFAD for its last 2 days and is not affected. Since every backfill window lies
+before the live floor (the oldest `event_map` day, about 45 days back) and every queued refill day is archived, AFAD's
+history before the live floor can no longer be refilled from AFAD at all: what the archives and frozen partitions hold
+is all there is. The AFAD raw assets of the seam editions of 2026-06-28..30 (`raw-afad-2026-06-2{8,9}`,
+`raw-afad-2026-06-30`, 0 rows each, fetched 2026-11-08) are such retention answers, not quiet days.
 
 ## ISC (International Seismological Centre)
 

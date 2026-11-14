@@ -36,8 +36,10 @@ import {
   rawText,
   remediationTag,
   remediationTasks,
+  saturatedPlan,
   type WindowFetcher,
 } from '../src/remediation.js';
+import { beyondRetention } from '../src/retention.js';
 import type { EventNode, RawObs } from '../src/types.js';
 
 // FEED-DQ-1 / DQ-3: saturated backfill days are asked again in sub-day windows and published as additive day editions
@@ -64,6 +66,34 @@ test('tasks: frozen saturated days only, Kamchatka first, then the Sındırgı d
   };
   const t = remediationTasks(cursor, '2026-09-24', new Set(['afad:2025-08-12']));
   assert.deepEqual(t.map((x) => `${x.provider}:${x.day}`), ['kagsr:2025-07-30', 'afad:2025-08-11', 'afad:2025-11-12', 'imo:2023-11-11', 'imo:2025-05-24']);
+});
+
+test('saturated plan: archived, askable days only; a day before its month\'s archive waits; raws without an edition are built (SHLTR-151)', () => {
+  const cursor = {
+    providers: {
+      kagsr: { saturatedDays: ['2025-07-30'] },
+      afad: { saturatedDays: ['2025-08-11', '2025-08-12', '2025-08-13'] },
+      imo: { saturatedDays: ['2026-08-20'] },
+      usgs: { saturatedDays: ['2026-11-12'] },
+    },
+  };
+  const archived = new Set(['2025-07-30', '2025-08-11', '2025-08-12', '2025-08-13']);
+  const raw = (provider: string, day: string) => ({ provider, day, tag: 'remediation-2025', asset: `raw-${provider}-${day}.ndjson.gz`, url: '', sha256: 'x', bytes: 1, rows: 1, requests: 1, partial: false, fetched_at: '2026-11-08T00:00:00.000Z', reason: 'saturated' as const });
+  const ed = (day: string, from: string[]) => ({ day, edition: 1, tag: 'remediation-2025', asset: `events-${day}.e1.ndjson.gz`, url: '', sha256: 'y', bytes: 1, built_on: { tag: 'a', asset: 'b', sha256: null }, built_from: from, reason: 'saturated' as const, stats: {} as never, built_at: '' });
+  const idx = emptyRemediationIndex();
+  // 08-12: its raw is in the day's edition (done). 08-13: a run uploaded its raw and built no edition.
+  idx.raw.push(raw('afad', '2025-08-12'), raw('afad', '2025-08-13'));
+  idx.editions.push(ed('2025-08-12', ['raw-afad-2025-08-12.ndjson.gz']));
+  // AFAD 08-11 is older than the source's retention: never asked, never a task (saturatedReport warns about it).
+  const skip = (p: string, d: string): boolean => p === 'afad' && d === '2025-08-11';
+  const plan = saturatedPlan(cursor, '2026-11-04', idx, archived, skip);
+  assert.deepEqual(plan.tasks.map((t) => `${t.provider}:${t.day}`), ['kagsr:2025-07-30'], 'the retention day and the unarchived IMO day take no slot');
+  assert.deepEqual(plan.editionOnly, ['2025-08-13']);
+  assert.deepEqual(plan.waiting, ['2026-08-20'], 'frozen, its month not archived yet; USGS 11-12 is not frozen');
+  // Once 08-13's edition holds its raw, the day is done; IMO's month archives and its day is taken.
+  idx.editions.push(ed('2025-08-13', ['raw-afad-2025-08-13.ndjson.gz']));
+  const later = saturatedPlan(cursor, '2026-11-04', idx, new Set([...archived, '2026-08-20']), skip);
+  assert.deepEqual([later.tasks.map((t) => `${t.provider}:${t.day}`), later.editionOnly, later.waiting], [['kagsr:2025-07-30', 'imo:2026-08-20'], [], []]);
 });
 
 /** A source holding `times` on the day that answers at most `cap` rows per window (overflow = full). */
@@ -415,4 +445,88 @@ test('index text: the queue is kept; the index of 2026-10-04 (no queue, no reaso
   const old = { version: 1 as const, raw: [], editions: [] };
   assert.deepEqual(queuePlan(old, new Set(['2026-07-01'])), { tasks: [], editionOnly: [], waiting: [] });
   assert.deepEqual(pruneQueue(old), []);
+});
+
+// --- SHLTR-146: AFAD answers from its newest 1,000 events only. The seam refill of 2026-07-01..03 (queued for AFAD among
+// 15 sources, taken once July is archived) must not ask it, must not read its empty answer as "nothing to fill", and
+// must say so in the edition; the queue must not wait for AFAD forever. ---
+
+test('retention: the refill queue skips AFAD for a day older than its retention, notes it in the edition, and lets the day go', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'efd-seam-'));
+  try {
+    const afad = registry.find((p) => p.id === 'afad')!;
+    const deps0 = seamDeps(dir, seamArchive(), stubSources([]));
+    const skip = (provider: string, day: string): boolean => beyondRetention(registry.find((p) => p.id === provider)!, day, deps0.nowMs);
+    assert.ok(skip('afad', SEAM) && !skip('usgs', SEAM));
+    const idx = emptyRemediationIndex();
+    enqueueRefill(idx, '2026-06-29..2026-06-30', ['afad', 'usgs'], 'seam', '2026-11-08T00:00:00.000Z');
+    enqueueRefill(idx, '2026-06-28', ['afad'], 'seam', '2026-11-08T00:00:00.000Z');
+    const archived = new Set(ARCHIVES[0]!.days);
+    const plan = queuePlan(idx, archived, skip);
+    // AFAD rides along with the days that are built (so the edition notes it); alone (06-28) it is no work at all.
+    assert.deepEqual(plan.tasks.map((t) => `${t.provider}:${t.day}`), ['afad:2026-06-29', 'usgs:2026-06-29', 'afad:2026-06-30', 'usgs:2026-06-30']);
+    const asked: string[] = [];
+    const rows = [usgsRow('ci1', S0 + 2 * HOUR)];
+    const fetchWindow: DayRunDeps['fetchWindow'] = async (p, s, e, m) => {
+      asked.push(p.id);
+      return stubSources(rows)(p, s, e, m);
+    };
+    const r = await remediateDay(SEAM, plan.tasks.filter((t) => t.day === SEAM), idx, { ...deps0, fetchWindow });
+    assert.deepEqual(r.failed, []);
+    assert.ok(asked.length > 0 && asked.every((id) => id === 'usgs'), 'no AFAD request');
+    assert.deepEqual(r.notFetched.map((n) => [n.provider, n.reason, n.retained_from]), [['afad', 'retention', '2026-11-02']]);
+    const ed = r.edition!;
+    assert.deepEqual(ed.built_from, ['raw-usgs-2026-06-29.ndjson.gz'], 'no AFAD raw: nothing reads as "AFAD had nothing that day"');
+    assert.deepEqual(ed.not_fetched, r.notFetched);
+    assert.match(ed.not_fetched![0]!.note, /^afad answers time-range queries for its last 7 days only/);
+    assert.match(r.line!, /; not asked \(retention\): afad$/);
+    assert.ok(!idx.raw.some((x) => x.provider === 'afad'));
+    // Asked again with AFAD alone (a later run): no second edition of a finished day.
+    const again = await remediateDay(SEAM, [{ provider: 'afad', day: SEAM, reason: 'seam' }], idx, { ...deps0, fetchWindow });
+    assert.equal(again.edition, undefined);
+    assert.equal(idx.editions.length, 1);
+    // The queue: 06-28 (AFAD alone) and 06-29 are done; 06-30 is left. Without the retention the queue would wait for
+    // AFAD's raw for good.
+    assert.deepEqual(pruneQueue(structuredClone(idx)).map((e) => e.range), []);
+    assert.deepEqual(pruneQueue(idx, skip).map((e) => e.range), ['2026-06-28']);
+    assert.deepEqual(idx.refill_queue!.map((e) => e.range), ['2026-06-30..2026-06-30']);
+    assert.equal(afad.retentionDays, 7);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- SHLTR-151: KAGSR 2025-07-30 (saturated: a one-day backfill window filled the cap) is asked again in hour windows,
+// and the edition holds every row the hour windows answer. ---
+
+test('saturated day: asked in hour windows from the start, every hour\'s rows in the edition (the KAGSR 2025-07-30 case)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'efd-saturated-'));
+  try {
+    // The archive holds part of the day (as the backfill's capped answer left it); the source lists more now.
+    const all = Array.from({ length: 48 }, (_, i) => kagsr(`k${i}`, D0 + i * 30 * 60_000 + 7_000, { lat: 50 + (i % 7) * 0.5, lon: 155 + (i % 5) }));
+    const archived = all.slice(0, 30);
+    const windows: Array<[number, number]> = [];
+    const fetchWindow: DayRunDeps['fetchWindow'] = async (p, s, e) => {
+      windows.push([s, e]);
+      const obs = all.filter((r) => r.eventTimeMs >= s && r.eventTimeMs < e);
+      return { provider: p.id, obs, status: { ok: true, events_returned: obs.length }, overflow: false } as WindowOutcome;
+    };
+    const archives = [{ period: '2025-07', tag: 'archive-2025-07', asset: 'events-2025-07.e3.tar.zst', days: ['2025-07-29', DAY, '2025-07-31'], sha256: 'ea352f9c' }];
+    const deps: DayRunDeps = {
+      store: new LocalStore(join(dir, 'releases')), registry, fetchWindow, archives, arch: { days: archivedDay(archived), failedMonths: new Set() },
+      work: dir, nowMs: Date.parse('2026-11-15T04:43:00Z'), seqMarker: 500_000, spacingMs: 0, sleep: async () => {},
+    };
+    const idx = emptyRemediationIndex();
+    const tasks = remediationTasks({ providers: { kagsr: { saturatedDays: [DAY] } } }, '2026-11-04', new Set(idx.raw.map((r) => `${r.provider}:${r.day}`)));
+    assert.deepEqual(tasks, [{ provider: 'kagsr', day: DAY }]);
+    const r = await remediateDay(DAY, tasks, idx, deps);
+    assert.deepEqual(r.failed, []);
+    assert.equal(windows.length, 24, 'one request per hour');
+    assert.ok(windows.every(([s, e], i) => s === D0 + i * HOUR && e === s + HOUR));
+    assert.deepEqual([r.raws[0]!.rows, r.raws[0]!.partial, r.raws[0]!.requests], [48, false, 24]);
+    assert.deepEqual(r.edition!.stats.provider_rows.kagsr, { before: 30, after: 48 }, 'the day holds every row the source lists');
+    assert.equal(r.edition!.stats.new_events, 18);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

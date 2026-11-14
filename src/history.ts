@@ -41,7 +41,7 @@ import {
   rawOf,
   remergeNeighbour,
 } from './history-index.js';
-import { type HistoryState, type StallEntry, emptyState, loadState, recordRun, stateText, walkTexts } from './history-state.js';
+import { type HistoryState, type StallEntry, emptyState, loadState, recordRun, stallAtAlarm, stateText, walkTexts } from './history-state.js';
 import { type AssetInfo, DryRunStore, GitHubStore, type HistoryStore, LocalStore } from './history-store.js';
 import { verifyEdition } from './history-verify.js';
 import { type ContextMeta, mergeMeta, normalizeUnit, remergeGateProblems, remergeNodes, remergedDayFiles, snapshotUnit } from './remerge.js';
@@ -78,15 +78,21 @@ import type { ProviderConfig, RawObs } from './types.js';
  *   HISTORY_MAX_UNITS    override maxUnitsPerRun
  *
  * The run writes nothing to DATA_DIR. It exits non-zero only for a broken invariant (after writing the index of the
- * work already uploaded); a source month that fails is retried next run and turns the run red once, after a day of
- * failed runs; a month that failed before no longer holds back its source's older months. A walk that makes no progress
- * (work left, nothing fetched, sealed or adopted) turns the run red after a day of such runs that no Retry-After and no
- * time budget explain, or three days of any, and then once a day while it lasts (round 24, src/history-state.ts).
+ * work already uploaded); a source month that fails is retried next run, and from a day of failed runs it is a block; a
+ * month that failed before no longer holds back its source's older months. A walk that makes no progress (work left,
+ * nothing fetched, sealed or adopted) is a block after a day of such runs that no Retry-After and no time budget
+ * explain, or three days of any (round 24, src/history-state.ts).
+ *
+ * The blocked marker (history-blocked.txt, walk-blocked-history) states every standing block on every run (SHLTR-151):
+ * the source months failing for a day or more and a stopped walk (both from history-state.json), and this run's own
+ * re-merge blocks (a blocked month is the newest one left to merge, so every run asks it again first) and broken
+ * invariant. A run that evaluated them all and found none says so (output `complete`, the workflow's '#' marker), so the
+ * board resolves on the next health run instead of after the 26 h hold.
  */
 
-/** A source month that has failed this many runs turns the run red, once (history-state.json keeps its attempts entry);
- *  a walk that has stopped turns runs red by its own streak (src/history-state.ts). */
-const ALARM_FAILURES = 24;
+/** A source month that has failed this many runs is a block, stated by every run until it is fetched (history-state.json
+ *  keeps its attempts entry); a walk that has stopped is a block by its own streak (src/history-state.ts). */
+export const ALARM_FAILURES = 24;
 /** Failed source months per source per run at most: a month that failed before (`attempts`) no longer holds back the
  *  source's older months, but a source that fails everything costs at most this many failed months a run. */
 const MAX_FAILED_UNITS_PER_SOURCE = 3;
@@ -511,12 +517,6 @@ export async function fetchUnits(ctx: Ctx, maxUnits: number, onMonthComplete?: (
       ctx.report.failed.push(`${key}: ${res.error} (${a.failures} failed run(s) since ${a.since}; ${res.requests} request(s))`);
       if (rateLimited) ctx.report.rate_limited.push(`${key}: ${res.error.slice(0, 120)}`);
       console.log(`::warning::history: ${key} failed: ${res.error} — ${a.failures} failed run(s) since ${a.since}`);
-      if (a.failures === ALARM_FAILURES) {
-        ctx.report.blocked.push(
-          `history: ${key} has failed ${a.failures} runs since ${a.since} (last error: ${a.last_error}); the source's older months go on, ` +
-            `but no month from ${u.period.key} back is sealed until it is fetched: fix the source or take it out of the era`,
-        );
-      }
       continue;
     }
     const header: RawHeader = {
@@ -819,13 +819,29 @@ function stallMessage(ctx: Ctx, st: StallEntry, pending: number, unsealed: numbe
 }
 
 /**
+ * The source months that have failed ALARM_FAILURES runs or more and are still to fetch, from the walk's state: a block
+ * on every run until the month is fetched or leaves the config (a source taken out of its era). Sorted by key.
+ */
+export function failingMonthBlocks(cfg: HistoryConfig, idx: HistoryIndex): string[] {
+  const pending = new Set(pendingUnits(cfg, idx).map((u) => `${u.source}:${u.period.key}`));
+  return Object.entries(idx.attempts)
+    .filter(([key, a]) => a.failures >= ALARM_FAILURES && pending.has(key))
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(
+      ([key, a]) =>
+        `history: ${key} has failed ${a.failures} runs since ${a.since} (last error: ${a.last_error}); the source's older months go on, ` +
+        `but no month from ${key.slice(key.lastIndexOf(':') + 1)} back is sealed until it is fetched: fix the source or take it out of the era`,
+    );
+}
+
+/**
  * One run of the walk: take over assets an earlier run uploaded but never indexed, seal the months an earlier run left
  * complete, fetch (sealing each month as its last source arrives), then count the run into the no-progress streak of
  * `state` (whose `attempts` is `ctx.idx.attempts`, src/history-state.ts). A broken invariant comes back as `fatal`,
  * after the run is counted, and is never thrown: the index of the work already uploaded must still be written.
  * Exported for tests/history-run.test.ts.
  */
-export async function runWalk(ctx: Ctx, state: HistoryState, maxUnits: number): Promise<{ fatal: unknown; pending: number; unsealed: number }> {
+export async function runWalk(ctx: Ctx, state: HistoryState, maxUnits: number): Promise<{ fatal: unknown; pending: number; unsealed: number; complete: boolean }> {
   let fatal: unknown = null;
   try {
     adoptOrphans(ctx);
@@ -846,12 +862,18 @@ export async function runWalk(ctx: Ctx, state: HistoryState, maxUnits: number): 
   const progress = r.fetched.length + r.sealed.length + r.adopted.length + r.remerged.length > 0;
   // Explained: the run waited for a source's Retry-After or ran out of time, and nothing failed for another reason.
   const explained = !fatal && r.failed.length === r.rate_limited.length && r.held.length + r.rate_limited.length + r.budget.length > 0;
-  if (recordRun(state, { progress, workLeft: pending + unsealed > 0, explained }, ctx.now())) r.blocked.push(stallMessage(ctx, state.stall!, pending, unsealed));
+  // recordRun's daily repeat (alarmed_at) is kept; the block itself is stated by every run while the walk has stopped.
+  recordRun(state, { progress, workLeft: pending + unsealed > 0, explained }, ctx.now());
+  if (stallAtAlarm(state.stall)) r.blocked.push(stallMessage(ctx, state.stall!, pending, unsealed));
   else if (state.stall) {
     const st = state.stall;
     console.log(`history: no progress this run: ${st.runs} run(s) in a row since ${st.since}, ${st.unexplained} of them unexplained${explained ? '' : ' (this one too)'}`);
   }
-  return { fatal, pending, unsealed };
+  r.blocked.push(...failingMonthBlocks(ctx.cfg, ctx.idx));
+  // Every standing block was evaluated unless the run's time budget cut the re-merge short (a month it never reached
+  // may be one blocked before) or a broken invariant stopped the run.
+  const complete = !fatal && !r.budget.some((b) => b.startsWith('re-merging '));
+  return { fatal, pending, unsealed, complete };
 }
 
 async function main(): Promise<void> {
@@ -862,6 +884,8 @@ async function main(): Promise<void> {
   if (!cfg.enabled && process.env.HISTORY_FORCE !== '1') {
     console.log('history: providers/history.json has enabled=false; nothing to do');
     setOutput('changed', 'false');
+    // The walk is off: nothing of it is blocked.
+    setOutput('complete', 'true');
     return;
   }
   requireZstd();
@@ -930,7 +954,7 @@ async function main(): Promise<void> {
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
-  const { fatal, pending, unsealed } = run;
+  const { fatal, pending, unsealed, complete } = run;
   // Whatever was uploaded is indexed, also when a later step failed: the index never lags the Releases by choice. The
   // streaks go to the state file: a run that only counts one more failure leaves the index as it was (round 24).
   const files = walkTexts(idx, state, indexText);
@@ -959,6 +983,8 @@ async function main(): Promise<void> {
   );
   const blocked = [...ctx.report.blocked];
   if (fatal) blocked.unshift(`history: ${fatal instanceof Error ? fatal.message : String(fatal)}`);
+  // history.yml uploads a '#' marker (nothing blocked) only after a run that evaluated every standing block.
+  setOutput('complete', String(complete));
   if (blocked.length) {
     for (const m of blocked) console.error(`::error::${m}`);
     // Marker, not a failing step: the index of the uploaded work must still reach the commit job.

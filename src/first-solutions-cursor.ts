@@ -117,7 +117,8 @@ export function daysLeft(cur: SourceCursor, plan: WalkPlan): number {
 
 /** From this many consecutive failed runs a run prints a warning for the source. */
 export const STALL_WARN_FAILURES = 24;
-/** From this many, on every STALL_WARN_FAILURES-th, the run turns red (about once a day at the hourly pace). */
+/** From this many failures in a row the source is a block on the run's marker, on every run (stallBlocks); stallLevel's
+ *  `alarm` marks every STALL_WARN_FAILURES-th of them (about once a day at the hourly pace). */
 export const STALL_ALARM_FAILURES = 72;
 
 export function recordFailure(cur: SourceCursor, error: string, at: string): void {
@@ -136,4 +137,18 @@ export function stallLevel(cur: SourceCursor): 'ok' | 'warn' | 'alarm' {
   if (cur.failures < STALL_WARN_FAILURES) return 'ok';
   if (cur.failures >= STALL_ALARM_FAILURES && cur.failures % STALL_WARN_FAILURES === 0) return 'alarm';
   return 'warn';
+}
+
+/**
+ * The blocked marker's lines (SHLTR-151): every source of `providers` whose walk has failed STALL_ALARM_FAILURES runs or
+ * more in a row, stated by every run while it lasts (stallLevel's `alarm` is one run a day, which left the board to the
+ * 26 h hold in between). Sorted by provider; empty when nothing is blocked, and the workflow then uploads a '#' marker.
+ */
+export function stallBlocks(cursor: FirstSolutionsCursor, providers: readonly string[]): string[] {
+  return [...new Set(providers)]
+    .sort()
+    .flatMap((p) => {
+      const cur = cursor.sources[p];
+      return cur && cur.failures >= STALL_ALARM_FAILURES ? [`first-solutions ${p}: ${cur.failures} failed runs in a row since ${cur.failingSince}: ${cur.lastError}`] : [];
+    });
 }

@@ -20,6 +20,7 @@ import {
   nextDay,
   recordAnswer,
   recordFailure,
+  stallBlocks,
   stallLevel,
   unmarkRange,
 } from './first-solutions-cursor.js';
@@ -812,7 +813,6 @@ async function main(): Promise<void> {
       cursor.sources[res.provider] = reverted;
       console.log(`::warning::first-solutions ${res.provider}: upload failed, the run's work is asked again next run: ${uploadError}`);
       summary[res.provider] = { upload_error: uploadError, requests: res.requests, failures: reverted.failures };
-      if (stallLevel(reverted) === 'alarm') blockers.push(`first-solutions ${res.provider}: ${reverted.failures} failed runs in a row since ${reverted.failingSince}: ${reverted.lastError}`);
       continue;
     }
     newLines.push(...chunks.map((c) => c.line));
@@ -831,8 +831,10 @@ async function main(): Promise<void> {
       `first-solutions ${res.provider}: ${res.requests} request(s), ${res.records.length} record(s), ${res.daysDone.length} day(s) done${res.daysDone.length ? ` (${res.daysDone[0]}..${res.daysDone[res.daysDone.length - 1]})` : ''}, pending ${cur.pending ? `${cur.pending.day}+${cur.pending.offset}` : 'none'}, ${left} day(s) left${res.error ? `, stopped: ${res.error}` : ''}${res.monthCapAt ? `, stopped before ${res.monthCapAt}: ${MAX_MONTHS_PER_LANE} event months this run` : ''}`,
     );
     if (level === 'warn') console.log(`::warning::first-solutions ${res.provider}: ${cur.failures} failed runs in a row since ${cur.failingSince}: ${cur.lastError}`);
-    if (level === 'alarm') blockers.push(`first-solutions ${res.provider}: ${cur.failures} failed runs in a row since ${cur.failingSince}: ${cur.lastError}`);
   }
+  // Every standing block, on every run (SHLTR-151): each lane whose walk has failed for days, whether or not this run
+  // asked it (a one-off `sources` dispatch); none = the workflow uploads a '#' marker and the board resolves.
+  blockers.push(...stallBlocks(cursor, HISTORY_SOURCES.map((s) => s.provider)));
 
   writeFileSync(join(outDir, 'cursor.json'), JSON.stringify(cursor, null, 2) + '\n');
   writeFileSync(join(outDir, 'chunks.ndjson'), (startChunksText ?? '') + newLines.map((l) => JSON.stringify(l) + '\n').join(''));

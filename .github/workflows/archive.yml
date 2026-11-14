@@ -82,6 +82,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Archive cold months to Releases
+        id: run
         env:
           DATA_DIR: .data
           GH_TOKEN: ${{ github.token }}
@@ -103,8 +104,11 @@ jobs:
       # earlier would skip the commit and make every later run repeat the same work.
       # A blocked month keeps the run green (alerting plan of 2026-10-22): a warning here, and the marker as the artifact
       # walk-blocked-archive, which the health workflow's feed evaluator (scripts/feed-health.mjs) files on the
-      # "[health] feed" board as walks:archive:<source> (a P3: one comment; it resolves once no marker is newer than
-      # 26 h). A script that throws still fails its own step, and the run.
+      # "[health] feed" board as walks:archive:<source> (a P3: one comment). A script that throws still fails its own
+      # step, and the run. A blocked month stays flagged and is tried again by every run, so a run that looked at every
+      # cold month (output `complete`: the per-run cap did not stop it) states every standing block (SHLTR-151), and
+      # with nothing blocked uploads a marker without a blocked line (only a "#" line): the board resolves on the next
+      # health run; the 26 h hold is the fallback.
       - name: Warn if any month was blocked
         if: always()
         run: |
@@ -112,6 +116,9 @@ jobs:
             cat archive-blocked.txt
             echo '::warning::archive: one or more months blocked (see above), and the health workflow files the marker on the "[health] feed" board; check whether the commit step above ran, it is skipped if the script itself threw'
           fi
+      - name: Mark a run with nothing blocked
+        if: always() && steps.run.outcome == 'success' && steps.run.outputs.complete == 'true'
+        run: '[ -f archive-blocked.txt ] || echo "# nothing blocked: run ${{ github.run_id }}" > archive-blocked.txt'
       - name: Upload the blocked marker (read by the health workflow)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

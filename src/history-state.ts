@@ -94,6 +94,11 @@ export interface RunOutcome {
   explained: boolean;
 }
 
+/** Whether a no-progress streak has reached an alarm (STALL_ALARM_RUNS unexplained runs, or STALL_ALARM_RUNS_ANY
+ *  runs): the walk has stopped. Every run states it in its blocked marker while it lasts (SHLTR-151), not only the run a
+ *  day that recordRun turns red. */
+export const stallAtAlarm = (st: StallEntry | null): boolean => st != null && (st.unexplained >= STALL_ALARM_RUNS || st.runs >= STALL_ALARM_RUNS_ANY);
+
 /**
  * Count the run into the no-progress streak (`s.stall`). True when this run turns red for it: the streak has reached
  * STALL_ALARM_RUNS unexplained runs or STALL_ALARM_RUNS_ANY runs, and it has not turned a run red in the last
@@ -107,7 +112,7 @@ export function recordRun(s: HistoryState, o: RunOutcome, nowIso: string): boole
   const st = (s.stall ??= { since: nowIso, runs: 0, unexplained: 0, alarmed_at: null });
   st.runs++;
   if (!o.explained) st.unexplained++;
-  if (st.unexplained < STALL_ALARM_RUNS && st.runs < STALL_ALARM_RUNS_ANY) return false;
+  if (!stallAtAlarm(st)) return false;
   if (st.alarmed_at != null && Date.parse(nowIso) - Date.parse(st.alarmed_at) < STALL_REPEAT_MS) return false;
   st.alarmed_at = nowIso;
   return true;

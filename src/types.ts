@@ -128,6 +128,10 @@ export interface ProviderConfig {
    *  that publishes many events days after their origin (NRCan). Capped at HOT_WINDOW_DAYS: an older row is dropped
    *  at ingest anyway (providers.ts liveLookbackMs). */
   lookbackDays?: number;
+  /** Time-range queries (backfill, remediation) only: the source answers for its last this many days only (AFAD: its
+   *  newest 1,000 events, SHLTR-146). A window older than that is never asked and is reported with the reason
+   *  `retention`, never as filled (src/retention.ts). Missing = the source keeps its whole catalogue. */
+  retentionDays?: number;
   /** Hours the source may answer with no rows before status.json lists it as silent (src/activity.ts, FEED-3):
    *  missing = 12 (an active agency), a number for a quiet one, null = never silent (a region quiet for weeks). */
   activityBudgetHours?: number | null;

@@ -133,3 +133,46 @@ test('backfill on a sparse checkout refuses to run when a partition of its windo
   assert.match(r2.stderr, /lacks 4 file\(s\) this run reads \(knowledge\/index\/archives\.json, knowledge\/index\/backfill\.json, knowledge\/index\/head\.json, knowledge\/index\/partitions\.json\)/);
   assert.equal(existsSync(join(s.dir, 'p2.txt')), false);
 });
+
+test('backfill.yml commit step on a sparse checkout: stages the changes inside it, refuses a new file outside it, never stages a day it did not check out', () => {
+  // 2026-11-14 15:43Z: `git add events knowledge` exited 1 on the first gated walk, which checked out no month (nothing
+  // to fill): a pathspec that matches only paths outside the sparse checkout is an error. The step now runs the line
+  // below from backfill.yml itself, so the test and the workflow cannot drift.
+  const yml = readFileSync(join(ROOT, '.github/workflows/backfill.yml'), 'utf8');
+  const addLine = yml.split('\n').map((l) => l.trim()).find((l) => l.startsWith('git add'));
+  assert.equal(addLine, 'git add -A');
+  const s = setup();
+  const add = (cwd: string) => spawnSync('git', ['add', '-A'], { cwd, env: s.e, encoding: 'utf8' });
+  const staged = (cwd: string) => s.git(cwd, 'diff', '--cached', '--name-only').split('\n').filter(Boolean);
+
+  // A walk with nothing to fill: only the index files, the cursor rewritten.
+  const walk = s.clone(['/knowledge/index/*.json']);
+  writeFileSync(join(walk, 'knowledge/index/backfill.json'), '{"targetStart":"2023-07-06","providers":{"usgs":{}}}\n');
+  assert.equal(spawnSync('git', ['add', 'events', 'knowledge'], { cwd: walk, env: s.e }).status, 1, 'the old pathspecs fail with no month checked out');
+  const r = add(walk);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(staged(walk), ['knowledge/index/backfill.json']);
+
+  // A window run: one month checked out, a day rewritten and a new day added inside it.
+  const win = s.clone(['/knowledge/index/*.json', '/events/2026/09/']);
+  writeFileSync(join(win, 'events/2026/09/15.ndjson'), '{"x":2}\n{"x":4}\n');
+  writeFileSync(join(win, 'events/2026/09/16.ndjson'), '{"x":5}\n');
+  assert.equal(add(win).status, 0);
+  assert.deepEqual(staged(win), ['events/2026/09/15.ndjson', 'events/2026/09/16.ndjson']);
+
+  // A new file in a month that is not checked out: refused, nothing more is staged.
+  const stray = s.clone(['/knowledge/index/*.json']);
+  mkdirSync(join(stray, 'events/2026/08'), { recursive: true });
+  writeFileSync(join(stray, 'events/2026/08/30.ndjson'), '{"x":6}\n');
+  const r2 = add(stray);
+  assert.equal(r2.status, 1);
+  assert.match(r2.stderr, /outside of your sparse-checkout definition/);
+  assert.deepEqual(staged(stray), []);
+
+  // A rewrite of a tracked day that is not checked out (the truncation shape): never staged.
+  const trunc = s.clone(['/knowledge/index/*.json']);
+  mkdirSync(join(trunc, 'events/2026/08'), { recursive: true });
+  writeFileSync(join(trunc, 'events/2026/08/31.ndjson'), '');
+  add(trunc);
+  assert.deepEqual(staged(trunc), []);
+});

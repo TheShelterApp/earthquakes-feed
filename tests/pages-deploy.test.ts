@@ -218,10 +218,16 @@ function actionSteps(): Array<{ name: string; text: string; run: string }> {
 
 for (const [file, job] of [['.github/workflows/aggregate.yml', 'aggregate'], ['.github/workflows/derive.yml', 'derive']] as const) {
   test(`pages-deploy wiring: ${file} passes its own timeout-minutes and the start its first step notes`, () => {
-    const yml = read(file);
+    const whole = read(file);
+    // The publishing job alone: derive.yml has a `gate` job before it (SHLTR-149, scripts/writer-queue.mjs).
+    const at = whole.indexOf(`\n  ${job}:\n`);
+    assert.ok(at > 0, `${file}: no ${job} job`);
+    const next = /\n {2}[\w-]+:\n/.exec(whole.slice(at + 1));
+    const yml = whole.slice(at, next ? at + 1 + next.index : undefined);
     const timeout = /\n {4}timeout-minutes: (\d+)\n/.exec(yml)?.[1];
     assert.ok(timeout, `${file}: no job timeout-minutes`);
-    assert.equal((yml.match(/\n {4}timeout-minutes: /g) ?? []).length, 1, `${file}: one job`);
+    assert.equal((yml.match(/\n {4}timeout-minutes: /g) ?? []).length, 1, `${file}: one timeout for the ${job} job`);
+    assert.equal((whole.match(/job-timeout-minutes: /g) ?? []).length, 1, `${file}: one Pages deploy`);
     assert.equal(/\n {10}job-timeout-minutes: (\d+)\n/.exec(yml)?.[1], timeout, `${file}: job-timeout-minutes must equal the ${job} job's timeout-minutes`);
     assert.match(yml, /\n {10}job-started-at: \$\{\{ env\.FEED_JOB_STARTED_S \}\}\n/);
     const steps = yml.slice(yml.indexOf('\n    steps:\n'));

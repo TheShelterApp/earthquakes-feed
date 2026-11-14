@@ -8,17 +8,55 @@ name: derive
 # without fetching: gh workflow run derive.yml -R TheShelterApp/earthquakes-feed
 on:
   workflow_dispatch:
-
-concurrency:
-  group: earthquakes-feed-writer
-  cancel-in-progress: false
-  queue: max
+    inputs:
+      force:
+        description: 'Join the writer queue even when 2 writer runs already wait (README.md "Writer group"): every aggregate run waits behind it'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
+  # Outside every group: the writer lock is taken by the job below, and only when this gate admits it (SHLTR-149;
+  # scripts/writer-queue.mjs, README.md "Writer group").
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # The repository's unfinished runs and their jobs (the writer queue).
+      actions: read
+    outputs:
+      admit: ${{ steps.gate.outputs.admit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .nvmrc
+            scripts/writer-queue.mjs
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Count the writer queue
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WRITER_WORKFLOW: derive.yml
+          FORCE: ${{ inputs.force && 'true' || '' }}
+        run: node scripts/writer-queue.mjs gate
+
   derive:
+    needs: gate
+    if: needs.gate.outputs.admit == 'true'
+    # The writer lock, runs waiting in arrival order (FEED-OPS-4; aggregate.yml explains the group). It stays on the
+    # full data checkout: derive rebuilds and publishes every view from the whole tree it reads.
+    concurrency:
+      group: earthquakes-feed-writer
+      cancel-in-progress: false
+      queue: max
     # Pinned, not ubuntu-latest: ubuntu-latest moves to Ubuntu 26.04 from 2026-10-19
     # (actions/runner-images#14748). Move to ubuntu-26.04 deliberately, after a green test run.
     runs-on: ubuntu-24.04

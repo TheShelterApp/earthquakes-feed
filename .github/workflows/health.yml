@@ -89,7 +89,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      # This run's created_at (its queue time) and the walks' walk-blocked-<workflow> marker artifacts.
+      # This run's created_at (its queue time), the walks' walk-blocked-<workflow> marker artifacts and the writer queue
+      # (the unfinished runs and their jobs, scripts/writer-queue.mjs).
       actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -104,8 +105,8 @@ jobs:
           node-version-file: .nvmrc
       - name: Judge the feed (findings for the "[health] feed" board)
         env:
-          # GitHub's own API only (the script hard-codes the host): the run, the repository's size, the data tree, the
-          # walk markers. A read that fails (or no token) is the finding watcher:feed-github.
+          # GitHub's own API only (the scripts hard-code the host): the run, the repository's size, the data tree, the
+          # walk markers, the writer queue. A read that fails (or no token) is the finding watcher:feed-github.
           GH_TOKEN: ${{ github.token }}
         run: node scripts/feed-health.mjs --findings findings/feed.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

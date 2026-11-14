@@ -10,17 +10,24 @@
  *   npx tsx scripts/writer-group-sim.ts week runs.ndjson [seeds]
  *       A synthetic week: the heartbeat Worker's schedule (heartbeat/src/worker.js), the scheduled runs GitHub delivered
  *       in the measured week, run times drawn from that week's measured quantiles; `seeds` weeks (default 20).
+ *   npx tsx scripts/writer-group-sim.ts incident
+ *       The incident of 2026-11-08 (SHLTR-149): 47 backfill dispatches 4.6 s apart and the aggregate every 5 minutes,
+ *       under each design: how long the aggregate waited, how many backfills waited at once, how many the gate refused.
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { workflowFor } from '../heartbeat/src/worker.js';
 import {
   DESIGNS,
+  INCIDENT_START_MS,
   WRITER,
+  incidentArrivals,
+  maxAggregateWaitMs,
   maxDepth,
+  maxWaiting,
   observedCancelled,
   replayArrivals,
-  simulate,
+  simulateDesign,
   summarize,
   syntheticArrivals,
   type Outcome,
@@ -68,10 +75,10 @@ const load = (file: string): RunRecord[] =>
 function table(title: string, outs: Outcome[]): void {
   const s = summarize(outs);
   console.log(`\n${title}   (writer group at most ${maxDepth(outs, WRITER)} deep)`);
-  console.log('  workflow                   arrivals   ran  cancelled  lost work  wait s p50/p90/max   cancelled by');
+  console.log('  workflow                   arrivals   ran  cancelled  refused  lost work  wait s p50/p90/max   cancelled by');
   for (const [wf, x] of Object.entries(s)) {
     console.log(
-      `  ${wf.padEnd(26)} ${String(x.arrivals).padStart(8)} ${String(x.ran).padStart(5)} ${String(x.cancelled).padStart(10)} ${`${x.lostWorkMin} min`.padStart(10)}  ${`${x.waitS.p50}/${x.waitS.p90}/${x.waitS.max}`.padStart(18)}   ${JSON.stringify(x.cancelledBy)}`,
+      `  ${wf.padEnd(26)} ${String(x.arrivals).padStart(8)} ${String(x.ran).padStart(5)} ${String(x.cancelled).padStart(10)} ${String(x.refused).padStart(8)} ${`${x.lostWorkMin} min`.padStart(10)}  ${`${x.waitS.p50}/${x.waitS.p90}/${x.waitS.max}`.padStart(18)}   ${JSON.stringify(x.cancelledBy)}`,
     );
   }
 }
@@ -80,7 +87,7 @@ function replay(file: string, from?: string, to?: string): void {
   const runs = load(file).filter((r) => (!from || r.created_at >= from) && (!to || r.created_at < to));
   console.log(`${runs.length} runs ${from ?? runs.map((r) => r.created_at).sort()[0]} .. ${to ?? runs.map((r) => r.created_at).sort().at(-1)}`);
   for (const d of DESIGNS) {
-    const outs = simulate(replayArrivals(runs, d), (g) => (g === WRITER ? d.writerQueue : 'single'));
+    const outs = simulateDesign(replayArrivals(runs, d), d);
     table(d.name, outs);
     if (d === DESIGNS[0]) {
       const sim = new Set(outs.filter((o) => o.cancelledBy).map((o) => o.arrival.id.replace(/:(run|collect|commit)$/, '')));
@@ -130,18 +137,28 @@ function week(file: string, seeds: number): void {
     const all: Outcome[] = [];
     let depth = 0;
     for (let seed = 1; seed <= seeds; seed++) {
-      const outs = simulate(
-        syntheticArrivals({ startMs, days, heartbeat: workflowFor, dispatchLagMs, cronAt, hold, workflowRunLagMs: 5_000, historyCommitShare, seed }, d),
-        (g) => (g === WRITER ? d.writerQueue : 'single'),
-      );
+      const outs = simulateDesign(syntheticArrivals({ startMs, days, heartbeat: workflowFor, dispatchLagMs, cronAt, hold, workflowRunLagMs: 5_000, historyCommitShare, seed }, d), d);
       depth = Math.max(depth, maxDepth(outs, WRITER));
       all.push(...outs);
     }
     const s = summarize(all);
     console.log(`\n${d.name}   (per week, mean of ${seeds}; writer group at most ${depth} deep)`);
     for (const [wf, x] of Object.entries(s)) {
-      console.log(`  ${wf.padEnd(26)} arrivals ${(x.arrivals / seeds).toFixed(0).padStart(5)}  cancelled ${(x.cancelled / seeds).toFixed(1).padStart(6)}  lost work ${(x.lostWorkMin / seeds).toFixed(0).padStart(4)} min  wait s p50/p90/max ${x.waitS.p50}/${x.waitS.p90}/${x.waitS.max}`);
+      console.log(`  ${wf.padEnd(26)} arrivals ${(x.arrivals / seeds).toFixed(0).padStart(5)}  cancelled ${(x.cancelled / seeds).toFixed(1).padStart(6)}  refused ${(x.refused / seeds).toFixed(1).padStart(6)}  lost work ${(x.lostWorkMin / seeds).toFixed(0).padStart(4)} min  wait s p50/p90/max ${x.waitS.p50}/${x.waitS.p90}/${x.waitS.max}`);
     }
+  }
+}
+
+function incident(): void {
+  console.log(`2026-11-08 from ${new Date(INCIDENT_START_MS).toISOString()}: 47 backfill dispatches 4.6 s apart, the aggregate every 5 min`);
+  for (const d of DESIGNS) {
+    const outs = simulateDesign(incidentArrivals(d), d);
+    const end = Math.max(...outs.map((o) => o.endedAt ?? 0));
+    const s = summarize(outs);
+    console.log(
+      `  ${d.name}\n    aggregate waited at most ${Math.round(maxAggregateWaitMs(outs, end) / 60_000)} min; backfills waiting at once at most ` +
+        `${maxWaiting(outs, WRITER, (x) => x.workflow === 'backfill')}; backfill ran ${s['backfill']!.ran}, refused ${s['backfill']!.refused}`,
+    );
   }
 }
 
@@ -149,7 +166,8 @@ const [cmd, a, b, c] = process.argv.slice(2);
 if (cmd === 'fetch' && a && b) fetchRuns(a, b);
 else if (cmd === 'replay' && a) replay(a, b, c);
 else if (cmd === 'week' && a) week(a, Number(b ?? 20));
+else if (cmd === 'incident') incident();
 else {
-  console.error('usage: writer-group-sim.ts fetch <from> <to> | replay <runs.ndjson> [fromIso toIso] | week <runs.ndjson> [seeds]');
+  console.error('usage: writer-group-sim.ts fetch <from> <to> | replay <runs.ndjson> [fromIso toIso] | week <runs.ndjson> [seeds] | incident');
   process.exit(2);
 }

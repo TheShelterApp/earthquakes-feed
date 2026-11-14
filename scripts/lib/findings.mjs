@@ -356,6 +356,17 @@ export const RULES = Object.freeze({
     confirmRuns: 2,
     limits: { attempts: 4, retryDelayMs: 3 * SEC, timeoutMs: 20 * SEC },
   }),
+  'feed:writer-queue': rule('feed:writer-queue', {
+    title: 'feed writer queue backed up',
+    // SHLTR-149 (incident 2026-11-08: 47 backfill dispatches queued ahead of every aggregate run, the live manifest
+    // 1 h 47 min stale before feed:freshness could see it at 30 min). More than maxQueued writer runs wait for (or are
+    // about to enter) the earthquakes-feed-writer group, or the older live manifest is older than staleWithQueueMs while
+    // any writer run waits (scripts/writer-queue.mjs counts them; GitHub's ghost runs older than 6 h do not count). The
+    // gates of backfill, archive and derive keep the queue at 2 plus aggregate's own run, so more than 3 means a burst
+    // got past them (force=true, or a gate that misread the queue).
+    board: 'feed', class: 'symptom', severity: 'P2', key: 'feed:writer-queue', check: 'gh-feed',
+    limits: { maxQueued: 3, staleWithQueueMs: 15 * MIN },
+  }),
   'feed:systemic': rule('feed:systemic', {
     title: 'feed coverage lost',
     // Shadow. Two or more of usgs, emsc and geofon, or six or more sources, each failing continuously for at least

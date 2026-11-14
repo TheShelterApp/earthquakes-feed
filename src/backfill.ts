@@ -1,20 +1,35 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { relative, sep } from 'node:path';
 import { dataPaths } from './config.js';
 import { dayStartMs } from './backfill-cursor.js';
 import { backfillCfg } from './backfill-cfg.js';
-import { type BackfillCursorFile, applyWindowResult, homeDayOf, openDispatchLines, planJobs, recordDispatchOutcome, rememberHomeDay, stallReport, windowText } from './backfill-plan.js';
+import {
+  type BackfillCursorFile,
+  applyWindowResult,
+  homeDayOf,
+  openDispatchLines,
+  planJobs,
+  recordDispatchOutcome,
+  rememberHomeDay,
+  sparseMonthPatterns,
+  stallReport,
+  windowDays,
+  windowText,
+} from './backfill-plan.js';
 import { readArchivedDays } from './archive-io.js';
 import { eventDayKey } from './bitemporal.js';
 import { Resolver } from './dedup.js';
 import {
   loadInventory,
   loadPartitionFormat,
+  partitionPath,
   readDayPartitionNodes,
   saveInventory,
   writeDayPartition,
   type Inventory,
 } from './partitions.js';
 import { activeProviders, fetchProviderWindow, loadRegistry, priorityMap, configMap } from './providers.js';
+import { assertCheckedOut, isSparseCheckout, treeNames } from './sparse-checkout.js';
 import { byIngestOrder, emptyTally, screen } from './quality.js';
 import type { EventNode, Head, RawObs } from './types.js';
 import { isoFromMs } from './util.js';
@@ -25,14 +40,23 @@ const BACKFILL_TARGET_YEARS = Number(process.env.BACKFILL_TARGET_YEARS ?? 3);
 type Cursor = BackfillCursorFile;
 
 /** Oldest UTC day owned by the live pipeline (has an event_map shard). Backfill fills
- *  strictly before this, so it never collides with aggregate/derive rewrites. */
+ *  strictly before this, so it never collides with aggregate/derive rewrites. On the sparse checkout of backfill.yml
+ *  the shards are not checked out: their names come from git (a missing directory would read as "today" and let the
+ *  run write live-owned days). */
 function earliestLiveDay(root: string, nowMs: number): string {
   const dir = dataPaths(root).eventMapDir;
   const today = eventDayKey(nowMs);
-  if (!existsSync(dir)) return today;
-  const days = readdirSync(dir).filter((f) => f.endsWith('.ndjson')).map((f) => f.slice(0, 10)).sort();
+  let names: string[];
+  if (existsSync(dir)) names = readdirSync(dir);
+  else if (isSparseCheckout(root)) names = treeNames(root, relative(root, dir).split(sep).join('/'));
+  else return today;
+  const days = names.filter((f) => f.endsWith('.ndjson')).map((f) => f.slice(0, 10)).sort();
   return days[0] ?? today;
 }
+
+/** The index files backfill reads (cursor, archives, inventory, head, partition format): every `*.json` of
+ *  knowledge/index, the sparse pattern of backfill.yml. */
+const INDEX_JSON = /^knowledge\/index\/[^/]+\.json$/;
 
 function loadCursor(root: string, nowMs: number, liveDay: string): Cursor {
   const f = dataPaths(root).backfillCursor;
@@ -64,6 +88,9 @@ function standing(providers: ReturnType<typeof activeProviders>, cursor: Cursor)
 
 async function main(): Promise<void> {
   const root = dataPaths().root;
+  // Before anything is read: on a sparse checkout an index file that is not checked out would read as absent (a lost
+  // cursor restarts every walk at the live edge).
+  assertCheckedOut(root, ['knowledge/index'], (p) => INDEX_JSON.test(p));
   const nowMs = Date.now();
   const ingestTime = process.env.RUN_INGEST_TIME ?? isoFromMs(nowMs);
   const all = loadRegistry();
@@ -101,6 +128,20 @@ async function main(): Promise<void> {
     dispatch: isDispatch ? { startMs: dispatchStart, endMs: dispatchEnd } : null,
     only: onlyProviders,
   });
+
+  // backfill.yml's plan step (SHLTR-149): the months this plan reads and writes, as sparse-checkout patterns, and
+  // nothing else (no write to the data checkout, no request).
+  const days = windowDays(jobs, liveDay);
+  if (process.env.BACKFILL_PHASE === 'paths') {
+    const out = process.env.BACKFILL_PATHS_OUT;
+    if (!out) throw new Error('BACKFILL_PHASE=paths needs BACKFILL_PATHS_OUT');
+    const patterns = sparseMonthPatterns(days);
+    writeFileSync(out, patterns.map((p) => `${p}\n`).join(''));
+    console.log(`backfill: ${jobs.length} window(s) over ${days[0] ?? '-'}..${days.at(-1) ?? '-'}: ${patterns.length} month(s) to check out`);
+    return;
+  }
+  const dayFiles = new Set(days.map(partitionPath));
+  assertCheckedOut(root, ['events'], (p) => dayFiles.has(p));
 
   if (!jobs.length) {
     writeFileSync(dataPaths(root).backfillCursor, JSON.stringify(cursor, null, 2) + '\n');

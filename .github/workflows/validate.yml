@@ -18,6 +18,12 @@ concurrency:
 
 jobs:
   ci:
+    # The same at job level: since SHLTR-149 the writer lock is a job-level group with `queue: max` (aggregate.yml), so
+    # every pull request proves GitHub accepts the key there too (a workflow it rejects fails at once, before any job).
+    concurrency:
+      group: validate-ci-${{ github.ref }}
+      cancel-in-progress: false
+      queue: max
     # Pinned, not ubuntu-latest: ubuntu-latest moves to Ubuntu 26.04 from 2026-10-19
     # (actions/runner-images#14748). Move to ubuntu-26.04 deliberately, after a green test run.
     runs-on: ubuntu-24.04

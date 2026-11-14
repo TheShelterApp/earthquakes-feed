@@ -21,18 +21,58 @@ on:
       minmag:
         description: 'Minimum magnitude (blank = provider default)'
         required: false
-
-# The writer lock, runs waiting in arrival order (FEED-OPS-4; aggregate.yml explains the group).
-concurrency:
-  group: earthquakes-feed-writer
-  cancel-in-progress: false
-  queue: max
+      force:
+        description: 'Join the writer queue even when 2 writer runs already wait (README.md "Writer group"): every aggregate run waits behind it'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
+  # Outside every group: the writer lock is taken by the `backfill` job below, and only when this gate admits it
+  # (SHLTR-149; scripts/writer-queue.mjs, README.md "Writer group"). Pacing many windows: dispatch at most 2 at a time;
+  # a third is refused here in seconds with an ::error:: that names what waits. A refused walk (the hourly cron, or the
+  # heartbeat Worker's dispatch without a window) is a ::warning:: and a green run: the next tick walks on.
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # The repository's unfinished runs and their jobs (the writer queue).
+      actions: read
+    outputs:
+      admit: ${{ steps.gate.outputs.admit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .nvmrc
+            scripts/writer-queue.mjs
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Count the writer queue
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WRITER_WORKFLOW: backfill.yml
+          FORCE: ${{ inputs.force && 'true' || '' }}
+          # A walk run (no dispatched window) is retried by the next tick; a dispatched window is not.
+          RETRIED: ${{ (github.event_name == 'schedule' || !(inputs.starttime && inputs.endtime)) && 'true' || '' }}
+        run: node scripts/writer-queue.mjs gate
+
   backfill:
+    needs: gate
+    if: needs.gate.outputs.admit == 'true'
+    # The writer lock, runs waiting in arrival order (FEED-OPS-4; aggregate.yml explains the group). It holds the group
+    # for seconds: the backfill itself takes 0–2 s (its requests included) and the data checkout below is sparse.
+    concurrency:
+      group: earthquakes-feed-writer
+      cancel-in-progress: false
+      queue: max
     # Pinned, not ubuntu-latest: ubuntu-latest moves to Ubuntu 26.04 from 2026-10-19
     # (actions/runner-images#14748). Move to ubuntu-26.04 deliberately, after a green test run.
     runs-on: ubuntu-24.04
@@ -41,16 +81,37 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Sparse and blobless (SHLTR-149): the full checkout of `data` took 94–101 s of the 2 min 15 s each backfill held
+      # the writer lock in the 2026-11-08 incident, while the backfill step took 0–2 s. A backfill reads only the index
+      # files and the day partitions of its windows; the index files come now, the months after the plan below.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: data
           path: .data
           fetch-depth: 1
+          sparse-checkout: /knowledge/index/*.json
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      # The same plan as the Backfill step (the same environment, the same checkout), printed as the months it reads
+      # and writes (a day of margin on each side) and added to the sparse checkout. The Backfill step refuses to run when
+      # a partition of its range is in the tree but not checked out (src/backfill.ts assertCheckedOut), and the commit
+      # step's `git add` fails on a file written outside these months: a sparse miss never reads as an empty day.
+      - name: Check out the months of this run's windows
+        env:
+          DATA_DIR: .data
+          BACKFILL_PHASE: paths
+          BACKFILL_PATHS_OUT: ${{ runner.temp }}/backfill-paths.txt
+          BACKFILL_STARTTIME: ${{ inputs.starttime }}
+          BACKFILL_ENDTIME: ${{ inputs.endtime }}
+          BACKFILL_PROVIDERS: ${{ inputs.providers }}
+        run: |
+          npx --no-install tsx src/backfill.ts
+          cat "$BACKFILL_PATHS_OUT"
+          if [ -s "$BACKFILL_PATHS_OUT" ]; then git -C .data sparse-checkout add --stdin < "$BACKFILL_PATHS_OUT"; fi
       - name: Backfill
         id: run
         env:
@@ -75,6 +136,8 @@ jobs:
         run: |
           git config user.name  "earthquakes-feed-bot"
           git config user.email "bot@users.noreply.github.com"
+          # A sparse checkout: a file written outside the months checked out above makes `git add` exit 1, and the step
+          # fails before anything is committed.
           git add events knowledge
           git commit -m "backfill: @ $(date -u +%FT%TZ)" || { echo 'no changes'; exit 0; }
           # Fail-loud push loop (H3; tests/push-data.test.ts): a concurrent writer's commit is rebased onto, a conflict

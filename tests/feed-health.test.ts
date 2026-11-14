@@ -15,6 +15,7 @@ import {
   evaluateSources,
   evaluateStats,
   evaluateWalks,
+  evaluateWriterQueue,
   GITHUB_API,
   main,
   MANIFEST_V1_URL,
@@ -695,6 +696,7 @@ const healthyInputs = (over: Partial<FeedInputs> = {}): FeedInputs => ({
   repoSize: { ok: true, kb: 6_100_000 },
   tree: { ok: true, json: todaysTree() },
   walks: ['history', 'first-solutions', 'backfill', 'archive', 'remerge', 'stats'].map((workflow) => ({ workflow, ok: true, marker: null })),
+  writerQueue: { ok: true, queue: [] },
   ids: IDS,
   notes: [],
   ...over,
@@ -703,7 +705,7 @@ const healthyInputs = (over: Partial<FeedInputs> = {}): FeedInputs => ({
 test('evaluateFeed: a healthy run is no finding and nothing unjudged; status.json unreadable is feed:status and three unjudged patterns', () => {
   const ok = evaluateFeed(healthyInputs());
   assert.deepEqual([ok.findings, ok.unjudged], [[], []]);
-  assert.match(ok.summary, /^v1=60 s \(contract 30 min\) v2=60 s \(contract 30 min\) queued=0 s status=2026-10-22 12:12Z sources=42 failing=\[\] silent=\[\] frozen=\[\] tls_leaf_days=\[phivolcs:27\.7,tmd:171\.6\] walks=history:clear,first-solutions:clear,backfill:clear,archive:clear,remerge:clear,stats:clear$/);
+  assert.match(ok.summary, /^v1=60 s \(contract 30 min\) v2=60 s \(contract 30 min\) queued=0 s status=2026-10-22 12:12Z sources=42 failing=\[\] silent=\[\] frozen=\[\] tls_leaf_days=\[phivolcs:27\.7,tmd:171\.6\] walks=history:clear,first-solutions:clear,backfill:clear,archive:clear,remerge:clear,stats:clear writer-queue=0 queued$/);
   for (const status of [{ ok: false as const, message: 'HTTP 502 after 4 attempt(s)' }, { ok: true as const, json: { generated: 'x' } }, { ok: true as const, json: [] }]) {
     const r = evaluateFeed(healthyInputs({ status }));
     assert.deepEqual(r.findings.map((f) => [f.key, f.severity, f.rule]), [['feed:status', 'P3', 'feed:status']]);
@@ -785,6 +787,8 @@ function world(over: Array<[string | RegExp, (url: string, n: number) => Respons
     [API_REPO, () => json({ full_name: REPO, size: 6_100_000 })],
     [`${API_REPO}/git/trees/data?recursive=1`, () => json(todaysTree())],
     [/\/actions\/artifacts\?name=walk-blocked-/, () => json({ total_count: 0, artifacts: [] })],
+    // The writer queue (scripts/writer-queue.mjs): no unfinished run.
+    [/\/actions\/runs\?status=\w+&per_page=100$/, () => json({ total_count: 0, workflow_runs: [] })],
   ]);
 }
 
@@ -950,11 +954,11 @@ test('main: every network call failing still writes a document: unreachable mani
   assert.deepEqual(doc.findings.map((f: Finding) => [f.key, f.rule, f.severity, f.members ?? null]), [
     ['feed:freshness', 'feed:freshness:unreachable', 'P2', ['v1', 'v2']],
     ['feed:status', 'feed:status', 'P3', null],
-    ['watcher:feed-github', 'watcher', 'P3', ['run', 'repository', 'data-tree', 'walks:history', 'walks:first-solutions', 'walks:backfill', 'walks:archive', 'walks:remerge', 'walks:stats']],
+    ['watcher:feed-github', 'watcher', 'P3', ['run', 'repository', 'data-tree', 'walks:history', 'walks:first-solutions', 'walks:backfill', 'walks:archive', 'walks:remerge', 'walks:stats', 'writer-queue']],
   ]);
-  assert.match(doc.findings[2].text, /^feed:repo-size, feed:size, walks:history:\*, walks:first-solutions:\*, walks:backfill:\*, walks:archive:\*, walks:remerge:\*, walks:stats:\* not judged this run: the feed evaluator's GitHub reads failed/);
+  assert.match(doc.findings[2].text, /^feed:repo-size, feed:size, walks:history:\*, walks:first-solutions:\*, walks:backfill:\*, walks:archive:\*, walks:remerge:\*, walks:stats:\*, feed:writer-queue not judged this run: the feed evaluator's GitHub reads failed/);
   assert.ok(doc.findings[2].text.length <= 500);
-  assert.deepEqual(doc.unjudged, ['feed:source:*', 'feed:cert:*', 'feed:systemic', 'feed:repo-size', 'feed:size', 'feed:stats', 'feed:stats-through', 'feed:stats-days', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*']);
+  assert.deepEqual(doc.unjudged, ['feed:source:*', 'feed:cert:*', 'feed:systemic', 'feed:repo-size', 'feed:size', 'feed:stats', 'feed:stats-through', 'feed:stats-days', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue']);
   assert.match(doc.notes.join('\n'), /queue time unknown \(network error: .*\): counted as 0/);
 });
 
@@ -969,7 +973,7 @@ test('main: no GH_TOKEN (a local run): the GitHub parts are unjudged, nothing is
   const doc = JSON.parse(printed);
   assert.ok(parseFindingsDocument(doc).ok);
   assert.deepEqual(doc.findings, []);
-  assert.deepEqual(doc.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*']);
+  assert.deepEqual(doc.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue']);
   assert.match(doc.notes.join(), /GitHub parts not judged: no GH_TOKEN or GITHUB_REPOSITORY \(a local run\)/);
   // A token without the run id: the queue time is 0, with a note.
   const c2 = clock();
@@ -990,9 +994,11 @@ test('main: in Actions, no GH_TOKEN or a failed created_at read is watcher:feed-
   };
   // GH_TOKEN dropped from the feed job: every GitHub part unjudged, and the watcher names the cause once.
   const noToken = (await findingsOf({ GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: '4242' })).doc;
-  assert.deepEqual(noToken.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*']);
-  assert.deepEqual(noToken.findings.map((f) => [f.key, f.members]), [['watcher:feed-github', ['run', 'repository', 'data-tree', 'walks:history', 'walks:first-solutions', 'walks:backfill', 'walks:archive', 'walks:remerge', 'walks:stats']]]);
-  assert.match(noToken.findings[0]!.text, /: this run's created_at, the repository size, the data tree, the history walk's marker, .*the stats walk's marker: GH_TO/);
+  assert.deepEqual(noToken.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue']);
+  assert.deepEqual(noToken.findings.map((f) => [f.key, f.members]), [['watcher:feed-github', ['run', 'repository', 'data-tree', 'walks:history', 'walks:first-solutions', 'walks:backfill', 'walks:archive', 'walks:remerge', 'walks:stats', 'writer-queue']]]);
+  // The effect first: the 500-character cut takes the end of the list of reads (and the reason) here.
+  assert.match(noToken.findings[0]!.text, /: this run's created_at, the repository size, the data tree, the history walk's marker, .*the remerge walk's marker, the stats w…$/);
+  assert.equal(noToken.findings[0]!.text.length, 500);
   // This run's created_at unreadable: the queue time is 0, and the watcher says why.
   const runGone = await findingsOf(ENV, world([[`${API_REPO}/actions/runs/4242`, () => json({ message: 'Not Found' }, 404)]]));
   assert.deepEqual(runGone.doc.findings.map((f) => [f.key, f.members]), [['watcher:feed-github', ['run']]]);
@@ -1106,4 +1112,69 @@ test('collect: the stats index is read only when the v1 manifest points at it; e
   assert.equal(off.stats?.pointer, null);
   assert.ok(!w2.calls.some((x) => x.url === STATS_INDEX_URL));
   assert.deepEqual(evaluateFeed(off).findings, []);
+});
+
+// --- feed:writer-queue (SHLTR-149) ---
+
+const q = (id: number, workflow: string, state: 'holding' | 'waiting' | 'approaching' | 'refused' | 'stale', minAgo = 1) => ({ id, workflow, event: 'workflow_dispatch', created: ISO(NOW - minAgo * MIN), state });
+
+test('feed:writer-queue: more than 3 writer runs queued is P2; 3 is not; the manifest past 15 min while any waits is P2; ghosts and refused runs never count', () => {
+  const judge = (queue: ReturnType<typeof q>[], generatedMs = NOW - MIN, v2 = okRead(NOW - MIN)) => evaluateWriterQueue({ nowMs: NOW, writerQueue: { ok: true, queue }, v1: okRead(generatedMs), v2 });
+  const holder = q(1, 'aggregate.yml', 'holding', 2);
+  // The steady worst case the gates allow: 2 gated runs and aggregate's own.
+  assert.deepEqual(judge([holder, q(2, 'aggregate.yml', 'waiting'), q(3, 'backfill.yml', 'waiting'), q(4, 'backfill.yml', 'approaching')]).findings, []);
+  const burst = judge([holder, q(2, 'aggregate.yml', 'waiting', 9), q(3, 'backfill.yml', 'waiting', 8), q(4, 'backfill.yml', 'waiting', 7), q(5, 'derive.yml', 'approaching', 6)]).findings;
+  assert.deepEqual(burst.map((f) => [f.key, f.rule, f.board, f.severity, f.class, f.check, f.sinceMs, f.members]), [
+    ['feed:writer-queue', 'feed:writer-queue', 'feed', 'P2', 'symptom', 'gh-feed', NOW - 9 * MIN, ['aggregate', 'backfill', 'backfill', 'derive']],
+  ]);
+  assert.equal(
+    burst[0]!.text,
+    '4 writer run(s) wait for the earthquakes-feed-writer group (aggregate #2 waiting, backfill #3 waiting, backfill #4 waiting, derive #5 approaching; holding: aggregate #1 holding), live manifest generated 60 s ago: every aggregate run (the live feed) waits behind them; over 3 queued: a burst of dispatches got past the gates (force=true, or a gate that misread the queue); cancel the surplus (gh run cancel <id>) and pace dispatches (README.md "Writer group")',
+  );
+  assert.ok(mayTurnRed(burst[0]!.class), 'a P2 symptom: red in its first hour');
+  // 16 min old with one aggregate waiting: the queue is why the feed is late, before feed:freshness sees it at 30 min.
+  const late = judge([holder, q(2, 'aggregate.yml', 'waiting')], NOW - 16 * MIN).findings;
+  assert.deepEqual(late.map((f) => [f.key, f.severity, f.sinceMs]), [['feed:writer-queue', 'P2', NOW - MIN]]);
+  assert.match(late[0]!.text, /^1 writer run\(s\) wait .*, live manifest generated 16 min ago: .*; the manifest is past 15 min while writers wait; /);
+  // The older of the two manifests counts (v2 signed late).
+  assert.equal(judge([holder, q(2, 'aggregate.yml', 'waiting')], NOW - MIN, okRead(NOW - 20 * MIN)).findings.length, 1);
+  // Stale with nothing queued is feed:freshness's business, not this rule's; 15 min exactly is not past the line.
+  assert.deepEqual(judge([holder], NOW - 40 * MIN).findings, []);
+  assert.deepEqual(judge([holder, q(2, 'aggregate.yml', 'waiting')], NOW - 15 * MIN).findings, []);
+  const ghosts = [holder, ...[2, 3, 4, 5].map((id) => q(id, 'backfill.yml', 'refused')), q(6, 'derive.yml', 'stale', 60 * 24 * 60), q(7, 'backfill.yml', 'stale', 60 * 24 * 38)];
+  assert.deepEqual(judge(ghosts, NOW - 20 * MIN).findings, []);
+  // Unread: unjudged, never resolved by a read that failed.
+  const unread = evaluateWriterQueue({ nowMs: NOW, writerQueue: { ok: false, message: 'GET /repos/x/actions/runs?status=queued&per_page=100: HTTP 403' }, v1: okRead(NOW), v2: okRead(NOW) });
+  assert.deepEqual([unread.findings, unread.unjudged], [[], ['feed:writer-queue']]);
+  assert.match(unread.notes.join(), /^writer queue: GET .*HTTP 403$/);
+  assert.equal(RULES['feed:writer-queue'].limits['maxQueued'], 3);
+  assert.equal(RULES['feed:writer-queue'].limits['staleWithQueueMs'], 15 * MIN);
+});
+
+test('feed:writer-queue through collect: the runs and their jobs read from GitHub with the job token; a failed read is unjudged and a watcher member', async () => {
+  const runsAt = (status: string) => `${API_REPO}/actions/runs?status=${status}&per_page=100`;
+  const run = (id: number, wf: string, minAgo: number) => ({ id, path: `.github/workflows/${wf}`, status: 'in_progress', event: 'workflow_dispatch', created_at: ISO(NOW - minAgo * MIN) });
+  const c = clock();
+  const w = world([
+    [runsAt('in_progress'), () => json({ workflow_runs: [run(10, 'aggregate.yml', 3), run(11, 'aggregate.yml', 1), run(12, 'backfill.yml', 1), run(13, 'history.yml', 1)] })],
+    [`${API_REPO}/actions/runs/10/jobs?filter=latest&per_page=100`, () => json({ jobs: [{ name: 'aggregate', status: 'in_progress', conclusion: null }] })],
+    [`${API_REPO}/actions/runs/11/jobs?filter=latest&per_page=100`, () => json({ jobs: [{ name: 'aggregate', status: 'pending', conclusion: null }] })],
+    [`${API_REPO}/actions/runs/12/jobs?filter=latest&per_page=100`, () => json({ jobs: [{ name: 'gate', status: 'completed', conclusion: 'success' }, { name: 'backfill', status: 'pending', conclusion: null }] })],
+    [MANIFEST_V1_URL, () => json(v1Manifest(NOW - 17 * MIN))],
+    [MANIFEST_V2_URL, () => json(v2Envelope(NOW - 17 * MIN))],
+  ]);
+  const inputs = await collect({ readFile: switchesOff, env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep });
+  assert.ok(inputs.writerQueue?.ok);
+  const r = evaluateFeed(inputs);
+  assert.deepEqual(r.findings.map((f) => [f.key, f.members]), [['feed:writer-queue', ['aggregate', 'backfill']]]);
+  assert.match(r.summary, / writer-queue=2 queued$/);
+  assert.equal(w.calls.filter((x) => x.url.includes('/runs/13/')).length, 0, 'history is no writer');
+  for (const call of w.calls.filter((x) => x.url.includes('/actions/runs'))) assert.equal(call.auth, `Bearer ${TOKEN}`);
+  // The listing fails: unjudged, and watcher:feed-github names it.
+  const c2 = clock();
+  const broken = world([[/\/actions\/runs\?status=/, () => json({ message: 'Resource not accessible by integration' }, 403)]]);
+  const r2 = evaluateFeed(await collect({ readFile: switchesOff, env: ENV, fetchImpl: broken.fetchImpl, now: c2.now, sleep: c2.sleep }));
+  assert.deepEqual(r2.unjudged, ['feed:writer-queue']);
+  assert.deepEqual(r2.findings.map((f) => [f.key, f.members]), [['watcher:feed-github', ['writer-queue']]]);
+  assert.match(r2.findings[0]!.text, /^feed:writer-queue not judged this run: .*: the writer queue: GET \/repos\/TheShelterApp\/earthquakes-feed\/actions\/runs\?status=queued&per_page=100: HTTP 403$/);
 });

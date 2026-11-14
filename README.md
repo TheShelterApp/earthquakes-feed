@@ -237,7 +237,8 @@ open, reachable source appears.
   walk's small `knowledge/index/history-state.json` ([APIs.md](APIs.md#deep-history-before-2023-07-06)).
 - **Remediation editions:** a backfill day whose one-day window still filled a source's page cap
   (`saturatedDays`), and the 2026-06-28..07-03 seam that 15 sources never fetched, are asked
-  again in sub-day windows by the `remediate` workflow and published as one additive, immutable
+  again in sub-day windows by the `remediate` workflow (a saturated day in hour windows, taken by its daily run; until
+  an edition completes it, backfill's marker names it on the health board) and published as one additive, immutable
   edition per day in a `remediation-YYYY` Release; refills wait in a persistent queue until
   their month is archived, and the archived day is never rewritten. ComCat's late publications (M4.5+ solutions
   published or revised after the live day froze) are asked again once a day for the frozen, unarchived days of the
@@ -454,7 +455,7 @@ hundred, the board is not written at all: exit 3). The label `health:p1` … `he
 | `feed:stats` | P2 (after 30 min) | `providers/stats.json` says `derive_publish: "on"` and the live v1 manifest has no `stats` pointer | derive's `::warning::stats dropped: …` says why; the live feed is unaffected and the app keeps its last verified statistics |
 | `feed:stats-through` | P3 | With `history_enabled`, the statistics index's `through` null or more than 3 days behind the last frozen day | The stats builder's runs (`stats.yml`) and its ComCat gate |
 | `feed:stats-days` | P3 | The statistics index names `missing_days` | A window day with neither an event-map day nor a partition on `data` |
-| `walks:<workflow>:<source>` | P3 | A blocked marker of `history`, `first-solutions`, `backfill`, `archive`, `remerge` or `stats` (a year that failed its ComCat gate or its build, a failed verify) in the last 26 h (`run` for a line about the walk itself) | The walk run's warning; the row resolves 26 h after the last marker |
+| `walks:<workflow>:<source>` | P3 | A line of the newest blocked marker of `history`, `first-solutions`, `backfill`, `archive`, `remerge` or `stats` (a year that failed its ComCat gate or its build, a failed verify, a month that cannot be re-rolled or merged, a source failing for days), if under 26 h old (`run` for a line about the walk itself) | The walk run's warning; the row resolves with the walk's next run that names it no more (each run states every standing block), at the latest 26 h after the last marker |
 | `platform:api` | P2 | `/v1/health` not 200 `ok: true` after 3 tries over 60 s, or `sessionKeySource: "ephemeral"` | The API Worker; an ephemeral key means its session signing secret is missing (random 401s in the app) |
 | `platform:api:envelope` | P3 | `providerTokenEnvelope: "missing"` | Account deletion cannot revoke at Apple until the envelope key is set |
 | `platform:config-worker` | P3 | `/healthz` not 200 `ok: true`; escalates at 6 h | Apps read the data copy first and keep their last good config: the config Worker |
@@ -484,12 +485,18 @@ on the boards; GitHub can drop a scheduled run, so 35 days without one opens `wa
 
 **Walks and writers.** `history`, `first-solutions`, `backfill`, `archive`, `remerge` and `stats` keep a blocked run green: a `::warning::`,
 and the marker as the artifact `walk-blocked-<workflow>`, which the `feed` job files as `walks:<workflow>:<source>`.
-Only the newest marker of a walk counts, for 26 h. `backfill` and `stats` state every standing block on every run (an
-open dispatched window, a stalled walk, an unreadable archive; a year whose ledger entry failed its ComCat gate), and a
-run of theirs with nothing blocked uploads a marker with only a `#` line: the entry resolves on the next health run, no
-hand clearing. A dispatched backfill window that overflowed, failed or held back a day stays open in
-`knowledge/index/backfill.json` (`dispatched`) until dispatched ranges of that provider that answered in full cover it
-(dispatch narrower ranges inside it). The other walks report a block once and rely on the 26 h hold.
+Only the newest marker of a walk counts. Every walk states every standing block on every run, scheduled and
+nothing-to-do runs included (SHLTR-151): `backfill` an open dispatched window, a stalled walk, an unreadable archive and
+a saturated day no remediation edition has completed yet; `stats` a year whose ledger entry failed its ComCat gate;
+`history` a source month failing for a day or more and a stopped walk (from `history-state.json`) and its re-merge
+blocks; `first-solutions` each source failing 72 runs or more in a row (from its cursor); `archive` a month it cannot
+re-roll and `remerge` a month it cannot merge (both stay flagged, so every run tries them again). A run that evaluated
+every standing block and found none uploads a marker with only a `#` line: the entry resolves on the next health run,
+no hand clearing. A run that could not evaluate them all uploads no such marker (`history` and `remerge` cut by their
+time budget, `archive` stopped by its per-run cap, a `remerge` dispatch naming months): the previous marker stands. The
+26 h hold is only the fallback, for a walk that stops running (switched off, a schedule GitHub dropped). A dispatched
+backfill window that overflowed, failed or held back a day stays open in `knowledge/index/backfill.json` (`dispatched`)
+until dispatched ranges of that provider that answered in full cover it (dispatch narrower ranges inside it).
 `aggregate` and `derive` still go red on a failed publish (owner decision 2026-10-22); `feed:freshness` is the symptom
 either way.
 

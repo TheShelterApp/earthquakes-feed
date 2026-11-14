@@ -487,7 +487,7 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /**
  * The lines of a blocked marker, each filed under the registry id that matches leftmost as a whole word (not inside a
  * longer id-like word: letters, digits, '_' and '-' delimit it), else 'run' (a line about the walk itself). A line
- * starting with '#' is a comment, not a block: a walk that states every standing block on every run (backfill, stats)
+ * starting with '#' is a comment, not a block: every walk states every standing block on every run (SHLTR-151) and
  * uploads `# nothing blocked: run <id>` when it has none, so its newest marker clears the board.
  */
 export function parseMarker(text, ids) {

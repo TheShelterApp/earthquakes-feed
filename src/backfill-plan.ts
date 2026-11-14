@@ -2,7 +2,8 @@ import { type BackfillCfg, backfillCfg } from './backfill-cfg.js';
 import { type ProviderCursor, STALL_ALARM_FAILURES, advance, narrowAfterOverflow, newCursor, nextWindow, recordAnswer, recordFailure, stallLevel } from './backfill-cursor.js';
 import { eventDayKey } from './bitemporal.js';
 import type { WindowOutcome } from './providers.js';
-import { RETENTION, retainedFrom, retainedFromMs, retentionNote } from './retention.js';
+import { type RemediationIndex, currentEdition } from './remediation.js';
+import { RETENTION, beyondRetention, retainedFrom, retainedFromMs, retentionNote } from './retention.js';
 import type { EventNode, ProviderConfig } from './types.js';
 
 /**
@@ -207,6 +208,34 @@ export function stallReport(walks: ReadonlyArray<Pick<Job, 'p' | 'cur'>>): { blo
       `its walk stands at ${cur.filledBackTo} with a ${cur.windowDays}-day window. Fix the source or set its registry backfill.enabled to false`;
     if (level === 'alarm') blockers.push(msg);
     else warnings.push(msg);
+  }
+  return { blockers, warnings };
+}
+
+/**
+ * The saturated days (SHLTR-151): a day whose one-day window still filled a source's page cap holds the capped rows
+ * only (`saturatedDays`, recorded for remediation). Each is a block on every run until a remediation edition completes it
+ * (src/remediation.ts: the day asked again in hour windows, split further while a window fills the cap): a raw asset of
+ * the source and day that is not partial, in the day's current edition. A day still partial at the smallest window, or
+ * older than the source's retention, can never be completed: a warning, not a block.
+ */
+export function saturatedReport(
+  walks: ReadonlyArray<Pick<Job, 'p' | 'cur'>>,
+  remediation: Pick<RemediationIndex, 'raw' | 'editions'>,
+  nowMs: number,
+): { blockers: string[]; warnings: string[] } {
+  const blockers: string[] = [];
+  const warnings: string[] = [];
+  for (const j of walks) {
+    for (const day of [...new Set(j.cur?.saturatedDays ?? [])].sort()) {
+      const built = new Set(currentEdition({ ...remediation, version: 1 }, day)?.built_from ?? []);
+      const raws = remediation.raw.filter((r) => r.provider === j.p.id && r.day === day && built.has(r.asset));
+      if (raws.some((r) => !r.partial)) continue;
+      const what = `backfill: ${j.p.id} ${day} filled the source's page cap even as a one-day window, so the day holds part of its rows`;
+      if (raws.length) warnings.push(`${what}; its remediation edition is partial too (a 5-minute window still filled the cap): nothing more can be fetched`);
+      else if (beyondRetention(j.p, day, nowMs)) warnings.push(`${what}; ${retentionNote(j.p, nowMs)}: it cannot be refilled`);
+      else blockers.push(`${what} until a remediation edition completes it (remediate.yml asks the day again in hour windows; its daily run takes saturated days)`);
+    }
   }
   return { blockers, warnings };
 }

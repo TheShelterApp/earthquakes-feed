@@ -13,6 +13,7 @@ import {
   planJobs,
   planWindows,
   recordDispatchOutcome,
+  saturatedReport,
   skipLine,
   stallReport,
 } from '../src/backfill-plan.js';
@@ -262,4 +263,42 @@ test('retention: an open dispatched window before the edge leaves the open list;
   assert.match(r.closed[0]!, /^backfill: dispatched window 2026-06-01\.\.2026-06-08 \(7 d\) of afad .* closed \(retention\)/);
   // Nothing of afad's closed part stands on the board any more.
   assert.deepEqual(openDispatchLines(r.open, new Set(['afad'])).length, 1);
+});
+
+// --- SHLTR-151: a saturated day (a one-day window filled the cap: the day holds the capped rows only) is a block on
+// every run until a remediation edition completes it. ---
+
+test('saturated days: a block until a complete raw of the day is in its current edition; partial or beyond retention: a warning', () => {
+  const nowMs = Date.parse('2026-11-14T16:34:00Z');
+  const cur = (days: string[]) => ({ filledBackTo: '2023-07-06', windowDays: 30, done: true, failures: 0, lastCount: 0, lastRun: '', saturatedDays: days });
+  const walks = [
+    { p: byId('kagsr'), cur: cur(['2025-07-30']) },
+    { p: byId('afad'), cur: cur(['2025-08-11', '2026-06-28']) },
+    { p: byId('usgs'), cur: null },
+  ];
+  const raw = (provider: string, day: string, partial = false, asset = `raw-${provider}-${day}.ndjson.gz`) =>
+    ({ provider, day, tag: `remediation-${day.slice(0, 4)}`, asset, url: '', sha256: 'x', bytes: 1, rows: 1, requests: 24, partial, fetched_at: '2026-10-04T12:00:00.000Z' });
+  const edition = (day: string, from: string[], n = 1) =>
+    ({ day, edition: n, tag: `remediation-${day.slice(0, 4)}`, asset: `events-${day}.e${n}.ndjson.gz`, url: '', sha256: 'y', bytes: 1, built_on: { tag: 'a', asset: 'b', sha256: null }, built_from: from, stats: {} as never, built_at: '' });
+  // Today: AFAD's 2025-08-11 was completed on 2026-10-04; KAGSR's 2025-07-30 never was; AFAD 2026-06-28 (hypothetical)
+  // has no raw and lies before AFAD's retention.
+  const today = { raw: [raw('afad', '2025-08-11')], editions: [edition('2025-08-11', ['raw-afad-2025-08-11.ndjson.gz'])] };
+  const r = saturatedReport(walks, today, nowMs);
+  assert.deepEqual(r.blockers, [
+    'backfill: kagsr 2025-07-30 filled the source\'s page cap even as a one-day window, so the day holds part of its rows until a remediation edition completes it (remediate.yml asks the day again in hour windows; its daily run takes saturated days)',
+  ]);
+  assert.equal(r.warnings.length, 1);
+  assert.match(r.warnings[0]!, /^backfill: afad 2026-06-28 .*afad answers time-range queries for its last 7 days only .*: it cannot be refilled$/);
+  // A raw uploaded but in no edition yet (another source of the day failed): still a block.
+  const unbuilt = { raw: [...today.raw, raw('kagsr', '2025-07-30')], editions: today.editions };
+  assert.equal(saturatedReport(walks, unbuilt, nowMs).blockers.length, 1);
+  // The edition built from it: done. A partial one (a 5-minute window still full): a warning, never a block.
+  const done = { raw: unbuilt.raw, editions: [...today.editions, edition('2025-07-30', ['raw-kagsr-2025-07-30.ndjson.gz'])] };
+  assert.deepEqual(saturatedReport(walks, done, nowMs).blockers, []);
+  const partial = { raw: [...today.raw, raw('kagsr', '2025-07-30', true)], editions: done.editions };
+  const p = saturatedReport(walks, partial, nowMs);
+  assert.deepEqual(p.blockers, []);
+  assert.match(p.warnings.join('\n'), /kagsr 2025-07-30 .*its remediation edition is partial too/);
+  // The parser of the health board files the block under kagsr: walks:backfill:kagsr.
+  assert.match(r.blockers[0]!, /^backfill: kagsr /);
 });

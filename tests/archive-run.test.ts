@@ -159,6 +159,20 @@ test('archive run: a re-roll merges the archived days with the re-materialized o
   assert.match(readFileSync(join(o.markerDir, 'archive-blocked.txt'), 'utf8'), /refused shrink/);
   assert.ok(existsSync(join(root, 'events', '2026', '05', '02.ndjson')));
   assert.equal(index(root).list.find((x) => x.period === '2026-05')!.needs_reroll, true, 'the month waits for a decision');
+  assert.equal(res2.complete, true);
+  // SHLTR-151: the month stays flagged, so every later run tries it again and states the block again (no 26 h hold
+  // needed); once it re-rolls, the run's marker names nothing and archive.yml uploads a '#' marker.
+  const o3 = opts(root);
+  const res3 = silently(() => runArchive(root, NOW, io, o3));
+  assert.match(res3.blocked.join('\n'), /2026-05: refused shrink 1000 -> \d+ events/);
+  assert.match(readFileSync(join(o3.markerDir, 'archive-blocked.txt'), 'utf8'), /refused shrink/);
+  const idx3 = index(root);
+  Object.assign(idx3.list.find((x) => x.period === '2026-05')!, { count: 1 });
+  writeFileSync(join(root, 'knowledge', 'index', 'archives.json'), JSON.stringify(idx3));
+  const o4 = opts(root);
+  const res4 = silently(() => runArchive(root, NOW, io, o4));
+  assert.deepEqual([res4.archived, res4.blocked, res4.complete], [['2026-05'], [], true]);
+  assert.equal(existsSync(join(o4.markerDir, 'archive-blocked.txt')), false);
 });
 
 test('archive run: a re-roll never replaces an asset: a failed upload leaves the prior asset; an orphan name is skipped; a merged month is merged again', () => {
@@ -248,8 +262,11 @@ test('archive run: dry run uploads, indexes and removes nothing; the per-run cap
   assert.ok(existsSync(join(root, 'events', '2026', '05', '01.ndjson')));
   assert.ok(existsSync(join(root, 'knowledge', 'observations', 'ingest=2026', '05', '01', '00.ndjson')));
   assert.equal(index(root).list.length, 0);
-  // Cap 0: nothing rolls.
+  assert.equal(res.complete, true);
+  // Cap 0: nothing rolls, and the run has not looked at every cold month (no '#' marker: a month it skipped may be
+  // one blocked before).
   const root2 = dataRoot();
-  assert.deepEqual(silently(() => runArchive(root2, NOW, stubReleases().io, opts(root2, { maxMonths: 0 }))).archived, []);
+  const capped = silently(() => runArchive(root2, NOW, stubReleases().io, opts(root2, { maxMonths: 0 })));
+  assert.deepEqual([capped.archived, capped.complete], [[], false]);
   assert.ok(existsSync(join(root2, 'events', '2026', '05', '01.ndjson')));
 });

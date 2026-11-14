@@ -34,6 +34,9 @@ import type { EventNode, ProviderConfig, RawObs } from './types.js';
 export const REMEDIATION_ORDER: readonly string[] = ['kagsr', 'afad', 'imo'];
 /** The first windows of a day; a window whose answer fills the cap is halved. */
 export const FIRST_WINDOW_MS = 6 * 3_600_000;
+/** The first windows of a saturated day (SHLTR-151): one hour each, since the day is known to be dense (a one-day
+ *  window filled the cap): 24 requests, about 27 s at 1.1 s apart, and still halved while a window fills the cap. */
+export const SATURATED_FIRST_WINDOW_MS = 3_600_000;
 /** The smallest window; one that still fills the cap leaves the day partial (recorded). */
 export const MIN_WINDOW_MS = 5 * 60_000;
 const DAY_MS = 86_400_000;

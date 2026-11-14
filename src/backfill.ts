@@ -13,6 +13,7 @@ import {
   planWindows,
   recordDispatchOutcome,
   rememberHomeDay,
+  saturatedReport,
   skipLine,
   sparseMonthPatterns,
   stallReport,
@@ -32,6 +33,7 @@ import {
   type Inventory,
 } from './partitions.js';
 import { activeProviders, fetchProviderWindow, loadRegistry, priorityMap, configMap } from './providers.js';
+import type { RemediationIndex } from './remediation.js';
 import { RETENTION } from './retention.js';
 import { assertCheckedOut, isSparseCheckout, treeNames } from './sparse-checkout.js';
 import { byIngestOrder, emptyTally, screen } from './quality.js';
@@ -82,12 +84,22 @@ function writeMarker(blockers: readonly string[]): void {
   writeFileSync('backfill-blocked.txt', blockers.join('\n') + '\n');
 }
 
-/** The standing blocks every run reports, walk jobs or not: the stalled walks and the open dispatched windows. */
-function standing(providers: ReturnType<typeof activeProviders>, cursor: Cursor): { blockers: string[]; warnings: string[] } {
+/** The remediation index (knowledge/index/remediation.json, in the sparse checkout's index files): which saturated
+ *  days a remediation edition completed. */
+function loadRemediation(root: string): Pick<RemediationIndex, 'raw' | 'editions'> {
+  const f = dataPaths(root).remediationIndex;
+  return existsSync(f) ? (JSON.parse(readFileSync(f, 'utf8')) as RemediationIndex) : { raw: [], editions: [] };
+}
+
+/** The standing blocks every run reports, walk jobs or not: the stalled walks, the open dispatched windows and the
+ *  saturated days no remediation edition has completed yet (SHLTR-151). */
+function standing(providers: ReturnType<typeof activeProviders>, cursor: Cursor, root: string, nowMs: number): { blockers: string[]; warnings: string[] } {
   const eligible = providers.filter((p) => backfillCfg(p) !== null);
-  const stalls = stallReport(eligible.map((p) => ({ p, cur: cursor.providers[p.id] ?? null })));
+  const walks = eligible.map((p) => ({ p, cur: cursor.providers[p.id] ?? null }));
+  const stalls = stallReport(walks);
   const open = openDispatchLines(cursor.dispatched ?? [], new Set(eligible.map((p) => p.id)));
-  return { blockers: [...open, ...stalls.blockers], warnings: stalls.warnings };
+  const saturated = saturatedReport(walks, loadRemediation(root), nowMs);
+  return { blockers: [...open, ...stalls.blockers, ...saturated.blockers], warnings: [...stalls.warnings, ...saturated.warnings] };
 }
 
 async function main(): Promise<void> {
@@ -181,7 +193,7 @@ async function main(): Promise<void> {
   if (!jobs.length) {
     writeFileSync(dataPaths(root).backfillCursor, JSON.stringify(cursor, null, 2) + '\n');
     console.log(`backfill: nothing to do (all providers done or none eligible${skipped.length ? `; ${skipped.length} window(s) skipped: ${RETENTION}` : ''})`);
-    const st = standing(providers, cursor);
+    const st = standing(providers, cursor, root, nowMs);
     for (const w of st.warnings) console.log(`::warning::${w}`);
     writeMarker(st.blockers);
     return;
@@ -415,7 +427,7 @@ async function main(): Promise<void> {
   }
   // A walk that keeps failing, and a dispatched window not filled yet, are reported on every run, never silent
   // (backfill-plan.ts stallReport, openDispatchLines).
-  const st = standing(providers, cursor);
+  const st = standing(providers, cursor, root, nowMs);
   for (const w of st.warnings) console.log(`::warning::${w}`);
   blockers.push(...st.blockers);
   writeMarker(blockers);

@@ -20,7 +20,7 @@ import {
   walkTexts,
 } from '../src/history-state.js';
 import { DryRunStore, type HistoryStore, LocalStore } from '../src/history-store.js';
-import { type Ctx, adoptOrphans, emptyReport, fetchUnits, runWalk, sealPeriods } from '../src/history.js';
+import { ALARM_FAILURES, type Ctx, adoptOrphans, emptyReport, failingMonthBlocks, fetchUnits, runWalk, sealPeriods } from '../src/history.js';
 import { loadRegistry } from '../src/providers.js';
 
 // FEED-TEST-1: the deep-history walk's run decisions (src/history.ts): taking over assets a run uploaded but never
@@ -135,7 +135,7 @@ const http = (answer: (url: string) => HttpAnswer) => {
   };
 };
 
-test('fetch: a failing source month counts its failure, keeps the error and turns the run red once, on its 24th failed run', async () => {
+test('fetch: a failing source month counts its failure, keeps the error, and from its 24th failed run is a block stated by every run until it is fetched', async () => {
   const h = http(() => ({ status: 500, body: 'boom', latencyMs: 1, retryAfterMs: null }));
   const ctx = ctxOf({ fetchOptions: h.fetchOptions });
   await fetchUnits(ctx, 4);
@@ -146,19 +146,26 @@ test('fetch: a failing source month counts its failure, keeps the error and turn
   assert.equal(ctx.report.failed.length, 1, 'one failed month stops the source for the run (the next month waits)');
   assert.deepEqual(ctx.report.blocked, []);
   assert.deepEqual(ctx.idx.raw, []);
-  // The 24th failed run turns the run red.
-  ctx.idx.attempts[key]!.failures = 23;
+  assert.deepEqual(failingMonthBlocks(CFG, ctx.idx), [], 'one failed run is no block');
+  // From the 24th failed run the month is a block (SHLTR-151: the marker states it on every run, not once).
+  ctx.idx.attempts[key]!.failures = ALARM_FAILURES - 1;
   ctx.report.failed = [];
   await fetchUnits(ctx, 4);
   assert.equal(ctx.idx.attempts[key]?.failures, 24);
-  assert.equal(ctx.report.blocked.length, 1);
-  assert.match(ctx.report.blocked[0]!, /usgs:2022-12 has failed 24 runs since/);
-  // Once: the 48th failed run is not red again (the attempts entry in the index still says so).
+  assert.deepEqual(ctx.report.blocked, [], 'fetchUnits reports nothing itself: runWalk states the standing blocks');
+  const blocks = failingMonthBlocks(CFG, ctx.idx);
+  assert.equal(blocks.length, 1);
+  assert.match(blocks[0]!, /^history: usgs:2022-12 has failed 24 runs since .*no month from 2022-12 back is sealed until it is fetched/);
   ctx.idx.attempts[key]!.failures = 47;
-  ctx.report.blocked = [];
   await fetchUnits(ctx, 4);
-  assert.equal(ctx.idx.attempts[key]?.failures, 48);
-  assert.deepEqual(ctx.report.blocked, []);
+  assert.match(failingMonthBlocks(CFG, ctx.idx).join(), /usgs:2022-12 has failed 48 runs/, 'still a block on the 48th');
+  // A month the index holds (fetched by a run whose commit was lost, then adopted) is no block, whatever its streak.
+  const held = emptyIndex(CFG.boundary);
+  held.attempts = ctx.idx.attempts;
+  held.raw.push({ source: 'usgs', period: '2022-12', tag: 'history-2022', asset: 'raw-usgs-2022-12.ndjson.zst', url: 'x', sha256: 'x', bytes: 1, rows: 0, provider_count: 0, start: '2022-12-01T00:00:00.000Z', end: '2023-01-01T00:00:00.000Z', fetch_min_magnitude: null, fetched_at: NOW_ISO });
+  assert.deepEqual(failingMonthBlocks(CFG, held), []);
+  // A source taken out of the era: its streak is no block any more.
+  assert.deepEqual(failingMonthBlocks({ ...CFG, eras: [{ ...ERA, sources: ['emsc'] }] }, ctx.idx), []);
 });
 
 test('fetch: a month that failed before no longer holds back its source\'s older months (round 23); a fresh failure still stops the source', { skip: !hasZstd && 'zstd not installed' }, async () => {
@@ -442,25 +449,33 @@ test('state: the streak of a source month the index already holds (fetched by a 
   assert.deepEqual(Object.keys(parseState(walkTexts(idx, state, indexText).state).attempts), ['usgs:2022-11']);
 });
 
-test('stall: a day of runs with work left and nothing fetched, sealed or adopted turns the run red, then once a day while it lasts; progress ends it', { skip: !hasZstd && 'zstd not installed' }, async () => {
+test('stall: a day of runs with work left and nothing fetched, sealed or adopted is a block, stated by every run while it lasts; progress ends it', { skip: !hasZstd && 'zstd not installed' }, async () => {
   const store = new LocalStore(join(mkdtempSync(join(tmpdir(), 'history-stall-')), 'releases'));
   let files: DataFiles = { index: indexText(emptyIndex(CFG.boundary)), state: null };
   const red: number[] = [];
+  const failingMonths: number[] = [];
   let last: Ctx | null = null;
   for (let h = 0; h < 48; h++) {
     const r = await hourly(store, files, hourIso(h), failing);
     if (stallAlarms(r.ctx).length) red.push(h);
+    if (r.ctx.report.blocked.some((m) => /usgs:2022-12 has failed/.test(m))) failingMonths.push(h);
+    assert.equal(r.run.complete, true, `hour ${h}: every standing block evaluated`);
     if (h === STALL_ALARM_RUNS - 1) last = r.ctx;
     files = r.files;
   }
-  // The 24th run (hour 23), then 23 h later (hour 46); not every 24th failure of a month, not every run after.
-  assert.deepEqual(red, [23, 46]);
+  // From the 24th run (hour 23) on, every run states the stall and the month failing for a day (SHLTR-151: a '#' marker
+  // in between would clear the board while the walk still stands; before, only hours 23 and 46 said so and the 26 h
+  // hold carried the rest).
+  assert.deepEqual(red, Array.from({ length: 25 }, (_, i) => 23 + i));
+  assert.deepEqual(failingMonths, Array.from({ length: 25 }, (_, i) => 23 + i));
   const msg = stallAlarms(last!)[0]!;
   assert.match(msg, /no progress for 24 run\(s\) since 2026-10-04T11:26:00\.000Z \(24 of them with no Retry-After or time budget to explain them\): 2 source month\(s\) to fetch and 0 complete month\(s\) to seal/);
   assert.match(msg, /failing: usgs:2022-12 \(24 failed run\(s\) since 2026-10-04T11:26:00\.000Z: .*HTTP 500.*\); usgs:2022-11 \(23 failed run\(s\)/);
   assert.equal(files.index, indexText(emptyIndex(CFG.boundary)), '48 failed runs, not one index commit');
-  assert.deepEqual(parseState(files.state!).stall, { since: hourIso(0), runs: 48, unexplained: 48, alarmed_at: hourIso(46) });
+  assert.deepEqual(parseState(files.state!).stall, { since: hourIso(0), runs: 48, unexplained: 48, alarmed_at: hourIso(46) }, 'the daily repeat is still recorded');
   const ok = await hourly(store, files, hourIso(48), answering());
+  assert.deepEqual(ok.ctx.report.blocked, [], 'the source answers: nothing is blocked any more, the run says so');
+  assert.equal(ok.run.complete, true);
   assert.deepEqual(stallAlarms(ok.ctx), []);
   assert.equal(parseState(ok.files.state!).stall, null);
 });
@@ -553,7 +568,7 @@ test('stall: a month whose fetch the time budget cuts short, and a seal the budg
   const idle = http(() => ({ status: 500, body: 'boom', latencyMs: 1, retryAfterMs: null }));
   const r2 = await hourly(store, { index: indexText(idx), state: r1.files.state }, hourIso(1), idle, { deadline: Date.now() - 1 });
   assert.deepEqual(idle.calls, [], 'nothing left to fetch');
-  assert.deepEqual(r2.run, { fatal: null, pending: 0, unsealed: 2 });
+  assert.deepEqual(r2.run, { fatal: null, pending: 0, unsealed: 2, complete: true }, 'a seal cut short leaves no block unevaluated');
   assert.deepEqual(r2.ctx.report.budget, ['sealing 2022-12 on'], 'listed once, though the walk tried to seal twice');
   assert.deepEqual(r2.ctx.report.sealed, []);
   assert.deepEqual(parseState(r2.files.state!).stall, { since: hourIso(0), runs: 2, unexplained: 0, alarmed_at: null });

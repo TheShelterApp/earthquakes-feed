@@ -698,6 +698,25 @@ test('evaluateWalks: a marker under 26 h is one P3 per walks:<workflow>:<source>
   assert.ok(long.text.length < 300);
 });
 
+test('evaluateWalks: a one-off block clears with the walk\'s next run (its "#" marker), not 26 h later; the hold is the fallback for a walk that stops (SHLTR-151)', () => {
+  const T0 = NOW - 48 * HOUR;
+  const blocked = 'history: re-merge of 2019-07 waits: the archive of the boundary days could not be read (2023-07)';
+  // Every walk now uploads a marker on every run: the blocked one, then (the next run, the archive readable again) '#'.
+  for (const workflow of RULES.walks.limits.workflows as string[]) {
+    const at1 = evaluateWalks([walk(workflow, blocked, T0)], T0 + 30 * 60_000, IDS);
+    assert.deepEqual(keys(at1.findings), [`walks:${workflow}:run`], workflow);
+    const next = walk(workflow, `# nothing blocked: run ${18_000_002}`, T0 + HOUR);
+    assert.deepEqual(evaluateWalks([next], T0 + HOUR + 10 * 60_000, IDS).findings, [], `${workflow}: clear on the next health run`);
+    // The walk stops running after its blocked marker: the hold still ends the row after 26 h, long before 48 h.
+    assert.equal(evaluateWalks([walk(workflow, blocked, T0)], T0 + 26 * HOUR, IDS).findings.length, 0, workflow);
+    assert.equal(evaluateWalks([walk(workflow, blocked, T0)], T0 + 48 * HOUR, IDS).findings.length, 0, workflow);
+  }
+  // A standing block is restated by every run: the row stays while it lasts, whatever the hold.
+  let open = 0;
+  for (let h = 0; h <= 48; h++) open += evaluateWalks([walk('history', 'history: usgs:2022-12 has failed 30 runs', T0 + h * HOUR)], T0 + h * HOUR + 600_000, IDS).findings.length;
+  assert.equal(open, 49);
+});
+
 test('pickMarkerArtifact: the newest non-expired artifact of that name; none; a body without a list throws', () => {
   const name = 'walk-blocked-history';
   const art = (id: number, createdAgoH: number, extra: Record<string, unknown> = {}) => ({ id, name, expired: false, created_at: ISO(NOW - createdAgoH * HOUR), workflow_run: { id: id * 10 }, ...extra });

@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -286,6 +286,10 @@ export interface ArchiveResult {
   logArchived: number;
   runLogs: number;
   blocked: string[];
+  /** Every cold month was looked at (the per-run cap did not stop the run): `blocked` is then every standing block, and
+   *  archive.yml uploads a '#' marker when it is empty (SHLTR-151). A blocked month keeps needs_reroll (or stays in the
+   *  tree) and is tried, and reported, again by every run. */
+  complete: boolean;
 }
 
 /**
@@ -303,11 +307,13 @@ export function runArchive(root: string, nowMs: number, io: ArchiveIo, opts: Arc
   let archived = 0;
   const archivedMonths: string[] = [];
   const blocked: string[] = [];
+  let complete = true;
 
   try {
     for (const [month, { days, files }] of [...months.entries()].sort()) {
       if (archived >= opts.maxMonths) {
         console.log(`archive: reached per-run cap (${opts.maxMonths}); remaining months roll next run`);
+        complete = false;
         break;
       }
       // Only fully-cold months (every day older than the hot window).
@@ -464,10 +470,14 @@ export function runArchive(root: string, nowMs: number, io: ArchiveIo, opts: Arc
         (runLogs.leftoversRemoved.length ? `, ${runLogs.leftoversRemoved.length} leftover(s) removed` : '') +
         (blocked.length ? `, ${blocked.length} blocked` : ''),
     );
-    return { archived: archivedMonths, logArchived, runLogs: runLogs.archived.length, blocked };
+    return { archived: archivedMonths, logArchived, runLogs: runLogs.archived.length, blocked, complete };
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) runArchive(dataPaths().root, Date.now(), ghArchiveIo, optionsFromEnv());
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const res = runArchive(dataPaths().root, Date.now(), ghArchiveIo, optionsFromEnv());
+  // archive.yml uploads a '#' marker (nothing blocked) only after a run that looked at every cold month.
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `complete=${res.complete}\n`);
+}

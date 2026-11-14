@@ -31,6 +31,7 @@ import {
   LATE_USGS_SCHEDULED,
   PARTITION_TAG,
   RAW_REMEDIATION_KIND,
+  SATURATED_FIRST_WINDOW_MS,
   buildDayEdition,
   currentEdition,
   dayRaws,
@@ -79,7 +80,7 @@ import type { EventNode, ProviderConfig, RawObs } from './types.js';
  *                             only, not the saturated days
  *   REMEDIATION_PROVIDERS     with REMEDIATION_REFILL: a comma list of source ids, or `bootstrap-2026-07-05` (the 15
  *                             sources the onboarding bootstrap of 2026-07-05 marked complete without filling them)
- *   REMEDIATION_QUEUE_ONLY=1  the queue only (the scheduled run)
+ *   REMEDIATION_QUEUE_ONLY=1  the queue only, not the saturated days (the scheduled run takes both since SHLTR-151)
  *   REMEDIATION_DAYS          only these tasks, e.g. "kagsr:2025-07-30,afad:2025-08-11"
  *   REMEDIATION_MAX_DAYS      days per run (default 8)
  *   REMEDIATION_LATE_USGS     the late-ComCat refresh: `on` (build and publish), `plan` (ask ComCat and diff, publish
@@ -253,7 +254,9 @@ export async function remediateDay(day: string, tasks: readonly DayTask[], idx: 
       continue;
     }
     const cfg = backfillCfg(p);
-    const f = await fetchDayInWindows(day, (s, e) => deps.fetchWindow(p, s, e, cfg?.minmag), { spacingMs: deps.spacingMs, sleep: deps.sleep });
+    // A saturated day (a one-day window filled the cap) is asked in hour windows from the start (SHLTR-151).
+    const firstWindowMs = (t.reason ?? 'saturated') === 'saturated' ? SATURATED_FIRST_WINDOW_MS : undefined;
+    const f = await fetchDayInWindows(day, (s, e) => deps.fetchWindow(p, s, e, cfg?.minmag), { spacingMs: deps.spacingMs, sleep: deps.sleep, ...(firstWindowMs ? { firstWindowMs } : {}) });
     if (!f.ok) {
       res.failed.push(`${t.provider}:${day}: ${f.error} (${f.requests} request(s)); asked again next run`);
       continue;

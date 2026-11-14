@@ -9,8 +9,9 @@ name: remediate
 # (FEED-OPS-4, round 14): no other writer touches the file, so its push rebases onto theirs.
 # A dispatch with `refill` adds the range to the PERSISTENT refill queue (remediation.json `refill_queue`); the queue's
 # days are taken once their month is archived (archive.yml), by any later run and by the daily scheduled run, which
-# does the queue only (nothing when it is empty or still waiting). A run does at most `max_days` days, one request at
-# a time, at least 1.1 s apart.
+# also takes the saturated days no edition has completed yet (SHLTR-151; backfill's marker names each of them until
+# then; a saturated day is asked in hour windows). A run does at most `max_days` days, one request at a time, at least
+# 1.1 s apart.
 # The late-ComCat refresh (`late_usgs`, SHLTR-150): ComCat publishes and upgrades many M4.5+ solutions days or weeks
 # after the origin, after the live day froze. The scheduled run asks ComCat again for every frozen, unarchived day of the
 # last 45 and publishes a `late_usgs` edition, built on the day's frozen partition, for each day whose M4.5+ set changed;
@@ -100,7 +101,6 @@ jobs:
           REMEDIATION_MAX_DAYS: ${{ inputs.max_days || (github.event_name == 'schedule' && '3' || '') }}
           REMEDIATION_REFILL: ${{ inputs.refill }}
           REMEDIATION_PROVIDERS: ${{ inputs.providers }}
-          REMEDIATION_QUEUE_ONLY: ${{ github.event_name == 'schedule' && '1' || '' }}
           # The scheduled run: the mode src/remediation.ts LATE_USGS_SCHEDULED names; a dispatch: its input.
           REMEDIATION_LATE_USGS: ${{ github.event_name == 'schedule' && 'scheduled' || inputs.late_usgs }}
           REMEDIATION_LATE_USGS_RANGE: ${{ inputs.late_usgs_range }}

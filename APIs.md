@@ -1266,7 +1266,8 @@ closed. Nothing of it reaches the health board: it is not a block, nothing more 
 A source's walk reports its failures: a window that fails is halved for the next run (a window whose answer is too
 large to stream within the timeout fails as a timeout, never as an overflow), each failure is logged with its error,
 the cursor keeps `lastError` and `failingSince`, a streak of 24 runs adds a warning to every run, and from 72 runs at a
-one-day window the run turns red about once a day. Before 2026-10-01 a failing walk stayed silent and kept its
+one-day window the stall is a block on the run's marker (`walks:backfill:<source>`) on every run while it lasts.
+Before 2026-10-01 a failing walk stayed silent and kept its
 window: ISC's 21-day window (more than 5,000 rows, about 35 s against ISC's 30 s timeout) failed 1,861 runs in a row,
 all green, from July to 2026-10-01. ISC's walk is paused since (`backfill.enabled: false` in the registry): every
 day it has left before the target lies in a frozen month already rolled to a Release, and finishing it means pulling
@@ -1590,9 +1591,11 @@ holds a group of its own, so a delivery that finds nothing to do never waits beh
 and takes over nothing is a no-progress run. It is explained when it only waited for a source's Retry-After, was
 rate-limited, or ran out of its time budget, and nothing failed for another reason. The 24th unexplained no-progress run
 in a row (a day of hourly runs), or the 72nd of any kind (a walk that only ever waits, or a month never fetched whole
-within `maxSecondsPerRun`, has stopped too), turns the run red with what is left and the months that keep failing, and
-then one run a day while it lasts (23 h apart at least); the streak is `stall` in `history-state.json`. Progress, or no
-work left, ends it. Round 24 added it: since round 23 a month that never succeeds lets its source's older months go on,
+within `maxSecondsPerRun`, has stopped too), is a block with what is left and the months that keep failing, stated in
+the walk's marker (`walks:history:run`) by every run while it lasts (SHLTR-151; until then one run a day, 23 h apart,
+and the 26 h hold carried the board in between; `alarmed_at` still records that daily repeat); the streak is `stall`
+in `history-state.json`. A source month that has failed 24 runs is a block of its own (`walks:history:<source>`) on
+every run until it is fetched. Progress, or no work left, ends the stall. Round 24 added it: since round 23 a month that never succeeds lets its source's older months go on,
 so its own alarm (one red run, at its 24th failure) came long before the walk ran out of other work, and the walk then
 stopped silently once only that month was left.
 
@@ -1611,7 +1614,15 @@ Three kinds of days are incomplete for some sources although they are frozen:
   (the day is partial for that source) and listed the day in its cursor (`saturatedDays` in
   `knowledge/index/backfill.json`). On 2026-10-04 that was KAGSR 2025-07-30 (the day after the M8.8 Kamchatka
   mainshock), 23 AFAD days of the Sındırgı sequences (2025-08-11 to 08-25 and 2025-10-28 to 11-12) and IMO 2023-11-11,
-  2025-04-01 and 2025-05-24.
+  2025-04-01 and 2025-05-24. All but KAGSR 2025-07-30 got their editions on 2026-10-04 (dispatches named their days;
+  the scheduled run then took the refill queue only). KAGSR 2025-07-30, measured read only on 2026-11-14: KAGSR's
+  answer for the whole day holds 676 events (and one for 2025-07-29 .. 08-01, 1,004: KAGSR applies no 500-row cap; the
+  backfill's custom-source rule, an answer of 490 rows or more is an overflow, marked the day), the 24 hour windows of
+  the day sum to the same 676 ids, and the archived day (`archive-2025-07`, `events-2025-07.e3.tar.zst`) holds 578 of
+  them: 98 KAGSR events of the day are missing (60 with ids above the newest one archived: KAGSR added them after the
+  backfill fetched the day in July 2026). Since SHLTR-151 such a day is a block on backfill's marker
+  (`walks:backfill:<source>`) on every run until an edition completes it (a raw asset of the source and day, not
+  partial, in the day's current edition), and the daily scheduled run takes the saturated days too.
 - **The seam** 2026-06-28 → 07-03 05:42 UTC, which 15 sources never fetched (*History and backfill*).
 - **Late ComCat** (since 2026-11, SHLTR-150): ComCat's M4.5+ solutions published or revised after the live day froze
   (*Late publications*).
@@ -1623,7 +1634,8 @@ frozen days not archived yet (late ComCat):
 - the saturated days are its default tasks on a dispatch; an explicit refill (inputs `refill`, a range of at most 31
   days, and `providers`, a comma list or `bootstrap-2026-07-05` for the 15 seam sources) is added to the PERSISTENT
   refill queue, `refill_queue` in the index (`range`, `providers`, `reason`, `queued_at`). Every run, and a scheduled
-  run once a day (04:43 UTC, the queue only), takes the queue's days whose month is archived and leaves the others
+  run once a day (04:43 UTC: the queue and, since SHLTR-151, the saturated days, at most 3 days a run), takes the
+  queue's days whose month is archived and leaves the others
   queued; a day leaves the queue once every source of its entry has a raw asset of it and its current edition is
   built from all of the day's raws. 2026-07-01…07-03 are queued so and are taken by the first scheduled run after
   `archive` rolls July (on or after 2026-11-29). A source the day is older than the retention of (registry
@@ -1631,7 +1643,7 @@ frozen days not archived yet (late ComCat):
   the edition names it in `not_fetched` (`provider`, `reason: "retention"`, `retained_from`, `note`), so 2026-07-01…07-03
   carry `usgs`, `emsc` and the other 12 sources, not AFAD;
 - a run works day by day (ascending, at most `max_days`); each source of the day is asked again for the whole day in
-  6-hour windows, each halved while its answer fills the cap (down to 5 minutes; a window still full there marks the
+  6-hour windows (a saturated day in 1-hour windows, since SHLTR-151), each halved while its answer fills the cap (down to 5 minutes; a window still full there marks the
   day `partial`), one request at a time, at least 1.1 s apart. When a source fails, the day's successful raw assets are
   uploaded and indexed, and no edition is built: the next run asks only the sources that have no raw asset of the day
   yet and builds the edition from all of them;

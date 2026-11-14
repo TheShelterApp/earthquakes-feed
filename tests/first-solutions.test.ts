@@ -33,7 +33,10 @@ import {
   markDone,
   newSourceCursor,
   nextDay,
+  newCursor,
+  recordAnswer,
   recordFailure,
+  stallBlocks,
   stallLevel,
   unmarkRange,
 } from '../src/first-solutions-cursor.js';
@@ -234,6 +237,24 @@ test('cursor: a stall warns from 24 failed runs and goes red on every 24th from 
   assert.equal(stallLevel(c), 'alarm');
   recordFailure(c, 'HTTP 503', 'x');
   assert.equal(stallLevel(c), 'warn');
+});
+
+test('cursor: the marker states every lane failing for 72 runs or more on every run, not only on its daily alarm; an answer clears it (SHLTR-151)', () => {
+  const cursor = newCursor();
+  const lanes = HISTORY_SOURCES.map((s) => s.provider);
+  cursor.sources['geonet'] = newSourceCursor();
+  cursor.sources['usgs'] = newSourceCursor();
+  for (let i = 0; i < 73; i++) recordFailure(cursor.sources['geonet']!, 'HTTP 503', i === 0 ? '2026-11-10T00:48:00.000Z' : 'x');
+  for (let i = 0; i < 71; i++) recordFailure(cursor.sources['usgs']!, 'timeout', 'x');
+  assert.equal(stallLevel(cursor.sources['geonet']!), 'warn', 'the 73rd failure is no daily alarm');
+  assert.deepEqual(stallBlocks(cursor, lanes), ['first-solutions geonet: 73 failed runs in a row since 2026-11-10T00:48:00.000Z: HTTP 503']);
+  recordFailure(cursor.sources['usgs']!, 'timeout', 'x');
+  assert.deepEqual(stallBlocks(cursor, lanes).map((l) => l.split(':')[0]), ['first-solutions geonet', 'first-solutions usgs']);
+  // A source no longer among the lanes is no block; one that answers again clears its line.
+  assert.deepEqual(stallBlocks(cursor, ['usgs']).length, 1);
+  recordAnswer(cursor.sources['geonet']!);
+  recordAnswer(cursor.sources['usgs']!);
+  assert.deepEqual(stallBlocks(cursor, lanes), []);
 });
 
 // --- requests ----------------------------------------------------------------------------------------------------------

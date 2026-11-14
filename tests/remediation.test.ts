@@ -466,3 +466,38 @@ test('retention: the refill queue skips AFAD for a day older than its retention,
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- SHLTR-151: KAGSR 2025-07-30 (saturated: a one-day backfill window filled the cap) is asked again in hour windows,
+// and the edition holds every row the hour windows answer. ---
+
+test('saturated day: asked in hour windows from the start, every hour\'s rows in the edition (the KAGSR 2025-07-30 case)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'efd-saturated-'));
+  try {
+    // The archive holds part of the day (as the backfill's capped answer left it); the source lists more now.
+    const all = Array.from({ length: 48 }, (_, i) => kagsr(`k${i}`, D0 + i * 30 * 60_000 + 7_000, { lat: 50 + (i % 7) * 0.5, lon: 155 + (i % 5) }));
+    const archived = all.slice(0, 30);
+    const windows: Array<[number, number]> = [];
+    const fetchWindow: DayRunDeps['fetchWindow'] = async (p, s, e) => {
+      windows.push([s, e]);
+      const obs = all.filter((r) => r.eventTimeMs >= s && r.eventTimeMs < e);
+      return { provider: p.id, obs, status: { ok: true, events_returned: obs.length }, overflow: false } as WindowOutcome;
+    };
+    const archives = [{ period: '2025-07', tag: 'archive-2025-07', asset: 'events-2025-07.e3.tar.zst', days: ['2025-07-29', DAY, '2025-07-31'], sha256: 'ea352f9c' }];
+    const deps: DayRunDeps = {
+      store: new LocalStore(join(dir, 'releases')), registry, fetchWindow, archives, arch: { days: archivedDay(archived), failedMonths: new Set() },
+      work: dir, nowMs: Date.parse('2026-11-15T04:43:00Z'), seqMarker: 500_000, spacingMs: 0, sleep: async () => {},
+    };
+    const idx = emptyRemediationIndex();
+    const tasks = remediationTasks({ providers: { kagsr: { saturatedDays: [DAY] } } }, '2026-11-04', new Set(idx.raw.map((r) => `${r.provider}:${r.day}`)));
+    assert.deepEqual(tasks, [{ provider: 'kagsr', day: DAY }]);
+    const r = await remediateDay(DAY, tasks, idx, deps);
+    assert.deepEqual(r.failed, []);
+    assert.equal(windows.length, 24, 'one request per hour');
+    assert.ok(windows.every(([s, e], i) => s === D0 + i * HOUR && e === s + HOUR));
+    assert.deepEqual([r.raws[0]!.rows, r.raws[0]!.partial, r.raws[0]!.requests], [48, false, 24]);
+    assert.deepEqual(r.edition!.stats.provider_rows.kagsr, { before: 30, after: 48 }, 'the day holds every row the source lists');
+    assert.equal(r.edition!.stats.new_events, 18);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

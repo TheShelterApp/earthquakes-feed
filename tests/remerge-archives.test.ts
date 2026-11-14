@@ -156,8 +156,8 @@ test('selection: below the epoch, not waiting for a re-roll, newest first, at mo
 
 test('archive re-merge: newest first, a new asset beside the old one, the remediated day refreshed; compare-and-set applies it', { skip: !hasZstd && 'zstd not installed' }, () => {
   const w = world({ remediationOn: 'june' });
-  const { pending, report } = silently(() => runRemergeArchives(w.ctx(), { max: 4 }));
-  assert.deepEqual(report.blocked, []);
+  const { pending, report, complete } = silently(() => runRemergeArchives(w.ctx(), { max: 4 }));
+  assert.deepEqual([report.blocked, complete], [[], true]);
   assert.deepEqual(pending.months.map((m) => m.period), ['2024-06', '2024-05'], 'newest first; May waited for June within the run');
   const june = pending.months[0]!;
   assert.equal(june.entry.asset, 'events-2024-06.e2.tar.zst');
@@ -219,8 +219,15 @@ test('archive re-merge: a remediated day built on another asset blocks the month
   assert.match(r.report.blocked.join('\n'), /2024-06: remediation events-2024-06-12\.e1\.ndjson\.gz of 2024-06-12 was built on/);
   assert.deepEqual(w.uploads, []);
   assert.match(r.report.waiting.join('\n'), /2024-05: waits for 2024-06/);
+  // SHLTR-151: the blocked month is the newest left, so the next run selects it first and states the block again; the
+  // run looked at every month it selected, so its marker is every standing block.
+  assert.equal(r.complete, true);
+  const again = silently(() => runRemergeArchives(w.ctx(), { max: 4 }));
+  assert.deepEqual([again.report.blocked, again.complete], [r.report.blocked, true]);
   const late = silently(() => runRemergeArchives(world().ctx({ deadline: Date.now() - 1 }), { max: 4 }));
   assert.deepEqual(late.report.budget, ['re-merging 2024-06 on']);
+  assert.equal(late.complete, false, 'cut by the deadline: no "nothing blocked" marker');
+  assert.equal(silently(() => runRemergeArchives(world().ctx(), { max: 4, only: new Set(['2024-05']) })).complete, false, 'a dispatch for some months says nothing of the others');
   const w2 = world();
   const dry = silently(() => runRemergeArchives(w2.ctx({ dryRun: true }), { max: 4 }));
   assert.equal(dry.pending.months.length, 2);

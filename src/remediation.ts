@@ -663,7 +663,7 @@ export const LATE_USGS_DMAG = 0.3;
 /** What the scheduled run does: `plan` asks ComCat and diffs, publishes nothing (the report lists what an `on` run
  *  would build); `on` builds and publishes the editions; `off` skips the refresh. A one-line PR switches it. */
 export type LateUsgsMode = 'off' | 'plan' | 'on';
-export const LATE_USGS_SCHEDULED: LateUsgsMode = 'plan';
+export const LATE_USGS_SCHEDULED: LateUsgsMode = 'on';
 
 const shiftDay = (day: string, n: number): string => new Date(Date.parse(`${day}T00:00:00Z`) + n * DAY_MS).toISOString().slice(0, 10);
 

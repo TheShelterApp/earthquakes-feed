@@ -1728,7 +1728,8 @@ frozen days not archived yet (late ComCat):
   checks above, every event and every report of the partition must be in the edition and every other source's live
   report must still be live in it. The mode of the scheduled run is `LATE_USGS_SCHEDULED` in `src/remediation.ts`
   (`plan`: ask and compare, publish nothing, the log lists what `on` would build; `on`; `off`); a dispatch with
-  `late_usgs` (`plan` or `on`, with `dry_run` into the run's artifact) runs it at once, over `late_usgs_range` (at most
+  `late_usgs` (`plan` or `on`) runs it at once — a dispatch is a dry run unless `dry_run` is false: it builds into
+  the run's artifact only, publishes nothing and ends with a `DRY RUN` warning — over `late_usgs_range` (at most
   31 days) instead of the last 45 for the frozen days older than that (the one-time catch-up of 2026-07…10). When the
   month rolls, the archive holds the partition byte for byte, so the edition still replaces the day: the archive
   re-merge (*Re-merged history*) takes an edition built on the partition whose archived file has the same sha256.

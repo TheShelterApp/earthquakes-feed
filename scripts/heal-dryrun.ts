@@ -5,11 +5,13 @@
  * data directory.
  *
  * Usage:
- *   npx tsx scripts/heal-dryrun.ts --data <data-branch dir> [--now <iso>] [--regular] [--out <report.md>]
+ *   npx tsx scripts/heal-dryrun.ts --data <data-branch dir> [--now <iso>] [--regular] [--epoch <n>] [--out <report.md>]
  *
  * <data-branch dir> needs knowledge/index (event_map shards + head.json), e.g.
  *   git archive origin/data knowledge/index | tar -x -C /tmp/data
  * --now defaults to head.ingest_time + 5 min (the next aggregate run).
+ * --epoch runs the live identity rules of that re-merge epoch (config identityRules, without the offline-only density
+ * rule) instead of the current REMERGE_EPOCH's: what the next run would do once REMERGE_EPOCH is raised to it.
  *
  * The report lists every group the heal folds (each member's providers, solution, distance and
  * Δt to the survivor, the op:merge reason) with sanity flags for a false merge, the held solutions the run withdraws
@@ -23,7 +25,7 @@ import { join, resolve } from 'node:path';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { loadState } from '../src/bitemporal.js';
-import { EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HEAL_MAX_FOLDS_PER_RUN, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS } from '../src/config.js';
+import { EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HEAL_MAX_FOLDS_PER_RUN, HOT_WINDOW_DAYS, LIVE_IDENTITY_RULES, LIVE_INDEX_DAYS, identityRules } from '../src/config.js';
 import { HELD_REASON, REHOMED_REASON_PREFIX, Resolver } from '../src/dedup.js';
 import { REDERIVED_REASON, runFeedSideSteps } from '../src/heal.js';
 import { haversineKm } from '../src/geo.js';
@@ -57,7 +59,9 @@ for (const [k, n] of state.eventMap) before.set(k, JSON.parse(JSON.stringify(n))
 
 // The production step itself (aggregate → runFeedSideSteps), with its marker sent to a scratch
 // directory; merges and retractions are read back from the lines it logged.
-const resolver = new Resolver(state.eventMap, priorityMap(registry), configMap(registry), nowMs);
+const epochArg = opt('--epoch');
+const rules = epochArg != null ? { ...identityRules(Number(epochArg)), densityAsOfPair: false } : LIVE_IDENTITY_RULES;
+const resolver = new Resolver(state.eventMap, priorityMap(registry), configMap(registry), nowMs, { rules });
 const log = new LogBuffer(head.seq, ingestTime);
 const scratch = mkdtempSync(join(tmpdir(), 'heal-dryrun-'));
 const side = runFeedSideSteps(scratch, resolver, log, { healDue: !regular, loadDays, ingestTime });
@@ -101,6 +105,7 @@ const md: string[] = [];
 const hotFloor = nowMs - HOT_WINDOW_DAYS * 86_400_000;
 const liveBefore = [...before.values()].filter((n) => n.state === 'live');
 md.push(regular ? `# Heal dry run (regular heal, at most ${HEAL_MAX_FOLDS_PER_RUN} folds${side.regularHeal?.capped ? ': CAPPED' : ''})` : `# Heal dry run (epoch ${HEAL_EPOCH})`);
+if (epochArg != null) md.push('', `Identity rules of re-merge epoch ${epochArg} (live): ${JSON.stringify(rules)}`);
 md.push('');
 md.push(`Data: head seq ${head.seq} @ ${head.ingest_time}; simulated run at ${ingestTime}; event_map days loaded: ${loadDays} (${before.size} nodes, ${liveBefore.length} live); hot window from ${isoFromMs(hotFloor)} (${liveBefore.filter((n) => n.eventTimeMs >= hotFloor).length} live nodes).`);
 md.push('');

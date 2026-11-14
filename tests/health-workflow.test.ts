@@ -214,20 +214,44 @@ test('walks: a blocked marker is a warning on a green run and the artifact walk-
     const days = Number(/\n {10}retention-days: (\d+)\n/.exec(upload[0]!)?.[1]);
     assert.ok(days * 86_400_000 > lim.markerHoldMs, `${workflow}: the marker outlives the hold`);
   }
-  // backfill and stats state every standing block on every run: a run whose tool step finished with nothing blocked
-  // uploads a marker with only a '#' line, after the warning step (which must not see it) and before the upload, so the
-  // board resolves on the next health run (feed-health.mjs parseMarker skips '#' lines).
-  for (const { workflow, marker } of WALKS.filter((w) => w.workflow === 'backfill' || w.workflow === 'stats')) {
+  // Every walk states every standing block on every run (SHLTR-151; backfill and stats since 2026-11): a run whose tool
+  // step finished with nothing blocked, and that evaluated every standing block, uploads a marker with only a '#' line,
+  // after the warning step (which must not see it) and before the upload, so the board resolves on the next health run
+  // (feed-health.mjs parseMarker skips '#' lines) and the 26 h hold is only the fallback for a walk that stops running.
+  const MARK: Record<string, { tool: RegExp; when: RegExp }> = {
+    backfill: { tool: /\n {8}id: run\n/, when: /\n {8}if: always\(\) && steps\.run\.outcome == 'success'\n/ },
+    stats: { tool: /\n {8}id: run\n/, when: /\n {8}if: always\(\) && !inputs\.dry_run && steps\.run\.outcome == 'success'\n/ },
+    // A run of the walk switched off (providers/history.json enabled false) has nothing blocked either; a run whose
+    // time budget cut the re-merge short (output complete false) may not have reached a month blocked before.
+    history: {
+      tool: /\n {8}id: walk\n/,
+      when: /\n {8}if: always\(\) && !inputs\.dry_run && \(steps\.gate\.outputs\.on == 'false' \|\| \(steps\.walk\.outcome == 'success' && steps\.walk\.outputs\.complete == 'true'\)\)\n/,
+    },
+    // In the commit job, which runs only after a successful collect job, once its output is downloaded.
+    'first-solutions': { tool: /\n {8}id: out\n/, when: /\n {8}if: always\(\) && steps\.out\.outcome == 'success'\n/ },
+    // Not after a run the per-run cap stopped (output complete false).
+    archive: { tool: /\n {8}id: run\n/, when: /\n {8}if: always\(\) && steps\.run\.outcome == 'success' && steps\.run\.outputs\.complete == 'true'\n/ },
+    // Not after a run the deadline cut, or a dispatch naming its months (output complete false).
+    remerge: { tool: /\n {8}id: run\n/, when: /\n {8}if: always\(\) && !inputs\.dry_run && steps\.run\.outcome == 'success' && steps\.run\.outputs\.complete == 'true'\n/ },
+  };
+  assert.deepEqual(Object.keys(MARK).sort(), [...lim.workflows].sort());
+  for (const { workflow, marker } of WALKS) {
     const all = steps(read(`.github/workflows/${workflow}.yml`));
     const at = (pred: (s: string) => boolean): number => all.findIndex(pred);
-    const tool = at((s) => /\n {8}id: run\n/.test(s));
+    const tool = at((s) => MARK[workflow]!.tool.test(s));
     const warn = at((s) => s.includes(`if [ -f ${marker} ]`));
     const mark = at((s) => s.includes('name: Mark a run with nothing blocked'));
     const upload = at((s) => s.includes(`name: ${lim.artifactPrefix}${workflow}\n`));
     assert.ok(tool >= 0 && tool < warn && warn < mark && mark < upload, `${workflow}: tool ${tool} < warn ${warn} < mark ${mark} < upload ${upload}`);
-    assert.match(all[mark]!, /\n {8}if: always\(\)( && !inputs\.dry_run)? && steps\.run\.outcome == 'success'\n/, workflow);
+    assert.match(all[mark]!, MARK[workflow]!.when, workflow);
     assert.ok(all[mark]!.includes(`[ -f ${marker} ] || echo "# nothing blocked: run \${{ github.run_id }}" > ${marker}`), workflow);
   }
+  // The tools say whether they evaluated every standing block.
+  for (const [file, text] of [
+    ['src/history.ts', "setOutput('complete', String(complete))"],
+    ['src/archive.ts', 'complete=${res.complete}'],
+    ['src/remerge-archives.ts', "setOutput('complete', String(res.complete))"],
+  ] as const) assert.ok(read(file).includes(text), file);
   // first-solutions' collect writes its marker under FIRST_SOLUTIONS_OUT, which the workflow sets to fs-out.
   assert.match(read('.github/workflows/first-solutions.yml'), /\n {10}FIRST_SOLUTIONS_OUT: fs-out\n/);
 });

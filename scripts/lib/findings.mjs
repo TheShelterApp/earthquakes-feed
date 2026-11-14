@@ -457,9 +457,10 @@ export const RULES = Object.freeze({
     title: 'maintenance walk blocked',
     // A blocked marker of history, first-solutions, backfill, archive, remerge or stats (those runs stay green with a ::warning:: and
     // upload the marker as artifact walk-blocked-<workflow>). Key walks:<workflow>:<source>. Only the newest marker
-    // counts, for 26 h: a walk that alarms about once a day has moved on when no marker is newer than that. backfill and
-    // stats state every standing block on every run and upload a marker with only a '#' line when nothing is blocked,
-    // which clears their keys on the next health run.
+    // counts. Every walk states every standing block on every run and uploads a marker with only a '#' line when it
+    // evaluated them all and nothing is blocked (SHLTR-151; backfill and stats since 2026-11), which clears its keys on
+    // the next health run. The 26 h hold is the fallback: a walk that stopped running (switched off, its schedule
+    // dropped) has moved on when no marker is newer than that.
     board: 'feed', class: 'maintenance', severity: 'P3', keyPrefix: 'walks:',
     limits: { workflows: ['history', 'first-solutions', 'backfill', 'archive', 'remerge', 'stats'], artifactPrefix: 'walk-blocked-', markerHoldMs: 26 * HOUR },
   }),

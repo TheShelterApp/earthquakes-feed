@@ -265,7 +265,8 @@
       "attribution": "AFAD — Republic of Türkiye, Disaster and Emergency Management Presidency (deprem.afad.gov.tr)",
       "doi": null,
       "contact": "https://deprem.afad.gov.tr",
-      "notes": "Custom JSON. Times are UTC without a zone suffix (read as Turkish local time until 2026-10-01, which stored every AFAD event 3 h early; PF-5e). Dense small local events down to ~M0.6."
+      "retentionDays": 7,
+      "notes": "Custom JSON. Times are UTC without a zone suffix (read as Turkish local time until 2026-10-01, which stored every AFAD event 3 h early; PF-5e). Dense small local events down to ~M0.6. retentionDays 7 (SHLTR-146): event/filter answers from AFAD's newest 1,000 events only (2026-11-14: 2026-11-02 21:18 UTC on, about 11.8 days at about 85 events a day; a swarm shortens it), every older window answers 0 rows; it answered 2025-08 in full on 2026-10-04. Backfill and remediation never ask it for a day before the retention."
     },
     {
       "id": "cenc",

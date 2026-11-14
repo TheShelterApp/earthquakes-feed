@@ -602,8 +602,14 @@ function writeMonthReport(ctx: RemergeArchivesCtx, report: RunReport, m: MonthRe
   writeFileSync(join(dir, `${m.period}.json`), JSON.stringify({ ...m, merge: { ...meta.merge, merges: undefined }, folds }, null, 1) + '\n');
 }
 
-/** One collect run (see the module comment). Writes pending.json and report.json; returns them. */
-export function runRemergeArchives(ctx: RemergeArchivesCtx, opts: { max: number; only?: ReadonlySet<string> }): { pending: Pending; report: RunReport } {
+/**
+ * One collect run (see the module comment). Writes pending.json and report.json; returns them, and whether the run
+ * looked at every month it selected (`complete`, SHLTR-151): a blocked month stays unmerged and, being the newest left
+ * (the older ones wait for it), is selected and reported again by every run, so a complete run's `blocked` is every
+ * standing block and remerge.yml uploads a '#' marker when it is empty. Not complete: the time budget stopped the run
+ * before a month, or a dispatch named its months (`only`), which says nothing about the others.
+ */
+export function runRemergeArchives(ctx: RemergeArchivesCtx, opts: { max: number; only?: ReadonlySet<string> }): { pending: Pending; report: RunReport; complete: boolean } {
   const report: RunReport = { epoch: ctx.epoch, dry_run: ctx.dryRun, merged: [], waiting: [], blocked: [], unused: [], budget: [] };
   const pending: Pending = { version: 1, epoch: ctx.epoch, months: [], unused: [] };
   const cache = new AssetCache(ctx);
@@ -645,7 +651,7 @@ export function runRemergeArchives(ctx: RemergeArchivesCtx, opts: { max: number;
     }
   }
   writeOutputs(ctx, pending, report);
-  return { pending, report };
+  return { pending, report, complete: report.budget.length === 0 && !opts.only };
 }
 
 function writeOutputs(ctx: RemergeArchivesCtx, pending: Pending, report: RunReport): void {
@@ -707,6 +713,7 @@ function main(): void {
   }
   const { pending, report } = res;
   setOutput('changed', String(pending.months.length + pending.unused.length > 0));
+  setOutput('complete', String(res.complete));
   console.log(`remerge: merged=${report.merged.length} waiting=${report.waiting.length} blocked=${report.blocked.length} unused=${report.unused.length} budget=${report.budget.length}`);
   if (report.blocked.length) writeFileSync('remerge-blocked.txt', report.blocked.join('\n') + '\n');
 }

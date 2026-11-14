@@ -127,8 +127,12 @@ jobs:
           retention-days: 3
       # A blocked or stalled walk keeps the run green (alerting plan of 2026-10-22): a warning here, and the marker as the
       # artifact walk-blocked-history, which the health workflow's feed evaluator (scripts/feed-health.mjs) files on the
-      # "[health] feed" board as walks:history:<source> (a P3: one comment; it resolves once no marker is newer than
-      # 26 h). A dry run's marker stays a warning only.
+      # "[health] feed" board as walks:history:<source> (a P3: one comment). A dry run's marker stays a warning only.
+      # The marker states every standing block on every run (SHLTR-151: a source month failing for a day or more and a
+      # stopped walk, from history-state.json; this run's re-merge blocks, whose month every run asks again first), so a
+      # run that evaluated them all (output `complete`) with nothing blocked, and a run of a walk switched off, upload a
+      # marker without a blocked line (only a "#" line): the board resolves on the next health run; the 26 h hold is the
+      # fallback for a walk that stops running.
       - name: Warn if the walk was blocked
         if: always()
         run: |
@@ -136,6 +140,9 @@ jobs:
             cat history-blocked.txt
             echo '::warning::history: blocked or stalled (see above); the index of the uploaded work is still committed, and the health workflow files the marker on the "[health] feed" board'
           fi
+      - name: Mark a run with nothing blocked
+        if: always() && !inputs.dry_run && (steps.gate.outputs.on == 'false' || (steps.walk.outcome == 'success' && steps.walk.outputs.complete == 'true'))
+        run: '[ -f history-blocked.txt ] || echo "# nothing blocked: run ${{ github.run_id }}" > history-blocked.txt'
       - name: Upload the blocked marker (read by the health workflow)
         if: always() && !inputs.dry_run
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

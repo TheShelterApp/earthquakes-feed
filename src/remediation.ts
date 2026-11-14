@@ -34,6 +34,9 @@ import type { EventNode, ProviderConfig, RawObs } from './types.js';
 export const REMEDIATION_ORDER: readonly string[] = ['kagsr', 'afad', 'imo'];
 /** The first windows of a day; a window whose answer fills the cap is halved. */
 export const FIRST_WINDOW_MS = 6 * 3_600_000;
+/** The first windows of a saturated day (SHLTR-151): one hour each, since the day is known to be dense (a one-day
+ *  window filled the cap): 24 requests, about 27 s at 1.1 s apart, and still halved while a window fills the cap. */
+export const SATURATED_FIRST_WINDOW_MS = 3_600_000;
 /** The smallest window; one that still fills the cap leaves the day partial (recorded). */
 export const MIN_WINDOW_MS = 5 * 60_000;
 const DAY_MS = 86_400_000;
@@ -501,7 +504,23 @@ export interface EditionRef {
   /** late_usgs only: the day's earlier late_usgs editions this one replaced in the index (pruneLateUsgs). Their assets
    *  stay in the Release; their entries and those of their raw assets leave the index. */
   superseded?: string[];
+  /** The sources' note: sources of the day's tasks that were not asked, and why (`retention`: the day is older than
+   *  the source answers for, registry retentionDays, SHLTR-146). The edition does not hold their rows of the day beyond
+   *  what the archive held. Absent: every source of the day's tasks was asked. */
+  not_fetched?: NotFetched[];
 }
+/** A source of a day's tasks the run did not ask (SHLTR-146). */
+export interface NotFetched {
+  provider: string;
+  reason: 'retention';
+  /** The first whole day the source still answered for when the edition was built. */
+  retained_from: string;
+  note: string;
+}
+/** Whether a source is not asked for a day at all (src/retention.ts beyondRetention, bound to the run's clock and
+ *  registry); the queue treats such a source-day as done, since nothing more can be fetched. */
+export type SkipSource = (provider: string, day: string) => boolean;
+const NO_SKIP: SkipSource = () => false;
 /**
  * A queued refill: its days are remediated as soon as each is archived (a remediation edition supplements an archived
  * day only), by the scheduled run or any dispatch, and dropped from the range once done (every provider has a raw
@@ -583,17 +602,24 @@ export function unbuiltRaws(idx: RemediationIndex, day: string): RawRef[] {
 }
 
 /** A queued day is done when every provider of the entry has a raw asset of it and its current edition is built from
- *  all of the day's raws. */
-const queuedDayDone = (idx: RemediationIndex, day: string, providers: readonly string[]): boolean => {
-  const have = new Set(dayRaws(idx, day).map((r) => r.provider));
-  return providers.every((p) => have.has(p)) && currentEdition(idx, day) != null && unbuiltRaws(idx, day).length === 0;
+ *  all of the day's raws. A provider the run does not ask for the day (`skip`: beyond its retention) needs no raw; a
+ *  day none of whose providers can be asked, and that has no raw, is done with no edition. */
+const queuedDayDone = (idx: RemediationIndex, day: string, providers: readonly string[], skip: SkipSource = NO_SKIP): boolean => {
+  const raws = dayRaws(idx, day);
+  const have = new Set(raws.map((r) => r.provider));
+  const need = providers.filter((p) => !skip(p, day));
+  if (!need.every((p) => have.has(p))) return false;
+  if (!raws.length) return need.length === 0;
+  return currentEdition(idx, day) != null && unbuiltRaws(idx, day).length === 0;
 };
 
 /**
  * What the queue asks of this run: fetch tasks for its ARCHIVED days (providers without a raw of the day), the archived
- * days whose raws are all there but not yet in an edition, and the days still waiting for their month's archive.
+ * days whose raws are all there but not yet in an edition, and the days still waiting for their month's archive. A
+ * source-day `skip` names (beyond the source's retention) is still a task: remediateDay skips it and notes it in the
+ * edition (`not_fetched`); it never keeps a day queued.
  */
-export function queuePlan(idx: RemediationIndex, archivedDays: ReadonlySet<string>): { tasks: DayTask[]; editionOnly: string[]; waiting: string[] } {
+export function queuePlan(idx: RemediationIndex, archivedDays: ReadonlySet<string>, skip: SkipSource = NO_SKIP): { tasks: DayTask[]; editionOnly: string[]; waiting: string[] } {
   const done = new Set(idx.raw.map((r) => `${r.provider}:${r.day}`));
   const tasks = new Map<string, DayTask>();
   const editionOnly = new Set<string>();
@@ -604,9 +630,13 @@ export function queuePlan(idx: RemediationIndex, archivedDays: ReadonlySet<strin
       else if (!done.has(`${t.provider}:${t.day}`)) tasks.set(`${t.provider}:${t.day}`, t);
     }
     for (const day of rangeDays(e.range)) {
-      if (archivedDays.has(day) && !queuedDayDone(idx, day, e.providers) && e.providers.every((p) => done.has(`${p}:${day}`))) editionOnly.add(day);
+      if (archivedDays.has(day) && !queuedDayDone(idx, day, e.providers, skip) && e.providers.every((p) => skip(p, day) || done.has(`${p}:${day}`))) editionOnly.add(day);
     }
   }
+  // A skipped source-day rides along only with a day this run builds (another source to fetch, or an edition to build),
+  // so the edition notes it; alone it is no work at all (and never a second build of a finished day).
+  const builds = new Set([...[...tasks.values()].filter((t) => !skip(t.provider, t.day)).map((t) => t.day), ...editionOnly]);
+  for (const [k, t] of tasks) if (skip(t.provider, t.day) && !builds.has(t.day)) tasks.delete(k);
   const sort = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
   return {
     tasks: [...tasks.values()].sort((a, b) => sort(a.day, b.day) || sort(a.provider, b.provider)),
@@ -615,17 +645,52 @@ export function queuePlan(idx: RemediationIndex, archivedDays: ReadonlySet<strin
   };
 }
 
+/**
+ * The saturated days a run that is not queue-only takes (SHLTR-151): remediationTasks' source-days of an ARCHIVED day
+ * that the source can still be asked for (a day older than its retention never gets a raw: backfill's saturatedReport
+ * warns about it instead, and it must not take a run's slot every day); a frozen day whose month is not archived yet
+ * waits (`waiting`: an edition is built on the archived day only). Edition-only: an archived saturated day whose sources
+ * all have a raw but whose current edition is not built from every raw of the day (a run uploaded them and built no
+ * edition: another source of the day failed, or the run died between the uploads); backfill's marker names such a day
+ * until an edition holds its raw.
+ */
+export function saturatedPlan(
+  cursor: { providers: Record<string, { saturatedDays?: string[] }> },
+  frozenBefore: string,
+  idx: RemediationIndex,
+  archivedDays: ReadonlySet<string>,
+  skip: SkipSource = NO_SKIP,
+): { tasks: DayTask[]; editionOnly: string[]; waiting: string[] } {
+  const done = new Set(idx.raw.map((r) => `${r.provider}:${r.day}`));
+  const tasks: DayTask[] = [];
+  const waiting = new Set<string>();
+  for (const t of remediationTasks(cursor, frozenBefore, done)) {
+    if (skip(t.provider, t.day)) continue;
+    if (archivedDays.has(t.day)) tasks.push(t);
+    else waiting.add(t.day);
+  }
+  const fetching = new Set(tasks.map((t) => t.day));
+  const editionOnly = new Set<string>();
+  for (const [provider, c] of Object.entries(cursor.providers)) {
+    for (const day of c.saturatedDays ?? []) {
+      if (day < frozenBefore && archivedDays.has(day) && !fetching.has(day) && done.has(`${provider}:${day}`) && unbuiltRaws(idx, day).length > 0) editionOnly.add(day);
+    }
+  }
+  const sort = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+  return { tasks, editionOnly: [...editionOnly].sort(sort), waiting: [...waiting].sort(sort) };
+}
+
 /** Drop the done days from the queue: each entry's range shrinks from both ends past its done days, and an entry with
  *  every day done leaves the queue. Returns the entries that left. */
-export function pruneQueue(idx: RemediationIndex): RefillEntry[] {
+export function pruneQueue(idx: RemediationIndex, skip: SkipSource = NO_SKIP): RefillEntry[] {
   const left: RefillEntry[] = [];
   const keep: RefillEntry[] = [];
   for (const e of idx.refill_queue ?? []) {
     const days = rangeDays(e.range);
     let a = 0;
     let b = days.length - 1;
-    while (a <= b && queuedDayDone(idx, days[a]!, e.providers)) a++;
-    while (b >= a && queuedDayDone(idx, days[b]!, e.providers)) b--;
+    while (a <= b && queuedDayDone(idx, days[a]!, e.providers, skip)) a++;
+    while (b >= a && queuedDayDone(idx, days[b]!, e.providers, skip)) b--;
     if (a > b) {
       left.push(e);
       continue;

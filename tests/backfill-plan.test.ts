@@ -2,7 +2,21 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { STALL_ALARM_FAILURES, STALL_WARN_FAILURES, dayStartMs } from '../src/backfill-cursor.js';
-import { type BackfillCursorFile, type Job, type OpenDispatch, applyWindowResult, openDispatchLines, planJobs, recordDispatchOutcome, stallReport } from '../src/backfill-plan.js';
+import {
+  type BackfillCursorFile,
+  type Job,
+  type OpenDispatch,
+  applyWindowResult,
+  closeBeyondRetention,
+  openDispatchLines,
+  planDays,
+  planJobs,
+  planWindows,
+  recordDispatchOutcome,
+  saturatedReport,
+  skipLine,
+  stallReport,
+} from '../src/backfill-plan.js';
 import { loadRegistry } from '../src/providers.js';
 import type { ProviderConfig, RawObs } from '../src/types.js';
 
@@ -16,19 +30,21 @@ const DAY = 86_400_000;
 const LIVE_DAY = '2026-09-20';
 const LIVE = dayStartMs(LIVE_DAY);
 const TARGET = dayStartMs('2023-07-06');
+/** The run's clock: the live floor (the oldest event_map shard) is about 45 days back. */
+const NOW = LIVE + 45 * DAY + 10 * 3_600_000;
 const INGEST = '2026-10-04T10:41:00.000Z';
 const day = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 const rows = (n: number): RawObs[] => Array.from({ length: n }, () => ({}) as RawObs);
 const ok = (n: number, overflow = false) => ({ overflow, status: { ok: true, events_returned: n }, obs: rows(n) });
 
 const plan = (cursor: BackfillCursorFile, over: Partial<Parameters<typeof planJobs>[2]> = {}): Job[] =>
-  planJobs([byId('usgs'), byId('emsc'), byId('isc'), byId('jma'), byId('afad')], cursor, { liveDay: LIVE_DAY, liveDayMs: LIVE, targetMs: TARGET, dispatch: null, only: null, ...over });
+  planJobs([byId('usgs'), byId('emsc'), byId('isc'), byId('jma'), byId('afad')], cursor, { liveDay: LIVE_DAY, liveDayMs: LIVE, targetMs: TARGET, nowMs: NOW, dispatch: null, only: null, ...over });
 
 test('plan: a new walk starts at the live edge with its initial window; forward-only and disabled sources ask nothing', () => {
   const cursor: BackfillCursorFile = { targetStart: '2023-07-06', providers: {} };
   const jobs = plan(cursor);
-  // ISC is paused (backfill.enabled false), JMA has no time-range query.
-  assert.deepEqual(jobs.map((j) => j.p.id), ['usgs', 'emsc', 'afad']);
+  // ISC is paused (backfill.enabled false), JMA has no time-range query, AFAD keeps 7 days only (its walk is done, below).
+  assert.deepEqual(jobs.map((j) => j.p.id), ['usgs', 'emsc']);
   const usgs = jobs.find((j) => j.p.id === 'usgs')!;
   assert.equal(day(usgs.endMs), LIVE_DAY);
   assert.equal(usgs.endMs - usgs.startMs, usgs.cfg.initialWindowDays * DAY);
@@ -179,4 +195,110 @@ test('backfill home day (C6): an event a re-merged archive kept off its time-day
   // Read again on its own day: no longer off.
   rememberHomeDay(home, '2024-07-01', off);
   assert.equal(home.has('efd_off'), false);
+});
+
+// --- SHLTR-146: a source's retention (registry retentionDays). AFAD's event API answers from its newest 1,000 events
+// only; an older window answers 0 rows with HTTP 200, which read as "nothing to fill". ---
+
+test('retention: AFAD keeps 7 days in the registry; a dispatch over 2026-06 lists every day as retention and asks nothing', () => {
+  const afad = byId('afad');
+  assert.equal(afad.retentionDays, 7);
+  const nowMs = Date.parse('2026-11-14T16:34:00Z');
+  const cursor: BackfillCursorFile = { targetStart: '2023-07-06', providers: {} };
+  const dispatch = { startMs: dayStartMs('2026-06-01'), endMs: dayStartMs('2026-07-01') };
+  const { jobs, skipped } = planWindows([byId('usgs'), afad], cursor, {
+    liveDay: '2026-09-30', liveDayMs: dayStartMs('2026-09-30'), targetMs: TARGET, nowMs, dispatch, only: new Set(['afad']),
+  });
+  assert.deepEqual(jobs, [], 'no AFAD request');
+  assert.equal(skipped.length, 1);
+  const k = skipped[0]!;
+  assert.deepEqual([k.provider, k.reason, k.retainedFrom, k.walk, k.startMs, k.endMs], ['afad', 'retention', '2026-11-08', false, dispatch.startMs, dispatch.endMs]);
+  const days = planDays(jobs, skipped);
+  assert.equal(days.length, 30);
+  assert.ok(days.every((d) => d.provider === 'afad' && d.action === 'retention'));
+  assert.deepEqual([days[0]!.day, days.at(-1)!.day], ['2026-06-01', '2026-06-30']);
+  assert.match(skipLine(k), /^backfill: afad 2026-06-01\.\.2026-07-01 \(30 d\) skipped \(retention\): afad answers time-range queries for its last 7 days only/);
+  assert.deepEqual(cursor.providers, {}, 'a dispatch moves no cursor');
+  // The same dispatch for a source without a retention is asked as before.
+  const usgs = planWindows([byId('usgs'), afad], cursor, { liveDay: '2026-09-30', liveDayMs: dayStartMs('2026-09-30'), targetMs: TARGET, nowMs, dispatch, only: null });
+  assert.deepEqual(usgs.jobs.map((j) => [j.p.id, j.startMs, j.endMs]), [['usgs', dispatch.startMs, dispatch.endMs]]);
+  assert.deepEqual(usgs.skipped.map((s) => s.provider), ['afad']);
+});
+
+test('retention: a window across the edge is asked from the edge on; a walk wholly before it is done, by retention', () => {
+  const afad = byId('afad');
+  const nowMs = Date.parse('2026-11-14T16:34:00Z');
+  const opts = { liveDay: '2026-11-04', liveDayMs: dayStartMs('2026-11-04'), targetMs: TARGET, nowMs, only: null };
+  // A dispatched 2026-11-01 .. 11-12: the days from 2026-11-08 are asked, 11-01 .. 11-07 are retention.
+  const across = planWindows([afad], { targetStart: '2023-07-06', providers: {} }, { ...opts, dispatch: { startMs: dayStartMs('2026-11-01'), endMs: dayStartMs('2026-11-12') } });
+  assert.deepEqual(across.jobs.map((j) => [day(j.startMs), day(j.endMs), j.cur]), [['2026-11-08', '2026-11-12', null]]);
+  assert.deepEqual(across.skipped.map((s) => [day(s.startMs), day(s.endMs)]), [['2026-11-01', '2026-11-08']]);
+  const days = planDays(across.jobs, across.skipped);
+  assert.deepEqual(days.filter((d) => d.action === 'retention').map((d) => d.day), ['2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06', '2026-11-07']);
+  assert.deepEqual(days.filter((d) => d.action === 'fetch').map((d) => d.day), ['2026-11-08', '2026-11-09', '2026-11-10', '2026-11-11']);
+  // A walk: its next window ends at the live floor, 10 days back; wholly before the edge, so the walk is done.
+  const cursor: BackfillCursorFile = { targetStart: '2023-07-06', providers: { afad: { filledBackTo: '2026-11-04', windowDays: 3, done: false, failures: 0, lastCount: 0, lastRun: '' } } };
+  const walk = planWindows([afad], cursor, { ...opts, dispatch: null });
+  assert.deepEqual(walk.jobs, []);
+  assert.deepEqual(walk.skipped.map((s) => [s.walk, day(s.startMs), day(s.endMs)]), [[true, '2026-11-01', '2026-11-04']]);
+  assert.match(skipLine(walk.skipped[0]!), /; its walk is done$/);
+  assert.deepEqual([cursor.providers.afad!.done, cursor.providers.afad!.stoppedBy, cursor.providers.afad!.filledBackTo], [true, 'retention', '2026-11-04'], 'nothing reads as filled');
+  assert.deepEqual(planWindows([afad], cursor, { ...opts, dispatch: null }), { jobs: [], skipped: [] }, 'a done walk asks nothing and reports nothing');
+});
+
+test('retention: an open dispatched window before the edge leaves the open list; its part inside the retention stays', () => {
+  const nowMs = Date.parse('2026-11-14T16:34:00Z');
+  const providers = [byId('afad'), byId('usgs')];
+  const open: OpenDispatch[] = [
+    { provider: 'afad', start: '2026-06-01T00:00:00.000Z', end: '2026-06-08T00:00:00.000Z', reason: 'failed', error: 'HTTP 503', since: INGEST },
+    { provider: 'afad', start: '2026-11-05T00:00:00.000Z', end: '2026-11-10T00:00:00.000Z', reason: 'overflow', since: INGEST },
+    { provider: 'usgs', start: '2026-06-01T00:00:00.000Z', end: '2026-06-08T00:00:00.000Z', reason: 'failed', error: 'HTTP 503', since: INGEST },
+  ];
+  const r = closeBeyondRetention(open, providers, nowMs);
+  assert.deepEqual(r.open.map((o) => [o.provider, o.start, o.end, o.reason]), [
+    ['afad', '2026-11-08T00:00:00.000Z', '2026-11-10T00:00:00.000Z', 'overflow'],
+    ['usgs', '2026-06-01T00:00:00.000Z', '2026-06-08T00:00:00.000Z', 'failed'],
+  ]);
+  assert.equal(r.closed.length, 2);
+  assert.match(r.closed[0]!, /^backfill: dispatched window 2026-06-01\.\.2026-06-08 \(7 d\) of afad .* closed \(retention\)/);
+  // Nothing of afad's closed part stands on the board any more.
+  assert.deepEqual(openDispatchLines(r.open, new Set(['afad'])).length, 1);
+});
+
+// --- SHLTR-151: a saturated day (a one-day window filled the cap: the day holds the capped rows only) is a block on
+// every run until a remediation edition completes it. ---
+
+test('saturated days: a block until a complete raw of the day is in its current edition; partial or beyond retention: a warning', () => {
+  const nowMs = Date.parse('2026-11-14T16:34:00Z');
+  const cur = (days: string[]) => ({ filledBackTo: '2023-07-06', windowDays: 30, done: true, failures: 0, lastCount: 0, lastRun: '', saturatedDays: days });
+  const walks = [
+    { p: byId('kagsr'), cur: cur(['2025-07-30']) },
+    { p: byId('afad'), cur: cur(['2025-08-11', '2026-06-28']) },
+    { p: byId('usgs'), cur: null },
+  ];
+  const raw = (provider: string, day: string, partial = false, asset = `raw-${provider}-${day}.ndjson.gz`) =>
+    ({ provider, day, tag: `remediation-${day.slice(0, 4)}`, asset, url: '', sha256: 'x', bytes: 1, rows: 1, requests: 24, partial, fetched_at: '2026-10-04T12:00:00.000Z' });
+  const edition = (day: string, from: string[], n = 1) =>
+    ({ day, edition: n, tag: `remediation-${day.slice(0, 4)}`, asset: `events-${day}.e${n}.ndjson.gz`, url: '', sha256: 'y', bytes: 1, built_on: { tag: 'a', asset: 'b', sha256: null }, built_from: from, stats: {} as never, built_at: '' });
+  // Today: AFAD's 2025-08-11 was completed on 2026-10-04; KAGSR's 2025-07-30 never was; AFAD 2026-06-28 (hypothetical)
+  // has no raw and lies before AFAD's retention.
+  const today = { raw: [raw('afad', '2025-08-11')], editions: [edition('2025-08-11', ['raw-afad-2025-08-11.ndjson.gz'])] };
+  const r = saturatedReport(walks, today, nowMs);
+  assert.deepEqual(r.blockers, [
+    'backfill: kagsr 2025-07-30 filled the source\'s page cap even as a one-day window, so the day holds part of its rows until a remediation edition completes it (remediate.yml asks the day again in hour windows; its daily run takes saturated days)',
+  ]);
+  assert.equal(r.warnings.length, 1);
+  assert.match(r.warnings[0]!, /^backfill: afad 2026-06-28 .*afad answers time-range queries for its last 7 days only .*: it cannot be refilled$/);
+  // A raw uploaded but in no edition yet (another source of the day failed): still a block.
+  const unbuilt = { raw: [...today.raw, raw('kagsr', '2025-07-30')], editions: today.editions };
+  assert.equal(saturatedReport(walks, unbuilt, nowMs).blockers.length, 1);
+  // The edition built from it: done. A partial one (a 5-minute window still full): a warning, never a block.
+  const done = { raw: unbuilt.raw, editions: [...today.editions, edition('2025-07-30', ['raw-kagsr-2025-07-30.ndjson.gz'])] };
+  assert.deepEqual(saturatedReport(walks, done, nowMs).blockers, []);
+  const partial = { raw: [...today.raw, raw('kagsr', '2025-07-30', true)], editions: done.editions };
+  const p = saturatedReport(walks, partial, nowMs);
+  assert.deepEqual(p.blockers, []);
+  assert.match(p.warnings.join('\n'), /kagsr 2025-07-30 .*its remediation edition is partial too/);
+  // The parser of the health board files the block under kagsr: walks:backfill:kagsr.
+  assert.match(r.blockers[0]!, /^backfill: kagsr /);
 });

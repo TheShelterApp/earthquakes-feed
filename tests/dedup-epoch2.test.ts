@@ -386,7 +386,7 @@ test('density as of the pair, time cap: epoch 1 is unchanged (the swarm guard ke
   for (const dt of [3_000, 14_000, 16_000]) assert.equal(together(remerge(aftershockPair(dt), 1).own, 'usgs:us7000mod1', 'emsc:20250811_mod1'), false, `${dt} ms`);
 });
 
-test('live Resolver: the epoch’s rules (none at epoch 1, the default while REMERGE_EPOCH is 1): an ISC copy in a swarm cell joins in a live heal from epoch 2', () => {
+test('live Resolver: the epoch’s rules (none at epoch 1; the default is REMERGE_EPOCH’s): an ISC copy in a swarm cell joins in a live heal from epoch 2', () => {
   const heal = (rules?: IdentityRules): boolean => {
     const map = new Map<string, EventNode>();
     for (const n of split([...swarm(39.25, 28.05, T), usgs('us6000qzh9', { mag: 4.6, magType: 'mb' }), isc('643893330', 'NEIC', { mag: 4.7 })])) map.set(n.feedId, n);

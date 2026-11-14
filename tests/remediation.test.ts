@@ -38,6 +38,7 @@ import {
   remediationTasks,
   type WindowFetcher,
 } from '../src/remediation.js';
+import { beyondRetention } from '../src/retention.js';
 import type { EventNode, RawObs } from '../src/types.js';
 
 // FEED-DQ-1 / DQ-3: saturated backfill days are asked again in sub-day windows and published as additive day editions
@@ -415,4 +416,53 @@ test('index text: the queue is kept; the index of 2026-10-04 (no queue, no reaso
   const old = { version: 1 as const, raw: [], editions: [] };
   assert.deepEqual(queuePlan(old, new Set(['2026-07-01'])), { tasks: [], editionOnly: [], waiting: [] });
   assert.deepEqual(pruneQueue(old), []);
+});
+
+// --- SHLTR-146: AFAD answers from its newest 1,000 events only. The seam refill of 2026-07-01..03 (queued for AFAD among
+// 15 sources, taken once July is archived) must not ask it, must not read its empty answer as "nothing to fill", and
+// must say so in the edition; the queue must not wait for AFAD forever. ---
+
+test('retention: the refill queue skips AFAD for a day older than its retention, notes it in the edition, and lets the day go', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'efd-seam-'));
+  try {
+    const afad = registry.find((p) => p.id === 'afad')!;
+    const deps0 = seamDeps(dir, seamArchive(), stubSources([]));
+    const skip = (provider: string, day: string): boolean => beyondRetention(registry.find((p) => p.id === provider)!, day, deps0.nowMs);
+    assert.ok(skip('afad', SEAM) && !skip('usgs', SEAM));
+    const idx = emptyRemediationIndex();
+    enqueueRefill(idx, '2026-06-29..2026-06-30', ['afad', 'usgs'], 'seam', '2026-11-08T00:00:00.000Z');
+    enqueueRefill(idx, '2026-06-28', ['afad'], 'seam', '2026-11-08T00:00:00.000Z');
+    const archived = new Set(ARCHIVES[0]!.days);
+    const plan = queuePlan(idx, archived, skip);
+    // AFAD rides along with the days that are built (so the edition notes it); alone (06-28) it is no work at all.
+    assert.deepEqual(plan.tasks.map((t) => `${t.provider}:${t.day}`), ['afad:2026-06-29', 'usgs:2026-06-29', 'afad:2026-06-30', 'usgs:2026-06-30']);
+    const asked: string[] = [];
+    const rows = [usgsRow('ci1', S0 + 2 * HOUR)];
+    const fetchWindow: DayRunDeps['fetchWindow'] = async (p, s, e, m) => {
+      asked.push(p.id);
+      return stubSources(rows)(p, s, e, m);
+    };
+    const r = await remediateDay(SEAM, plan.tasks.filter((t) => t.day === SEAM), idx, { ...deps0, fetchWindow });
+    assert.deepEqual(r.failed, []);
+    assert.ok(asked.length > 0 && asked.every((id) => id === 'usgs'), 'no AFAD request');
+    assert.deepEqual(r.notFetched.map((n) => [n.provider, n.reason, n.retained_from]), [['afad', 'retention', '2026-11-02']]);
+    const ed = r.edition!;
+    assert.deepEqual(ed.built_from, ['raw-usgs-2026-06-29.ndjson.gz'], 'no AFAD raw: nothing reads as "AFAD had nothing that day"');
+    assert.deepEqual(ed.not_fetched, r.notFetched);
+    assert.match(ed.not_fetched![0]!.note, /^afad answers time-range queries for its last 7 days only/);
+    assert.match(r.line!, /; not asked \(retention\): afad$/);
+    assert.ok(!idx.raw.some((x) => x.provider === 'afad'));
+    // Asked again with AFAD alone (a later run): no second edition of a finished day.
+    const again = await remediateDay(SEAM, [{ provider: 'afad', day: SEAM, reason: 'seam' }], idx, { ...deps0, fetchWindow });
+    assert.equal(again.edition, undefined);
+    assert.equal(idx.editions.length, 1);
+    // The queue: 06-28 (AFAD alone) and 06-29 are done; 06-30 is left. Without the retention the queue would wait for
+    // AFAD's raw for good.
+    assert.deepEqual(pruneQueue(structuredClone(idx)).map((e) => e.range), []);
+    assert.deepEqual(pruneQueue(idx, skip).map((e) => e.range), ['2026-06-28']);
+    assert.deepEqual(idx.refill_queue!.map((e) => e.range), ['2026-06-30..2026-06-30']);
+    assert.equal(afad.retentionDays, 7);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

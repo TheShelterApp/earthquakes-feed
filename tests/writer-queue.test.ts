@@ -40,6 +40,9 @@ test('classifyRun: the writing job decides; before it is listed the run is about
   assert.equal(c('archive.yml', [job('gate', 'completed', 'failure')]), 'refused');
   assert.equal(c('backfill.yml', [job('gate', 'completed', 'success'), job('backfill', 'completed', 'skipped')]), 'done');
   assert.equal(c('backfill.yml', [job('gate', 'completed', 'success'), { name: 'other', status: 'completed', conclusion: 'skipped' }]), 'refused');
+  // backfill's dry run: its gate and writing job are skipped, so it never counts as queued.
+  assert.equal(c('backfill.yml', [job('plan', 'in_progress'), job('gate', 'completed', 'skipped'), job('backfill', 'completed', 'skipped')]), 'done');
+  assert.equal(c('backfill.yml', [job('plan', 'in_progress'), job('gate', 'completed', 'skipped')]), 'refused');
   assert.equal(c('derive.yml', [], 'completed'), 'done');
   // Ghosts: GitHub lists a few runs `queued` for weeks with no job (backfill 37655510824 of 2026-10-07).
   assert.equal(c('backfill.yml', [], 'queued', STALE_RUN_MS / 60_000 + 1), 'stale');

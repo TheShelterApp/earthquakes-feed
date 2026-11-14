@@ -20,6 +20,9 @@ export interface ProviderCursor {
   lastError?: string;
   /** Ingest time of the first failure of the current streak. */
   failingSince?: string;
+  /** Why a walk is `done` before reaching the target: `retention`, the source no longer answers for the days it
+   *  would ask next (registry retentionDays, SHLTR-146). Absent: done at the target or the source's earliest day. */
+  stoppedBy?: 'retention';
 }
 
 /** From this many consecutive failures a run prints a warning annotation for the provider. */

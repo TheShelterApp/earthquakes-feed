@@ -1252,7 +1252,16 @@ does not move the walk's cursor. Pace them: at most 2 writer runs wait for the `
 naming what waits (dispatch it again once one has finished, or with `force=true`, which every aggregate run then waits
 behind); the hourly walk is refused with a warning only and walks on at its next tick. A backfill run holds the group for
 seconds: it checks out only the index files and the months of its windows (SHLTR-149, after 47 dispatches of a usgs
-refill held the live feed 1 h 47 min on 2026-11-08).
+refill held the live feed 1 h 47 min on 2026-11-08). A dispatch with `dry_run=true` only prints the plan (each window
+to fetch, and each provider and day with `fetch` or `retention`) and writes, asks and uploads nothing; it takes no
+writer lock.
+
+**Retention.** A source whose registry entry has `retentionDays` (AFAD: 7, *Turkey (AFAD)*) answers a time-range query
+only for that many recent days; an older window answers no rows, which used to be recorded as filled. The planner
+(`src/backfill-plan.ts` `planWindows`) never asks such a source for a day before its retention: the window, or the part
+of it before the edge, is skipped with the reason `retention` (a `::notice::` line per window), a walk whose next
+window lies wholly before the edge is done (`stoppedBy: "retention"`), and an open dispatched window before the edge is
+closed. Nothing of it reaches the health board: it is not a block, nothing more can be fetched.
 
 A source's walk reports its failures: a window that fails is halved for the next run (a window whose answer is too
 large to stream within the timeout fails as a timeout, never as an overflow), each failure is logged with its error,
@@ -1617,7 +1626,10 @@ frozen days not archived yet (late ComCat):
   run once a day (04:43 UTC, the queue only), takes the queue's days whose month is archived and leaves the others
   queued; a day leaves the queue once every source of its entry has a raw asset of it and its current edition is
   built from all of the day's raws. 2026-07-01…07-03 are queued so and are taken by the first scheduled run after
-  `archive` rolls July (on or after 2026-11-29);
+  `archive` rolls July (on or after 2026-11-29). A source the day is older than the retention of (registry
+  `retentionDays`; AFAD, SHLTR-146) is not asked and needs no raw asset: the day is built from its other sources and
+  the edition names it in `not_fetched` (`provider`, `reason: "retention"`, `retained_from`, `note`), so 2026-07-01…07-03
+  carry `usgs`, `emsc` and the other 12 sources, not AFAD;
 - a run works day by day (ascending, at most `max_days`); each source of the day is asked again for the whole day in
   6-hour windows, each halved while its answer fills the cap (down to 5 minutes; a window still full there marks the
   day `partial`), one request at a time, at least 1.1 s apart. When a source fails, the day's successful raw assets are
@@ -1673,7 +1685,8 @@ checksum, `built_from`: the raw assets, `reason`: `saturated` or `seam` (absent 
 `context`: by day, the archive asset or the neighbour's edition the build read, with its checksum (absent on the
 entries of 2026-10-04: archives only), and `stats`: events before and after, new, retired, off the day, rows changed /
 unchanged, rows that joined a neighbouring day, AFAD rows re-read, rows per source before and after; `reason`
-`late_usgs` on the late ComCat entries). The archived day, its `archive-YYYY-MM` asset, the frozen partition and the
+`late_usgs` on the late ComCat entries; `not_fetched`, the sources of the day's tasks not asked, on an edition built
+without one). The archived day, its `archive-YYYY-MM` asset, the frozen partition and the
 manifests (`manifest.json` and the signed v2 manifest, which list neither) are unchanged: a consumer that wants the
 repaired day reads the current edition (the highest `edition` of the day not `withdrawn`) instead of the archived day or
 the frozen partition, as the statistics builder does.
@@ -1965,6 +1978,26 @@ that history can shift a feature's time by +3 h when its chosen provider is `afa
 drop EMSC's `auth: "AFAD"` copy of it. The feed's own readers of that history (the offline re-merge, the statistics
 builder) apply this through `normalizeRows` (src/row-normalize.ts, below *ISC*): an AFAD row in an event of AFAD's
 rows only is re-timed; one that joined another source's event at its wrong time is left there.
+
+**Retention (SHLTR-146).** AFAD's event service (`apiv2/event/filter`) answers a time-range query from its newest
+1,000 events only. Measured on 2026-11-14 16:34 UTC with one-day queries 1.5 s apart: every day from 2026-11-03 on
+answered in full (37 to 117 rows a day), 2026-11-02 answered its last 11 events (21:18:10 on), every older day
+(2026-11-01, 10-31, 10-28, 10-24, 10-17, 09-30, 08-01, 2025-08-11) answered 0 rows with HTTP 200; the days from
+2026-11-02 21:18 on sum to exactly 1,000 rows, a query for 2026-11-02 .. 11-15 with `limit=2000` returns exactly those
+1,000, and one for 2026-01-01 .. 11-02 21:00 with `minmag=4` returns none. At AFAD's rate then (about 85 events a day)
+that is about 11.8 days; a swarm shortens it (the Sındırgı sequence listed 400–600 events a day). On 2026-10-04 the
+same service still answered 2025-08 in full (the remediation of 23 Sındırgı days), so the limit is newer than that;
+on 2026-11-08 the seam days 2026-06-28..30 already answered 0 rows. The registry says `retentionDays: 7` for `afad`
+(src/retention.ts): backfill and remediation never ask it for a day before the last 7 whole days. A backfill window
+older than that is skipped with the reason `retention` (the run's log and the dry run's plan list it day by day; a walk
+whose next window lies wholly before it is done with `stoppedBy: "retention"` in `knowledge/index/backfill.json`; a
+dispatched window that is still open there is closed), and a remediation day older than that is built without AFAD,
+its edition naming it in `not_fetched` (*Remediation editions*). Neither is a block on the health board: nothing more
+can be fetched. The live path asks AFAD for its last 2 days and is not affected. Since every backfill window lies
+before the live floor (the oldest `event_map` day, about 45 days back) and every queued refill day is archived, AFAD's
+history before the live floor can no longer be refilled from AFAD at all: what the archives and frozen partitions hold
+is all there is. The AFAD raw assets of the seam editions of 2026-06-28..30 (`raw-afad-2026-06-2{8,9}`,
+`raw-afad-2026-06-30`, 0 rows each, fetched 2026-11-08) are such retention answers, not quiet days.
 
 ## ISC (International Seismological Centre)
 

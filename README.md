@@ -223,7 +223,12 @@ open, reachable source appears.
   frozen day partitions. Every source with a time-range query reached the target
   (2023-07-06) in July 2026 except ISC, whose walk is paused; a backfilled row is the
   source's solution when it was fetched, while the log holds each report as first seen
-  since 2026-07-05 (`scripts/first-observations.ts`; [APIs.md](APIs.md#history-and-backfill)).
+  since 2026-07-05 (`scripts/first-observations.ts`; [APIs.md](APIs.md#history-and-backfill)). A source that answers
+  for its recent past only (registry `retentionDays`; AFAD since late 2026: its newest 1,000 events, about 12 days) is
+  never asked for an older day: backfill skips such windows with the reason `retention` and remediation builds the day
+  without it (`not_fetched` in the edition), instead of recording its empty answer as filled
+  ([APIs.md](APIs.md#turkey-afad)). `gh workflow run backfill.yml -f dry_run=true` (with `starttime`, `endtime`,
+  `providers`) prints the plan day by day and writes, asks and uploads nothing.
   History before 2023-07-06 goes elsewhere: the `history` walk (switched by `providers/history.json` `enabled`; on since
   2026-10-01 for its first era, 2022-07-01 → 2023-07-06: ComCat in edition 1, the 17 FDSN sources that reached the 3-year
   target in edition 2; era A takes the same 17 back to 2000-01-01; era B is ComCat alone, M ≥ 4.5 only, back to

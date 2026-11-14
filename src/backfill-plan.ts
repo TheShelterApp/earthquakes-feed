@@ -2,6 +2,7 @@ import { type BackfillCfg, backfillCfg } from './backfill-cfg.js';
 import { type ProviderCursor, STALL_ALARM_FAILURES, advance, narrowAfterOverflow, newCursor, nextWindow, recordAnswer, recordFailure, stallLevel } from './backfill-cursor.js';
 import { eventDayKey } from './bitemporal.js';
 import type { WindowOutcome } from './providers.js';
+import { RETENTION, retainedFrom, retainedFromMs, retentionNote } from './retention.js';
 import type { EventNode, ProviderConfig } from './types.js';
 
 /**
@@ -46,33 +47,90 @@ export interface Job {
   endMs: number;
 }
 
+/** A window, or the part of one, the run does not ask for: older than the source's retention (SHLTR-146). */
+export interface PlanSkip {
+  provider: string;
+  /** Half-open [startMs, endMs). */
+  startMs: number;
+  endMs: number;
+  reason: typeof RETENTION;
+  /** The first whole day the source still answers for. */
+  retainedFrom: string;
+  note: string;
+  /** A walk's window (its cursor is then done: nothing older can be fetched), not a dispatched one. */
+  walk: boolean;
+}
+
 /**
  * Each eligible provider's window for this run. A dispatched range (BACKFILL_STARTTIME/ENDTIME) is a one-off fill and
  * leaves every cursor alone; otherwise a provider without a cursor gets a new one (added to `cursor`), a finished or
  * windowless walk asks nothing.
+ *
+ * A source with a retention (registry `retentionDays`, src/retention.ts) is never asked for a day before it: such a
+ * window is a `skipped` entry with the reason `retention`, never a job, so no request is made and nothing reads as
+ * filled; a window across the edge is asked from the edge on. A walk whose next window lies wholly before the edge
+ * is done (`stoppedBy: 'retention'`): the source no longer holds anything older.
  */
-export function planJobs(
+export function planWindows(
   providers: readonly ProviderConfig[],
   cursor: BackfillCursorFile,
-  opts: { liveDay: string; liveDayMs: number; targetMs: number; dispatch: { startMs: number; endMs: number } | null; only: ReadonlySet<string> | null },
-): Job[] {
+  opts: { liveDay: string; liveDayMs: number; targetMs: number; nowMs: number; dispatch: { startMs: number; endMs: number } | null; only: ReadonlySet<string> | null },
+): { jobs: Job[]; skipped: PlanSkip[] } {
   const jobs: Job[] = [];
+  const skipped: PlanSkip[] = [];
   for (const p of providers) {
     if (opts.only && !opts.only.has(p.id)) continue;
     const cfg = backfillCfg(p);
     if (!cfg) continue;
-    if (opts.dispatch) {
-      jobs.push({ p, cfg, cur: null, startMs: opts.dispatch.startMs, endMs: opts.dispatch.endMs });
-      continue;
+    let cur: ProviderCursor | null = null;
+    let win: { startMs: number; endMs: number } | null;
+    if (opts.dispatch) win = { ...opts.dispatch };
+    else {
+      cur = cursor.providers[p.id] ??= newCursor(opts.liveDay, cfg);
+      if (cur.done) continue;
+      win = nextWindow(cur, cfg, opts.targetMs, opts.liveDayMs);
+      if (!win) continue;
     }
-    const cur = (cursor.providers[p.id] ??= newCursor(opts.liveDay, cfg));
-    if (cur.done) continue;
-    const win = nextWindow(cur, cfg, opts.targetMs, opts.liveDayMs);
-    if (!win) continue;
+    const edgeMs = retainedFromMs(p, opts.nowMs);
+    if (edgeMs != null && win.startMs < edgeMs) {
+      const skip: PlanSkip = {
+        provider: p.id, startMs: win.startMs, endMs: Math.min(win.endMs, edgeMs), reason: RETENTION, retainedFrom: retainedFrom(p, opts.nowMs)!,
+        note: retentionNote(p, opts.nowMs), walk: cur != null,
+      };
+      skipped.push(skip);
+      if (win.endMs <= edgeMs) {
+        if (cur) {
+          cur.done = true;
+          cur.stoppedBy = RETENTION;
+        }
+        continue;
+      }
+      win = { startMs: edgeMs, endMs: win.endMs };
+    }
     jobs.push({ p, cfg, cur, ...win });
   }
-  return jobs;
+  return { jobs, skipped };
 }
+
+/** planWindows' jobs alone. */
+export const planJobs = (...args: Parameters<typeof planWindows>): Job[] => planWindows(...args).jobs;
+
+/** One line per provider and UTC day of a plan: `fetch` (a job's day) or `retention` (a skipped day). */
+export function planDays(jobs: ReadonlyArray<Pick<Job, 'p' | 'startMs' | 'endMs'>>, skipped: readonly PlanSkip[]): { provider: string; day: string; action: 'fetch' | typeof RETENTION }[] {
+  const out: { provider: string; day: string; action: 'fetch' | typeof RETENTION }[] = [];
+  const days = (s: number, e: number): string[] => {
+    const r: string[] = [];
+    for (let ms = Date.parse(`${eventDayKey(s)}T00:00:00Z`); ms < e; ms += DAY) r.push(eventDayKey(ms));
+    return r;
+  };
+  for (const k of skipped) for (const day of days(k.startMs, k.endMs)) out.push({ provider: k.provider, day, action: RETENTION });
+  for (const j of jobs) for (const day of days(j.startMs, j.endMs)) out.push({ provider: j.p.id, day, action: 'fetch' });
+  return out.sort((a, b) => (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+}
+
+/** The log line of a skipped window. */
+export const skipLine = (k: PlanSkip): string =>
+  `backfill: ${k.provider} ${windowText(k)} skipped (${k.reason}): ${k.note}${k.walk ? '; its walk is done' : ''}`;
 
 export type WindowVerdict =
   /** Overflow with room to narrow: nothing ingested, the window halves for the next run. */
@@ -196,6 +254,28 @@ export function recordDispatchOutcome(
   else if (verdict.kind === 'failed') rest.push({ ...range, reason: 'failed', error: verdict.error.slice(0, 200) });
   else if (opts.untouchable) rest.push({ ...range, reason: 'held' });
   return rest;
+}
+
+/**
+ * The open dispatched windows without their parts before a source's retention (SHLTR-146): those can never be filled,
+ * so they leave the list (with a log line each) instead of standing on the board for good.
+ */
+export function closeBeyondRetention(open: readonly OpenDispatch[], providers: readonly ProviderConfig[], nowMs: number): { open: OpenDispatch[]; closed: string[] } {
+  const out: OpenDispatch[] = [];
+  const closed: string[] = [];
+  for (const o of open) {
+    const p = providers.find((x) => x.id === o.provider);
+    const edgeMs = p ? retainedFromMs(p, nowMs) : null;
+    const s = Date.parse(o.start);
+    const e = Date.parse(o.end);
+    if (!p || edgeMs == null || s >= edgeMs) {
+      out.push(o);
+      continue;
+    }
+    closed.push(`backfill: dispatched window ${windowText({ startMs: s, endMs: Math.min(e, edgeMs) })} of ${o.provider} (open since ${o.since}) closed (${RETENTION}): ${retentionNote(p, nowMs)}`);
+    if (e - edgeMs >= MIN_OPEN_MS) out.push({ ...o, start: new Date(edgeMs).toISOString() });
+  }
+  return { open: out, closed };
 }
 
 /** The marker lines of the open dispatched windows of the given providers (each names its provider id). */

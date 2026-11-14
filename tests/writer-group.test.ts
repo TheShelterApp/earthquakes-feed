@@ -235,7 +235,19 @@ test('workflows: every writer but aggregate passes the gate first, outside every
     assert.ok(gate, `${f}: no gate job`);
     // The jobs API names a job by its id when it has no `name:`; scripts/writer-queue.mjs looks the jobs up by id.
     for (const text of [gate, lock]) assert.doesNotMatch(text, /\n {4}name: /, `${f}: a job display name`);
-    assert.deepEqual(Object.keys(jobs), [GATE_JOB, w.lockJob], `${f}: the gate, then the writing job`);
+    // backfill's dry run (SHLTR-146) is a job of its own, only on dry_run, outside every group, read only; the gate
+    // (and so the writing job) is skipped then.
+    const dry = jobs['plan'];
+    if (dry) {
+      assert.equal(f, 'backfill.yml', `${f}: a dry-run job`);
+      assert.match(dry, /^ {2}plan:\n {4}if: \$\{\{ inputs\.dry_run \}\}\n/, `${f}: the dry run only on dry_run`);
+      assert.doesNotMatch(dry, /concurrency:/, `${f}: the dry run waits in no group`);
+      assert.match(dry, /\n {4}permissions:\n {6}contents: read\n {4}steps:/, `${f}: the dry run reads only`);
+      assert.doesNotMatch(dry, /git (commit|push)|push-data\.sh|walk-blocked-/, `${f}: the dry run writes nothing and uploads no marker`);
+      assert.match(dry, /\n {10}BACKFILL_PHASE: plan\n/, f);
+      assert.match(gate, /^ {2}gate:\n {4}if: \$\{\{ !inputs\.dry_run \}\}\n/, `${f}: no gate (and no writing job) on a dry run`);
+    }
+    assert.deepEqual(Object.keys(jobs).filter((j) => j !== 'plan'), [GATE_JOB, w.lockJob], `${f}: the gate, then the writing job`);
     assert.doesNotMatch(gate, /concurrency:/, `${f}: the gate must not wait in any group`);
     assert.match(gate, /\n {4}permissions:\n {6}contents: read\n(?: {6}#.*\n)* {6}actions: read\n/, `${f}: the gate reads the runs (actions: read)`);
     assert.match(gate, /\n {6}admit: \$\{\{ steps\.gate\.outputs\.admit \}\}\n/, f);

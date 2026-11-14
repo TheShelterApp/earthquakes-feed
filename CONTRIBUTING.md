@@ -32,6 +32,9 @@ Adding one is a single entry in [`providers/registry.json`](providers/registry.j
 - `"lookbackDays": 7` for an FDSN source that publishes many events days after their origin
   (e.g. NRCan) — the live path asks it for that many days instead of 2 (at most 7, the
   window in which reports are matched by time and place).
+- `"retentionDays": 7` for a source whose time-range query answers only its recent past (AFAD: its newest 1,000
+  events) — backfill and remediation never ask it for an older day and report such windows as `retention`, not as
+  filled (APIs.md *Turkey (AFAD)*).
 - `"fallbackBase": "<query URL>"` for an FDSN source with a second host of the same catalogue
   under the same event ids (NOA) — asked when `base` fails or answers with no rows.
 - `"activityBudgetHours": 72` for a source that is often quiet for a day or two, `null` for one

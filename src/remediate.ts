@@ -12,6 +12,7 @@ import { DATA_DIR, dataPaths } from './config.js';
 import { DryRunStore, GitHubStore, type HistoryStore, LocalStore } from './history-store.js';
 import { FROZEN_AFTER_DAYS, frozenBefore as frozenBeforeAt } from './partitions.js';
 import { partitionBlobs } from './stats-history.js';
+import { RETENTION, beyondRetention, retainedFrom, retentionNote } from './retention.js';
 import { type WindowOutcome, fetchProviderWindow, loadRegistry } from './providers.js';
 import {
   type AssetRef,
@@ -20,6 +21,7 @@ import {
   type EditionStats,
   type LateUsgsDiff,
   type LateUsgsMode,
+  type NotFetched,
   type RawRef,
   type RemediationIndex,
   type RemediationReason,
@@ -54,6 +56,7 @@ import {
   remediationTag,
   remediationTasks,
   tasksByDay,
+  unbuiltRaws,
 } from './remediation.js';
 import type { EventNode, ProviderConfig, RawObs } from './types.js';
 
@@ -173,6 +176,8 @@ export interface DayRunResult {
   edition?: EditionRef;
   /** The raws uploaded (with or without an edition). */
   raws: RawRef[];
+  /** Sources of the day's tasks not asked (beyond their retention, SHLTR-146); an edition built carries them. */
+  notFetched: NotFetched[];
   failed: string[];
   line?: string;
 }
@@ -201,7 +206,7 @@ function readIndexed(store: HistoryStore, ref: { tag: string; asset: string; sha
  * Mutates `idx` (new raw and edition entries).
  */
 export async function remediateDay(day: string, tasks: readonly DayTask[], idx: RemediationIndex, deps: DayRunDeps): Promise<DayRunResult> {
-  const res: DayRunResult = { day, raws: [], failed: [] };
+  const res: DayRunResult = { day, raws: [], notFetched: [], failed: [] };
   const nowIso = new Date(deps.nowMs).toISOString();
   const reason: RemediationReason =
     tasks.some((t) => t.reason === 'seam') || (!tasks.length && dayRaws(idx, day).some((r) => r.reason === 'seam')) ? 'seam' : tasks.some((t) => t.reason === 'late_usgs') ? 'late_usgs' : 'saturated';
@@ -234,12 +239,17 @@ export async function remediateDay(day: string, tasks: readonly DayTask[], idx: 
     return res;
   }
 
-  // 1) The sources, one after another.
+  // 1) The sources, one after another. A source the day is older than the retention of (registry retentionDays,
+  //    SHLTR-146) is not asked: it would answer with nothing, which is not "nothing to fill". It is noted instead.
   const fetched: { task: DayTask; rows: RawObs[]; requests: number; partial: boolean; windows: Awaited<ReturnType<typeof fetchDayInWindows>>['windows'] }[] = [];
   for (const t of tasks) {
     const p = deps.registry.find((x) => x.id === t.provider);
     if (!p) {
       res.failed.push(`${t.provider}:${day}: not in the registry`);
+      continue;
+    }
+    if (beyondRetention(p, day, deps.nowMs)) {
+      res.notFetched.push({ provider: p.id, reason: RETENTION, retained_from: retainedFrom(p, deps.nowMs)!, note: retentionNote(p, deps.nowMs) });
       continue;
     }
     const cfg = backfillCfg(p);
@@ -328,6 +338,8 @@ export async function remediateDay(day: string, tasks: readonly DayTask[], idx: 
   const fetchedProviders = new Set(fetched.map((f) => f.task.provider));
   const others = dayRaws(idx, day).filter((r) => !fetchedProviders.has(r.provider));
   if (!fetched.length && !others.length) return res;
+  // Every task skipped and the current edition already built from every raw: nothing new to build.
+  if (!fetched.length && tasks.length && res.notFetched.length === tasks.length && currentEdition(idx, day) && unbuiltRaws(idx, day).length === 0) return res;
   const rows: RawObs[] = fetched.flatMap((f) => f.rows);
   for (const r of others) rows.push(...parseRawText(readIndexed(deps.store, r, deps.work)).rows);
 
@@ -356,12 +368,16 @@ export async function remediateDay(day: string, tasks: readonly DayTask[], idx: 
     reason,
     context: contextRefs,
     stats: built.stats, built_at: nowIso,
+    ...(res.notFetched.length ? { not_fetched: res.notFetched } : {}),
   };
   idx.editions.push(ed);
   // One late_usgs entry per day in the index: the earlier ones (and their raws) leave it, their assets stay.
   if (late) res.pruned = pruneLateUsgs(idx, ed);
   res.edition = ed;
-  res.line = summaryLine(day, `${tag}/${edName}`, fetched, built.stats) + (res.late ? `; late ComCat: ${lateLine(res.late)}` : '');
+  res.line =
+    summaryLine(day, `${tag}/${edName}`, fetched, built.stats) +
+    (res.late ? `; late ComCat: ${lateLine(res.late)}` : '') +
+    (res.notFetched.length ? `; not asked (${RETENTION}): ${res.notFetched.map((n) => n.provider).join(', ')}` : '');
   return res;
 }
 
@@ -462,7 +478,13 @@ async function main(): Promise<void> {
   }
 
   const done = new Set(idx.raw.map((r) => `${r.provider}:${r.day}`));
-  const plan = queuePlan(idx, archivedDays);
+  // A source-day older than the source's retention (registry retentionDays, SHLTR-146) is never asked; the queue counts
+  // it as done and an edition built for the day names it in `not_fetched`.
+  const skip = (provider: string, day: string): boolean => {
+    const p = registry.find((x) => x.id === provider);
+    return p != null && beyondRetention(p, day, nowMs);
+  };
+  const plan = queuePlan(idx, archivedDays, skip);
   let tasks: DayTask[] = [...(queueOnly ? [] : remediationTasks(cursor, frozenBefore, done)), ...plan.tasks];
   let editionOnly = plan.editionOnly;
   if (process.env.REMEDIATION_DAYS) {
@@ -480,6 +502,7 @@ async function main(): Promise<void> {
   const report = {
     done: [] as string[],
     failed: [] as string[],
+    not_fetched: [] as string[],
     pending: days.length - runDays.length,
     waiting: plan.waiting,
     days: [] as { day: string; edition: string | null; raws: string[]; stats: EditionStats | null; failed: string[] }[],
@@ -498,6 +521,10 @@ async function main(): Promise<void> {
     for (const day of runDays) {
       const r = await remediateDay(day, byDay.get(day) ?? [], idx, { store, registry, fetchWindow: fetchProviderWindow, archives, arch, work, nowMs, seqMarker: head.seq, spacingMs: SPACING_MS });
       report.failed.push(...r.failed);
+      for (const n of r.notFetched) {
+        report.not_fetched.push(`${n.provider}:${day}: ${n.note}`);
+        console.log(`::notice::remediate: ${n.provider}:${day} not asked (${n.reason}): ${n.note}`);
+      }
       if (r.line) {
         report.done.push(r.line);
         console.log(`remediate: ${r.line}`);
@@ -555,7 +582,7 @@ async function main(): Promise<void> {
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
-  report.queue_done = pruneQueue(idx).map((e) => `${e.range} (${e.providers.join(',')})`);
+  report.queue_done = pruneQueue(idx, skip).map((e) => `${e.range} (${e.providers.join(',')})`);
   report.queue = idx.refill_queue ?? [];
   const text = indexText(idx);
   const changed = text !== before;

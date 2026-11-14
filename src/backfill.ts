@@ -6,11 +6,14 @@ import { backfillCfg } from './backfill-cfg.js';
 import {
   type BackfillCursorFile,
   applyWindowResult,
+  closeBeyondRetention,
   homeDayOf,
   openDispatchLines,
-  planJobs,
+  planDays,
+  planWindows,
   recordDispatchOutcome,
   rememberHomeDay,
+  skipLine,
   sparseMonthPatterns,
   stallReport,
   windowDays,
@@ -29,6 +32,7 @@ import {
   type Inventory,
 } from './partitions.js';
 import { activeProviders, fetchProviderWindow, loadRegistry, priorityMap, configMap } from './providers.js';
+import { RETENTION } from './retention.js';
 import { assertCheckedOut, isSparseCheckout, treeNames } from './sparse-checkout.js';
 import { byIngestOrder, emptyTally, screen } from './quality.js';
 import type { EventNode, Head, RawObs } from './types.js';
@@ -117,17 +121,40 @@ async function main(): Promise<void> {
   const dispatchEnd = process.env.BACKFILL_ENDTIME ? Date.parse(process.env.BACKFILL_ENDTIME) : null;
   const onlyProviders = process.env.BACKFILL_PROVIDERS ? new Set(process.env.BACKFILL_PROVIDERS.split(',')) : null;
 
-  // 1) Decide each provider's window for this run (backfill-plan.ts planJobs). Dispatch is a one-off fill of an
+  // 1) Decide each provider's window for this run (backfill-plan.ts planWindows). Dispatch is a one-off fill of an
   // explicit range — it must NOT move the auto-cursor, or it leaves a gap (the auto-walk would skip the range between
   // it and the live edge).
+  // A source with a retention (registry retentionDays, SHLTR-146) is never asked for a day before it: those windows
+  // are `skipped` with the reason `retention` and reported as such, never as filled.
   const isDispatch = dispatchStart != null && dispatchEnd != null;
-  const jobs = planJobs(providers, cursor, {
+  const { jobs, skipped } = planWindows(providers, cursor, {
     liveDay,
     liveDayMs,
     targetMs,
+    nowMs,
     dispatch: isDispatch ? { startMs: dispatchStart, endMs: dispatchEnd } : null,
     only: onlyProviders,
   });
+
+  // backfill.yml's dry run (input dry_run): the plan, day by day, and nothing else (no write, no request).
+  if (process.env.BACKFILL_PHASE === 'plan') {
+    for (const j of jobs) console.log(`backfill plan: ${j.p.id} ${windowText(j)} fetch${j.cur ? ` (walk at ${j.cur.filledBackTo}, ${j.cur.windowDays}-day window)` : ' (dispatched)'}`);
+    for (const k of skipped) console.log(`backfill plan: ${skipLine(k).replace(/^backfill: /, '')}`);
+    for (const d of planDays(jobs, skipped)) console.log(`backfill plan: ${d.provider} ${d.day} ${d.action}`);
+    const out = process.env.BACKFILL_PLAN_OUT;
+    if (out) {
+      const plan = {
+        live_day: liveDay,
+        dispatch: isDispatch ? { start: new Date(dispatchStart).toISOString(), end: new Date(dispatchEnd).toISOString() } : null,
+        jobs: jobs.map((j) => ({ provider: j.p.id, start: new Date(j.startMs).toISOString(), end: new Date(j.endMs).toISOString(), walk: j.cur != null })),
+        skipped: skipped.map((k) => ({ provider: k.provider, start: new Date(k.startMs).toISOString(), end: new Date(k.endMs).toISOString(), reason: k.reason, retained_from: k.retainedFrom, walk: k.walk, note: k.note })),
+        days: planDays(jobs, skipped),
+      };
+      writeFileSync(out, JSON.stringify(plan, null, 2) + '\n');
+    }
+    console.log(`backfill plan: ${jobs.length} window(s) to fetch, ${skipped.length} skipped; nothing written, nothing asked`);
+    return;
+  }
 
   // backfill.yml's plan step (SHLTR-149): the months this plan reads and writes, as sparse-checkout patterns, and
   // nothing else (no write to the data checkout, no request).
@@ -142,10 +169,18 @@ async function main(): Promise<void> {
   }
   const dayFiles = new Set(days.map(partitionPath));
   assertCheckedOut(root, ['events'], (p) => dayFiles.has(p));
+  for (const k of skipped) console.log(`::notice::${skipLine(k)}`);
+  // An open dispatched window before a source's retention can never be filled: it leaves the open list.
+  if (cursor.dispatched?.length) {
+    const r = closeBeyondRetention(cursor.dispatched, providers, nowMs);
+    for (const line of r.closed) console.log(`::notice::${line}`);
+    if (r.open.length) cursor.dispatched = r.open;
+    else delete cursor.dispatched;
+  }
 
   if (!jobs.length) {
     writeFileSync(dataPaths(root).backfillCursor, JSON.stringify(cursor, null, 2) + '\n');
-    console.log('backfill: nothing to do (all providers done or none eligible)');
+    console.log(`backfill: nothing to do (all providers done or none eligible${skipped.length ? `; ${skipped.length} window(s) skipped: ${RETENTION}` : ''})`);
     const st = standing(providers, cursor);
     for (const w of st.warnings) console.log(`::warning::${w}`);
     writeMarker(st.blockers);

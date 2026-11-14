@@ -167,7 +167,7 @@ export function evaluateFreshness({ nowMs, v1, v2, queuedMs = 0, reRead = false 
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// status.json: feed:source:<id>, feed:cert:<id>, feed:systemic
+// status.json: feed:source:<id>, feed:breaker:<id>, feed:cert:<id>, feed:systemic
 
 const TLS_RE = /certificate|\bcert\b|CERT_|\bTLS\b|\bSSL\b|self[- ]signed|unable to verify|handshake/i;
 
@@ -244,6 +244,8 @@ function certFinding(id, leaf) {
  *                     sample from 30 min to the line), silent, frozen (P3, members ⊆ [fetch, silent, frozen]). A
  *                     source that has never fetched successfully (no start on record) is P3 with sinceMs null at
  *                     once: reconcile holds a finding without a start on its own clock;
+ *   feed:breaker:<id> the aggregate's circuit breaker open for 6 h or more (`providers.<id>.breaker.open_since`, P3; a P4
+ *                     sample below), so the source has not been asked since but for a probe an hour;
  *   feed:cert:<id>    a pinned leaf with under 7 days left (P3);
  *   feed:systemic     (shadow) 2 or more core sources, or 6 or more in all, failing for 30 min or more (P2).
  * `opts.nowMs` only adds a note on the document's own age.
@@ -317,6 +319,22 @@ export function evaluateSources(status, refMs, { nowMs } = {}) {
         text: `${id}: ${parts.join(', ')}`,
       }));
     }
+  }
+
+  // Open circuit breakers (SHLTR-147): the source's own row above already counts the failure from its last success; this
+  // row says the aggregate has stopped asking it.
+  const breakerLine = RULES['feed:breaker'].limits.openLineMs;
+  for (const id of Object.keys(providers).sort()) {
+    const b = isObject(providers[id]) && isObject(providers[id].breaker) ? providers[id].breaker : null;
+    const openSinceMs = b && typeof b.open_since === 'string' ? Date.parse(b.open_since) : NaN;
+    if (!SAFE_ID.test(id) || !Number.isFinite(openSinceMs)) continue;
+    const age = refMs - openSinceMs;
+    findings.push(makeFinding('feed:breaker', {
+      id,
+      severity: age >= breakerLine ? 'P3' : 'P4',
+      sinceMs: openSinceMs,
+      text: `${id}: circuit breaker open for ${ageText(Math.max(0, age))} (since ${utcText(openSinceMs)}, ${isNum(b.failures) ? b.failures : '?'} runs without an answer), not asked but for a probe; next probe ${oneLine(b.next_probe ?? '?', 40)}; error: ${oneLine(errorMessage(providers[id].error), 200) || 'no error message'}`,
+    }));
   }
 
   // Pinned leaves under the line (FEED-SEC-1): a week's notice before a renewal under a new intermediate cuts the
@@ -694,7 +712,7 @@ export function evaluateFeed(inputs) {
   if (!isObject(json) || !isObject(json.providers)) {
     const why = status && !status.ok ? status.message : 'no providers in the answer';
     findings.push(makeFinding('feed:status', { text: `v1/status.json unreadable (${oneLine(why, 200)}): the per-source health of the feed is unknown this run` }));
-    unjudged.push('feed:source:*', 'feed:cert:*', 'feed:systemic');
+    unjudged.push('feed:source:*', 'feed:breaker:*', 'feed:cert:*', 'feed:systemic');
     parts.push('status=unreadable');
   } else {
     let refMs = statusRefMs(json);

@@ -37,7 +37,7 @@ export function classifyFailure(provider: unknown, opts?: { tlsError?: unknown; 
 /** status.json's own time: generatedAt (ms), else Date.parse(generated); null when neither. */
 export function statusRefMs(status: unknown): number | null;
 
-/** feed:source:<id>, feed:cert:<id> and feed:systemic of a readable status.json, judged as of `refMs`. */
+/** feed:source:<id>, feed:breaker:<id>, feed:cert:<id> and feed:systemic of a readable status.json, judged as of `refMs`. */
 export function evaluateSources(status: unknown, refMs: number, opts?: { nowMs?: number }): { findings: Finding[]; notes: string[] };
 
 export interface Judged {

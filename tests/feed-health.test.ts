@@ -40,6 +40,8 @@ import {
   type WalkRead,
 } from '../scripts/feed-health.mjs';
 import { mayTurnRed, parseFindingsDocument, RULES, type Finding } from '../scripts/lib/findings.mjs';
+import { breakerPlan } from '../src/breaker.js';
+import { loadRegistry } from '../src/providers.js';
 import { enrichStatusV2 } from '../src/status-v2.js';
 
 // The feed health evaluator (scripts/feed-health.mjs, the `feed` job of .github/workflows/health.yml): the findings of
@@ -129,6 +131,55 @@ test('silent and frozen sources: one feed:source row each, rule quiet, members n
   assert.equal(both.findings[0]!.rule, 'feed:source');
   assert.equal(both.findings[0]!.sinceMs, STATUS_MS - 13 * HOUR);
   assert.match(both.findings[0]!.text, /^bgs: fetch failing for 13\.0 h \(last successful fetch .*\), frozen, 40 rows .*, error: timed out after 30000 ms$/);
+});
+
+// --- SHLTR-147: the aggregate's circuit breaker ---
+
+/** NOA's status.json entry while its breaker is open: the aggregate's skipped status (src/breaker.ts) as derive enriches
+ *  it, the breaker opened `openAgoMs` before the document and the last answer `lastOkAgoMs` before it. */
+function noaSkipped(genMs: number, openAgoMs: number, lastOkAgoMs: number): Record<string, unknown> {
+  const noa = loadRegistry().find((p) => p.id === 'noa')!;
+  const openSinceMs = genMs - openAgoMs;
+  const index = { noa: { failures: 9, lastError: 'This operation was aborted', openSinceMs, opens: 4, skipRuns: 12, nextProbeMs: genMs + 40 * MIN } };
+  const raw = breakerPlan(index, [noa], genMs).skipped['noa']!;
+  const v2 = enrichStatusV2({ generated: ISO(genMs), head_seq: 1, providers: { noa: { ...raw } } }, { generatedMs: genMs, expectedIntervalSeconds: 300, staleAfterSeconds: 1800, health: { noa: genMs - lastOkAgoMs } });
+  return (v2.providers as Record<string, Record<string, unknown>>)['noa']!;
+}
+
+test('feed:breaker: a breaker open 6 h or more is a P3 row of its own, below that a P4 sample; it clears once the source answers', () => {
+  const gen = STATUS_MS;
+  const at = (openAgoMs: number, lastOkAgoMs = openAgoMs + 15 * MIN) => judge(statusAt(gen, (x) => (x.providers.noa = noaSkipped(gen, openAgoMs, lastOkAgoMs))));
+  const r = at(7 * HOUR);
+  assert.deepEqual(r.findings.map((f) => [f.key, f.rule, f.severity]), [['feed:source:noa', 'feed:source', 'P4'], ['feed:breaker:noa', 'feed:breaker', 'P3']]);
+  const f = byKey(r.findings)['feed:breaker:noa']!;
+  assert.equal(f.sinceMs, gen - 7 * HOUR);
+  assert.equal(f.board, 'feed');
+  assert.equal(mayTurnRed(f.class), false, 'one source is never a red run');
+  assert.equal(f.text, 'noa: circuit breaker open for 7.0 h (since 2026-10-22 05:12Z, 9 runs without an answer), not asked but for a probe; next probe 2026-10-22T12:52:13.014Z; error: not asked: circuit breaker open after 9 runs without an answer (last: This operation was aborted)');
+  assert.equal(RULES['feed:breaker'].limits['openLineMs'], 6 * HOUR);
+  assert.equal(RULES['feed:breaker'].severity, 'P3');
+  // Below the line: a P4 sample (the job summary), no board row of its own.
+  assert.deepEqual(at(6 * HOUR - MIN).findings.map((x) => [x.key, x.severity]), [['feed:source:noa', 'P4'], ['feed:breaker:noa', 'P4']]);
+  assert.deepEqual(at(6 * HOUR).findings.find((x) => x.key === 'feed:breaker:noa')!.severity, 'P3');
+  // The probe got an answer: the breaker field is gone, and with the source ok, so is every row.
+  assert.deepEqual(judge(statusAt(gen)).findings, []);
+});
+
+test('feed:breaker: a skipped source is judged exactly as a failing one by its feed:source row (no false recovery)', () => {
+  const gen = STATUS_MS;
+  for (const lastOkAgo of [20 * MIN, 2 * HOUR, 13 * HOUR]) {
+    const skipped = judge(statusAt(gen, (x) => (x.providers.noa = noaSkipped(gen, lastOkAgo - 15 * MIN, lastOkAgo))));
+    const failed = judge(statusAt(gen, (x) => failing(x, 'noa', gen - lastOkAgo, { kind: 'error', message: 'This operation was aborted' })));
+    const row = (rs: { findings: Finding[] }) => {
+      const s = rs.findings.find((x) => x.key === 'feed:source:noa');
+      return s ? [s.rule, s.severity, s.sinceMs, s.members ?? null] : null;
+    };
+    assert.deepEqual(row(skipped), row(failed), `last answer ${lastOkAgo / MIN} min ago`);
+  }
+  // 13 h: past the 12 h line of a transient failure, the source's own P3 row, beside the breaker's.
+  const long = judge(statusAt(gen, (x) => (x.providers.noa = noaSkipped(gen, 12 * HOUR + 45 * MIN, 13 * HOUR))));
+  assert.deepEqual(long.findings.map((f) => [f.key, f.severity]), [['feed:source:noa', 'P3'], ['feed:breaker:noa', 'P3']]);
+  assert.deepEqual(byKey(long.findings)['feed:source:noa']!.members, ['fetch']);
 });
 
 test('pinned leaves: under 7 days is feed:cert with sinceMs 7 days before its end (escalating at 2 days left); 192 days or no field: nothing', () => {
@@ -709,7 +760,7 @@ test('evaluateFeed: a healthy run is no finding and nothing unjudged; status.jso
   for (const status of [{ ok: false as const, message: 'HTTP 502 after 4 attempt(s)' }, { ok: true as const, json: { generated: 'x' } }, { ok: true as const, json: [] }]) {
     const r = evaluateFeed(healthyInputs({ status }));
     assert.deepEqual(r.findings.map((f) => [f.key, f.severity, f.rule]), [['feed:status', 'P3', 'feed:status']]);
-    assert.deepEqual(r.unjudged, ['feed:source:*', 'feed:cert:*', 'feed:systemic']);
+    assert.deepEqual(r.unjudged, ['feed:source:*', 'feed:breaker:*', 'feed:cert:*', 'feed:systemic']);
     assert.match(r.findings[0]!.text, /^v1\/status\.json unreadable \(.+\): the per-source health of the feed is unknown this run$/);
   }
   // A status.json without a generated time is judged as of now, with a note.
@@ -958,7 +1009,7 @@ test('main: every network call failing still writes a document: unreachable mani
   ]);
   assert.match(doc.findings[2].text, /^feed:repo-size, feed:size, walks:history:\*, walks:first-solutions:\*, walks:backfill:\*, walks:archive:\*, walks:remerge:\*, walks:stats:\*, feed:writer-queue not judged this run: the feed evaluator's GitHub reads failed/);
   assert.ok(doc.findings[2].text.length <= 500);
-  assert.deepEqual(doc.unjudged, ['feed:source:*', 'feed:cert:*', 'feed:systemic', 'feed:repo-size', 'feed:size', 'feed:stats', 'feed:stats-through', 'feed:stats-days', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue']);
+  assert.deepEqual(doc.unjudged, ['feed:source:*', 'feed:breaker:*', 'feed:cert:*', 'feed:systemic', 'feed:repo-size', 'feed:size', 'feed:stats', 'feed:stats-through', 'feed:stats-days', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue']);
   assert.match(doc.notes.join('\n'), /queue time unknown \(network error: .*\): counted as 0/);
 });
 

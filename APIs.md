@@ -1086,7 +1086,8 @@ M4.5+ and 387 M6+ earthquakes; the feed's ComCat-anchored counts 22,485 and 387)
 197,002 M4.5+ and from 4,487 to 4,269 M6+ (ComCat 162,768 and 3,559; anchored 162,839 and 3,560). The anchored side is
 higher where ComCat deleted events since, or types them as non-earthquakes (Kīlauea's 2018 collapse events). The
 remaining over-count is events the current rules keep apart (an ISC copy of a NEIC or GFZ origin at 0 km / 0 s, one
-agency's distant solution, a large quake's agencies in a swarm cell): epoch 2 (below) is the rule round for it. Above 0:
+agency's distant solution, a large quake's agencies in a swarm cell): epoch 2 (below) is the rule round for it, on since
+2026-11-14 (`REMERGE_INGEST_TIME` 2026-11-14T00:00:00.000Z, `REMERGE_RULES` 3). Above 0:
 
 - *Deep history:* the hourly `history` walk gives each month whose current edition is not merged a new edition
   `events-YYYY-MM.e<N+1>.tar.zst`, built from edition N and nothing else, newest month first; a month waits until its
@@ -1115,7 +1116,7 @@ agency's distant solution, a large quake's agencies in a swarm cell): epoch 2 (b
   which is then merged within about 6 h. A month re-rolled later (a backfill fill, `needs_reroll`) gets a new asset
   without `merge_epoch` and is merged again.
 
-**Epoch 2** (SHLTR-148; config `identityRules`; not on yet: `REMERGE_EPOCH` is 1). The epoch is one switch for the live
+**Epoch 2** (SHLTR-148; config `identityRules`; `REMERGE_EPOCH` 2 since 2026-11-14). The epoch is one switch for the live
 feed and the re-merge: the live Resolver (aggregate's merge pass and regular heal, backfill, the deep-history build, the
 remediation editions) runs the rules of `REMERGE_EPOCH`, and the re-merge of a unit runs the rules of the epoch it
 merges the unit to, so raising the epoch changes both at once and the archives, the history and the live hot window
@@ -1157,16 +1158,32 @@ solutions outside their regions with no global agency's event in the window, and
 quake; the statistics still collapse or leave those out. The first live run after the switch folds 17 pairs of the hot
 window (event map of 2026-11-14), all through the authoritative-region window.
 
-To switch it on (the lead, after reviewing the dry runs): raise `REMERGE_EPOCH` to 2 together with
-`REMERGE_INGEST_TIME`; `remerge.yml` then merges every archive month again (newest first, a new asset each), the hourly
-`history` walk every era-A / pilot month (a new edition each), each remediated day of a merged month gets a refreshed
-edition, and from the next aggregate run the live regular heal folds the hot window's pairs under the new rules (at most
-`HEAL_MAX_FOLDS_PER_RUN` a run). Dry runs first: `remerge.yml` / `src/remerge-archives.ts` with `REMERGE_DRY_RUN=1`
-and `REMERGE_EPOCH_OVERRIDE=2` (locally also `REMERGE_NO_WAIT=1` for a sample of months: `remerge.yml` has no input
-for it, so a runner dry run with `only:` leaves every month but the newest waiting), `src/history.ts` with
-`HISTORY_DRY_RUN=1`, `HISTORY_REMERGE_EPOCH=2` and `HISTORY_REMERGE_NO_WAIT=1`, each read by
-`scripts/remerge-verify.ts --comcat`; and `scripts/heal-dryrun.ts --regular --epoch 2` on the event map for the live
-side (the first run after the switch is a regular run: raising `REMERGE_EPOCH` does not raise `HEAL_EPOCH`). The statistics' reconciliation stays as a safety
+The switch (2026-11-14, after the dry runs above): `REMERGE_EPOCH` 2 with `REMERGE_INGEST_TIME`. From the next
+aggregate run the live regular heal folds the hot window's pairs under the new rules (at most `HEAL_MAX_FOLDS_PER_RUN` a
+run; 17 on the event map of 2026-11-14, all by the authoritative-region window, `scripts/heal-dryrun.ts --regular --epoch
+2`: raising `REMERGE_EPOCH` does not raise `HEAL_EPOCH`), and backfill, onboarding, the remediation editions and the
+deep-history build ingest under them. The campaign then merges every unit to epoch 2 in this order, each from its
+current epoch-1 asset or edition (a new asset or edition each, nothing replaced):
+
+1. *Archives:* `remerge.yml`, 4 months a run (`REMERGE_MONTHS_PER_RUN`), newest first, each run committed before the
+   next is dispatched (a month waits until its newer month is merged): 9 runs for the 36 months, about 5–8 min each on
+   the runner (61–75 s a month in the dry run of 2026-11-14, run 43626370955), plus the cron every 6 h. Each remediated
+   day of a merged month gets a refreshed edition.
+2. *Deep history:* the hourly `history` walk, once `archive-2023-07` is at epoch 2 (2023-07 waits for it), newest
+   first, 10–20 months a run as at epoch 1: the 283 era-A / pilot months in about 18–25 runs. Era B is not re-merged.
+3. *Statistics:* their digests carry the epoch, so every year rebuilds; until a year's inputs are merged the builder
+   re-merges them in memory at epoch 2 (the same rules, the same counts). Once the history is done, every year is
+   rebuilt from the merged assets and checked month by month against ComCat (`stats.yml` `verify=full`).
+
+Progress is the count of `archives.json` entries and of current `history.json` editions with `merge_epoch` 2 (36 and
+283 when done). A blocked unit (a hard check failed) stops nothing else and is filed on the "[health] feed" board
+(`walk-blocked-remerge`, `walk-blocked-history`, `walk-blocked-stats`). The rollback is the one below: `REMERGE_EPOCH`
+back to 1 (with its ingest time) first, then `remerge.yml` with `rollback: 2` (the archive entries go back to their
+epoch-1 assets, the epoch-2 history editions and refreshed remediation editions are withdrawn); the live folds made
+under epoch 2 stay, as every live fold does. Dry runs of a later round work as they did for this one: `remerge.yml` /
+`src/remerge-archives.ts` with `REMERGE_DRY_RUN=1` and `REMERGE_EPOCH_OVERRIDE` (locally also `REMERGE_NO_WAIT=1`),
+`src/history.ts` with `HISTORY_DRY_RUN=1`, `HISTORY_REMERGE_EPOCH` and `HISTORY_REMERGE_NO_WAIT=1`, each read by
+`scripts/remerge-verify.ts --comcat`, and `scripts/heal-dryrun.ts --regular --epoch <n>` for the live side. The statistics' reconciliation stays as a safety
 net (*Statistics*, Reconciliation): epoch 2 joins in the feed what the authoritative-region filter and the collapse
 leave out of the counts where a global agency's event is within the window, and the rest (regional solutions with no
 global event near them, phantoms of automatic teleseismic locators) stays an event of its own that the statistics still
@@ -1186,7 +1203,7 @@ line of a merged asset carries the normalized `review_status` (*Review status*).
 index commit never landed is taken over by the next run (history: `adoptOrphans` when it was merged from the month's
 current edition; archives: the output is deterministic, so the next run's identical asset is adopted by checksum);
 any other is listed in `unused`. A rollback (`remerge.yml` input `rollback: <epoch>[:YYYY-MM,...]`,
-`scripts/remerge-rollback.ts`; set `REMERGE_EPOCH` to 0 first) changes only the indexes: each archive entry goes back
+`scripts/remerge-rollback.ts`; first set `REMERGE_EPOCH` below the epoch rolled back: 1 for epoch 2, 0 for epoch 1) changes only the indexes: each archive entry goes back
 to `previous[0]` (the merged asset stays listed with `withdrawn_at` and a reason), and each merged history edition and
 refreshed remediation edition gets `withdrawn: {at, reason}`, which a reader skips: the current edition is the highest
 one not withdrawn.

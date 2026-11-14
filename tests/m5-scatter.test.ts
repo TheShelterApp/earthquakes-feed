@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { LARGE_EVENT_MAX_KM, MODERATE_EVENT_FULL_KM_MAG } from '../src/config.js';
+import { type IdentityRules, LARGE_EVENT_MAX_KM, MODERATE_EVENT_FULL_KM_MAG, liveIdentityRules } from '../src/config.js';
 import { Resolver } from '../src/dedup.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import type { EventNode, RawObs } from '../src/types.js';
@@ -11,7 +11,10 @@ import type { EventNode, RawObs } from '../src/types.js';
 // the moderate-event window's 37–42 km at M5.0–5.2 (40 km at M5.0, shrunk by |ΔM|). From MODERATE_EVENT_FULL_KM_MAG on
 // the window reaches LARGE_EVENT_MAX_KM whatever |ΔM|. The fixture is production's: the 7 pairs of the hot window the
 // event map of origin/data dae9220725 held as two live events each, with every live or retired event within 2 min and
-// 150 km of them.
+// 150 km of them. The windows are epoch 1's (the tests pass its rules); what epoch 2's authoritative-region window adds
+// is asserted beside them.
+const EPOCH1 = liveIdentityRules(1);
+const EPOCH2 = liveIdentityRules(2);
 
 const here = (rel: string): string => fileURLToPath(new URL(rel, import.meta.url));
 const registry = loadRegistry(here('../providers/registry.json'));
@@ -44,7 +47,7 @@ test('m5 scatter: the regular heal folds the 7 pairs of production in one run, t
   assert.equal(MODERATE_EVENT_FULL_KM_MAG, 5.0);
   const map = storedMap();
   const before = live(map).length;
-  const { merges } = new Resolver(map, prio, cfg, NOW).heal(INGEST);
+  const { merges } = new Resolver(map, prio, cfg, NOW, { rules: EPOCH1 }).heal(INGEST);
   const folds = merges.filter((m) => !m.reason.startsWith('re-point'));
   assert.deepEqual(folds.map((m) => [m.loser.feedId, m.survivor.feedId]).sort(), [...PAIRS].sort());
   for (const m of folds) {
@@ -54,15 +57,28 @@ test('m5 scatter: the regular heal folds the 7 pairs of production in one run, t
     assert.ok(km > 38 && km < 48 && s <= 4, m.reason);
   }
   assert.equal(live(map).length, before - 7);
-  assert.equal(new Resolver(map, prio, cfg, NOW + 300_000).heal(INGEST).merges.length, 0);
+  assert.equal(new Resolver(map, prio, cfg, NOW + 300_000, { rules: EPOCH1 }).heal(INGEST).merges.length, 0);
+});
+
+test('m5 scatter, epoch 2: the same 7 pairs, plus RéNaSS / RESIF’s solution of the 2026-10-02 Kamchatka M5.1 by the authoritative-region window', () => {
+  const map = storedMap();
+  const before = live(map).length;
+  const { merges } = new Resolver(map, prio, cfg, NOW, { rules: EPOCH2 }).heal(INGEST);
+  const folds = merges.filter((m) => !m.reason.startsWith('re-point'));
+  const extra: [string, string] = ['efd_01M3Z6ACJ09NMHV9X0T4RTSKYX', 'efd_01M3Z6B9VG8WRYPWFT3HAQNXQT'];
+  assert.deepEqual(folds.map((m) => [m.loser.feedId, m.survivor.feedId]).sort(), [...PAIRS, extra].sort());
+  const far = folds.find((m) => m.loser.feedId === extra[0])!;
+  assert.match(far.reason, /^proximity: d=82\.6 km dt=7\.6 s .*authoritative-region window \(renass\+resif outside its region\)=200\.0 km\/30 s$/);
+  assert.equal(live(map).length, before - 8);
+  assert.equal(new Resolver(map, prio, cfg, NOW + 300_000, { rules: EPOCH2 }).heal(INGEST).merges.length, 0);
 });
 
 /** Two reports of different providers, M`m1` and M`m2`, `km` north and `dtS` later: how many events at first sight
  *  and after the heal. */
-function pair(m1: number, m2: number, km: number, dtS = 2, p2 = 'geonet', p1 = 'usgs', lat0 = -20): number {
+function pair(m1: number, m2: number, km: number, dtS = 2, p2 = 'geonet', p1 = 'usgs', lat0 = -20, rules: IdentityRules = EPOCH1): number {
   const t = Date.parse('2026-10-05T12:00:00Z');
   const map = new Map<string, EventNode>();
-  const r = new Resolver(map, prio, cfg, NOW);
+  const r = new Resolver(map, prio, cfg, NOW, { rules });
   const report = (provider: string, id: string, over: Partial<RawObs>): RawObs => ({
     provider, providerEventId: id, eventTimeMs: t, providerUpdatedMs: null, status: null, lat: lat0, lon: -174, depth: 10,
     mag: 5, magType: 'mb', place: null, knownAliasIds: [], fields: {}, ...over,
@@ -91,4 +107,16 @@ test('m5 scatter: below M5.0, NRCan, and one provider on both sides keep the win
   assert.equal(pair(4.99, 5.3, 35), 1);
   assert.equal(pair(5.0, 5.0, 45, 2, 'nrcan'), 2, 'NRCan stays out of the moderate window (owner decision 2026-10-02)');
   assert.equal(pair(5.0, 5.0, 45, 2, 'usgs'), 2, 'one provider under two ids');
+});
+
+test('m5 scatter, epoch 2: a regional agency’s solution near Tonga, outside its region, joins within 200 km, 30 s and |ΔM| 1.0', () => {
+  // The authoritative-region window (config AUTHORITY_WINDOW) beside the moderate-event window: GeoNet and NRCan are
+  // regional agencies, Tonga is outside both regions.
+  assert.equal(pair(5.0, 5.0, LARGE_EVENT_MAX_KM + 1, 2, 'geonet', 'usgs', -20, EPOCH2), 1, 'beyond 50 km');
+  assert.equal(pair(5.0, 5.0, 45, 21, 'geonet', 'usgs', -20, EPOCH2), 1, 'beyond 20 s');
+  assert.equal(pair(4.99, 5.3, 37, 2, 'geonet', 'usgs', -20, EPOCH2), 1);
+  assert.equal(pair(5.0, 5.0, 45, 2, 'nrcan', 'usgs', -20, EPOCH2), 1, 'NRCan outside its region');
+  assert.equal(pair(5.0, 5.0, 201, 2, 'geonet', 'usgs', -20, EPOCH2), 2, 'beyond 200 km');
+  assert.equal(pair(5.0, 5.0, 45, 31, 'geonet', 'usgs', -20, EPOCH2), 2, 'beyond 30 s');
+  assert.equal(pair(5.0, 5.0, 45, 2, 'usgs', 'usgs', -20, EPOCH2), 2, 'one provider under two ids');
 });

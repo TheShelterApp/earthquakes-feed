@@ -445,11 +445,13 @@ export const HEAL_EPOCH = 2;
  *  re-merged, `buildEdition` and `buildDayEdition` build as before, and `remerge.yml` selects nothing (the kill switch).
  *  Epoch 1 replays today's feed-side identity steps (heal.ts feedSideSteps, withdrawals off) over the published events
  *  in sliding 7-day windows; a later rule round is epoch 2. Raise it only together with REMERGE_INGEST_TIME. Epoch 1 since
- *  2026-11-08 (dry runs reviewed in the platform plan 2026-11-08-feed-statistics/remerge-dryrun.md). */
-export const REMERGE_EPOCH: number = 1;
+ *  2026-11-08 (dry runs reviewed in the platform plan 2026-11-08-feed-statistics/remerge-dryrun.md). Epoch 2 (the
+ *  identity rules of identityRules(2), SHLTR-148) since 2026-11-14; a rollback sets it back to 1 (APIs.md, Re-merged
+ *  history). */
+export const REMERGE_EPOCH: number = 2;
 /** The ingest time every re-merged event's changed lines carry (never the wall clock, so a rebuild is byte-identical);
- *  fixed when REMERGE_EPOCH is raised. */
-export const REMERGE_INGEST_TIME: string = '2026-11-08T00:00:00.000Z';
+ *  fixed when REMERGE_EPOCH is raised (epoch 1: 2026-11-08T00:00:00.000Z). */
+export const REMERGE_INGEST_TIME: string = '2026-11-14T00:00:00.000Z';
 /** The version of the re-merge's input normalization (src/remerge.ts normalizeUnit) within an epoch: a unit merged under
  *  an older value is merged again (a new edition / asset; nothing replaced). 1: none. 2 (2026-11-08): AFAD rows the
  *  pre-2026-10-01 parser stored 3 h early are re-timed with the PF-5e rule (correction.ts afadCorrections) before the

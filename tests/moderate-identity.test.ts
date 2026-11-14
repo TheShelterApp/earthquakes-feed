@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  type IdentityRules,
   LARGE_EVENT_MAX_KM,
   MODERATE_EVENT_BASE_KM,
   MODERATE_EVENT_EXCLUDED_PROVIDERS,
@@ -11,6 +12,7 @@ import {
   MODERATE_EVENT_MAX_DELTA,
   MODERATE_EVENT_MAX_DT_MS,
   SWARM_CELL_ABSOLUTE,
+  liveIdentityRules,
 } from '../src/config.js';
 import { Resolver } from '../src/dedup.js';
 import { observationToRaw } from '../src/oplog.js';
@@ -204,15 +206,26 @@ test('a re-id joins the event holding its twin, not another event through the mo
   // USGS's event 31 km away through the moderate-event window; the re-id, as far from that event's representative,
   // went to the next event the window allowed (GeoNet's, 45 km), which holds no INGV row, while its twin stood in
   // USGS's event.
-  const map = new Map<string, EventNode>();
-  const r = new Resolver(map, prio, cfg, NOW);
-  const usgs = r.ingest(obs('usgs', 'us6000hhhh', { mag: 5.8, status: 'reviewed' }), '2026-10-02T04:35:00Z').node;
-  const twin = { mag: 5.8, magType: 'Mwp', lat: north(-24.8, 31), eventTimeMs: T0 + 2_000 };
-  assert.equal(r.ingest(obs('ingv', '46000001', twin), '2026-10-02T04:36:00Z').node, usgs, 'the first id joins through the moderate-event window');
-  const geonet = r.ingest(obs('geonet', '2026p741999', { mag: 5.7, lat: north(-24.8, 75), eventTimeMs: T0 - 1_000 }), '2026-10-02T04:36:00Z').node;
-  assert.notEqual(geonet, usgs, 'GeoNet’s event is 75 km from USGS’s: its own');
-  const reid = r.ingest(obs('ingv', '46000002', twin), '2026-10-02T04:41:00Z');
-  assert.equal(reid.node, usgs, 'the re-id joins its twin’s event');
-  assert.equal(live(map).length, 2);
-  assert.deepEqual(geonet.provenance.map((x) => x.provider), ['geonet']);
+  // Epoch 1's rules: from epoch 2 the authoritative-region window joins GeoNet's solution too (below).
+  const run = (rules: IdentityRules) => {
+    const map = new Map<string, EventNode>();
+    const r = new Resolver(map, prio, cfg, NOW, { rules });
+    const usgs = r.ingest(obs('usgs', 'us6000hhhh', { mag: 5.8, status: 'reviewed' }), '2026-10-02T04:35:00Z').node;
+    const twin = { mag: 5.8, magType: 'Mwp', lat: north(-24.8, 31), eventTimeMs: T0 + 2_000 };
+    assert.equal(r.ingest(obs('ingv', '46000001', twin), '2026-10-02T04:36:00Z').node, usgs, 'the first id joins through the moderate-event window');
+    const geonet = r.ingest(obs('geonet', '2026p741999', { mag: 5.7, lat: north(-24.8, 75), eventTimeMs: T0 - 1_000 }), '2026-10-02T04:36:00Z').node;
+    assert.notEqual(geonet, usgs, 'GeoNet’s event is 75 km from USGS’s: its own at first sight');
+    const reid = r.ingest(obs('ingv', '46000002', twin), '2026-10-02T04:41:00Z');
+    return { map, usgs, geonet, reid };
+  };
+  const e1 = run(liveIdentityRules(1));
+  assert.equal(e1.reid.node, e1.usgs, 'the re-id joins its twin’s event');
+  assert.equal(live(e1.map).length, 2);
+  assert.deepEqual(e1.geonet.provenance.map((x) => x.provider), ['geonet']);
+  // Epoch 2: the re-id still joins its twin's event, and that event's merge pass then joins GeoNet's solution south of
+  // Fiji, outside GeoNet's region, 75 km away (the authoritative-region window, 200 km).
+  const e2 = run(liveIdentityRules(2));
+  assert.equal(e2.reid.node.provenance.filter((x) => x.provider === 'ingv').length, 2);
+  assert.equal(live(e2.map).length, 1);
+  assert.match(e2.reid.merges.map((m) => m.reason).join(' | '), /authoritative-region window \(geonet outside its region\)/);
 });

@@ -22,6 +22,7 @@ import {
   lateUsgsKeeps,
   lateUsgsRowsOfNodes,
   partitionAsset,
+  pruneLateUsgs,
 } from '../src/remediation.js';
 import { LATE_COMCAT, comcatGate, gateCauses, verifyRow } from '../src/stats-history.js';
 import type { EventNode, RawObs } from '../src/types.js';
@@ -220,6 +221,61 @@ test('late_usgs day: a changed day gets an edition on its frozen partition that 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('late_usgs day: no new edition while ComCat is unchanged since the last edition; one late_usgs entry per day in the index', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'efd-late-'));
+  try {
+    const parts = frozenPartitions();
+    const idx = emptyRemediationIndex();
+    const deps = (rows: RawObs[]) => lateDeps(dir, parts, comcat(rows).fetchWindow);
+    const e1 = (await remediateDay(D, task, idx, deps(COMCAT))).edition!;
+    // ComCat revises us7000own: e2 replaces e1 in the index (the asset stays in the Release).
+    const revised = COMCAT.map((x) => (x.providerEventId === 'us7000own' ? { ...x, mag: 4.9 } : x));
+    const second = await remediateDay(D, task, idx, deps(revised));
+    assert.equal(second.edition!.edition, 2);
+    assert.deepEqual(second.pruned, ['events-2026-09-15.e1.ndjson.gz', 'raw-usgs-2026-09-15.ndjson.gz']);
+    assert.deepEqual(idx.editions.map((e) => e.asset), ['events-2026-09-15.e2.ndjson.gz']);
+    assert.deepEqual(idx.editions[0]!.superseded, [e1.asset]);
+    assert.deepEqual(idx.raw.map((r) => r.asset), ['raw-usgs-2026-09-15.g2.ndjson.gz'], 'only the raw the current edition is built from');
+    assert.ok(assets(dir).includes(e1.asset) && assets(dir).includes('raw-usgs-2026-09-15.ndjson.gz'), 'superseded assets stay');
+    // Daily runs with ComCat as e2 took it: compared with e2's raw, not with the partition (which still differs).
+    const before = assets(dir);
+    for (let k = 0; k < 3; k++) {
+      const r = await remediateDay(D, task, idx, deps(revised));
+      assert.equal(r.edition, undefined);
+      assert.equal(r.late!.changed, false);
+      assert.equal(r.late!.held_from, 'remediation-2026/raw-usgs-2026-09-15.g2.ndjson.gz');
+    }
+    assert.ok(lateUsgsDiff(lateUsgsRowsOfNodes(parts.get(D)!.nodes), lateUsgsRowsOfNodes(parts.get(D)!.nodes).concat([{ id: 'us7000own', ids: ['us7000own'], mag: 4.9 }])).changed, 'against the partition it would re-qualify');
+    assert.deepEqual(assets(dir), before);
+    assert.equal(idx.editions.length, 1);
+    // A third change: e3, and the index still holds one entry naming both earlier ones.
+    const third = await remediateDay(D, task, idx, deps(revised.map((x) => (x.providerEventId === 'us7000own' ? { ...x, mag: 4.5 } : x))));
+    assert.equal(third.edition!.edition, 3);
+    assert.deepEqual(idx.editions.map((e) => [e.asset, e.superseded]), [['events-2026-09-15.e3.ndjson.gz', ['events-2026-09-15.e1.ndjson.gz', 'events-2026-09-15.e2.ndjson.gz']]]);
+    assert.deepEqual(idx.raw.map((r) => r.asset), ['raw-usgs-2026-09-15.g3.ndjson.gz']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('late_usgs prune: only earlier late_usgs editions of the day leave the index; other reasons, other days and withdrawn entries stay', () => {
+  const ref = (day: string, edition: number, reason: 'late_usgs' | 'seam', tag = 'data') => ({
+    day, edition, tag: 'remediation-2026', asset: `events-${day}.e${edition}.ndjson.gz`, url: '', sha256: 'x', bytes: 1,
+    built_on: { tag, asset: 'a', sha256: 'b' }, built_from: [`raw-${day}-${edition}`], reason, stats: {} as never, built_at: '',
+  });
+  const raw = (day: string, edition: number, reason: 'late_usgs' | 'seam') => ({ provider: 'usgs', day, tag: 'remediation-2026', asset: `raw-${day}-${edition}`, url: '', sha256: 'x', bytes: 1, rows: 1, requests: 1, partial: false, fetched_at: '', reason });
+  const idx = emptyRemediationIndex();
+  idx.editions.push(ref('2026-09-15', 1, 'late_usgs'), { ...ref('2026-09-15', 2, 'late_usgs'), withdrawn: { at: '', reason: 'r' } }, ref('2026-09-16', 1, 'late_usgs'), ref('2026-06-29', 1, 'seam', 'archive-2026-06'));
+  idx.raw.push(raw('2026-09-15', 1, 'late_usgs'), raw('2026-09-16', 1, 'late_usgs'), raw('2026-06-29', 1, 'seam'));
+  const cur = ref('2026-09-15', 3, 'late_usgs');
+  idx.editions.push(cur);
+  idx.raw.push(raw('2026-09-15', 3, 'late_usgs'));
+  assert.deepEqual(pruneLateUsgs(idx, cur), ['events-2026-09-15.e1.ndjson.gz', 'raw-2026-09-15-1']);
+  assert.deepEqual(idx.editions.map((e) => e.asset), ['events-2026-09-15.e2.ndjson.gz', 'events-2026-09-16.e1.ndjson.gz', 'events-2026-06-29.e1.ndjson.gz', 'events-2026-09-15.e3.ndjson.gz']);
+  assert.deepEqual(idx.raw.map((r) => r.asset), ['raw-2026-09-16-1', 'raw-2026-06-29-1', 'raw-2026-09-15-3']);
+  assert.deepEqual(pruneLateUsgs(idx, ref('2026-06-29', 2, 'seam', 'archive-2026-06')), [], 'never for another reason');
 });
 
 test('late_usgs day: plan mode diffs only; an unchanged day, an archived day and a day without a partition publish nothing', async () => {

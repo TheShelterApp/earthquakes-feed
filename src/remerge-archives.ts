@@ -300,7 +300,8 @@ function refreshedEdition(
   const bytes = gzipSync(Buffer.from(text), { level: 9 });
   const sum = sha256(bytes);
   const names = ctx.dryRun ? new Set<string>() : listNames(ctx.io, tag);
-  const indexed = new Set(ctx.remediation.editions.filter((e) => e.tag === tag).map((e) => e.asset));
+  // A late_usgs edition's `superseded` assets left the index (pruneLateUsgs) but are not unindexed uploads.
+  const indexed = new Set(ctx.remediation.editions.filter((e) => e.tag === tag).flatMap((e) => [e.asset, ...(e.superseded ?? [])]));
   // An earlier run's identical upload whose commit never landed (gzip without a timestamp: same bytes) is reused.
   let asset: string | null = null;
   for (const n of names) {

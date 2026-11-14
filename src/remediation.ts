@@ -498,6 +498,9 @@ export interface EditionRef {
   built_at: string;
   /** Withdrawn by scripts/remerge-rollback.ts: never current; the asset stays. */
   withdrawn?: { at: string; reason: string };
+  /** late_usgs only: the day's earlier late_usgs editions this one replaced in the index (pruneLateUsgs). Their assets
+   *  stay in the Release; their entries and those of their raw assets leave the index. */
+  superseded?: string[];
 }
 /**
  * A queued refill: its days are remediated as soon as each is archived (a remediation edition supplements an archived
@@ -524,6 +527,29 @@ export function indexText(idx: RemediationIndex): string {
   const raw = [...idx.raw].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : a.provider < b.provider ? -1 : 1));
   const editions = [...idx.editions].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : a.edition - b.edition));
   return JSON.stringify({ version: 1, raw, editions, refill_queue: idx.refill_queue ?? [] }, null, 2) + '\n';
+}
+
+/**
+ * Keep one late_usgs entry per day (SHLTR-150): once `cur`, a new late_usgs edition, is in the index, the day's earlier
+ * late_usgs editions (built on the frozen partition, not withdrawn) leave it, named in `cur.superseded`, and so do the
+ * day's late_usgs raw assets no remaining edition is built from. Nothing reads them: the current edition is the day's
+ * input (stats, remerge-archives, the next refresh, which compares with the raw `cur` is built from); a re-merge
+ * refreshes only the current edition of an archived day, and its rollback falls back to that one, which stays. The
+ * assets stay in the Release (immutable); remerge-archives counts the superseded names as indexed. Returns the asset
+ * names that left the index.
+ */
+export function pruneLateUsgs(idx: RemediationIndex, cur: EditionRef): string[] {
+  if (cur.reason !== 'late_usgs') return [];
+  const older = idx.editions.filter((e) => e !== cur && e.day === cur.day && e.reason === 'late_usgs' && e.built_on.tag === PARTITION_TAG && !e.withdrawn && e.edition < cur.edition);
+  if (!older.length) return [];
+  const drop = new Set(older);
+  idx.editions = idx.editions.filter((e) => !drop.has(e));
+  cur.superseded = [...new Set([...(cur.superseded ?? []), ...older.flatMap((e) => [...(e.superseded ?? []), e.asset])])].sort();
+  const used = new Set(idx.editions.filter((e) => e.day === cur.day).flatMap((e) => e.built_from));
+  const rawsGone = idx.raw.filter((r) => r.day === cur.day && r.reason === 'late_usgs' && !used.has(r.asset));
+  const goneRaw = new Set(rawsGone);
+  idx.raw = idx.raw.filter((r) => !goneRaw.has(r));
+  return [...older.map((e) => e.asset), ...rawsGone.map((r) => r.asset)];
 }
 
 /** Add a refill to the queue. Nothing is added when every day of the range is already done for these providers or

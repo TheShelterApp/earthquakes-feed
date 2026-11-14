@@ -46,6 +46,7 @@ import {
   nextFree,
   partitionAsset,
   parseRawText,
+  pruneLateUsgs,
   pruneQueue,
   queuePlan,
   rawAssetName,
@@ -166,6 +167,8 @@ export interface DayRunResult {
   late?: LateUsgsDiff & { held_from: string; base_changed: boolean };
   /** late_usgs in `plan` mode: the day changed and an `on` run would build its edition. */
   planned?: boolean;
+  /** late_usgs: the index entries the new edition replaced (pruneLateUsgs; the assets stay in the Release). */
+  pruned?: string[];
   /** The edition built, when one was. */
   edition?: EditionRef;
   /** The raws uploaded (with or without an edition). */
@@ -355,6 +358,8 @@ export async function remediateDay(day: string, tasks: readonly DayTask[], idx: 
     stats: built.stats, built_at: nowIso,
   };
   idx.editions.push(ed);
+  // One late_usgs entry per day in the index: the earlier ones (and their raws) leave it, their assets stay.
+  if (late) res.pruned = pruneLateUsgs(idx, ed);
   res.edition = ed;
   res.line = summaryLine(day, `${tag}/${edName}`, fetched, built.stats) + (res.late ? `; late ComCat: ${lateLine(res.late)}` : '');
   return res;
@@ -474,7 +479,7 @@ async function main(): Promise<void> {
     days: [] as { day: string; edition: string | null; raws: string[]; stats: EditionStats | null; failed: string[] }[],
     queue_done: [] as string[],
     queue: [] as unknown[],
-    late_usgs: { mode: lateMode, range: lateRange || null, days: [] as string[], checked: [] as LateReport[], built: [] as string[], planned: [] as string[], unchanged: 0, failed: [] as string[], not_reached: [] as string[] },
+    late_usgs: { mode: lateMode, range: lateRange || null, days: [] as string[], checked: [] as LateReport[], built: [] as string[], pruned: [] as string[], planned: [] as string[], unchanged: 0, failed: [] as string[], not_reached: [] as string[] },
   };
   console.log(
     `remediate: ${store.label}; ${days.length} day(s) to do (${days.map((d) => `${d}[${(byDay.get(d) ?? []).map((t) => t.provider).join(',') || 'edition'}]`).join(' ') || 'none'}); ` +
@@ -526,8 +531,9 @@ async function main(): Promise<void> {
           for (const m of r.failed) console.log(`::warning::remediate: ${m}`);
         } else if (r.edition) {
           report.late_usgs.built.push(r.edition.asset);
+          report.late_usgs.pruned.push(...(r.pruned ?? []));
           report.done.push(r.line!);
-          console.log(`remediate: ${r.line}`);
+          console.log(`remediate: ${r.line}${r.pruned?.length ? `; replaced in the index: ${r.pruned.join(', ')}` : ''}`);
         } else if (r.planned) {
           report.late_usgs.planned.push(day);
           console.log(`remediate: ${day} would get a late_usgs edition: ${lateLine(r.late!)}`);

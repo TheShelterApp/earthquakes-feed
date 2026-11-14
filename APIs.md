@@ -1630,7 +1630,10 @@ frozen days not archived yet (late ComCat):
   gets an edition built like every other but on the day's **frozen partition** (`built_on`: `{"tag": "data", "asset":
   "events/YYYY/MM/DD.ndjson", "sha256", "blob"}`; neighbours read as consumers read them, a frozen partition counting as
   the neighbour's archived day), with ComCat's whole answer of the day as its raw asset; an unchanged day publishes
-  nothing. Each refresh of a day builds on the partition again with ComCat's newest answer. Unlike the other editions
+  nothing. Each refresh of a day builds on the partition again with ComCat's newest answer, and is compared next time
+  with that answer, so a day gets a new edition only when ComCat changed again since its last one. The index keeps one
+  `late_usgs` entry per day: a new one replaces the day's earlier `late_usgs` editions and their raw assets in
+  `remediation.json` and names the editions it replaced in `superseded` (their assets stay in the Release). Unlike the other editions
   it does not re-read the partition's AFAD rows stored 3 h early (before 2026-10-01): it adds ComCat's rows and moves
   nothing else (the month's re-merge re-times them). A row ComCat no longer
   lists (deleted upstream) is reported (`gone`) and kept: an edition never removes a row. Before upload, beyond the

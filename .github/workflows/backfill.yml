@@ -136,9 +136,12 @@ jobs:
         run: |
           git config user.name  "earthquakes-feed-bot"
           git config user.email "bot@users.noreply.github.com"
-          # A sparse checkout: a file written outside the months checked out above makes `git add` exit 1, and the step
-          # fails before anything is committed.
-          git add events knowledge
+          # A sparse checkout, so no pathspec: `git add events knowledge` exits 1 whenever a pathspec matches only paths
+          # outside the checkout (every walk with nothing to fill checks out no month: 2026-11-14 15:43Z). `-A` alone
+          # stages the changes inside the checkout; a NEW file written outside it still makes `git add` exit 1 and the
+          # step fails before anything is committed, and a rewrite of a tracked day that is not checked out is never
+          # staged (tests/backfill-sparse.test.ts).
+          git add -A
           git commit -m "backfill: @ $(date -u +%FT%TZ)" || { echo 'no changes'; exit 0; }
           # Fail-loud push loop (H3; tests/push-data.test.ts): a concurrent writer's commit is rebased onto, a conflict
           # aborts the rebase and fails.

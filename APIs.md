@@ -1136,14 +1136,21 @@ agree. Epoch 2 adds four rules to epoch 1's:
   up to the later of its two origins (`src/remerge.ts` `swarmCellsAsOf`, over the unit's input), close to what live saw
   when the reports arrived, instead of over the seven days before the window's end, where a quake's own aftershocks had
   made its cell a swarm cell. It is somewhat looser than live, which counts every loaded event of the cell over ten
-  days (`LIVE_INDEX_DAYS`) and any aftershock already in when the pair is judged.
+  days (`LIVE_INDEX_DAYS`) and any aftershock already in when the pair is judged. Capped in time
+  (`DENSITY_AS_OF_PAIR_MAX_DT_MS`, 15 s): a pair whose cells are swarm cells by the window's count, which that count's
+  swarm guard keeps apart, folds through this rule only when its origins are less than 15 s apart. Of the dry runs' 2,051
+  folds by this rule, 21 were 15 s or more apart; 7 of them attached a small non-ComCat solution (M3.2 or less) to the
+  wrong small quake. With the cap 20 of the 21 stay apart (the 21st, NOA's M1.9 30.5 s from AFAD's event, folds in a
+  later window by epoch 1's windows, its cell sparse there), two of the three M4.5+ ones join ComCat's event 1.3 and
+  1.7 s from them instead, and one (EMSC's M4.8 of 2024-04-22, 30.1 s) stays a duplicate: a wrong fold loses a distinct
+  quake, a missed one keeps a duplicate. A pair the merge pass joins without this rule is not capped.
 
 Nothing else changes: the hard checks, the ComCat anchor (no ComCat id lost, no two ComCat events welded), the context,
 the windows of epoch 1. Dry runs of 2026-11-14 (local, read-only, `scripts/remerge-verify.ts --comcat`): the 36
-archive months go from 31,920 to 29,357 live M4.5+ and from 567 to 456 M6+ events (ComCat 22,476 and 387; the anchored
-counts unchanged in every month, no new weld), 4,890 folds (1,947 by the authoritative-region window, 417 ISC copies,
-50 large quakes in swarm cells, 1,752 by the density as of the pair, and 724 by epoch 1's windows, pairs another fold
-made reachable); 29 history months
+archive months go from 31,920 to 29,358 live M4.5+ and from 567 to 456 M6+ events (ComCat 22,476 and 387; the anchored
+counts unchanged in every month, no new weld), 4,872 folds (1,947 by the authoritative-region window, 417 ISC copies,
+50 large quakes in swarm cells, 1,733 by the density as of the pair with its 15 s cap, and 725 by epoch 1's windows,
+pairs another fold made reachable; without the cap 4,890 and 29,357); 29 history months
 (2005-06, 2009-05, 2013, 2022-05 → 2023-07) from 427 to 376 M6+ (ComCat 311). What stays above ComCat at M6+ is
 regional agencies' own solutions inside their regions at a higher magnitude (KAGSR's Kamchatka aftershocks), regional
 solutions outside their regions with no global agency's event in the window, and global agencies' second ids of one

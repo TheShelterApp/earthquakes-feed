@@ -501,8 +501,10 @@ export function identityRules(epoch: number): IdentityRules {
  * the out-of-region or the authoritative-region window) is not capped. Over the epoch-2 dry runs (2026-11-14: 1,752
  * archive and 299 history folds by this rule), 21 were 15 s or more apart, the swarm cases the guard exists for: 7 of
  * them attached a small non-ComCat solution (M3.2 or less) to the wrong small quake, its own report 0.2–1.4 s from
- * another event; 3 joined an M4.5+ duplicate correctly (2023-12-03 GEOFON M5.06 at 18.2 s, 2024-04-22 EMSC M4.8 / M4.6
- * at 30.1 / 32.7 s), which stay duplicates: a wrong fold loses a distinct quake, a missed one keeps a duplicate.
+ * another event. Capped, 20 of the 21 stay apart (NOA's M1.9 of 2024-05-15, 30.5 s, folds in a later window by the
+ * epoch-1 windows of a cell sparse there), GEOFON's M5.06 of 2023-12-03 and EMSC's M4.6 of 2024-04-22 join ComCat's event
+ * 1.3 / 1.7 s from them instead of one 18.2 / 32.7 s away, and EMSC's M4.8 of 2024-04-22 (30.1 s) stays a duplicate: a
+ * wrong fold loses a distinct quake, a missed one keeps a duplicate.
  */
 export const DENSITY_AS_OF_PAIR_MAX_DT_MS = 15_000;
 /** The rules a live (ingesting) Resolver runs at `epoch`: that epoch's, the offline-only density rule left out. */

@@ -228,7 +228,9 @@ open, reachable source appears.
   (`saturatedDays`), and the 2026-06-28..07-03 seam that 15 sources never fetched, are asked
   again in sub-day windows by the `remediate` workflow and published as one additive, immutable
   edition per day in a `remediation-YYYY` Release; refills wait in a persistent queue until
-  their month is archived, and the archived day is never rewritten
+  their month is archived, and the archived day is never rewritten. ComCat's late publications (M4.5+ solutions
+  published or revised after the live day froze) are asked again once a day for the frozen, unarchived days of the
+  last 45, each changed day getting a `late_usgs` edition built on its frozen partition
   ([APIs.md](APIs.md#remediation-editions-saturated-days-and-the-2026-07-seam)).
 - **Re-merged history:** history written with the merge pass off (backfill, the deep-history build, remediation) keeps
   a quake that reached it source by source as several events; the offline re-merge (`src/remerge.ts`, config

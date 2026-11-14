@@ -15,6 +15,11 @@
  *   arrival that finds 100 waiting is cancelled itself.
  * A `null` group never waits (a job outside every group). `then` models a `workflow_run` chain: derive.yml used to be
  * triggered by every completed aggregate run and arrived in the same group a few seconds later.
+ *
+ * SHLTR-149 adds the gate (scripts/writer-queue.mjs): a gated arrival that finds `maxQueued` or more runs pending in its
+ * group is refused at once and never enters it (`refused`); aggregate is never gated. The real gate also counts runs
+ * whose own gate is still deciding, which this replay has no time for (a gate takes seconds): it is the gate's bound
+ * at the moment each run arrives.
  */
 
 export type QueueMode = 'single' | 'max';
@@ -50,6 +55,15 @@ export interface Outcome {
   endedAt: number | null;
   /** The arrival that cancelled it while it waited (`single`), or itself when it found the queue full (`max`). */
   cancelledBy: Arrival | null;
+  /** Refused by the gate: it never entered the group (SHLTR-149). */
+  refused: boolean;
+}
+
+/** The writer gate (scripts/writer-queue.mjs decideGate): arrivals `gated` selects are refused when `maxQueued` wait. */
+export interface Gate {
+  group: string;
+  maxQueued: number;
+  gated: (a: Arrival) => boolean;
 }
 
 interface GroupState {
@@ -62,14 +76,14 @@ interface GroupState {
  * taken in time order (ties by id), a completion at the same instant as an arrival is handled first, so a run that
  * frees the group at t starts its successor before anything arriving at t is queued.
  */
-export function simulate(arrivals: readonly Arrival[], queue: (group: string) => QueueMode = () => 'single'): Outcome[] {
+export function simulate(arrivals: readonly Arrival[], queue: (group: string) => QueueMode = () => 'single', opts: { gate?: Gate } = {}): Outcome[] {
   const outcomes = new Map<Arrival, Outcome>();
   const groups = new Map<string, GroupState>();
   const incoming: Arrival[] = [...arrivals].sort(byTime);
   let followSeq = 0;
   const outOf = (a: Arrival): Outcome => {
     let o = outcomes.get(a);
-    if (!o) outcomes.set(a, (o = { arrival: a, startedAt: null, endedAt: null, cancelledBy: null }));
+    if (!o) outcomes.set(a, (o = { arrival: a, startedAt: null, endedAt: null, cancelledBy: null, refused: false }));
     return o;
   };
   const state = (g: string): GroupState => {
@@ -120,6 +134,11 @@ export function simulate(arrivals: readonly Arrival[], queue: (group: string) =>
       continue;
     }
     const s = state(a.group);
+    const gate = opts.gate;
+    if (gate && gate.group === a.group && gate.gated(a) && s.pending.length >= gate.maxQueued) {
+      outOf(a).refused = true;
+      continue;
+    }
     if (!s.running) {
       s.running = start(a, a.at);
       continue;
@@ -149,6 +168,8 @@ export interface WorkflowSummary {
   arrivals: number;
   ran: number;
   cancelled: number;
+  /** Refused by the gate (SHLTR-149). */
+  refused: number;
   /** Minutes of work done before the group that cancelled arrivals threw away. */
   lostWorkMin: number;
   /** Seconds between entering the group and starting: median, 90th percentile, max (runs that started). */
@@ -170,6 +191,7 @@ export function summarize(outcomes: readonly Outcome[]): Record<string, Workflow
       arrivals: os.length,
       ran: os.filter((o) => o.startedAt != null).length,
       cancelled: cancelled.length,
+      refused: os.filter((o) => o.refused).length,
       lostWorkMin: Math.round(cancelled.reduce((s, o) => s + (o.arrival.priorWorkMs ?? 0), 0) / 60_000),
       waitS: { p50: q(0.5), p90: q(0.9), max: waits.length ? Math.round(waits[waits.length - 1]!) : 0 },
       cancelledBy,
@@ -178,11 +200,31 @@ export function summarize(outcomes: readonly Outcome[]): Record<string, Workflow
   return out;
 }
 
+/**
+ * The most arrivals of `group` (those `which` selects) that waited at once: entered and not started yet. A refused
+ * arrival never waits; a cancelled one waits until it is cancelled.
+ */
+export function maxWaiting(outcomes: readonly Outcome[], group: string, which: (a: Arrival) => boolean = () => true): number {
+  const ev: [number, number][] = [];
+  for (const o of outcomes) {
+    if (o.arrival.group !== group || o.refused || !which(o.arrival)) continue;
+    const leave = o.startedAt ?? (o.cancelledBy ? o.cancelledBy.at : null);
+    if (leave === o.arrival.at) continue;
+    ev.push([o.arrival.at, 1]);
+    if (leave != null) ev.push([leave, -1]);
+  }
+  ev.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let d = 0;
+  let m = 0;
+  for (const [, x] of ev) m = Math.max(m, (d += x));
+  return m;
+}
+
 /** The busiest the group's queue got (running + pending) over the replay. */
 export function maxDepth(outcomes: readonly Outcome[], group: string): number {
   const ev: [number, number][] = [];
   for (const o of outcomes) {
-    if (o.arrival.group !== group) continue;
+    if (o.arrival.group !== group || o.refused) continue;
     ev.push([o.arrival.at, 1]);
     const leave = o.endedAt ?? (o.cancelledBy ? o.cancelledBy.at : null);
     if (leave != null) ev.push([leave, -1]);
@@ -207,6 +249,28 @@ export interface Design {
   /** The history / first-solutions / remediate commit jobs (each writes only its own index files) hold no group. */
   sideCommitsOutside: boolean;
   writerQueue: QueueMode;
+  /** SHLTR-149: backfill, archive and derive pass the gate (at most this many pending when they join); unset: no gate. */
+  gateMaxQueued?: number;
+  /** SHLTR-149: how long a backfill holds the group (its sparse data checkout); unset: as measured. */
+  backfillHoldMs?: number;
+}
+
+/**
+ * A backfill job on the sparse data checkout (backfill.yml since SHLTR-149), estimated from the steps of the full one
+ * measured on 2026-11-08/14: job setup 2 s, code checkout 1–3 s, setup-node 4 s, npm ci 4–6 s, the backfill 0–2 s,
+ * validate 7–18 s (it walked the whole tree), commit 0–3 s, markers 1 s; the sparse checkout of the index files (about
+ * 4 MB) and of the windows' months, and the plan step, put at 15 s together. The full checkout alone took 94–101 s.
+ */
+export const SPARSE_BACKFILL_HOLD_MS = 40_000;
+
+/** The gated workflows (scripts/writer-queue.mjs WRITERS: all but aggregate). */
+export const GATED_WORKFLOWS: ReadonlySet<string> = new Set(['backfill', 'archive', 'derive']);
+
+/** simulate() under a design: its writer queue mode and, when it has one, its gate. */
+export function simulateDesign(arrivals: readonly Arrival[], design: Design): Outcome[] {
+  const gate: Gate | undefined =
+    design.gateMaxQueued != null ? { group: WRITER, maxQueued: design.gateMaxQueued, gated: (a) => GATED_WORKFLOWS.has(a.workflow) } : undefined;
+  return simulate(arrivals, (g) => (g === WRITER ? design.writerQueue : 'single'), gate ? { gate } : {});
 }
 
 export const DESIGNS: readonly Design[] = [
@@ -214,6 +278,14 @@ export const DESIGNS: readonly Design[] = [
   { name: 'queue: max only', foldDerive: false, sideCommitsOutside: false, writerQueue: 'max' },
   { name: 'derive folded + commit jobs outside, single queue', foldDerive: true, sideCommitsOutside: true, writerQueue: 'single' },
   { name: 'derive folded + commit jobs outside + queue: max (round 14)', foldDerive: true, sideCommitsOutside: true, writerQueue: 'max' },
+  {
+    name: 'round 14 + job-level lock, gate at 2 queued, sparse backfill (SHLTR-149)',
+    foldDerive: true,
+    sideCommitsOutside: true,
+    writerQueue: 'max',
+    gateMaxQueued: 2,
+    backfillHoldMs: SPARSE_BACKFILL_HOLD_MS,
+  },
 ];
 
 /** One workflow run as `gh api …/actions/runs` and `…/runs/{id}/jobs` describe it (scripts/writer-group-sim.ts fetch). */
@@ -291,6 +363,7 @@ export function replayArrivals(runs: readonly RunRecord[], design: Design): Arri
         const j = r.jobs[0];
         let hold = jobHold(j) ?? med(`${r.wf}:${r.wf}`, 90_000);
         if (r.wf === 'aggregate' && design.foldDerive && j?.conclusion === 'success') hold += tailAfter(ms(j.completed_at)!);
+        if (r.wf === 'backfill' && design.backfillHoldMs != null) hold = design.backfillHoldMs;
         out.push({ id, workflow: r.wf, at: created, group: WRITER, holdMs: hold });
         break;
       }
@@ -397,9 +470,11 @@ export function syntheticArrivals(w: WeekInput, design: Design): Arrival[] {
       case 'derive.yml':
         if (!design.foldDerive) out.push({ id, workflow: 'derive', at, group: WRITER, holdMs: sample('derive') });
         break;
-      case 'backfill.yml':
-        out.push({ id, workflow: 'backfill', at, group: WRITER, holdMs: sample('backfill') });
+      case 'backfill.yml': {
+        const hold = sample('backfill');
+        out.push({ id, workflow: 'backfill', at, group: WRITER, holdMs: design.backfillHoldMs ?? hold });
         break;
+      }
       case 'archive.yml':
         out.push({ id, workflow: 'archive', at, group: WRITER, holdMs: sample('archive') });
         break;
@@ -425,4 +500,40 @@ export function syntheticArrivals(w: WeekInput, design: Design): Arrival[] {
   }
   for (const [wf, times] of Object.entries(w.cronAt)) for (const t of times) add(wf, t, n++);
   return out;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The incident of 2026-11-08 (SHLTR-149): 47 backfill dispatches of a usgs refill, the aggregate every 5 minutes.
+
+/** The first of the 47 backfill dispatches (run 42493027214) and the spacing of the loop that made them. */
+export const INCIDENT_START_MS = Date.parse('2026-11-08T15:05:35Z');
+export const INCIDENT_DISPATCHES = 47;
+export const INCIDENT_SPACING_MS = 4_600;
+/** What each of those backfill runs held the group: 2 min 15 s (94–101 s of it the full data checkout). */
+export const INCIDENT_BACKFILL_HOLD_MS = 135_000;
+/** An aggregate run's hold (its measured p50 with derive folded in: about 2.5 min). */
+export const INCIDENT_AGGREGATE_HOLD_MS = 150_000;
+
+/**
+ * The incident's arrivals under `design`: the 47 backfill dispatches, and the heartbeat Worker's aggregate dispatch
+ * every 5 minutes (27 s after the minute) from 15:00 to 18:00. The backfill hold is the design's (the sparse checkout)
+ * or the incident's.
+ */
+export function incidentArrivals(design: Design): Arrival[] {
+  const out: Arrival[] = [];
+  const hour = Date.parse('2026-11-08T15:00:00Z');
+  for (let t = hour, n = 0; t < hour + 3 * 3_600_000; t += 300_000, n++) {
+    out.push({ id: `aggregate@${String(n).padStart(3, '0')}`, workflow: 'aggregate', at: t + 27_000, group: WRITER, holdMs: INCIDENT_AGGREGATE_HOLD_MS });
+  }
+  for (let i = 0; i < INCIDENT_DISPATCHES; i++) {
+    out.push({ id: `backfill@${String(i).padStart(3, '0')}`, workflow: 'backfill', at: INCIDENT_START_MS + i * INCIDENT_SPACING_MS, group: WRITER, holdMs: design.backfillHoldMs ?? INCIDENT_BACKFILL_HOLD_MS });
+  }
+  return out;
+}
+
+/** The longest an aggregate arrival waited for the group, in ms (an aggregate that never started counts to `endMs`). */
+export function maxAggregateWaitMs(outcomes: readonly Outcome[], endMs: number): number {
+  let m = 0;
+  for (const o of outcomes) if (o.arrival.workflow === 'aggregate') m = Math.max(m, (o.startedAt ?? endMs) - o.arrival.at);
+  return m;
 }

@@ -226,3 +226,27 @@ export function rememberHomeDay(homeDay: Map<string, string>, day: string, n: Pi
  *  re-materialized day never loses it on the re-roll), else its time-day (a repositioned event moves as before). */
 export const homeDayOf = (homeDay: ReadonlyMap<string, string>, n: Pick<EventNode, 'feedId' | 'eventTimeMs'>): string =>
   homeDay.get(n.feedId) ?? eventDayKey(n.eventTimeMs);
+
+/**
+ * The days a run's windows read and write (SHLTR-149, the sparse checkout of backfill.yml): every day from the first
+ * window's start to the last window's end, which the run reads, and one day of margin on each side (a row may sit up to
+ * a minute outside its window, so a write can land on the day before or after). Days from `liveDay` on are the live
+ * pipeline's and never touched. Empty without jobs.
+ */
+export function windowDays(jobs: ReadonlyArray<Pick<Job, 'startMs' | 'endMs'>>, liveDay: string): string[] {
+  if (!jobs.length) return [];
+  const first = Math.min(...jobs.map((j) => j.startMs)) - DAY;
+  const last = Math.max(...jobs.map((j) => j.endMs)) + DAY;
+  const out: string[] = [];
+  for (let ms = Date.parse(`${eventDayKey(first)}T00:00:00Z`); ms <= last; ms += DAY) {
+    const d = eventDayKey(ms);
+    if (d >= liveDay) break;
+    out.push(d);
+  }
+  return out;
+}
+
+/** The sparse-checkout patterns (non-cone) of those days: one `/events/YYYY/MM/` per month, oldest first. */
+export function sparseMonthPatterns(days: readonly string[]): string[] {
+  return [...new Set(days.map((d) => `/events/${d.slice(0, 4)}/${d.slice(5, 7)}/`))];
+}

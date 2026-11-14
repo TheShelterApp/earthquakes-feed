@@ -1,6 +1,5 @@
-import { AUTHORITY_REGIONS, STATS_GLOBAL_PROVIDERS, STATS_REGION_CATALOGUE, STATS_REGION_MARGIN_DEG } from './config.js';
+import { outsideAuthority } from './authority.js';
 import { gatherCellKeys, gridKey, haversineKm } from './geo.js';
-import { catalogueOf } from './util.js';
 import { reviewStatusOfRow } from './review-status.js';
 import type { Extra } from './types.js';
 
@@ -413,28 +412,17 @@ export interface Reconciliation {
 }
 export const EMPTY_RECONCILIATION: Reconciliation = { dropped: new Map(), outOfRegion: new Set() };
 
-const inBox = (lat: number, lon: number, [latMin, latMax, lonMin, lonMax]: readonly [number, number, number, number], m: number): boolean =>
-  lat >= latMin - m && lat <= latMax + m && [lon, lon - 360, lon + 360].some((x) => x >= lonMin - m && x <= lonMax + m);
-
 /**
  * The authoritative-region filter (rule v3, ComCat's own practice: a regional network is authoritative for its own
  * region, a global network everywhere): an M4.5+ row is out of region when none of its provenance providers is a global
  * network (STATS_GLOBAL_PROVIDERS) and its epicentre lies outside the region (AUTHORITY_REGIONS, by catalogue, plus
  * STATS_REGION_MARGIN_DEG on every side) of every provider that reported it. A provider with no region is treated as
- * global. A row holding a `usgs` row is therefore never out of region; nothing below M4.5 ever is.
+ * global. A row holding a `usgs` row is therefore never out of region; nothing below M4.5 ever is. The test is
+ * authority.ts outsideAuthority, the one the Resolver's authoritative-region window (epoch 2) uses too.
  */
 export function isOutOfRegion(ev: Pick<StatsEvent, 'magE2' | 'latE4' | 'lonE4' | 'sources'>): boolean {
-  if (ev.magE2 < RECONCILE_MIN_E2 || ev.sources.length === 0) return false;
-  const lat = ev.latE4 / 1e4;
-  const lon = ev.lonE4 / 1e4;
-  for (const p of ev.sources) {
-    if (STATS_GLOBAL_PROVIDERS.has(p)) return false;
-    const cat = STATS_REGION_CATALOGUE.get(p) ?? catalogueOf(p);
-    const boxes = AUTHORITY_REGIONS[cat];
-    if (!boxes) return false;
-    if (boxes.some((b) => inBox(lat, lon, b, STATS_REGION_MARGIN_DEG))) return false;
-  }
-  return true;
+  if (ev.magE2 < RECONCILE_MIN_E2) return false;
+  return outsideAuthority(ev.sources, ev.latE4 / 1e4, ev.lonE4 / 1e4);
 }
 
 /**

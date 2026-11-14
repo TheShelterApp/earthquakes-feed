@@ -13,18 +13,23 @@
 #   PUSH_BRANCH=data PUSH_ATTEMPTS=3 PUSH_BACKOFF_S=0 bash "$GITHUB_WORKSPACE/scripts/push-data.sh"
 #
 # PUSH_BACKOFF_S > 0 sleeps i * PUSH_BACKOFF_S seconds after the i-th failed push (aggregate: 5 attempts, 5 s, so at
-# most 5 + 10 + 15 + 20 = 50 s of pauses under the writer lock).
+# most 5 + 10 + 15 + 20 = 50 s of pauses under the writer lock). PUSH_JITTER_S > 0 adds a random 0..N seconds to each
+# pause (backfill and archive: 6 attempts, 3 s, jitter 3, so a lockless commit job cannot make them lose a commit).
 set -u
 branch="${PUSH_BRANCH:-data}"
 attempts="${PUSH_ATTEMPTS:-3}"
 backoff="${PUSH_BACKOFF_S:-0}"
+jitter="${PUSH_JITTER_S:-0}"
 i=1
 while [ "$i" -le "$attempts" ]; do
   if git push origin "HEAD:${branch}"; then
     exit 0
   fi
   if [ "$i" -eq "$attempts" ]; then break; fi
-  if [ "$backoff" -gt 0 ]; then sleep $((i * backoff)); fi
+  pause=$((i * backoff))
+  # Random 0..PUSH_JITTER_S seconds on top, so two writers rejected together do not retry in lockstep.
+  if [ "$jitter" -gt 0 ]; then pause=$((pause + RANDOM % (jitter + 1))); fi
+  if [ "$pause" -gt 0 ]; then sleep "$pause"; fi
   # The explicit refspec updates origin/<branch> whatever the checkout configured for the remote.
   if ! git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"; then
     echo "::warning::fetching origin/${branch} failed after a failed push (attempt ${i} of ${attempts}); pushing again"

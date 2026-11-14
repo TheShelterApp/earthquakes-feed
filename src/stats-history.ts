@@ -1187,6 +1187,13 @@ export function partitionBlobs(dataDir: string, through: string): Map<string, st
   return out;
 }
 
+/** The remediation editions by reason, e.g. `late_usgs 120, saturated 35, seam 40` (absent reason: saturated). */
+export function editionReasons(idx: RemediationIndex): string {
+  const by = new Map<string, number>();
+  for (const e of idx.editions) by.set(e.reason ?? 'saturated', (by.get(e.reason ?? 'saturated') ?? 0) + 1);
+  return [...by].sort(([a], [b]) => (a < b ? -1 : 1)).map(([r, n]) => `${r} ${n}`).join(', ') || 'none';
+}
+
 const readJson = <T>(f: string, fallback: T): T => (existsSync(f) ? (JSON.parse(readFileSync(f, 'utf8')) as T) : fallback);
 
 function setOutput(key: string, value: string): void {
@@ -1275,7 +1282,7 @@ async function main(): Promise<void> {
   const comcat = comcatCounter(usgs);
   const work = mkdtempSync(join(tmpdir(), 'efd-stats-'));
   const reader = new InputReader(ghStatsIo(DATA_DIR, work));
-  console.log(`stats: through ${through}; epoch ${STATS_REMERGE_EPOCH} (config REMERGE_EPOCH ${REMERGE_EPOCH}); ${idx.partitions.size} frozen partition(s), ${idx.archives.length} archive month(s), ${idx.remediation.editions.length} remediation edition(s), ${idx.history?.editions.length ?? 0} history edition(s); max ${maxYears} year(s)${dryRun ? '; dry run' : ''}`);
+  console.log(`stats: through ${through}; epoch ${STATS_REMERGE_EPOCH} (config REMERGE_EPOCH ${REMERGE_EPOCH}); ${idx.partitions.size} frozen partition(s), ${idx.archives.length} archive month(s), ${idx.remediation.editions.length} remediation edition(s) (${editionReasons(idx.remediation)}), ${idx.history?.editions.length ?? 0} history edition(s); max ${maxYears} year(s)${dryRun ? '; dry run' : ''}`);
   let res: RunResult;
   try {
     res = await runStatsHistory({

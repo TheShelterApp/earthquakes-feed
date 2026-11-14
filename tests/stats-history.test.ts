@@ -571,3 +571,39 @@ test('InputReader: a month\'s remediated days never push its archive out of the 
   assert.equal(io.calls.filter((c) => c === 'archive-2025-08/events-2025-08.tar.zst').length, 1, 'the archive is downloaded once');
   assert.equal(reader.downloads, 16, 'the archive and 15 remediation editions');
 });
+
+test('late_usgs (SHLTR-150): an unarchived frozen day reads its current edition built on the partition, not the partition; the month counts follow', () => {
+  const day = '2026-09-15';
+  const t = Date.parse(`${day}T06:00:00Z`);
+  // The partition as the day froze: ComCat's early M4.4; the late_usgs edition: the same quake at M4.6 and a late M4.8.
+  const node = (row: RawObs): F => {
+    const one = new Map<string, EventNode>();
+    new Resolver(one, priorityMap(registry), configMap(registry), t + 30 * DAY, { hotFloorMs: 0, merge: false }).ingest(row, IT);
+    return nodeToFeature([...one.values()][0]!) as F;
+  };
+  const early = node(obs('usgs', 'us7000late1', { eventTimeMs: t, mag: 4.4, magType: 'mb', fields: { ids: ',us7000late1,' } }));
+  const upgraded = JSON.parse(JSON.stringify(early)) as F;
+  const up = upgraded['properties'] as { mag: number; feed: { provenance: { mag: number }[] } };
+  up.mag = 4.6;
+  up.feed.provenance[0]!.mag = 4.6;
+  const late = node(obs('usgs', 'us7000late2', { eventTimeMs: t + 3_600_000, lat: -20, lon: -175, mag: 4.8, magType: 'mb', fields: { ids: ',us7000late2,' } }));
+  const partBlob = 'c'.repeat(40);
+  const ed = { ...remEdition(day, 1), reason: 'late_usgs', built_on: { tag: 'data', asset: 'events/2026/09/15.ndjson', sha256: SHA('p'), blob: partBlob }, stats: { remerge: { epoch: 1, from_edition: 0 } } } as unknown as EditionRef;
+  const idx: InputIndex = { remediation: remediation([ed]), partitions: new Map([[day, partBlob], ['2026-09-16', 'd'.repeat(40)]]), archives: [], history: null };
+  const lk = inputLookup(idx, 1);
+  const r = chooseDayInput(day, lk)!;
+  assert.deepEqual([r.kind, r.key, r.merged], ['remediation', `remediation-2026/events-${day}.e1.ndjson.gz`, true], 'the current edition, whatever its reason; merged (epoch 1, no archive yet)');
+  assert.equal(chooseDayInput('2026-09-16', lk)!.kind, 'partition', 'a day without an edition keeps its partition');
+  const plan = planYear(2026, '2026-09-16', lk, 1);
+  assert.equal(plan.inputs.filter((i) => i?.kind === 'remediation').length, 1);
+  assert.equal(plan.inputs.filter((i) => i?.kind === 'partition').length, 1);
+  const io = fakeIo(new Map(), new Map([[`remediation-2026/events-${day}.e1.ndjson.gz`, ndjson([upgraded, late])]]), new Map([[day, ndjson([early])], ['2026-09-16', '']]));
+  const b = buildYear(plan, new InputReader(io), { builder: 1, detailed: false, registry, lookup: lk, through: '2026-09-16' });
+  assert.ok(io.calls.includes(`remediation-2026/events-${day}.e1.ndjson.gz`), 'the edition is read');
+  assert.ok(!io.calls.includes(`partition ${day}`), 'its partition is not');
+  assert.equal(b.acc.months.get('2026-09')!.n45, 2, 'the verify table counts the month from the same inputs');
+  // Without the edition (a dry run publishes nothing), the partition's M4.4 counts nothing.
+  const bare = inputLookup({ ...idx, remediation: remediation([]) }, 1);
+  const b0 = buildYear(planYear(2026, '2026-09-16', bare, 1), new InputReader(fakeIo(new Map(), new Map(), new Map([[day, ndjson([early])], ['2026-09-16', '']]))), { builder: 1, detailed: false, registry, lookup: bare, through: '2026-09-16' });
+  assert.equal(b0.acc.months.get('2026-09')?.n45 ?? 0, 0);
+});

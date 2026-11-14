@@ -400,6 +400,12 @@ function summaryLine(day: string, asset: string, fetched: { task: DayTask; rows:
   );
 }
 
+/** The line a dry run ends with (null for a real run). */
+export function dryRunNotice(dryRun: boolean, built: number): string | null {
+  if (!dryRun) return null;
+  return `DRY RUN: ${built} edition(s) built into the workflow artifact remediation-dry-run; nothing was uploaded to the Releases and knowledge/index/remediation.json on data is unchanged. Dispatch again with dry_run=false to publish.`;
+}
+
 type LateReport = { day: string } & NonNullable<DayRunResult['late']>;
 
 /** REMEDIATION_LATE_USGS: on | plan | off | blank (off) | scheduled (LATE_USGS_SCHEDULED, the scheduled run's mode). */
@@ -557,6 +563,13 @@ async function main(): Promise<void> {
   setOutput('changed', String(changed));
   writeFileSync(join(out, 'report.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(`remediate: done=${report.done.length} failed=${report.failed.length} pending=${report.pending} waiting=${report.waiting.length} queue=${(idx.refill_queue ?? []).map((e) => e.range).join(' ') || 'empty'} index_changed=${changed}`);
+  // A dispatch defaults to a dry run: say so where it cannot be missed (2026-11-14: a 120-edition campaign ran as four
+  // dry runs and published nothing).
+  const dry = dryRunNotice(dryRun, report.done.length + report.late_usgs.planned.length);
+  if (dry) {
+    console.log(`::warning title=remediate dry run::${dry}`);
+    if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `**${dry}**\n`);
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

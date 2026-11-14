@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Dry run: no Release, no upload, no commit; the produced assets become a 3-day workflow artifact'
+        description: 'Dry run (the default): no Release, no upload, no commit, the produced assets become a 3-day workflow artifact; set false to publish'
         type: boolean
         default: true
       days:

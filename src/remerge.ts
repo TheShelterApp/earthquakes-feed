@@ -25,7 +25,7 @@ import type { EventNode, ProviderConfig } from './types.js';
  *    rows, so no row leaves any asset; no row is withdrawn.
  *
  * The windows run the identity rules of the epoch the unit is merged to (config identityRules): from epoch 2 also ISC's
- * copies of NEIC's and GFZ's origins, the authoritative-region window, and a pair's cell density counted as of the pair
+ * copies of NEIC's, GFZ's, GA's and the Puerto Rico network's origins, the authoritative-region window, and a pair's cell density counted as of the pair
  * (swarmCellsAsOf) instead of as of the window's end.
  *
  * Deterministic: the same input gives the same output bytes (ingest time REMERGE_INGEST_TIME, never the clock).

@@ -2,14 +2,14 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { outsideAuthority } from '../src/authority.js';
-import { AUTHORITY_WINDOW, ISC_COPY_DT_MS, ISC_COPY_KM, LIVE_IDENTITY_RULES, REMERGE_EPOCH, SWARM_CELL_ABSOLUTE, identityRules } from '../src/config.js';
+import { AUTHORITY_WINDOW, ISC_COPY_DT_MS, ISC_COPY_KM, type IdentityRules, LIVE_IDENTITY_RULES, REMERGE_EPOCH, SWARM_CELL_ABSOLUTE, identityRules, liveIdentityRules } from '../src/config.js';
 import { Resolver } from '../src/dedup.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import { anchorCounts, remergeGateProblems, remergeNodes, snapshotUnit, swarmCellsAsOf } from '../src/remerge.js';
 import { isOutOfRegion } from '../src/stats-table.js';
 import type { EventNode, RawObs } from '../src/types.js';
 
-// Dedup epoch 2 (SHLTR-148; config identityRules): ISC's copies of NEIC's, GFZ's and GA's origins, the authoritative-
+// Dedup epoch 2 (SHLTR-148; config identityRules): ISC's copies of NEIC's, GFZ's, GA's and RSPR's origins, the authoritative-
 // region window, a pair's density as of the pair (the re-merge only) and large quakes in swarm cells. Each rule is off
 // at epoch 1 (the live feed and every published unit today) and on from epoch 2.
 
@@ -84,6 +84,7 @@ test('identityRules: epoch 1 adds nothing, epoch 2 adds all four rules; the live
   assert.deepEqual(identityRules(1), { iscCopies: false, authorityWindow: false, densityAsOfPair: false, largeQuakesInSwarms: false });
   assert.deepEqual(identityRules(2), { iscCopies: true, authorityWindow: true, densityAsOfPair: true, largeQuakesInSwarms: true });
   assert.deepEqual(LIVE_IDENTITY_RULES, { ...identityRules(REMERGE_EPOCH), densityAsOfPair: false });
+  assert.deepEqual(liveIdentityRules(2), { ...identityRules(2), densityAsOfPair: false });
 });
 
 // --- ISC's copies ---
@@ -106,13 +107,53 @@ test('ISC copy: within 1 s and 5 km of the named agency’s row; authored GFZ jo
     ...swarm(39.25, 28.05, T),
     obs('geofon', 'gfz2025ppbq', { mag: 5.0, magType: 'mb' }),
     isc('645000001', 'GFZ', { eventTimeMs: T + ISC_COPY_DT_MS - 100, lat: 39.25 + dLat, mag: 5.6 }),
-    obs('auspass', 'smi:local/ga2025xyz', { eventTimeMs: T + 3_600_000, lat: 39.2, mag: 4.8, magType: 'mb' }),
-    isc('645000002', 'AUST', { eventTimeMs: T + 3_600_000, lat: 39.2, mag: null, magType: null }),
+    obs('auspass', 'smi:local/ga2025xyz', { eventTimeMs: T + 3_600_000, lat: 39.27, mag: 4.8, magType: 'mb' }),
+    isc('645000002', 'AUST', { eventTimeMs: T + 3_600_000, lat: 39.27, mag: null, magType: null }),
   ];
+  const e1 = remerge(rows, 1);
+  assert.equal(together(e1.own, 'geofon:gfz2025ppbq', 'isc:645000001'), false, 'epoch 1: the swarm cell keeps GFZ’s copy apart');
+  assert.equal(together(e1.own, 'auspass:smi:local/ga2025xyz', 'isc:645000002'), false, 'epoch 1: the swarm cell keeps AUST’s copy apart');
   const { own, problems } = remerge(rows, 2);
   assert.deepEqual(problems, []);
   assert.ok(together(own, 'geofon:gfz2025ppbq', 'isc:645000001'));
   assert.ok(together(own, 'auspass:smi:local/ga2025xyz', 'isc:645000002'));
+});
+
+test('ISC copy: authored RSPR joins ComCat’s pr… row (not a us… row at the same origin), also in a swarm cell (epoch 2 only)', () => {
+  const rows = [
+    ...swarm(18.05, -66.85, T),
+    usgs('pr71500001', { lat: 18.05, lon: -66.85, mag: 3.2, magType: 'md' }),
+    isc('648000001', 'RSPR', { eventTimeMs: T + 300, lat: 18.05, lon: -66.85, mag: 3.5 }),
+    // An RSPR copy at the origin of ComCat's us… row of another quake: RSPR's own row is the pr… one, so not a copy.
+    usgs('us7000prx1', { eventTimeMs: T + 7_200_000, lat: 18.05, lon: -66.85, mag: 3.4, magType: 'mb' }),
+    isc('648000002', 'RSPR', { eventTimeMs: T + 7_200_000, lat: 18.05, lon: -66.85, mag: 3.4 }),
+  ];
+  assert.equal(together(remerge(rows, 1).own, 'usgs:pr71500001', 'isc:648000001'), false, 'epoch 1: the swarm cell keeps them apart');
+  const { own, problems, reasons } = remerge(rows, 2);
+  assert.deepEqual(problems, []);
+  assert.ok(together(own, 'usgs:pr71500001', 'isc:648000001'));
+  assert.ok(reasons.some((r) => r.startsWith('ISC copy: isc 648000001 (Author RSPR) of usgs pr71500001')), reasons.join('\n'));
+  assert.equal(together(own, 'usgs:us7000prx1', 'isc:648000002'), false);
+});
+
+test('ISC copy: another author’s row at GA’s or the pr… row’s origin is no copy (AUST and RSPR are not unnamed)', () => {
+  const pr = remerge(
+    [...swarm(18.05, -66.85, T), usgs('pr71500002', { lat: 18.05, lon: -66.85, mag: 3.2, magType: 'md' }), isc('649000001', 'IDC', { eventTimeMs: T + 300, lat: 18.05, lon: -66.85, mag: 3.3 })],
+    2,
+  );
+  assert.deepEqual(pr.problems, []);
+  assert.equal(together(pr.own, 'usgs:pr71500002', 'isc:649000001'), false);
+  // In GA's own region (Western Australia), where the authoritative-region window does not apply.
+  const ga = remerge(
+    [
+      ...swarm(-31.15, 116.85, T),
+      obs('auspass', 'smi:local/ga2025abc', { lat: -31.13, lon: 116.86, mag: 4.8, magType: 'mb' }),
+      isc('649000002', 'IDC', { eventTimeMs: T + 300, lat: -31.13, lon: 116.86, mag: 4.7 }),
+    ],
+    2,
+  );
+  assert.deepEqual(ga.problems, []);
+  assert.equal(together(ga.own, 'auspass:smi:local/ga2025abc', 'isc:649000002'), false);
 });
 
 test('ISC copy: another author’s ISC row equal to NEIC’s within 1 s / 5 km joins when the magnitudes are within 1.0, not beyond', () => {
@@ -192,14 +233,14 @@ test('authority window: an out-of-region regional-only M4.5+ solution joins the 
   assert.ok(reasons.some((r) => r.includes('authoritative-region window (geonet outside its region)')), reasons.join('\n'));
 });
 
-test('authority window: limits (60 s, 200 km, |ΔM| 1.0; 300 km and 1.5 from M7) and a global partner only', () => {
+test('authority window: limits (30 s, 200 km, |ΔM| 1.0; 300 km and 1.5 from M7) and a global partner only', () => {
   const base = (over: Partial<RawObs>, partner: RawObs = usgs('us7000part', { lat: -22.29, lon: -177.7, mag: 5.7, magType: 'mb' })): RawObs[] => [
     partner,
     obs('geonet', '2025pgeo', { eventTimeMs: T + 4_000, lat: -22.29 + 150 / KM_PER_DEG, lon: -177.7, mag: 6.2, magType: 'mw', ...over }),
   ];
   const joined = (rows: RawObs[]): boolean => together(remerge(rows, 2).own, `${rows[0]!.provider}:${rows[0]!.providerEventId}`, 'geonet:2025pgeo');
   assert.ok(joined(base({})));
-  assert.equal(joined(base({ eventTimeMs: T + AUTHORITY_WINDOW.maxDtMs + 1_000 })), false, 'beyond 60 s');
+  assert.equal(joined(base({ eventTimeMs: T + AUTHORITY_WINDOW.maxDtMs + 1_000 })), false, 'beyond 30 s');
   assert.equal(joined(base({ lat: -22.29 + 230 / KM_PER_DEG })), false, 'beyond 200 km');
   assert.equal(joined(base({ mag: 6.9 })), false, '|ΔM| 1.2 > 1.0');
   // A great quake: 280 km and |ΔM| 1.4 still join.
@@ -223,8 +264,9 @@ test('authority window: a regional solution inside its own region is never joine
 test('authority window: never folds a ComCat-anchored event away and joins the regional solution to the nearer of two ComCat quakes', () => {
   const rows = [
     usgs('us7000aaaa', { lat: -22.0, lon: -177.0, mag: 5.6, magType: 'mb' }),
-    usgs('us7000bbbb', { eventTimeMs: T + 30_000, lat: -22.6, lon: -177.0, mag: 5.5, magType: 'mb' }),
-    obs('geonet', '2025ptwo', { eventTimeMs: T + 33_000, lat: -22.6 + 40 / KM_PER_DEG, lon: -177.0, mag: 6.1, magType: 'mw' }),
+    usgs('us7000bbbb', { eventTimeMs: T + 10_000, lat: -22.6, lon: -177.0, mag: 5.5, magType: 'mb' }),
+    // Both ComCat quakes are inside GeoNet's window (20 s / 107 km and 10 s / 40 km): the nearer takes it.
+    obs('geonet', '2025ptwo', { eventTimeMs: T + 20_000, lat: -22.6 + 40 / KM_PER_DEG, lon: -177.0, mag: 6.1, magType: 'mw' }),
   ];
   const before = anchorCounts(split(rows));
   const { own, problems } = remerge(rows, 2);
@@ -249,6 +291,26 @@ test('authority window: of two global partners the one of the regional solution�
   assert.deepEqual(problems, []);
   assert.ok(together(own, 'usgs:us7000sumg', 'geonet:2026pfar01'));
   assert.equal(together(own, 'isc:650000001', 'geonet:2026pfar01'), false);
+});
+
+test('authority window, live merge pass: a GeoNet solution revised to M4.5+ is found by ComCat’s event that arrives later', () => {
+  // The regional sides are tracked as the index changes (Resolver.authoritySideIds): a revision in place (same grid
+  // cell) lifts GeoNet's distant solution to M6.2 and makes it one; ComCat's event, minted after it (a fresh mint runs no
+  // merge pass), finds it from the global side on its own next revision.
+  const run = (rules: IdentityRules): boolean => {
+    const map = new Map<string, EventNode>();
+    const r = new Resolver(map, prio, cfg, T + 3_600_000, { rules });
+    const at = { eventTimeMs: T + 4_000, lat: -22.29 + 150 / KM_PER_DEG, lon: -177.7, magType: 'mw' };
+    r.ingest(obs('geonet', '2025plive', { ...at, mag: 4.3, providerUpdatedMs: T + 60_000 }), IT);
+    r.ingest(obs('geonet', '2025plive', { ...at, mag: 6.2, providerUpdatedMs: T + 600_000 }), IT);
+    const comcat = { lat: -22.29, lon: -177.7, magType: 'mb' };
+    r.ingest(usgs('us7000live', { ...comcat, mag: 5.7, providerUpdatedMs: T + 700_000 }), IT);
+    r.ingest(usgs('us7000live', { ...comcat, mag: 5.8, providerUpdatedMs: T + 900_000 }), IT);
+    const holding = (k: string): string => [...map.values()].find((n) => n.state === 'live' && n.aliases.includes(k))!.feedId;
+    return holding('geonet:2025plive') === holding('usgs:us7000live');
+  };
+  assert.equal(run(liveIdentityRules(1)), false);
+  assert.equal(run(liveIdentityRules(2)), true);
 });
 
 // --- density as of the pair, large quakes in swarm cells ---
@@ -286,18 +348,17 @@ test('density as of the pair: a quake’s own aftershocks no longer make its cel
   assert.equal(dense(39.25, 28.05, T + 8 * DAY + 60_000 + (SWARM_CELL_ABSOLUTE - 1) * 120_000), false, 'older than 7 days: not counted');
 });
 
-test('live Resolver: the current epoch’s rules (none at epoch 1): an ISC copy in a swarm cell stays apart in a live heal', () => {
-  if (REMERGE_EPOCH >= 2) return;
-  const map = new Map<string, EventNode>();
-  for (const n of split([...swarm(39.25, 28.05, T), usgs('us6000qzh9', { mag: 4.6, magType: 'mb' }), isc('643893330', 'NEIC', { mag: 4.7 })])) map.set(n.feedId, n);
-  const r = new Resolver(map, prio, cfg, T + DAY);
-  r.heal(IT);
-  const holding = (k: string): string => [...map.values()].find((n) => n.state === 'live' && n.aliases.includes(k))!.feedId;
-  assert.notEqual(holding('usgs:us6000qzh9'), holding('isc:643893330'));
-  // With the epoch 2 rules passed explicitly (what raising REMERGE_EPOCH does live), the same heal joins them.
-  const map2 = new Map<string, EventNode>();
-  for (const n of split([...swarm(39.25, 28.05, T), usgs('us6000qzh9', { mag: 4.6, magType: 'mb' }), isc('643893330', 'NEIC', { mag: 4.7 })])) map2.set(n.feedId, n);
-  new Resolver(map2, prio, cfg, T + DAY, { rules: { ...identityRules(2), densityAsOfPair: false } }).heal(IT);
-  const holding2 = (k: string): string => [...map2.values()].find((n) => n.state === 'live' && n.aliases.includes(k))!.feedId;
-  assert.equal(holding2('usgs:us6000qzh9'), holding2('isc:643893330'));
+test('live Resolver: the epoch’s rules (none at epoch 1, the default while REMERGE_EPOCH is 1): an ISC copy in a swarm cell joins in a live heal from epoch 2', () => {
+  const heal = (rules?: IdentityRules): boolean => {
+    const map = new Map<string, EventNode>();
+    for (const n of split([...swarm(39.25, 28.05, T), usgs('us6000qzh9', { mag: 4.6, magType: 'mb' }), isc('643893330', 'NEIC', { mag: 4.7 })])) map.set(n.feedId, n);
+    new Resolver(map, prio, cfg, T + DAY, rules ? { rules } : {}).heal(IT);
+    const holding = (k: string): string => [...map.values()].find((n) => n.state === 'live' && n.aliases.includes(k))!.feedId;
+    return holding('usgs:us6000qzh9') === holding('isc:643893330');
+  };
+  assert.equal(heal(liveIdentityRules(1)), false, 'epoch 1 rules: apart');
+  // The epoch 2 rules (what raising REMERGE_EPOCH does live): the same heal joins them.
+  assert.equal(heal(liveIdentityRules(2)), true, 'epoch 2 rules: one event');
+  // The default is the current epoch's.
+  assert.equal(heal(), REMERGE_EPOCH >= 2);
 });

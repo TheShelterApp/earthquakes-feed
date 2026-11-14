@@ -277,9 +277,10 @@ export class Resolver {
   /** With `densityAsOfPair` (the offline re-merge, src/remerge.ts): whether a cell is a swarm cell as of a time, counted
    *  over the unit's input (the merge pass's pairs only; Resolver.denseAt). */
   private readonly densityAt: ((lat: number, lon: number, atMs: number) => boolean) | null;
-  /** The live events that may be the regional side of an authoritative-region window (authoritySide), rebuilt when the
-   *  geo index or any event's solution changed since (geoVersion). */
-  private authoritySides: { version: number; ids: string[] } | null = null;
+  /** The indexed events that may be the regional side of an authoritative-region window (authoritySide, M4.5+), kept in
+   *  step with the geo index (indexGeo, deindexGeo, reposition) so a global side reads them without a scan of the index;
+   *  their state is checked where they are read (authorityCandidates). */
+  private readonly authoritySideIds = new Set<string>();
 
   constructor(
     readonly eventMap: Map<string, EventNode>,
@@ -342,11 +343,19 @@ export class Resolver {
     let set = this.geo.get(node.geohash);
     if (!set) this.geo.set(node.geohash, (set = new Set()));
     set.add(node.feedId);
+    this.trackAuthoritySide(node);
   }
 
   private deindexGeo(hash: string, feedId: string): void {
     this.geoVersion++;
-    this.geo.get(hash)?.delete(feedId);
+    if (this.geo.get(hash)?.delete(feedId)) this.authoritySideIds.delete(feedId);
+  }
+
+  /** Keep authoritySideIds in step with an indexed node's solution as it is now. */
+  private trackAuthoritySide(node: EventNode): void {
+    if (!this.rules.authorityWindow) return;
+    if (node.mag != null && node.mag >= AUTHORITY_WINDOW.minMag - 0.005 && this.authoritySide(node)) this.authoritySideIds.add(node.feedId);
+    else this.authoritySideIds.delete(node.feedId);
   }
 
   private isDense(lat: number, lon: number): boolean {
@@ -409,9 +418,10 @@ export class Resolver {
 
   /** Epoch 2 (`iscCopies`, config ISC_ORIGIN_COPIES): `copy`, an ISC row, is ISC's copy of `original`, an agency's own
    *  row, as good as a shared id: the origins within ISC_COPY_DT_MS and ISC_COPY_KM, and `original` a row of the agency
-   *  ISC's `Author` names (NEIC: ComCat's `us…` row; GFZ: GEOFON's; AUST: GA's), whatever the magnitudes (ISC's preferred
-   *  magnitude is often another agency's); or, for an ISC row of another author, a row of an `unnamed` agency (NEIC,
-   *  GFZ) with the magnitudes within ISC_COPY_UNNAMED_MAX_DM (or one of them unknown). */
+   *  ISC's `Author` names (NEIC: ComCat's `us…` row; GFZ: GEOFON's; AUST: GA's; RSPR: ComCat's `pr…` row), whatever the
+   *  magnitudes (ISC's preferred magnitude is often another agency's); or, for an ISC row of another author, a row of
+   *  an `unnamed` agency (NEIC, GFZ; not AUST or RSPR) with the magnitudes within ISC_COPY_UNNAMED_MAX_DM (or one of
+   *  them unknown). */
   private iscCopy(copy: SourcedSolution, original: SourcedSolution): boolean {
     if (!this.rules.iscCopies || copy.provider !== ISC_PROVIDER || original.provider === ISC_PROVIDER) return false;
     if (Math.abs(copy.eventTimeMs - original.eventTimeMs) > ISC_COPY_DT_MS) return false;
@@ -1469,6 +1479,8 @@ export class Resolver {
     if (beforeHash !== node.geohash) {
       this.deindexGeo(beforeHash, node.feedId);
       if (node.eventTimeMs >= this.hotFloor) this.indexGeo(node);
+    } else if (this.geo.get(node.geohash)?.has(node.feedId)) {
+      this.trackAuthoritySide(node);
     }
   }
 
@@ -2279,7 +2291,9 @@ export class Resolver {
   }
 
   /** Epoch 2 (`largeQuakesInSwarms`): both events of at least LARGE_EVENT_MAG, a pair the swarm guard does not judge (no
-   *  swarm member is that large; the base and large-event windows still do). */
+   *  swarm member is that large): its cells count as sparse for every window, the base and large-event windows without
+   *  the dense caps, the moderate-event and regional windows too (moderatePair; over the dry runs one fold of 65 units
+   *  used one, USP's M5.5 solution of the Cook Strait M6.5 of 2013-07-21 at 20.9 km / 0.2 s). */
   private largePair(a: EventNode, b: EventNode): boolean {
     return this.rules.largeQuakesInSwarms && a.mag != null && b.mag != null && a.mag >= LARGE_EVENT_MAG - REID_MAG_TOLERANCE && b.mag >= LARGE_EVENT_MAG - REID_MAG_TOLERANCE;
   }
@@ -2385,7 +2399,7 @@ export class Resolver {
 
   /** Live feed ids that may be the other side of an authoritative-region window with `node` (merge pass, epoch 2): for a
    *  regional side, the events of a magnitude a global side may have within the widest window; for an event that may be
-   *  a global side, the regional sides within it (a short list, rebuilt when an event changed: authoritySides). */
+   *  a global side, the regional sides within it (a short list kept in step with the index: authoritySideIds). */
   private authorityCandidates(node: EventNode): Set<string> {
     const out = new Set<string>();
     if (!this.rules.authorityWindow || !this.mergePass || node.mag == null) return out;
@@ -2401,17 +2415,7 @@ export class Resolver {
       return out;
     }
     if (node.mag < AUTHORITY_PARTNER_MIN_MAG - REID_MAG_TOLERANCE || !node.provenance.some((r) => STATS_GLOBAL_PROVIDERS.has(r.provider))) return out;
-    if (!this.authoritySides || this.authoritySides.version !== this.geoVersion) {
-      const ids: string[] = [];
-      for (const set of this.geo.values()) {
-        for (const fid of set) {
-          const n = this.eventMap.get(fid);
-          if (n && n.state === 'live' && n.mag != null && n.mag >= AUTHORITY_WINDOW.minMag - 0.005 && this.authoritySide(n)) ids.push(fid);
-        }
-      }
-      this.authoritySides = { version: this.geoVersion, ids };
-    }
-    for (const fid of this.authoritySides.ids) {
+    for (const fid of this.authoritySideIds) {
       const other = this.eventMap.get(fid);
       if (other && other.state === 'live' && near(other)) out.add(fid);
     }

@@ -463,17 +463,20 @@ export const REMERGE_RULES = 3;
  * remediation editions, onboarding, the one-time correction) runs the rules of REMERGE_EPOCH, and the re-merge of a unit
  * runs the rules of the epoch it merges the unit to, so a dry run (REMERGE_EPOCH_OVERRIDE, HISTORY_REMERGE_EPOCH) shows
  * what raising REMERGE_EPOCH would do to both before it is raised. Epoch 2:
- *  - `iscCopies`: ISC's copies of NEIC's and GFZ's origins are those agencies' solutions, as good as a shared id
- *    (ISC_ORIGIN_COPIES; Resolver.iscCopy);
+ *  - `iscCopies`: ISC's copies of NEIC's, GFZ's, GA's (AUST) and the Puerto Rico network's (RSPR) origins are those
+ *    agencies' solutions, as good as a shared id (ISC_ORIGIN_COPIES; Resolver.iscCopy);
  *  - `authorityWindow`: a regional agency's solution of M4.5+ outside its authoritative region joins the global
  *    agencies' event of the quake (AUTHORITY_WINDOW; Resolver.authorityJoin), by the region test the statistics use
  *    (src/authority.ts);
  *  - `densityAsOfPair` (the offline re-merge only, src/remerge.ts): a pair's grid-cell density is counted over the seven
- *    days up to the later of its two origins, not up to the window's end (Resolver.isDense), as live counted it when the
- *    reports arrived: a quake's own aftershocks no longer turn its cell into a swarm cell that keeps its agencies'
- *    solutions apart;
- *  - `largeQuakesInSwarms`: two events both of LARGE_EVENT_MAG or more are judged by the base and large-event windows
- *    in a dense cell too, without the swarm guard's shared-id demand (Resolver.largePair): a swarm is made of small
+ *    days (HOT_WINDOW_DAYS) up to the later of its two origins, not up to the window's end (Resolver.isDense), close to
+ *    what live saw when the reports arrived: a quake's own aftershocks no longer turn its cell into a swarm cell that
+ *    keeps its agencies' solutions apart. Somewhat looser than live, which counts every loaded event of the cell
+ *    (LIVE_INDEX_DAYS, ten days, and any aftershock already in when the pair is judged); the re-merge's older context
+ *    holds seven days, so ten could not be counted at a unit's start;
+ *  - `largeQuakesInSwarms`: two events both of LARGE_EVENT_MAG or more are judged in a dense cell as in any other cell —
+ *    the base and large-event windows without the dense caps, the moderate-event window and a regional window (USP's
+ *    large-quake window) — without the swarm guard's shared-id demand (Resolver.largePair): a swarm is made of small
  *    quakes, and a large quake in a cell its foreshocks or a swarm had filled stayed one event per agency (the Sındırgı
  *    M6.1 of 2025-08-10, in a cell with 64 events in the week before it, stood as ten events of the archive after
  *    epoch 1).
@@ -488,8 +491,12 @@ export function identityRules(epoch: number): IdentityRules {
   const on = epoch >= 2;
   return { iscCopies: on, authorityWindow: on, densityAsOfPair: on, largeQuakesInSwarms: on };
 }
+/** The rules a live (ingesting) Resolver runs at `epoch`: that epoch's, the offline-only density rule left out. */
+export function liveIdentityRules(epoch: number): IdentityRules {
+  return { ...identityRules(epoch), densityAsOfPair: false };
+}
 /** The rules the live Resolver runs: the current epoch's, the offline-only density rule left out. */
-export const LIVE_IDENTITY_RULES: IdentityRules = { ...identityRules(REMERGE_EPOCH), densityAsOfPair: false };
+export const LIVE_IDENTITY_RULES: IdentityRules = liveIdentityRules(REMERGE_EPOCH);
 /**
  * ISC's copies of other agencies' origins (epoch 2, `iscCopies`; APIs.md, *ISC*), by the ISC `Author` code: the
  * catalogue the copied row is from (util.ts catalogueOf: GA's rows reach the feed through AusPass) and, for ComCat, the

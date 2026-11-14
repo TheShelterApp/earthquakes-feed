@@ -1,5 +1,5 @@
 import { nodeToFeature } from './bitemporal.js';
-import { REMERGE_EPOCH, REMERGE_INGEST_TIME } from './config.js';
+import { REMERGE_EPOCH, REMERGE_INGEST_TIME, liveIdentityRules } from './config.js';
 import { Resolver } from './dedup.js';
 import { haversineKm } from './geo.js';
 import { type HistoryEra, type Period, dayKeyOf, fetchFloorOf, periodDays } from './history-config.js';
@@ -227,7 +227,10 @@ export function buildEdition(input: BuildInput): { dayFiles: Map<string, string>
     contextIds.add(n.feedId);
     for (const r of n.provenance) contextKeys.add(`${r.provider}:${r.nativeId}`);
   }
-  const resolver = new Resolver(transient, priorityMap(registry), configMap(registry), period.endMs, { hotFloorMs: 0, merge: false });
+  // The epoch the month is merged to (config REMERGE_EPOCH, or a dry run's HISTORY_REMERGE_EPOCH): its ingest rules too
+  // (an ISC copy attaches at first sight from epoch 2), so a dry run builds what raising the epoch would build.
+  const epoch = input.remergeEpoch ?? REMERGE_EPOCH;
+  const resolver = new Resolver(transient, priorityMap(registry), configMap(registry), period.endMs, { hotFloorMs: 0, merge: false, rules: liveIdentityRules(epoch) });
 
   const tally = emptyTally();
   const queue: { raw: RawObs; ingestTime: string }[] = [];
@@ -247,7 +250,6 @@ export function buildEdition(input: BuildInput): { dayFiles: Map<string, string>
 
   // The re-merge (config REMERGE_EPOCH, src/remerge.ts): the month's own events in sliding 7-day windows, the frozen
   // newer neighbour as pinned context (a loser may point into it, merge.into_newer), before the magnitude floor.
-  const epoch = input.remergeEpoch ?? REMERGE_EPOCH;
   let merge: MergeMeta | undefined;
   if (epoch > 0) {
     const own = [...transient.values()].filter((n) => !contextIds.has(n.feedId));

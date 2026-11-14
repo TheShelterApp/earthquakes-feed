@@ -25,7 +25,7 @@ import { join, resolve } from 'node:path';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { loadState } from '../src/bitemporal.js';
-import { EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HEAL_MAX_FOLDS_PER_RUN, HOT_WINDOW_DAYS, LIVE_IDENTITY_RULES, LIVE_INDEX_DAYS, identityRules } from '../src/config.js';
+import { EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HEAL_MAX_FOLDS_PER_RUN, HOT_WINDOW_DAYS, LIVE_IDENTITY_RULES, LIVE_INDEX_DAYS, liveIdentityRules } from '../src/config.js';
 import { HELD_REASON, REHOMED_REASON_PREFIX, Resolver } from '../src/dedup.js';
 import { REDERIVED_REASON, runFeedSideSteps } from '../src/heal.js';
 import { haversineKm } from '../src/geo.js';
@@ -60,7 +60,11 @@ for (const [k, n] of state.eventMap) before.set(k, JSON.parse(JSON.stringify(n))
 // The production step itself (aggregate → runFeedSideSteps), with its marker sent to a scratch
 // directory; merges and retractions are read back from the lines it logged.
 const epochArg = opt('--epoch');
-const rules = epochArg != null ? { ...identityRules(Number(epochArg)), densityAsOfPair: false } : LIVE_IDENTITY_RULES;
+if (epochArg != null && !/^(0|[1-9][0-9]*)$/.test(epochArg)) {
+  console.error(`heal-dryrun: --epoch must be an integer of 0 or more, not ${JSON.stringify(epochArg)}`);
+  process.exit(2);
+}
+const rules = epochArg != null ? liveIdentityRules(Number(epochArg)) : LIVE_IDENTITY_RULES;
 const resolver = new Resolver(state.eventMap, priorityMap(registry), configMap(registry), nowMs, { rules });
 const log = new LogBuffer(head.seq, ingestTime);
 const scratch = mkdtempSync(join(tmpdir(), 'heal-dryrun-'));

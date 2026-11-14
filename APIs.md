@@ -1211,6 +1211,14 @@ were already in `archive-2026-06`, and 07-01…07-03 are frozen and wait in the 
 2026-11-08 the onboarding bootstrap seeds a source as complete only when its live lookback reaches the floor, and
 queues the others like a source added later, so a new `data` branch cannot open the same gap.
 
+**Dispatching windows by hand.** A dispatch with `starttime` and `endtime` (and `providers`) fills that range once and
+does not move the walk's cursor. Pace them: at most 2 writer runs wait for the `earthquakes-feed-writer` group at a time
+(README.md, *Writer group*). A third dispatch is refused in seconds by the workflow's `gate` job with an `::error::`
+naming what waits (dispatch it again once one has finished, or with `force=true`, which every aggregate run then waits
+behind); the hourly walk is refused with a warning only and walks on at its next tick. A backfill run holds the group for
+seconds: it checks out only the index files and the months of its windows (SHLTR-149, after 47 dispatches of a usgs
+refill held the live feed 1 h 47 min on 2026-11-08).
+
 A source's walk reports its failures: a window that fails is halved for the next run (a window whose answer is too
 large to stream within the timeout fails as a timeout, never as an overflow), each failure is logged with its error,
 the cursor keeps `lastError` and `failingSince`, a streak of 24 runs adds a warning to every run, and from 72 runs at a

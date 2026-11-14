@@ -203,7 +203,8 @@ open, reachable source appears.
   group `earthquakes-feed-writer` with `queue: max`, so a run waits its turn instead of being cancelled by the next
   one; every commit to `data` goes through `scripts/push-data.sh` (fetch, rebase, retry, fail loudly on a conflict). The
   side-index commits of `history`, `first-solutions` and `remediate` write only their own files and push without the
-  lock. `scripts/writer-group-sim.ts` replays a week of runs under GitHub's queue rules.
+  lock. `scripts/writer-group-sim.ts` replays a week of runs under GitHub's queue rules. The queue is bounded: see
+  [Writer group](#writer-group).
 - **History & growth:** `backfill` walks each source backward (paced, idempotent, ~3-yr
   target), and `archive` rolls cold months (>120 d) to GitHub Releases (un-metered) and
   prunes the tree — so the `data` branch stays bounded. The run logs (`status/history`, one
@@ -257,6 +258,43 @@ open, reachable source appears.
   **jsDelivr** (branch refs cache ~12 h — resolve through the manifest). Never
   `raw.githubusercontent.com` (60 req/hr/IP).
 
+## Writer group
+
+Every workflow that commits to `data` beyond its own side index takes the concurrency group `earthquakes-feed-writer`
+(`queue: max`: first in, first out, up to 100 waiting), so one writes at a time. `aggregate`, the live feed's publisher,
+waits in the same queue as everyone else: on 2026-11-08 a loop of 47 `backfill.yml` dispatches (a usgs refill, 4–5 s
+apart) queued ahead of every aggregate run and the live manifest went 1 h 47 min stale (SHLTR-149;
+`npx tsx scripts/writer-group-sim.ts incident` replays it). Since then:
+
+- **The lock is job-level, behind a gate.** `backfill.yml`, `archive.yml` and `derive.yml` start with a `gate` job
+  outside every group ([`scripts/writer-queue.mjs`](scripts/writer-queue.mjs)): it counts the writer runs created before
+  its own that wait for the group or are about to enter it (aggregate included) and lets the writing job join only while
+  fewer than 2 do. A refused dispatch fails in seconds with an `::error::` naming what waits; a refused scheduled run
+  (backfill's hourly walk, also when the heartbeat Worker dispatches it without a window; archive's 6-hourly run) is a
+  `::warning::` and a green run, and its next run does the work. `aggregate.yml` has no gate: it is never refused. The
+  bound is "about 2": a gate that cannot see a run created a moment before its own can let a third in, and a gate
+  that cannot read the queue refuses (the input `force` overrides both).
+- **The locked part is short.** `backfill` holds the lock on a sparse, blobless checkout of `data` (the index files and
+  the months of its windows): the full checkout was 94–101 s of the 2 min 15 s each backfill held it, the backfill
+  itself 0–2 s. `archive` (4 runs a day) and `derive` (by hand) keep the full checkout: each reads most of the tree.
+- **Health watches it.** `feed:writer-queue` (P2) opens when more than 3 writer runs wait, or when the live manifest is
+  older than 15 minutes while any does ([Health watchdogs](#health-watchdogs-githubworkflowshealthyml)).
+
+**Pacing.** Dispatch at most 2 writer runs at a time and the next ones as those finish, e.g. a refill of many windows:
+
+```sh
+for w in 2026-01-01/2026-01-08 2026-01-08/2026-01-15 …; do
+  # Unfinished backfill runs among the newest 20 (the one holding the group included).
+  while [ "$(gh run list -R TheShelterApp/earthquakes-feed -w backfill.yml -L 20 --json status -q '[.[] | select(.status != "completed")] | length')" -ge 2 ]; do sleep 30; done
+  gh workflow run backfill.yml -R TheShelterApp/earthquakes-feed -f starttime="${w%/*}T00:00:00Z" -f endtime="${w#*/}T00:00:00Z" -f providers=usgs
+  sleep 15
+done
+```
+
+`node scripts/writer-queue.mjs status` (with `GH_TOKEN` and `GITHUB_REPOSITORY` set) prints the whole queue as the gates
+see it. `-f force=true` joins whatever waits; every aggregate run then waits behind it, so keep it for a single urgent run. To
+drain a queue that got too long: `gh run cancel <id>` for the surplus runs (never the one holding the group).
+
 ## Run locally
 
 Requires Node 22+.
@@ -309,8 +347,8 @@ minutes (one that was cancelled or skipped does not count). One health run runs 
   writes one findings document (the artifact `findings-<evaluator>`) and stays green whatever it judged; only a crash,
   or a findings file it cannot write, turns its job red.
   - `feed` ([`scripts/feed-health.mjs`](scripts/feed-health.mjs)): the live `v1` and `v2` manifests, `v1/status.json`,
-    the files on `data`, the repository size and the walks' blocked markers (a GitHub read that fails is
-    `watcher:feed-github`; a truncated listing of the `data` tree is a warning).
+    the files on `data`, the repository size, the walks' blocked markers and the writer queue (a GitHub read that fails
+    is `watcher:feed-github`; a truncated listing of the `data` tree is a warning).
   - `alerts` ([`scripts/alerts-watchdog.mjs`](scripts/alerts-watchdog.mjs)): The Shelter's alert pipeline, from the
     alerts-gateway's public `https://data.theshelter.app/alerts/status.json`, the USGS `4.5_hour` canary and, with the
     `CF_ANALYTICS_TOKEN` secret, the account's daily usage (only account totals are logged, and an API error is
@@ -392,6 +430,7 @@ hundred, the board is not written at all: exit 3). The label `health:p1` … `he
 | `alerts:policy` | P1 | The compiled fallback policy runs instead of the signed one | Republish or repair the signed alerts policy |
 | `alerts:apns` | P1 / P3 | P1: APNs not configured, `apns.problems` not empty, or split mode without production; P3: today's `skipped_no_key` or `retry_dropped_budget` above 0 | The gateway's APNs keys for the environment named |
 | `alerts:selftest` | P1 | The selftest (below) | Expected; never stored on a board |
+| `feed:writer-queue` | P2 | More than 3 runs wait for (or are about to enter) the `earthquakes-feed-writer` group, or the older live manifest is over 15 min old while any does (unfinished runs older than 6 h are GitHub's ghosts and do not count) | [Writer group](#writer-group): cancel the surplus runs (`gh run cancel <id>`), pace the dispatches; usually a burst dispatched with `force=true` |
 | `feed:freshness` | P2 (unreachable: 2nd run) | The older of the live `v1` and `v2` manifests past `stale_after_seconds` (1,800 s), confirmed by a re-read 60 s later; or a manifest unreachable | The aggregate runs, the heartbeat Worker and its `GH_PAT`, the Pages deploy; `v1` fresh and `v2` stale means signing stopped |
 | `feed:status` | P3 (2nd run) | `v1/status.json` unreadable | The per-source rows are frozen meanwhile: the aggregate runs' Pages publish |
 | `feed:source:<id>` | P3 | Its fetch failing from `lastSuccessAt` for 3 h (`usgs`, `emsc`, `geofon`), 12 h (the others) or 2 h (HTTP 401/403/404/410, a schema error, a certificate), or silent or frozen past its activity budget; for a source that never fetched successfully, that line counts from the first run that saw it; escalates at 24 h (core sources, definite errors) | Usually the agency; a certificate: [providers/tls/README.md](providers/tls/README.md); a 404 or a schema error: the adapter |

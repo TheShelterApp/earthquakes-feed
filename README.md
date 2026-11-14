@@ -199,9 +199,12 @@ open, reachable source appears.
 - **Two phases:** `aggregate` (fetch → dedup → append the log) → `derive` (rebuild
   views, publish), both in every `aggregate` run, one after the other on the same checkout. Each source fetch is
   fail-open — one dead source loses nothing — and a source that has not answered at all (a timeout or a connection
-  failure, not an HTTP error) on 3 runs in a row is skipped by a circuit breaker for 2, 4, 8, then 12 runs between
-  single probes, so a hung host stops costing every run its timeout (`src/breaker.ts`; APIs.md *Failing and silent
-  sources*).
+  failure, not an HTTP error) on 5 runs in a row (about 25 min) is skipped by a circuit breaker for 2, then 3 runs
+  between single probes, so a source that comes back is read again within 20 min and a host down for hours costs about
+  a third of the runs its timeout instead of all of them. Tuned for freshness over run time on the week 2026-11-07 →
+  11-13 (2,010 runs): 4 skipped source-runs that would have answered, against 98 with the first tuning (3 runs, back-off
+  up to 12); the core sources `usgs`, `emsc` and `geofon` are always asked (`src/breaker.ts`; APIs.md *Failing and
+  silent sources*).
 - **One writer at a time:** `aggregate`, `backfill`, `archive` (and `derive` dispatched by hand) share the concurrency
   group `earthquakes-feed-writer` with `queue: max`, so a run waits its turn instead of being cancelled by the next
   one; every commit to `data` goes through `scripts/push-data.sh` (fetch, rebase, retry, fail loudly on a conflict). The
@@ -437,7 +440,7 @@ hundred, the board is not written at all: exit 3). The label `health:p1` … `he
 | `feed:freshness` | P2 (unreachable: 2nd run) | The older of the live `v1` and `v2` manifests past `stale_after_seconds` (1,800 s), confirmed by a re-read 60 s later; or a manifest unreachable | The aggregate runs, the heartbeat Worker and its `GH_PAT`, the Pages deploy; `v1` fresh and `v2` stale means signing stopped |
 | `feed:status` | P3 (2nd run) | `v1/status.json` unreadable | The per-source rows are frozen meanwhile: the aggregate runs' Pages publish |
 | `feed:source:<id>` | P3 | Its fetch failing from `lastSuccessAt` for 3 h (`usgs`, `emsc`, `geofon`), 12 h (the others) or 2 h (HTTP 401/403/404/410, a schema error, a certificate), or silent or frozen past its activity budget; for a source that never fetched successfully, that line counts from the first run that saw it; escalates at 24 h (core sources, definite errors) | Usually the agency; a certificate: [providers/tls/README.md](providers/tls/README.md); a 404 or a schema error: the adapter |
-| `feed:breaker:<id>` | P3 (P4 below 6 h) | The aggregate's circuit breaker has kept the source from being asked for 6 h or more (`providers.<id>.breaker.open_since`): no answer at all on 3 runs in a row and on every probe since, a probe about every hour once it has failed a while; resolves when a probe gets an answer | The source's own `feed:source:<id>` row; `curl` its query from outside (a host down, or one blocking the runner); nothing to reset: the next answering probe closes it |
+| `feed:breaker:<id>` | P3 (P4 below 6 h) | The aggregate's circuit breaker has kept the source from being asked for 6 h or more (`providers.<id>.breaker.open_since`): no answer at all on 5 runs in a row and on every probe since (one every 15–20 min); resolves when a probe gets an answer | The source's own `feed:source:<id>` row; `curl` its query from outside (a host down, or one blocking the runner); nothing to reset: the next answering probe closes it |
 | `feed:cert:<id>` | P3 | A pinned leaf with under 7 days left; escalates at 2 days left | Pin the new leaf's intermediate if its issuer changed ([providers/tls/README.md](providers/tls/README.md)) |
 | `feed:size` | P3 | A status-history day file over 5 MB, or any other file on `data` over 45 MB | Slim what grows ([APIs.md](APIs.md#run-logs)): GitHub rejects a pushed file above 100 MiB |
 | `feed:repo-size` | P3 | The repository over 8,000,000 KB | [APIs.md](APIs.md#repository-size) |

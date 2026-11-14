@@ -831,14 +831,22 @@ export const SWEEP_EPOCH = 1;
 
 // --- live-fetch circuit breaker (src/breaker.ts, SHLTR-147) ---
 /** Consecutive runs whose live fetch of a source got no answer at all (a timeout, an abort, a connection failure; not
- *  an HTTP error status, not an empty answer) that open its breaker. In the week to 2026-11-13 (2,010 runs) such
- *  streaks of 1 or 2 runs were common (CENC 281 and 62, GEOFON 42 and 19, PHIVOLCS 29 and 2): one or two misses never
- *  open it. */
-export const BREAKER_TRIP_RUNS = 3;
+ *  an HTTP error status, not an empty answer) that open its breaker: about 25 minutes of a sustained outage. Tuned on
+ *  the status history 2026-11-07 → 11-13 (2,010 runs) for freshness over run time (the feed serves the map and the
+ *  alerts backstop): short streaks are common (CENC 281 single misses and 62 double ones, GEOFON 42 and 19, PHIVOLCS 29
+ *  and 2), and every skip of a source that would have answered delays its rows. With 3 runs and a back-off up to 12, 84
+ *  skipped source-runs of that week would have answered; with 5, the back-off below and GEOFON always asked, 5 (README, SHLTR-147). */
+export const BREAKER_TRIP_RUNS = 5;
 /** The runs an open breaker skips before it probes the source again, by how many times it has opened in a row: 2, then
- *  4, then 8, then 12 for every later opening (the cap: one probe about every 65 min). Each is reduced by a jitter of up
- *  to a quarter (src/breaker.ts breakerSkipRuns), so sources that failed together do not all come back on one run. */
-export const BREAKER_SKIP_RUNS: readonly number[] = [2, 4, 8, 12];
+ *  3 for every later opening (the cap: a probe at least every 20 min, so a source that comes back is read again within
+ *  20 min). The jitter (src/breaker.ts breakerSkipRuns) only shortens one: 3 becomes 2 or 3, so sources that failed
+ *  together do not all come back on one run. */
+export const BREAKER_SKIP_RUNS: readonly number[] = [2, 3];
+/** Sources the breaker never skips: the feed's core sources (health rule feed:source:core). usgs and emsc also have
+ *  sweeps that ask the same host every run with a budget of their own, so a skip would save no time; GEOFON's misses
+ *  come in short streaks between answers, so a skip mostly delays its rows (11 of the 16 late source-runs of the week
+ *  above with 5 runs to trip). */
+export const BREAKER_ALWAYS_ASKED: ReadonlySet<string> = new Set(['usgs', 'emsc', 'geofon']);
 /** The aggregate's cadence: the heartbeat Worker dispatches it every 5 min. An open breaker's next probe is the first
  *  run at least (skips + 1) intervals minus half an interval after the run that opened it, so a run that starts a minute
  *  or two early or late still counts as the run it stands for. */

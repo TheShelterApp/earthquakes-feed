@@ -245,7 +245,7 @@ function certFinding(id, leaf) {
  *                     source that has never fetched successfully (no start on record) is P3 with sinceMs null at
  *                     once: reconcile holds a finding without a start on its own clock;
  *   feed:breaker:<id> the aggregate's circuit breaker open for 6 h or more (`providers.<id>.breaker.open_since`, P3; a P4
- *                     sample below), so the source has not been asked since but for a probe an hour;
+ *                     sample below), so the source has not been asked since but for a probe every 15-20 min;
  *   feed:cert:<id>    a pinned leaf with under 7 days left (P3);
  *   feed:systemic     (shadow) 2 or more core sources, or 6 or more in all, failing for 30 min or more (P2).
  * `opts.nowMs` only adds a note on the document's own age.

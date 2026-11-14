@@ -5,9 +5,8 @@ import {
   BREAKER_MASS_MIN_ASKED,
   BREAKER_RUN_INTERVAL_MS,
   BREAKER_SKIP_RUNS,
+  BREAKER_ALWAYS_ASKED,
   BREAKER_TRIP_RUNS,
-  DELETE_SWEEP_PROVIDERS,
-  UPDATED_SWEEP_PROVIDERS,
 } from './config.js';
 import { isPinnedCertError } from './custom.js';
 import type { FetchOutcome } from './providers.js';
@@ -17,18 +16,17 @@ import { isoFromMs } from './util.js';
 /**
  * Live-fetch circuit breaker (SHLTR-147). The live fetches run in parallel, so a run's fetch phase lasts as long as its
  * slowest source, and a source that does not answer costs its whole timeout on every run (NOA on 2026-11-08: 15 s on
- * its host plus 15 s on its fallback host, every run). After BREAKER_TRIP_RUNS consecutive runs without an answer the
- * breaker opens: the source is not asked for BREAKER_SKIP_RUNS runs (2, 4, 8, then 12 as it keeps failing), then one
- * run probes it (half-open). Any answer, an HTTP error included, closes it; no answer opens it again with the next,
+ * its host plus 15 s on its fallback host, on most runs of the afternoon). After BREAKER_TRIP_RUNS (5) consecutive runs
+ * without an answer the breaker opens: the source is not asked for BREAKER_SKIP_RUNS runs (2, then 3 as it keeps
+ * failing), then one run probes it (half-open), so a source that comes back is read again within 20 minutes. Any answer, an HTTP error included, closes it; no answer opens it again with the next,
  * longer back-off. A skipped source's status is `ok: false` with `skipped: "breaker"`, so everything that reads `ok`
  * (degraded, the activity index, silent and frozen, lastSuccessAt, the health board) sees it exactly as a failing one.
  *
  * The state is knowledge/index/provider_breakers.json on the data branch, written in the aggregate's commit; a missing
  * or unreadable file, or an unreadable entry, means closed.
  *
- * Not tracked: the sources with a sweep (usgs, emsc): their sweeps ask the same host every run with a budget of their
- * own, so skipping the live fetch would save no time, and they are the feed's backbone; and the sources the live path
- * does not ask (`liveActive: false`).
+ * Not tracked: the feed's core sources (BREAKER_ALWAYS_ASKED: usgs, emsc, geofon), always asked; and the sources the
+ * live path does not ask (`liveActive: false`).
  */
 
 /** One source's breaker in knowledge/index/provider_breakers.json. A closed breaker with no failure has no entry. */
@@ -48,10 +46,8 @@ export interface BreakerRecord {
 }
 export type BreakerIndex = Record<string, BreakerRecord>;
 
-const SWEPT: ReadonlySet<string> = new Set([...UPDATED_SWEEP_PROVIDERS, ...DELETE_SWEEP_PROVIDERS]);
-
 /** Whether a source has a breaker at all. */
-export const breakerTracked = (p: Pick<ProviderConfig, 'id' | 'liveActive'>): boolean => p.liveActive !== false && !SWEPT.has(p.id);
+export const breakerTracked = (p: Pick<ProviderConfig, 'id' | 'liveActive'>): boolean => p.liveActive !== false && !BREAKER_ALWAYS_ASKED.has(p.id);
 
 const isOpen = (r: BreakerRecord | undefined): r is BreakerRecord & Required<Pick<BreakerRecord, 'openSinceMs' | 'opens' | 'skipRuns' | 'nextProbeMs'>> =>
   r != null && r.openSinceMs != null && r.opens != null && r.skipRuns != null && r.nextProbeMs != null;
@@ -74,21 +70,28 @@ export function isNoAnswer(s: Pick<ProviderStatus, 'ok' | 'http_status' | 'error
   return e.trim() === '' || NO_ANSWER_RE.test(e);
 }
 
-/** FNV-1a of a string, as a fraction in [0, 1): the jitter, the same for the same source and run. */
+/** FNV-1a of a string with murmur3's final mix (FNV alone barely moves its high bits on the last character, so
+ *  consecutive seqs would share a jitter), as a fraction in [0, 1): the jitter, the same for the same source and run. */
 function unitHash(s: string): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) {
     h ^= s.charCodeAt(i);
     h = Math.imul(h, 0x01000193) >>> 0;
   }
-  return h / 2 ** 32;
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x85ebca6b) >>> 0;
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35) >>> 0;
+  h ^= h >>> 16;
+  return (h >>> 0) / 2 ** 32;
 }
 
 /** The runs to skip after the `opens`-th opening in a row: BREAKER_SKIP_RUNS (the last entry for every later one),
- *  less a jitter of 0 to a quarter of it picked by the source and the run's seq. */
+ *  less a jitter of 0 to a third of it (rounded down) picked by the source and the run's seq: the jitter only ever
+ *  shortens a back-off, so no skip is longer than the series says. */
 export function breakerSkipRuns(opens: number, id: string, seq: number): number {
   const base = BREAKER_SKIP_RUNS[Math.min(Math.max(opens, 1), BREAKER_SKIP_RUNS.length) - 1]!;
-  return base - Math.floor(unitHash(`${id}:${seq}`) * (Math.floor(base / 4) + 1));
+  return base - Math.floor(unitHash(`${id}:${seq}`) * (Math.floor(base / 3) + 1));
 }
 
 /** The first run at or after this time probes: `skipRuns` runs are skipped, the next one asks. */

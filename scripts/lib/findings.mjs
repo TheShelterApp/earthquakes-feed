@@ -409,7 +409,7 @@ export const RULES = Object.freeze({
   'feed:breaker': rule('feed:breaker', {
     title: 'feed source breaker open',
     // SHLTR-147: the aggregate's circuit breaker (src/breaker.ts) has kept a source from being asked for 6 h or more:
-    // it got no answer at all (a timeout or a connection failure) on 3 runs in a row and on every probe since. Below the
+    // it got no answer at all (a timeout or a connection failure) on 5 runs in a row and on every probe since. Below the
     // line a P4 sample; resolved once a probe gets an answer (status.json no longer carries `breaker`).
     board: 'feed', class: 'external', severity: 'P3', keyPrefix: 'feed:breaker:',
     limits: { openLineMs: 6 * HOUR },

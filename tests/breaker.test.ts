@@ -16,7 +16,7 @@ import {
   saveBreakers,
   updateBreakers,
 } from '../src/breaker.js';
-import { BREAKER_RUN_INTERVAL_MS, BREAKER_SKIP_RUNS, BREAKER_TRIP_RUNS, FETCH_TIMEOUT_MS } from '../src/config.js';
+import { BREAKER_ALWAYS_ASKED, BREAKER_RUN_INTERVAL_MS, BREAKER_SKIP_RUNS, BREAKER_TRIP_RUNS, FETCH_TIMEOUT_MS } from '../src/config.js';
 import { PIN_HINT } from '../src/custom.js';
 import { type FetchOutcome, type Fetcher, loadRegistry } from '../src/providers.js';
 import { enrichStatusV2, updateProviderHealth } from '../src/status-v2.js';
@@ -62,32 +62,33 @@ test('isNoAnswer: a timeout, an abort or a connection failure trips; an HTTP sta
   assert.equal(isNoAnswer(answered), false);
 });
 
-test('tracked: not the swept sources (usgs, emsc) nor one the live path does not ask (isc)', () => {
-  assert.deepEqual(['usgs', 'emsc', 'isc', 'noa', 'geofon', 'cenc'].map((id) => breakerTracked(byId(id))), [false, false, false, true, true, true]);
-  const active = ['usgs', 'emsc', 'isc'].map(byId);
+test('tracked: not the core sources (usgs, emsc, geofon) nor one the live path does not ask (isc)', () => {
+  assert.deepEqual([...BREAKER_ALWAYS_ASKED].sort(), ['emsc', 'geofon', 'usgs']);
+  assert.deepEqual(['usgs', 'emsc', 'geofon', 'isc', 'noa', 'ncedc', 'cenc'].map((id) => breakerTracked(byId(id))), [false, false, false, false, true, true, true]);
+  const active = ['usgs', 'emsc', 'geofon', 'isc'].map(byId);
   let index: BreakerIndex = {};
-  for (let i = 0; i < 10; i++) index = run(index, active, NOW + i * RUN, () => timedOut).index;
+  for (let i = 0; i < 20; i++) index = run(index, active, NOW + i * RUN, () => timedOut).index;
   assert.deepEqual(index, {});
 });
 
-test('closed → open: one or two runs without an answer count, the third opens it; the next runs skip without a request', () => {
+test('closed → open: up to four runs without an answer count, the fifth opens it; the next runs skip without a request', () => {
+  assert.equal(BREAKER_TRIP_RUNS, 5);
   const active = [byId('noa'), byId('geonet')];
   const answers = (noa: ProviderStatus) => (id: string): ProviderStatus => (id === 'noa' ? noa : answered);
   let r = run({}, active, NOW, answers(timedOut));
   assert.deepEqual(r.index, { noa: { failures: 1, lastError: ABORTED } });
-  r = run(r.index, active, NOW + RUN, answers(timedOut));
-  assert.deepEqual([r.index['noa']!.failures, r.opened], [2, []]);
-  // A single blip (or two) never opens it: an answer clears the count.
-  assert.deepEqual(run(r.index, active, NOW + 2 * RUN, answers(answered)).index, {});
-  assert.deepEqual(run(r.index, active, NOW + 2 * RUN, answers(empty)).index, {}, 'an empty answer is an answer');
-  r = run(r.index, active, NOW + 2 * RUN, answers(timedOut));
-  assert.equal(BREAKER_TRIP_RUNS, 3);
+  for (let k = 1; k < 4; k++) r = run(r.index, active, NOW + k * RUN, answers(timedOut));
+  assert.deepEqual([r.index['noa']!.failures, r.opened], [4, []]);
+  // Short streaks never open it: an answer clears the count.
+  assert.deepEqual(run(r.index, active, NOW + 4 * RUN, answers(answered)).index, {});
+  assert.deepEqual(run(r.index, active, NOW + 4 * RUN, answers(empty)).index, {}, 'an empty answer is an answer');
+  r = run(r.index, active, NOW + 4 * RUN, answers(timedOut));
   assert.deepEqual(r.opened, ['noa']);
   const noa = r.index['noa']!;
-  assert.deepEqual([noa.failures, noa.opens, noa.skipRuns, noa.openSinceMs], [3, 1, 2, NOW + 2 * RUN]);
+  assert.deepEqual([noa.failures, noa.opens, noa.skipRuns, noa.openSinceMs], [5, 1, 2, NOW + 4 * RUN]);
   // Two runs are skipped; the third run after the opening probes (half an interval of slack either way).
-  assert.equal(noa.nextProbeMs, NOW + 2 * RUN + 3 * RUN - RUN / 2);
-  for (const k of [3, 4]) {
+  assert.equal(noa.nextProbeMs, NOW + 4 * RUN + 3 * RUN - RUN / 2);
+  for (const k of [5, 6]) {
     const plan = breakerPlan(r.index, active, NOW + k * RUN + 90_000);
     assert.deepEqual(Object.keys(plan.skipped), ['noa'], `run ${k}`);
     assert.deepEqual(plan.probing, []);
@@ -95,18 +96,18 @@ test('closed → open: one or two runs without an answer count, the third opens 
     assert.equal(s.ok, false);
     assert.equal(s.skipped, 'breaker');
     assert.equal(s.http_status, undefined);
-    assert.deepEqual(s.breaker, { open_since: '2026-11-08T13:10:00.000Z', next_probe: '2026-11-08T13:22:30.000Z', failures: 3, skip_runs: 2 });
-    assert.match(s.error!, /^not asked: circuit breaker open after 3 runs without an answer \(last: This operation was aborted\)$/);
+    assert.deepEqual(s.breaker, { open_since: '2026-11-08T13:20:00.000Z', next_probe: '2026-11-08T13:32:30.000Z', failures: 5, skip_runs: 2 });
+    assert.match(s.error!, /^not asked: circuit breaker open after 5 runs without an answer \(last: This operation was aborted\)$/);
   }
-  assert.deepEqual(breakerPlan(r.index, active, NOW + 5 * RUN - 120_000).probing, ['noa'], 'a run 2 min early still probes');
+  assert.deepEqual(breakerPlan(r.index, active, NOW + 7 * RUN - 120_000).probing, ['noa'], 'a run 2 min early still probes');
   // A skipped run leaves the entry as it was.
-  const skippedRun = run(r.index, active, NOW + 3 * RUN, () => answered);
+  const skippedRun = run(r.index, active, NOW + 5 * RUN, () => answered);
   assert.deepEqual(skippedRun.index, r.index);
   assert.deepEqual([skippedRun.opened, skippedRun.closed], [[], []]);
 });
 
 test('an HTTP error status never trips the breaker, however long it lasts', () => {
-  const active = [byId('geofon')];
+  const active = [byId('ncedc')];
   let index: BreakerIndex = {};
   for (let i = 0; i < 20; i++) {
     const r = run(index, active, NOW + i * RUN, () => http502);
@@ -115,8 +116,9 @@ test('an HTTP error status never trips the breaker, however long it lasts', () =
   }
   assert.deepEqual(index, {});
   // Nor does it extend a streak of timeouts: it resets it.
-  index = run(run(index, active, NOW, () => timedOut).index, active, NOW + RUN, () => timedOut).index;
-  assert.deepEqual(run(index, active, NOW + 2 * RUN, () => http502).index, {});
+  for (let i = 0; i < BREAKER_TRIP_RUNS - 1; i++) index = run(index, active, NOW + i * RUN, () => timedOut).index;
+  assert.equal(index['ncedc']!.failures, BREAKER_TRIP_RUNS - 1);
+  assert.deepEqual(run(index, active, NOW + 4 * RUN, () => http502).index, {});
 });
 
 /** An index with noa opened at NOW (first opening). */
@@ -139,11 +141,11 @@ test('open → half-open → closed: the probe that gets an answer (an HTTP erro
   }
 });
 
-test('half-open → open: a probe without an answer re-opens it with the next, longer back-off, the open-since time kept; the cap holds', () => {
+test('half-open → open: a probe without an answer re-opens it with the next back-off (2, then at most 3), the open-since time kept', () => {
   const active = [byId('noa')];
   let index = openedAtNow();
   const seen: number[] = [index['noa']!.skipRuns!];
-  for (let k = 2; k <= 8; k++) {
+  for (let k = 2; k <= 12; k++) {
     const at = index['noa']!.nextProbeMs!;
     const r = run(index, active, at, () => timedOut, 1000 + k);
     assert.deepEqual(r.reopened, ['noa']);
@@ -152,23 +154,18 @@ test('half-open → open: a probe without an answer re-opens it with the next, l
     assert.equal(noa.openSinceMs, NOW, 'open since the first opening');
     assert.equal(noa.failures, BREAKER_TRIP_RUNS + k - 1);
     assert.equal(noa.nextProbeMs, at + (noa.skipRuns! + 1) * RUN - RUN / 2);
+    // A source that comes back is read again within 20 minutes of its last probe.
+    assert.ok(noa.nextProbeMs - at <= 20 * 60_000 - RUN / 2, `opening ${k}`);
     seen.push(noa.skipRuns!);
     index = r.index;
   }
-  assert.deepEqual(BREAKER_SKIP_RUNS, [2, 4, 8, 12]);
-  // Each back-off is its series value less a jitter of up to a quarter; from the fourth opening on, at most 12.
-  const range = (opens: number): [number, number] => {
-    const base = BREAKER_SKIP_RUNS[Math.min(opens, 4) - 1]!;
-    return [base - Math.floor(base / 4), base];
-  };
-  seen.forEach((n, i) => {
-    const [lo, hi] = range(i + 1);
-    assert.ok(n >= lo && n <= hi, `opening ${i + 1}: ${n} runs, not in [${lo}, ${hi}]`);
-  });
-  assert.ok(seen[1]! < seen[3]!, 'the back-off grows');
+  assert.deepEqual(BREAKER_SKIP_RUNS, [2, 3]);
+  assert.equal(seen[0], 2);
+  for (const n of seen.slice(1)) assert.ok(n === 2 || n === 3, `${n} runs`);
+  assert.ok(seen.includes(3), 'the back-off grows to 3');
 });
 
-test('breakerSkipRuns: deterministic per source and run, within [base - base/4, base], every jitter value reached', () => {
+test('breakerSkipRuns: deterministic per source and run; the jitter only shortens (3 → 2 or 3), never past the series', () => {
   for (let opens = 1; opens <= 6; opens++) {
     const base = BREAKER_SKIP_RUNS[Math.min(opens, BREAKER_SKIP_RUNS.length) - 1]!;
     const values = new Set<number>();
@@ -177,11 +174,12 @@ test('breakerSkipRuns: deterministic per source and run, within [base - base/4, 
       assert.equal(n, breakerSkipRuns(opens, 'noa', seq));
       values.add(n);
     }
-    assert.deepEqual([...values].sort((a, b) => a - b), Array.from({ length: Math.floor(base / 4) + 1 }, (_, i) => base - Math.floor(base / 4) + i), `opens ${opens}`);
+    assert.deepEqual([...values].sort((a, b) => a - b), opens === 1 ? [2] : [2, 3], `opens ${opens}`);
+    assert.ok(Math.max(...values) <= base);
   }
-  // Two sources that opened on the same run do not all come back on the same one.
-  const twelve = new Set(registry.filter(breakerTracked).map((p) => breakerSkipRuns(4, p.id, 123_456)));
-  assert.ok(twelve.size > 1);
+  // Two sources that re-opened on the same run do not all come back on the same one.
+  const later = new Set(registry.filter(breakerTracked).map((p) => breakerSkipRuns(4, p.id, 123_456)));
+  assert.ok(later.size > 1);
 });
 
 test('state file: missing or corrupt means all closed; an unreadable entry is dropped, the others kept', () => {
@@ -252,7 +250,7 @@ test('a skipped source is a failing one to the activity index, silent, frozen, l
 });
 
 // The acceptance check: a source that hangs costs the fetch phase its whole timeout (twice with a fallback host) until
-// its breaker opens; from then on the phase is back within 2 s of the baseline on every run but the rare probe.
+// its breaker opens; from then on the phase is back within 2 s of the baseline on every run but a probe (one in 3-4).
 test('fetch phase wall time with a hung source: back at the baseline once the breaker opens (injected fetcher, virtual clock)', async () => {
   const active = ['noa', 'geonet', 'ingv', 'knmi', 'geofon', 'ethz'].map(byId);
   const hostOf = new Map<string, string>();
@@ -297,14 +295,14 @@ test('fetch phase wall time with a hung source: back at the baseline once the br
     }
     index = r.next.index;
   }
-  // Three runs pay before it opens; then two skipped runs, and probes ever further apart, at most one an hour.
-  assert.deepEqual(walls.slice(0, 4), [2 * noaTimeout, 2 * noaTimeout, 2 * noaTimeout, FAST_MS]);
+  // Five runs pay before it opens; then two skipped runs, then a probe every third or fourth run (at most 20 min apart).
+  assert.deepEqual(walls.slice(0, 6), [...Array(BREAKER_TRIP_RUNS).fill(2 * noaTimeout), FAST_MS]);
   const gaps = probes.map((p, i) => p - (i === 0 ? BREAKER_TRIP_RUNS - 1 : probes[i - 1]!));
   assert.equal(gaps[0], 3, 'the first probe: two runs skipped after the opening');
-  for (const g of gaps.slice(3)) assert.ok(g >= 10 && g <= 13, `gap ${g}`);
+  for (const g of gaps.slice(1)) assert.ok(g === 3 || g === 4, `gap ${g}`);
   const paying = walls.filter((w) => w > baseline + 2_000).length;
   assert.equal(paying, BREAKER_TRIP_RUNS + probes.length);
-  assert.ok(paying <= 30, `${paying} of ${RUNS} runs paid the timeout (without the breaker: all ${RUNS})`);
+  assert.ok(paying <= RUNS / 3, `${paying} of ${RUNS} runs paid the timeout (without the breaker: all ${RUNS})`);
   // NOA answers again: the next probe closes it and the source is asked on every run after.
   const at = index['noa']!.nextProbeMs!;
   const back = await phase(index, at, 99, false);

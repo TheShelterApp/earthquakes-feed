@@ -969,7 +969,7 @@ SHLTR-148; on with `REMERGE_EPOCH` 2, *Re-merged history*). The pattern above �
 agency places outside its own box, most of them its solution of a distant quake 50–200 km from where the global agencies
 place it, often with a higher magnitude — holds for GeoNet (Tonga, Kermadec, Vanuatu), USP, GA, INGV, RéNaSS/RESIF and
 the rest, and the statistics have left such events out since reconciliation rule v3. From epoch 2 the merge joins them:
-an event whose rows are all regional agencies' (none of `usgs`, `emsc`, `isc`, `geofon`, `gcmt`), of M4.5+, whose
+an event whose rows are all regional agencies' (none of `usgs`, `emsc`, `isc`, `geofon`, `gfz`, `gcmt`), of M4.5+, whose
 place lies outside the authoritative region of every one of them (`src/authority.ts` `outsideAuthority`: the
 statistics' own test, `AUTHORITY_REGIONS` plus 5° on every side), and an event holding a global agency's own solution
 (not EMSC's copy of the regional agency's) and no row of the regional side's catalogues are one quake when the origins
@@ -1127,20 +1127,23 @@ agree. Epoch 2 adds four rules to epoch 1's:
 - *The authoritative-region window* (`authorityWindow`, *Regional agencies outside their own region*): a regional-only
   M4.5+ event outside every one of its agencies' authoritative regions joins the global agencies' event of the quake
   (30 s, 200 km, |ΔM| 1.0; from M7.0 300 km and 1.5), by the statistics' own region test (`src/authority.ts`).
-- *Large quakes in swarm cells* (`largeQuakesInSwarms`): two events both of M5.5 or more are judged by the base and
-  large-event windows in a dense cell too, without the swarm guard's shared-id demand (a swarm is made of small quakes).
+- *Large quakes in swarm cells* (`largeQuakesInSwarms`): two events both of M5.5 or more are judged in a dense cell as
+  in any other cell — the base and large-event windows without the dense caps, the moderate-event window and a regional
+  window (USP's large-quake window) — without the swarm guard's shared-id demand (a swarm is made of small quakes).
   The Sındırgı M6.1 of 2025-08-10, in a cell with 64 events in the week before it, was ten events of the archive after
   epoch 1 (AFAD, ComCat, ISC's NEIC copy, SCEDC's NEIC copy, GEOFON, GA, USP, EMSC, INGV, RéNaSS); it is one.
 - *Density as of the pair* (`densityAsOfPair`, the re-merge only): a pair's cell density is counted over the seven days
-  up to the later of its two origins (`src/remerge.ts` `swarmCellsAsOf`, over the unit's input), as live counted it when
-  the reports arrived, instead of over the seven days before the window's end, where a quake's own aftershocks had made
-  its cell a swarm cell.
+  up to the later of its two origins (`src/remerge.ts` `swarmCellsAsOf`, over the unit's input), close to what live saw
+  when the reports arrived, instead of over the seven days before the window's end, where a quake's own aftershocks had
+  made its cell a swarm cell. It is somewhat looser than live, which counts every loaded event of the cell over ten
+  days (`LIVE_INDEX_DAYS`) and any aftershock already in when the pair is judged.
 
 Nothing else changes: the hard checks, the ComCat anchor (no ComCat id lost, no two ComCat events welded), the context,
 the windows of epoch 1. Dry runs of 2026-11-14 (local, read-only, `scripts/remerge-verify.ts --comcat`): the 36
 archive months go from 31,920 to 29,357 live M4.5+ and from 567 to 456 M6+ events (ComCat 22,476 and 387; the anchored
 counts unchanged in every month, no new weld), 4,890 folds (1,947 by the authoritative-region window, 417 ISC copies,
-50 large quakes in swarm cells, the rest epoch-1 windows the window-end density had blocked); 29 history months
+50 large quakes in swarm cells, 1,752 by the density as of the pair, and 724 by epoch 1's windows, pairs another fold
+made reachable); 29 history months
 (2005-06, 2009-05, 2013, 2022-05 → 2023-07) from 427 to 376 M6+ (ComCat 311). What stays above ComCat at M6+ is
 regional agencies' own solutions inside their regions at a higher magnitude (KAGSR's Kamchatka aftershocks), regional
 solutions outside their regions with no global agency's event in the window, and global agencies' second ids of one
@@ -1152,9 +1155,11 @@ To switch it on (the lead, after reviewing the dry runs): raise `REMERGE_EPOCH` 
 `history` walk every era-A / pilot month (a new edition each), each remediated day of a merged month gets a refreshed
 edition, and from the next aggregate run the live regular heal folds the hot window's pairs under the new rules (at most
 `HEAL_MAX_FOLDS_PER_RUN` a run). Dry runs first: `remerge.yml` / `src/remerge-archives.ts` with `REMERGE_DRY_RUN=1`
-and `REMERGE_EPOCH_OVERRIDE=2` (`REMERGE_NO_WAIT=1` for a sample of months), `src/history.ts` with `HISTORY_DRY_RUN=1`,
-`HISTORY_REMERGE_EPOCH=2` and `HISTORY_REMERGE_NO_WAIT=1`, each read by `scripts/remerge-verify.ts --comcat`; and
-`scripts/heal-dryrun.ts --epoch 2` on the event map for the live side. The statistics' reconciliation stays as a safety
+and `REMERGE_EPOCH_OVERRIDE=2` (locally also `REMERGE_NO_WAIT=1` for a sample of months: `remerge.yml` has no input
+for it, so a runner dry run with `only:` leaves every month but the newest waiting), `src/history.ts` with
+`HISTORY_DRY_RUN=1`, `HISTORY_REMERGE_EPOCH=2` and `HISTORY_REMERGE_NO_WAIT=1`, each read by
+`scripts/remerge-verify.ts --comcat`; and `scripts/heal-dryrun.ts --regular --epoch 2` on the event map for the live
+side (the first run after the switch is a regular run: raising `REMERGE_EPOCH` does not raise `HEAL_EPOCH`). The statistics' reconciliation stays as a safety
 net (*Statistics*, Reconciliation): epoch 2 joins in the feed what the authoritative-region filter and the collapse
 leave out of the counts where a global agency's event is within the window, and the rest (regional solutions with no
 global event near them, phantoms of automatic teleseismic locators) stays an event of its own that the statistics still

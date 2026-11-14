@@ -2295,8 +2295,13 @@ export class Resolver {
    *  time ahead of one that is merely near. */
   private score(a: EventNode, b: EventNode): number {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
-    const far = this.farOnly(a, b) ?? this.authorityOnly(a, b);
+    const far = this.farOnly(a, b);
     if (far) return MODERATE_SCORE_OFFSET + d / far.km + Math.abs(a.eventTimeMs - b.eventTimeMs) / far.ms;
+    // The authoritative-region window ranks by the magnitudes too: of a regional agency's distant solution's global
+    // partners, the one of its size first (an ISC-only event of IDC's smaller magnitude beside ComCat's event of the quake
+    // is no better a partner for being a little nearer).
+    const auth = this.authorityOnly(a, b);
+    if (auth) return MODERATE_SCORE_OFFSET + d / auth.km + Math.abs(a.eventTimeMs - b.eventTimeMs) / auth.ms + Math.abs(a.mag! - b.mag!) / auth.maxDelta;
     const dense = this.pairDense(a, b);
     // An ISC copy the windows reject (or a dense cell keeps apart) ranks with the base windows, by the copy's own rows.
     const copy = this.reject(a, b, d, dense) || dense ? this.iscCopyScore(a, b) : null;

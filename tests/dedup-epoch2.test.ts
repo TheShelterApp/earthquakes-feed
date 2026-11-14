@@ -236,6 +236,21 @@ test('authority window: never folds a ComCat-anchored event away and joins the r
   for (const n of own.filter((x) => x.provenance.some((r) => r.provider === 'usgs'))) assert.equal(n.state, 'live', `${n.feedId} keeps its ComCat row live`);
 });
 
+test('authority window: of two global partners the one of the regional solution’s size wins over a nearer smaller one', () => {
+  // GeoNet's M4.7 of a Tonga quake: ComCat's M4.7 event 90 km away, and an ISC-only event of IDC's M3.7 (the same quake,
+  // IDC's mb runs low) 80 km away. Without the magnitude in the ranking the ISC event took the GeoNet solution and the
+  // pair stayed beside ComCat's event.
+  const rows = [
+    usgs('us7000sumg', { lat: -22.29, lon: -177.7, mag: 4.7, magType: 'mb' }),
+    isc('650000001', 'IDC', { eventTimeMs: T + 200, lat: -22.29 + 12 / KM_PER_DEG, lon: -177.7, mag: 3.7 }),
+    obs('geonet', '2026pfar01', { eventTimeMs: T + 2_000, lat: -22.29 + 90 / KM_PER_DEG, lon: -177.7, mag: 4.7, magType: 'mb' }),
+  ];
+  const { own, problems } = remerge(rows, 2);
+  assert.deepEqual(problems, []);
+  assert.ok(together(own, 'usgs:us7000sumg', 'geonet:2026pfar01'));
+  assert.equal(together(own, 'isc:650000001', 'geonet:2026pfar01'), false);
+});
+
 // --- density as of the pair, large quakes in swarm cells ---
 
 test('large quakes in a swarm cell: two agencies’ M6.1 solutions 4 km apart join; small swarm members stay apart', () => {

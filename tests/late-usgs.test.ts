@@ -357,7 +357,7 @@ test('late_usgs keeps: a build that drops an event or a report, or retires anoth
 });
 
 test('late_usgs mode: the scheduled run takes LATE_USGS_SCHEDULED; blank is off; anything else is refused', () => {
-  assert.equal(LATE_USGS_SCHEDULED, 'plan', 'the scheduled run diffs only until a one-line PR switches it on');
+  assert.equal(LATE_USGS_SCHEDULED, 'on', 'the scheduled run publishes since the 2026-11-14 campaign (120 editions, 0 failures)');
   assert.equal(resolveLateMode(undefined), 'off');
   assert.equal(resolveLateMode(''), 'off');
   assert.equal(resolveLateMode('off'), 'off');

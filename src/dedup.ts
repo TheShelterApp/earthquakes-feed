@@ -4,6 +4,7 @@ import {
   COMCAT_ID_PROVIDERS,
   COMCAT_LIFECYCLE_PROVIDERS,
   COMCAT_PROVIDER,
+  DENSITY_AS_OF_PAIR_MAX_DT_MS,
   EMSC_AUTHORED_COPIES,
   EMSC_COMCAT_NETWORK_COPIES,
   EMSC_COPIES_KEPT_IN_PLACE,
@@ -2267,8 +2268,25 @@ export class Resolver {
 
   /** whyNotMerged without the out-of-region window (round 26). */
   private whyNotMergedByWindows(a: EventNode, b: EventNode): string | null {
-    const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
     const dense = this.pairDense(a, b);
+    const why = this.whyNotMergedWhere(a, b, dense);
+    if (why != null || !this.densityCapBlocks(a, b, dense)) return why;
+    return `cell density as of the pair only, events ${(Math.abs(a.eventTimeMs - b.eventTimeMs) / 1000).toFixed(1)} s apart (cap ${DENSITY_AS_OF_PAIR_MAX_DT_MS / 1000} s)`;
+  }
+
+  /** Epoch 2, the time cap of `densityAsOfPair` (config DENSITY_AS_OF_PAIR_MAX_DT_MS): whether a pair the windows accept
+   *  (judged with `dense`, the as-of-pair count) is one only that count lets through — its cells sparse as of the pair,
+   *  both swarm cells by the window's count (isDense), no large pair (largePair judges it as sparse by either count), and
+   *  that count's judgement rejecting it — while its origins are the cap or more apart. Never with live (no densityAt). */
+  private densityCapBlocks(a: EventNode, b: EventNode, dense: boolean): boolean {
+    if (dense || !this.densityAt || Math.abs(a.eventTimeMs - b.eventTimeMs) < DENSITY_AS_OF_PAIR_MAX_DT_MS) return false;
+    if (this.largePair(a, b) || !this.isDense(a.lat, a.lon) || !this.isDense(b.lat, b.lon)) return false;
+    return this.whyNotMergedWhere(a, b, true) != null;
+  }
+
+  /** whyNotMergedByWindows with the pair's cells judged dense or not as `dense` says. */
+  private whyNotMergedWhere(a: EventNode, b: EventNode, dense: boolean): string | null {
+    const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
     const gate = this.reject(a, b, d, dense);
     // An ISC copy of an agency's row in the other node (epoch 2) is the pair's identity: no window, no dense-cell veto.
     const copy = this.iscCopyPairs(a, b).length > 0;

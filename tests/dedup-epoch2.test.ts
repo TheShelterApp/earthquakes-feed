@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { outsideAuthority } from '../src/authority.js';
-import { AUTHORITY_WINDOW, ISC_COPY_DT_MS, ISC_COPY_KM, type IdentityRules, LIVE_IDENTITY_RULES, REMERGE_EPOCH, SWARM_CELL_ABSOLUTE, identityRules, liveIdentityRules } from '../src/config.js';
+import { AUTHORITY_WINDOW, DENSITY_AS_OF_PAIR_MAX_DT_MS, ISC_COPY_DT_MS, ISC_COPY_KM, type IdentityRules, LIVE_IDENTITY_RULES, REMERGE_EPOCH, SWARM_CELL_ABSOLUTE, identityRules, liveIdentityRules } from '../src/config.js';
 import { Resolver } from '../src/dedup.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import { anchorCounts, remergeGateProblems, remergeNodes, snapshotUnit, swarmCellsAsOf } from '../src/remerge.js';
@@ -346,6 +346,44 @@ test('density as of the pair: a quake’s own aftershocks no longer make its cel
   assert.equal(dense(39.25, 28.05, T), false);
   assert.equal(dense(39.25, 28.05, T + 60_000 + (SWARM_CELL_ABSOLUTE - 1) * 120_000), true);
   assert.equal(dense(39.25, 28.05, T + 8 * DAY + 60_000 + (SWARM_CELL_ABSOLUTE - 1) * 120_000), false, 'older than 7 days: not counted');
+});
+
+/** A moderate quake's two agencies' solutions `dtMs` apart (12 km), then 60 aftershocks from 60 s on: the cell is
+ *  dense at the window's end, not as of the pair. With `sparse` the aftershocks are left out (a sparse cell by both
+ *  counts). */
+const aftershockPair = (dtMs: number, sparse = false): RawObs[] => [
+  ...(sparse ? [] : Array.from({ length: SWARM_CELL_ABSOLUTE + 10 }, (_, i) => obs('afad', `as${i}`, { eventTimeMs: T + 60_000 + i * 120_000, lat: 39.25 + (i % 4) * 0.01, mag: 2.0, magType: 'ml' }))),
+  usgs('us7000mod1', { mag: 4.8, magType: 'mb' }),
+  obs('emsc', '20250811_mod1', { eventTimeMs: T + dtMs, lat: 39.25 + 12 / KM_PER_DEG, mag: 4.9, magType: 'mb' }),
+];
+
+test('density as of the pair, time cap: a pair only the as-of-pair count lets through folds below 15 s apart, not at 16 s', () => {
+  assert.equal(DENSITY_AS_OF_PAIR_MAX_DT_MS, 15_000);
+  const e2at14 = remerge(aftershockPair(14_000), 2);
+  assert.deepEqual(e2at14.problems, []);
+  assert.ok(together(e2at14.own, 'usgs:us7000mod1', 'emsc:20250811_mod1'), '14 s: folds');
+  assert.ok(e2at14.reasons.some((r) => r.includes('dt=14.0 s') && r.endsWith('(cell density as of the pair)')), e2at14.reasons.join(' | '));
+  const e2at16 = remerge(aftershockPair(16_000), 2);
+  assert.equal(together(e2at16.own, 'usgs:us7000mod1', 'emsc:20250811_mod1'), false, '16 s: the cap keeps them apart');
+  // Just under and at the cap.
+  assert.ok(together(remerge(aftershockPair(DENSITY_AS_OF_PAIR_MAX_DT_MS - 1), 2).own, 'usgs:us7000mod1', 'emsc:20250811_mod1'));
+  assert.equal(together(remerge(aftershockPair(DENSITY_AS_OF_PAIR_MAX_DT_MS), 2).own, 'usgs:us7000mod1', 'emsc:20250811_mod1'), false);
+});
+
+test('density as of the pair, time cap: a pair joinable without the as-of-pair count is not capped (sparse cell, large quakes in a swarm cell)', () => {
+  // The same pair 16 s apart in a sparse cell: the windows join it at either epoch.
+  for (const epoch of [1, 2]) assert.ok(together(remerge(aftershockPair(16_000, true), epoch).own, 'usgs:us7000mod1', 'emsc:20250811_mod1'), `sparse, epoch ${epoch}`);
+  // Two agencies' M6.1 solutions 16 s apart in a swarm cell (dense by both counts): large quakes in a swarm cell, not
+  // the as-of-pair count, join them.
+  const large = [...swarm(39.25, 28.05, T), usgs('us6000r0yz', { mag: 6.1 }), obs('geofon', 'gfz2025ppbq', { eventTimeMs: T + 16_000, lat: 39.28, mag: 6.13, magType: 'mw' })];
+  assert.equal(together(remerge(large, 1).own, 'usgs:us6000r0yz', 'geofon:gfz2025ppbq'), false, 'epoch 1: the swarm guard');
+  const e2 = remerge(large, 2);
+  assert.ok(together(e2.own, 'usgs:us6000r0yz', 'geofon:gfz2025ppbq'));
+  assert.ok(e2.reasons.some((r) => r.includes('dt=16.') && r.endsWith('(large quakes in a swarm cell)')), e2.reasons.join(' | '));
+});
+
+test('density as of the pair, time cap: epoch 1 is unchanged (the swarm guard keeps the pair apart at any gap)', () => {
+  for (const dt of [3_000, 14_000, 16_000]) assert.equal(together(remerge(aftershockPair(dt), 1).own, 'usgs:us7000mod1', 'emsc:20250811_mod1'), false, `${dt} ms`);
 });
 
 test('live Resolver: the epoch’s rules (none at epoch 1, the default while REMERGE_EPOCH is 1): an ISC copy in a swarm cell joins in a live heal from epoch 2', () => {

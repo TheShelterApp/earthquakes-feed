@@ -473,7 +473,8 @@ export const REMERGE_RULES = 3;
  *    what live saw when the reports arrived: a quake's own aftershocks no longer turn its cell into a swarm cell that
  *    keeps its agencies' solutions apart. Somewhat looser than live, which counts every loaded event of the cell
  *    (LIVE_INDEX_DAYS, ten days, and any aftershock already in when the pair is judged); the re-merge's older context
- *    holds seven days, so ten could not be counted at a unit's start;
+ *    holds seven days, so ten could not be counted at a unit's start. Capped in time (DENSITY_AS_OF_PAIR_MAX_DT_MS): a
+ *    pair the rule alone lets through must be less than 15 s apart;
  *  - `largeQuakesInSwarms`: two events both of LARGE_EVENT_MAG or more are judged in a dense cell as in any other cell —
  *    the base and large-event windows without the dense caps, the moderate-event window and a regional window (USP's
  *    large-quake window) — without the swarm guard's shared-id demand (Resolver.largePair): a swarm is made of small
@@ -491,6 +492,19 @@ export function identityRules(epoch: number): IdentityRules {
   const on = epoch >= 2;
   return { iscCopies: on, authorityWindow: on, densityAsOfPair: on, largeQuakesInSwarms: on };
 }
+/**
+ * The time cap of `densityAsOfPair` (epoch 2, the offline re-merge only; Resolver.densityCapBlocks). A pair whose two
+ * cells are swarm cells by the count every epoch uses (the re-merge window's loaded events, Resolver.isDense) and sparse
+ * only as of the pair, which that count's swarm guard would keep apart (no shared id, or the dense windows reject it),
+ * folds only when its two events' origin times (the representatives') are less than this apart. A pair the merge pass
+ * joins without the as-of-pair count (a sparse cell by both counts, a shared id or an ISC copy, two large quakes,
+ * the out-of-region or the authoritative-region window) is not capped. Over the epoch-2 dry runs (2026-11-14: 1,752
+ * archive and 299 history folds by this rule), 21 were 15 s or more apart, the swarm cases the guard exists for: 7 of
+ * them attached a small non-ComCat solution (M3.2 or less) to the wrong small quake, its own report 0.2–1.4 s from
+ * another event; 3 joined an M4.5+ duplicate correctly (2023-12-03 GEOFON M5.06 at 18.2 s, 2024-04-22 EMSC M4.8 / M4.6
+ * at 30.1 / 32.7 s), which stay duplicates: a wrong fold loses a distinct quake, a missed one keeps a duplicate.
+ */
+export const DENSITY_AS_OF_PAIR_MAX_DT_MS = 15_000;
 /** The rules a live (ingesting) Resolver runs at `epoch`: that epoch's, the offline-only density rule left out. */
 export function liveIdentityRules(epoch: number): IdentityRules {
   return { ...identityRules(epoch), densityAsOfPair: false };

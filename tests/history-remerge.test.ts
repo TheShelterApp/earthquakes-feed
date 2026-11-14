@@ -206,7 +206,7 @@ test('verifyEdition: a merged edition passes; a lost id, a lost row, a dangling 
   const prevMetaRows = before.reduce((s, n) => s + n.provenance.length, 0);
   const prevCheck = verifyEdition(prevFiles, { period, boundary: CFG.boundary, archivedDays: new Set() });
   const own = before.map((n) => structuredClone(n));
-  const res = remergeNodes({ own, memberDay, startMs: period.startMs, endMs: period.endMs, older: [], newer: [], anchored: new Set(), registry, ingestTime: NOW_ISO });
+  const res = remergeNodes({ own, memberDay, startMs: period.startMs, endMs: period.endMs, older: [], newer: [], anchored: new Set(), registry, ingestTime: NOW_ISO, epoch: 1 });
   assert.equal(res.offUnit.length, 1);
   const files = remergedDayFiles(own, res.dayOf);
   const meta = (m = mergeMeta(res, { epoch: 1, ingestTime: NOW_ISO, from: { edition: 1, asset: 'a', sha256: 's' }, older: null, newer: null, anchored: new Set() })): EditionMeta => ({
@@ -233,7 +233,7 @@ test('verifyEdition: a merged edition passes; a lost id, a lost row, a dangling 
 
 test('buildEdition floor after the re-merge: a live event under the floor goes with every event folded into it', () => {
   const nodes = split([...quake(Date.parse('2022-11-15T05:00:00Z'), 'f'), obs('usgs', 'ussmall', Date.parse('2022-11-16T00:00:00Z'), { mag: 3.9 }), obs('geofon', 'gsmall', Date.parse('2022-11-16T00:00:01Z'), { mag: 4.0, lat: 10.01 })]);
-  remergeNodes({ own: nodes, memberDay: new Map(nodes.map((n) => [n.feedId, '2022-11-15'])), startMs: Date.parse('2022-11-01T00:00:00Z'), endMs: Date.parse('2022-12-01T00:00:00Z'), older: [], newer: [], anchored: new Set(), registry, ingestTime: NOW_ISO });
+  remergeNodes({ own: nodes, memberDay: new Map(nodes.map((n) => [n.feedId, '2022-11-15'])), startMs: Date.parse('2022-11-01T00:00:00Z'), endMs: Date.parse('2022-12-01T00:00:00Z'), older: [], newer: [], anchored: new Set(), registry, ingestTime: NOW_ISO, epoch: 1 });
   const small = nodes.filter((n) => n.provenance.some((r) => r.nativeId === 'ussmall' || r.nativeId === 'gsmall'));
   assert.equal(small.filter((n) => n.state === 'live').length, 1, 'the small pair folded');
   const dropped = belowFloor(nodes, 4.5);

@@ -1,4 +1,5 @@
 import {
+  AUTHORITY_WINDOW,
   COMCAT_ID_PREFIX,
   COMCAT_ID_PROVIDERS,
   COMCAT_LIFECYCLE_PROVIDERS,
@@ -10,7 +11,12 @@ import {
   EMSC_STRANDED_MIN_DT_MS,
   GRID_CELL_DEG,
   HOT_WINDOW_DAYS,
+  ISC_COPY_DT_MS,
+  ISC_COPY_KM,
+  ISC_COPY_UNNAMED_MAX_DM,
+  ISC_ORIGIN_COPIES,
   LARGE_EVENT_BASE_KM,
+  LIVE_IDENTITY_RULES,
   LARGE_EVENT_KM_PER_MAG,
   LARGE_EVENT_MAG,
   LARGE_EVENT_MAX_DELTA,
@@ -39,13 +45,17 @@ import {
   REGIONAL_WINDOWS,
   REGION_RULES,
   SOURCE_NETWORK_COPIES,
+  STATS_GLOBAL_PROVIDERS,
+  type IdentityRules,
   type RegionalLargeKm,
   type RegionalLowMag,
   type OutOfRegionWindow,
   type RegionBox,
   type RegionRule,
 } from './config.js';
+import { authorityCatalogue, outsideAuthority, regionalProvider } from './authority.js';
 import { qualityCount } from './canonical.js';
+import { ISC_PROVIDER } from './fdsn.js';
 import { gatherCellKeys, gridKey, haversineKm } from './geo.js';
 import { finalsIndex, isPreliminary, supersedingFinal } from './preliminary.js';
 import { isCoordinateless } from './quality.js';
@@ -82,6 +92,13 @@ const REGIONAL_LARGE_GATHER_MAG = Math.min(
  *  partner side's magnitude), its time and magnitude limits, and whether the pair's first side holds the provider's
  *  rows. */
 type FarWindow = { provider: string; km: number; ms: number; maxDelta: number; providerIsA: boolean; speed: { fromKm: number; min: number; max: number; slackMs: number } | null };
+/** The authoritative-region window (config AUTHORITY_WINDOW, epoch 2) a pair gets: its distance, time and magnitude
+ *  limits, and whether the pair's first side is the regional agencies' side. */
+type AuthorityWin = { km: number; ms: number; maxDelta: number; regionalIsA: boolean };
+/** The widest authoritative-region window, and the smallest magnitude its global side may have (the floor less the
+ *  window's |ΔM|): the gather radius and floor of Resolver.authorityCandidates. */
+const AUTHORITY_MAX_KM = Math.max(AUTHORITY_WINDOW.km, AUTHORITY_WINDOW.great.km);
+const AUTHORITY_PARTNER_MIN_MAG = AUTHORITY_WINDOW.minMag - Math.max(AUTHORITY_WINDOW.maxDeltaMag, AUTHORITY_WINDOW.great.maxDeltaMag);
 const FAR_WINDOWS = [...REGION_RULES.values()].flatMap((r) => (r.window ? [r.window] : []));
 /** The smallest partner magnitude an out-of-region window takes (its `low` partner floor, round 27, else minPartnerMag). */
 const farMinPartnerMag = (w: OutOfRegionWindow): number => Math.min(w.minPartnerMag, w.low?.fromMag ?? Infinity);
@@ -254,14 +271,34 @@ export class Resolver {
    *  dense cell whose times can pass (candidatesInTime). */
   private readonly cellTimes = new Map<string, { version: number; lo: number[]; hi: number[]; ids: string[]; maxWidth: number }>();
   private geoVersion = 0;
+  /** The identity rules beyond the ones every epoch has (config IdentityRules): the live ones (LIVE_IDENTITY_RULES) by
+   *  default, the re-merge's epoch's in src/remerge.ts. */
+  private readonly rules: IdentityRules;
+  /** With `densityAsOfPair` (the offline re-merge, src/remerge.ts): whether a cell is a swarm cell as of a time, counted
+   *  over the unit's input (the merge pass's pairs only; Resolver.denseAt). */
+  private readonly densityAt: ((lat: number, lon: number, atMs: number) => boolean) | null;
+  /** The live events that may be the regional side of an authoritative-region window (authoritySide), rebuilt when the
+   *  geo index or any event's solution changed since (geoVersion). */
+  private authoritySides: { version: number; ids: string[] } | null = null;
 
   constructor(
     readonly eventMap: Map<string, EventNode>,
     private readonly priority: Map<string, number>,
     private readonly cfg: Map<string, ProviderConfig>,
     nowMs: number,
-    opts: { hotFloorMs?: number; denseFloorMs?: number; merge?: boolean; pinned?: ReadonlySet<string>; frozen?: ReadonlySet<string>; pairPrefilterMs?: number } = {},
+    opts: {
+      hotFloorMs?: number;
+      denseFloorMs?: number;
+      merge?: boolean;
+      pinned?: ReadonlySet<string>;
+      frozen?: ReadonlySet<string>;
+      pairPrefilterMs?: number;
+      rules?: IdentityRules;
+      densityAt?: (lat: number, lon: number, atMs: number) => boolean;
+    } = {},
   ) {
+    this.rules = opts.rules ?? LIVE_IDENTITY_RULES;
+    this.densityAt = this.rules.densityAsOfPair ? (opts.densityAt ?? null) : null;
     this.pinned = opts.pinned ?? new Set();
     this.frozen = opts.frozen ?? new Set();
     this.pairPrefilterMs = opts.pairPrefilterMs ?? null;
@@ -326,7 +363,10 @@ export class Resolver {
    *  authored copy (authoredCopy: EMSC re-publishing an agency's own solution, or since round 26 SCEDC re-publishing
    *  NEIC's) counts as one. */
   private sharesIdentity(raw: RawObs, node: EventNode): boolean {
-    return raw.knownAliasIds.some((a) => node.aliases.includes(a)) || node.provenance.some((r) => Resolver.authoredCopy(raw, r) || Resolver.authoredCopy(r, raw));
+    return (
+      raw.knownAliasIds.some((a) => node.aliases.includes(a)) ||
+      node.provenance.some((r) => Resolver.authoredCopy(raw, r) || Resolver.authoredCopy(r, raw) || this.iscCopy(raw, r) || this.iscCopy(r, raw))
+    );
   }
 
   /** Node-to-node form of sharesIdentity: one node's own report names the other's id (USGS `ids`), one node holds the
@@ -365,6 +405,46 @@ export class Resolver {
   private static networkRow(network: string, row: SourcedSolution): boolean {
     const id = nativeIdOf(row);
     return row.provider === COMCAT_PROVIDER && id.length > network.length && id.startsWith(network);
+  }
+
+  /** Epoch 2 (`iscCopies`, config ISC_ORIGIN_COPIES): `copy`, an ISC row, is ISC's copy of `original`, an agency's own
+   *  row, as good as a shared id: the origins within ISC_COPY_DT_MS and ISC_COPY_KM, and `original` a row of the agency
+   *  ISC's `Author` names (NEIC: ComCat's `us…` row; GFZ: GEOFON's; AUST: GA's), whatever the magnitudes (ISC's preferred
+   *  magnitude is often another agency's); or, for an ISC row of another author, a row of an `unnamed` agency (NEIC,
+   *  GFZ) with the magnitudes within ISC_COPY_UNNAMED_MAX_DM (or one of them unknown). */
+  private iscCopy(copy: SourcedSolution, original: SourcedSolution): boolean {
+    if (!this.rules.iscCopies || copy.provider !== ISC_PROVIDER || original.provider === ISC_PROVIDER) return false;
+    if (Math.abs(copy.eventTimeMs - original.eventTimeMs) > ISC_COPY_DT_MS) return false;
+    const agencyRow = (t: { catalogue: string; network?: string }): boolean =>
+      catalogueOf(original.provider) === t.catalogue && (t.network == null || Resolver.networkRow(t.network, original));
+    const named = ISC_ORIGIN_COPIES.get(String(copy.fields?.['Author'] ?? '').trim().toUpperCase());
+    if (named ? !agencyRow(named) : ![...ISC_ORIGIN_COPIES.values()].some((t) => t.unnamed && agencyRow(t))) return false;
+    if (haversineKm(copy.lat, copy.lon, original.lat, original.lon) > ISC_COPY_KM) return false;
+    return named != null || copy.mag == null || original.mag == null || !magsApart(copy.mag, original.mag, ISC_COPY_UNNAMED_MAX_DM);
+  }
+
+  /** The ISC copies (iscCopy) between two nodes' rows, either way round, as [copy, original]. */
+  private iscCopyPairs(a: EventNode, b: EventNode): [ProvenanceRow, ProvenanceRow][] {
+    if (!this.rules.iscCopies) return [];
+    const out: [ProvenanceRow, ProvenanceRow][] = [];
+    for (const ra of a.provenance) {
+      for (const rb of b.provenance) {
+        if (this.iscCopy(ra, rb)) out.push([ra, rb]);
+        else if (this.iscCopy(rb, ra)) out.push([rb, ra]);
+      }
+    }
+    return out;
+  }
+
+  /** The best-scored ISC copy between two nodes (row distance over ISC_COPY_KM plus time difference over
+   *  ISC_COPY_DT_MS, so 0 to 2, the base windows' range), or null when there is none. */
+  private iscCopyScore(a: EventNode, b: EventNode): number | null {
+    let best: number | null = null;
+    for (const [c, o] of this.iscCopyPairs(a, b)) {
+      const s = haversineKm(c.lat, c.lon, o.lat, o.lon) / ISC_COPY_KM + Math.abs(c.eventTimeMs - o.eventTimeMs) / ISC_COPY_DT_MS;
+      if (best == null || s < best) best = s;
+    }
+    return best;
   }
 
   /** `row` is `author`'s own solution: a row of that provider, or, when the provider has a ComCat network prefix
@@ -415,7 +495,7 @@ export class Resolver {
       if (!w && !reviewed) continue;
       for (const rb of b.provenance) {
         let s: number | null = null;
-        if (w && Resolver.revisedIdPair(ra, rb) && !(dense ??= this.isDense(a.lat, a.lon) || this.isDense(b.lat, b.lon))) {
+        if (w && Resolver.revisedIdPair(ra, rb) && !(dense ??= this.denseAt(a.lat, a.lon, a, b) || this.denseAt(b.lat, b.lon, a, b))) {
           s = haversineKm(ra.lat, ra.lon, rb.lat, rb.lon) / w.km + Math.abs(ra.eventTimeMs - rb.eventTimeMs) / w.dtMs;
         } else if (reviewed && this.reviewedTwin(ra, rb)) s = Resolver.reviewedPairScore(ra, rb);
         if (s != null && (best == null || s < best)) best = s;
@@ -599,10 +679,20 @@ export class Resolver {
         if (ra.provider === COMCAT_PROVIDER && ((namedA ??= comcatNamed(a)).has(rb.nativeId) || (namedB ??= comcatNamed(b)).has(ra.nativeId))) continue;
         if (knownAliasIdsOf(rb.provider, rb.nativeId, rb.fields).includes(`${ra.provider}:${ra.nativeId}`)) continue;
         if (Resolver.sameSolution(ra, rb) || Resolver.revisedIdPair(ra, rb) || this.reviewedTwin(ra, rb)) continue;
+        if (this.iscCopyIn(ra, a, b) || this.iscCopyIn(rb, a, b)) continue;
         return true;
       }
     }
     return false;
+  }
+
+  /** Epoch 2: `row`, an ISC row, is ISC's copy (iscCopy) of a row of one of `nodes`. Such a row is that agency's
+   *  solution, not a claim of ISC's own that its event is another quake: ISC's preliminary bulletin lists one quake under
+   *  several ids, one per contributing agency's origin (2025-08-09 14:04, Kamchatka M6.0: NEIC's origin and IDC's under
+   *  two ISC ids; 2025-08-03 04:57, South Pacific M6.3: GA's and IDC's), so such an id does not keep two events apart
+   *  (nodesDistinct). */
+  private iscCopyIn(row: ProvenanceRow, ...nodes: EventNode[]): boolean {
+    return this.rules.iscCopies && row.provider === ISC_PROVIDER && nodes.some((n) => n.provenance.some((o) => this.iscCopy(row, o)));
   }
 
   /** ±60 s / ±10 km, shrunk by the magnitude difference. When BOTH solutions are large the
@@ -843,7 +933,7 @@ export class Resolver {
 
   /** Whether the moderate-event window may judge the two nodes: neither cell dense, providers allowed. */
   private moderatePair(a: EventNode, b: EventNode): boolean {
-    if (this.isDense(a.lat, a.lon) || this.isDense(b.lat, b.lon)) return false;
+    if (!this.largePair(a, b) && (this.denseAt(a.lat, a.lon, a, b) || this.denseAt(b.lat, b.lon, a, b))) return false;
     return Resolver.moderateProviders(Resolver.providersOf(a), Resolver.providersOf(b));
   }
 
@@ -2160,7 +2250,7 @@ export class Resolver {
     const context = this.contextBlocks(a, b);
     if (context) return context;
     const why = this.whyNotMergedByWindows(a, b);
-    return why != null && this.farJoin(a, b) ? null : why;
+    return why != null && (this.farJoin(a, b) || this.authorityJoin(a, b)) ? null : why;
   }
 
   /** whyNotMerged without the out-of-region window (round 26). */
@@ -2168,7 +2258,9 @@ export class Resolver {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
     const dense = this.pairDense(a, b);
     const gate = this.reject(a, b, d, dense);
-    if (gate && !this.revisedPair(a, b)) {
+    // An ISC copy of an agency's row in the other node (epoch 2) is the pair's identity: no window, no dense-cell veto.
+    const copy = this.iscCopyPairs(a, b).length > 0;
+    if (gate && !copy && !this.revisedPair(a, b)) {
       if (!this.moderatePair(a, b)) return gate;
       const moderate = this.rejectModerate(a, b, d, this.regionalNodes(a, b));
       if (moderate) return `${gate}; ${moderate}`;
@@ -2177,12 +2269,25 @@ export class Resolver {
       return `AEC solution beyond ±${LOCATION_JOIN_DT_MS / 1000} s or |dM| ${LOCATION_JOIN_MAX_DM} of a location join`;
     }
     if (this.nodesDistinct(a, b)) return 'same provider under distinct native ids';
-    if (dense && !Resolver.nodesShareIdentity(a, b) && !this.reviewedTwinNodes(a, b)) return 'dense cell without a shared id';
+    if (dense && !copy && !Resolver.nodesShareIdentity(a, b) && !this.reviewedTwinNodes(a, b)) return 'dense cell without a shared id';
     return null;
   }
 
   private pairDense(a: EventNode, b: EventNode): boolean {
-    return this.isDense(a.lat, a.lon) && this.isDense(b.lat, b.lon);
+    if (this.largePair(a, b)) return false;
+    return this.denseAt(a.lat, a.lon, a, b) && this.denseAt(b.lat, b.lon, a, b);
+  }
+
+  /** Epoch 2 (`largeQuakesInSwarms`): both events of at least LARGE_EVENT_MAG, a pair the swarm guard does not judge (no
+   *  swarm member is that large; the base and large-event windows still do). */
+  private largePair(a: EventNode, b: EventNode): boolean {
+    return this.rules.largeQuakesInSwarms && a.mag != null && b.mag != null && a.mag >= LARGE_EVENT_MAG - REID_MAG_TOLERANCE && b.mag >= LARGE_EVENT_MAG - REID_MAG_TOLERANCE;
+  }
+
+  /** isDense for a pair of the merge pass: with the re-merge's `densityAt` (epoch 2, `densityAsOfPair`) the cell's density
+   *  as of the later of the pair's two origins, else isDense. */
+  private denseAt(lat: number, lon: number, a: EventNode, b: EventNode): boolean {
+    return this.densityAt ? this.densityAt(lat, lon, Math.max(a.eventTimeMs, b.eventTimeMs)) : this.isDense(lat, lon);
   }
 
   /** How far apart two solutions are relative to the windows their pair gets: d/km + |dt|/ms
@@ -2190,9 +2295,12 @@ export class Resolver {
    *  time ahead of one that is merely near. */
   private score(a: EventNode, b: EventNode): number {
     const d = haversineKm(a.lat, a.lon, b.lat, b.lon);
-    const far = this.farOnly(a, b);
+    const far = this.farOnly(a, b) ?? this.authorityOnly(a, b);
     if (far) return MODERATE_SCORE_OFFSET + d / far.km + Math.abs(a.eventTimeMs - b.eventTimeMs) / far.ms;
     const dense = this.pairDense(a, b);
+    // An ISC copy the windows reject (or a dense cell keeps apart) ranks with the base windows, by the copy's own rows.
+    const copy = this.reject(a, b, d, dense) || dense ? this.iscCopyScore(a, b) : null;
+    if (copy != null) return copy;
     const revised = this.revisedOnly(a, b, d, dense);
     if (revised != null) return MODERATE_SCORE_OFFSET + revised;
     const moderate = this.reject(a, b, d, dense) ? Resolver.moderateWindow(a, b, this.regionalNodes(a, b)) : null;
@@ -2210,6 +2318,101 @@ export class Resolver {
     return far && this.whyNotMergedByWindows(a, b) != null ? far : null;
   }
 
+  /** The authoritative-region window of a pair the merge pass accepts only through it (epoch 2: whyNotMergedByWindows
+   *  rejects the pair, no out-of-region window joins it, authorityJoin does), else null. Ranked with the moderate-event
+   *  pairs. */
+  private authorityOnly(a: EventNode, b: EventNode): AuthorityWin | null {
+    if (!this.rules.authorityWindow || !this.mergePass) return null;
+    const w = this.authorityJoin(a, b);
+    return w && !this.farJoin(a, b) && this.whyNotMergedByWindows(a, b) != null ? w : null;
+  }
+
+  /** Epoch 2 (`authorityWindow`): whether a node may be the regional side of an authoritative-region window (config
+   *  AUTHORITY_WINDOW): its magnitude at least `minMag` (in the statistics' hundredths), its rows all regional agencies'
+   *  (authority.ts regionalProvider) and none of a provider with its own out-of-region window (REGION_RULES `window`),
+   *  and its place outside the authoritative region of every one of them (authority.ts outsideAuthority, the statistics'
+   *  test). */
+  private authoritySide(n: EventNode): boolean {
+    if (!this.rules.authorityWindow || n.mag == null || Math.round(n.mag * 100) < Math.round(AUTHORITY_WINDOW.minMag * 100)) return false;
+    const providers = Resolver.providersOf(n);
+    if (!providers.every((p) => regionalProvider(p) && !REGION_RULES.get(p)?.window)) return false;
+    return outsideAuthority(providers, n.lat, n.lon);
+  }
+
+  /** The authoritative-region window two nodes get, or null: one is a regional side (authoritySide), the other holds a
+   *  global agency's own solution (STATS_GLOBAL_PROVIDERS; not EMSC's copy of a regional side's agency, copyOfProvider),
+   *  no row of the regional side's catalogues and a magnitude. The limits widen when the larger magnitude reaches
+   *  `great.fromMag`. Merge pass only. */
+  private authorityWindowOf(a: EventNode, b: EventNode): AuthorityWin | null {
+    if (!this.rules.authorityWindow || !this.mergePass || a.mag == null || b.mag == null) return null;
+    for (const [own, partner, regionalIsA] of [
+      [a, b, true],
+      [b, a, false],
+    ] as const) {
+      if (!this.authoritySide(own)) continue;
+      const ownProviders = Resolver.providersOf(own);
+      const ownCatalogues = new Set(ownProviders.map(authorityCatalogue));
+      if (partner.provenance.some((r) => ownCatalogues.has(authorityCatalogue(r.provider)))) continue;
+      if (!partner.provenance.some((r) => STATS_GLOBAL_PROVIDERS.has(r.provider) && !ownProviders.some((p) => Resolver.copyOfProvider(r, p)))) continue;
+      const great = Math.max(a.mag, b.mag) >= AUTHORITY_WINDOW.great.fromMag - REID_MAG_TOLERANCE;
+      return {
+        km: great ? AUTHORITY_WINDOW.great.km : AUTHORITY_WINDOW.km,
+        ms: AUTHORITY_WINDOW.maxDtMs,
+        maxDelta: great ? AUTHORITY_WINDOW.great.maxDeltaMag : AUTHORITY_WINDOW.maxDeltaMag,
+        regionalIsA,
+      };
+    }
+    return null;
+  }
+
+  /** The authoritative-region window of two nodes when it joins them (within its limits, no AEC location-join veto, no
+   *  provider under two ids), else null. Dense cells do not count here. */
+  private authorityJoin(a: EventNode, b: EventNode): AuthorityWin | null {
+    const w = this.authorityWindowOf(a, b);
+    if (!w) return null;
+    if (Math.abs(a.eventTimeMs - b.eventTimeMs) > w.ms) return null;
+    if (haversineKm(a.lat, a.lon, b.lat, b.lon) > w.km) return null;
+    if (magsApart(a.mag!, b.mag!, w.maxDelta)) return null;
+    if (Resolver.lifecycleLocationBlocks(a.provenance, a, b.provenance, b)) return null;
+    if (this.nodesDistinct(a, b)) return null;
+    return w;
+  }
+
+  /** Live feed ids that may be the other side of an authoritative-region window with `node` (merge pass, epoch 2): for a
+   *  regional side, the events of a magnitude a global side may have within the widest window; for an event that may be
+   *  a global side, the regional sides within it (a short list, rebuilt when an event changed: authoritySides). */
+  private authorityCandidates(node: EventNode): Set<string> {
+    const out = new Set<string>();
+    if (!this.rules.authorityWindow || !this.mergePass || node.mag == null) return out;
+    const near = (other: EventNode): boolean =>
+      Math.abs(other.eventTimeMs - node.eventTimeMs) <= AUTHORITY_WINDOW.maxDtMs && haversineKm(node.lat, node.lon, other.lat, other.lon) <= AUTHORITY_MAX_KM;
+    if (this.authoritySide(node)) {
+      for (const cell of gatherCellKeys(node.lat, node.lon, AUTHORITY_MAX_KM, GRID_CELL_DEG)) {
+        for (const fid of this.geo.get(cell) ?? []) {
+          const other = this.eventMap.get(fid);
+          if (other && other.mag != null && other.mag >= AUTHORITY_PARTNER_MIN_MAG - REID_MAG_TOLERANCE && near(other)) out.add(fid);
+        }
+      }
+      return out;
+    }
+    if (node.mag < AUTHORITY_PARTNER_MIN_MAG - REID_MAG_TOLERANCE || !node.provenance.some((r) => STATS_GLOBAL_PROVIDERS.has(r.provider))) return out;
+    if (!this.authoritySides || this.authoritySides.version !== this.geoVersion) {
+      const ids: string[] = [];
+      for (const set of this.geo.values()) {
+        for (const fid of set) {
+          const n = this.eventMap.get(fid);
+          if (n && n.state === 'live' && n.mag != null && n.mag >= AUTHORITY_WINDOW.minMag - 0.005 && this.authoritySide(n)) ids.push(fid);
+        }
+      }
+      this.authoritySides = { version: this.geoVersion, ids };
+    }
+    for (const fid of this.authoritySides.ids) {
+      const other = this.eventMap.get(fid);
+      if (other && other.state === 'live' && near(other)) out.add(fid);
+    }
+    return out;
+  }
+
   /** Every live neighbour `node` may fold with (whyNotMerged passes), best score first, ties
    *  by feed id. Empty outside the hot window. */
   private mergeableNeighbours(node: EventNode): { node: EventNode; score: number }[] {
@@ -2218,6 +2421,7 @@ export class Resolver {
     const cands = this.pairPrefilterMs != null ? this.candidatesInTime(node, Resolver.timeRange(node), this.pairPrefilterMs) : this.candidates(node);
     for (const r of node.provenance) for (const fid of this.revisedCandidates(r)) cands.add(fid);
     for (const fid of this.farCandidates(node)) cands.add(fid);
+    for (const fid of this.authorityCandidates(node)) cands.add(fid);
     for (const other of this.reviewedTwinNodesOf(node)) cands.add(other.feedId);
     for (const fid of cands) {
       if (fid === node.feedId) continue;
@@ -2290,6 +2494,24 @@ export class Resolver {
     }
     const dt = Math.abs(a.eventTimeMs - b.eventTimeMs) / 1000;
     const dM = a.mag != null && b.mag != null ? Math.abs(a.mag - b.mag).toFixed(2) : 'n/a';
+    if (this.reject(a, b, d, dense) || dense) {
+      const copies = this.iscCopyPairs(a, b);
+      if (copies.length) {
+        const [c, o] = copies.reduce((x, y) =>
+          haversineKm(y[0].lat, y[0].lon, y[1].lat, y[1].lon) / ISC_COPY_KM + Math.abs(y[0].eventTimeMs - y[1].eventTimeMs) / ISC_COPY_DT_MS <
+          haversineKm(x[0].lat, x[0].lon, x[1].lat, x[1].lon) / ISC_COPY_KM + Math.abs(x[0].eventTimeMs - x[1].eventTimeMs) / ISC_COPY_DT_MS
+            ? y
+            : x,
+        );
+        const author = String(c.fields?.['Author'] ?? '').trim() || 'n/a';
+        return `ISC copy: isc ${c.nativeId} (Author ${author}) of ${o.provider} ${o.nativeId} d=${haversineKm(c.lat, c.lon, o.lat, o.lon).toFixed(1)} km dt=${(Math.abs(c.eventTimeMs - o.eventTimeMs) / 1000).toFixed(1)} s (events ${d.toFixed(1)} km apart${dense ? ', dense cell' : ''})`;
+      }
+    }
+    const auth = this.farOnly(a, b) ? null : this.authorityOnly(a, b);
+    if (auth) {
+      const regional = auth.regionalIsA ? a : b;
+      return `proximity: d=${d.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} authoritative-region window (${Resolver.providersOf(regional).sort().join('+')} outside its region)=${auth.km.toFixed(1)} km/${(auth.ms / 1000).toFixed(0)} s`;
+    }
     const far = this.farOnly(a, b);
     if (far) {
       const speed = far.speed ? ` (beyond ${far.speed.fromKm} km at ${far.speed.min}–${far.speed.max} km/s)` : '';
@@ -2303,7 +2525,16 @@ export class Resolver {
     const base = moderate && regional ? Resolver.moderateWindow(a, b) : null;
     const widenedBy = moderate && regional && (!base || moderate.km > base.km) ? regional.provider : null;
     const label = moderate ? (widenedBy ? `${widenedBy.toUpperCase()} ${base ? 'window' : 'large-quake window'}` : 'moderate window') : 'window';
-    return `proximity: d=${d.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} ${label}=${km.toFixed(1)} km/${(ms / 1000).toFixed(0)} s`;
+    // Epoch 2: say when only the swarm-cell exemptions let the pair be judged by these windows (the audit trail).
+    const cellsDense = (at: (lat: number, lon: number) => boolean): boolean => at(a.lat, a.lon) && at(b.lat, b.lon);
+    const exempt = !dense && (this.rules.largeQuakesInSwarms || this.densityAt)
+      ? this.largePair(a, b) && cellsDense((lat, lon) => this.denseAt(lat, lon, a, b))
+        ? ' (large quakes in a swarm cell)'
+        : this.densityAt && cellsDense((lat, lon) => this.isDense(lat, lon))
+          ? ' (cell density as of the pair)'
+          : ''
+      : '';
+    return `proximity: d=${d.toFixed(1)} km dt=${dt.toFixed(1)} s dM=${dM} ${label}=${km.toFixed(1)} km/${(ms / 1000).toFixed(0)} s${exempt}`;
   }
 
   /** After a live node changed, match it against its live neighbours with the first-sight

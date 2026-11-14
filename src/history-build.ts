@@ -262,6 +262,7 @@ export function buildEdition(input: BuildInput): { dayFiles: Map<string, string>
       anchored: new Set(),
       registry,
       ingestTime: REMERGE_INGEST_TIME,
+      epoch,
     });
     merge = mergeMeta(res, {
       epoch,

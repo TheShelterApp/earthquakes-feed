@@ -339,6 +339,7 @@ export function buildDayEdition(input: {
       anchored: new Set(),
       registry: input.registry,
       ingestTime: REMERGE_INGEST_TIME,
+      epoch,
     });
     remergeFolds = res.merges.length;
   }

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { featureToNode, nodeToFeature } from '../src/bitemporal.js';
-import { LOCATION_JOIN_DT_MS, MAX_PAIR_DT_MS, MODERATE_EVENT_MAX_DT_MS, OVSICORI_WINDOW, REVIEWED_ID_WINDOWS, REVISED_ID_WINDOWS, TEMPORAL_MS } from '../src/config.js';
+import { AUTHORITY_WINDOW, ISC_COPY_DT_MS, LOCATION_JOIN_DT_MS, MAX_PAIR_DT_MS, MODERATE_EVENT_MAX_DT_MS, OVSICORI_WINDOW, REVIEWED_ID_WINDOWS, REVISED_ID_WINDOWS, TEMPORAL_MS } from '../src/config.js';
 import { Resolver } from '../src/dedup.js';
 import { feedSideSteps, runFeedSideSteps } from '../src/heal.js';
 import { LogBuffer, observationToRaw } from '../src/oplog.js';
@@ -53,7 +53,7 @@ function split(rows: RawObs[], nowMs = END): Map<string, EventNode> {
 const clone = (ns: Iterable<EventNode>): EventNode[] => [...ns].map((n) => structuredClone(n));
 const memberDays = (ns: EventNode[]): Map<string, string> => new Map(ns.map((n) => [n.feedId, new Date(n.eventTimeMs).toISOString().slice(0, 10)]));
 function remerge(own: EventNode[], over: Partial<Parameters<typeof remergeNodes>[0]> = {}) {
-  return remergeNodes({ own, memberDay: memberDays(own), startMs: START, endMs: END, older: [], newer: [], anchored: new Set(), registry, ingestTime: IT, ...over });
+  return remergeNodes({ own, memberDay: memberDays(own), startMs: START, endMs: END, older: [], newer: [], anchored: new Set(), registry, ingestTime: IT, epoch: 1, ...over });
 }
 /** An M6 quake three agencies placed 20-35 km apart, a few seconds apart: three events at first sight, merge pass off. */
 const m6Split = (t = START + 10 * DAY, idSuffix = ''): RawObs[] => [
@@ -128,7 +128,7 @@ test('Resolver context: no row is re-homed out of or into a context event', () =
 });
 
 test('pre-filter: MAX_PAIR_DT_MS is at least every pair-time window; heals with and without it are identical on production fixtures', () => {
-  const windows = [TEMPORAL_MS, MODERATE_EVENT_MAX_DT_MS, OVSICORI_WINDOW.maxDtMs, LOCATION_JOIN_DT_MS, ...[...REVISED_ID_WINDOWS.values()].map((w) => w.dtMs), ...[...REVIEWED_ID_WINDOWS.values()].flatMap((w) => [w.near.dtMs, w.far.dtMs])];
+  const windows = [TEMPORAL_MS, MODERATE_EVENT_MAX_DT_MS, OVSICORI_WINDOW.maxDtMs, LOCATION_JOIN_DT_MS, AUTHORITY_WINDOW.maxDtMs, ISC_COPY_DT_MS, ...[...REVISED_ID_WINDOWS.values()].map((w) => w.dtMs), ...[...REVIEWED_ID_WINDOWS.values()].flatMap((w) => [w.near.dtMs, w.far.dtMs])];
   for (const w of windows) assert.ok(MAX_PAIR_DT_MS >= w, `${w} ms`);
   const scatter = readFileSync(here('fixtures/m5-scatter-2026-10-06-event-map.ndjson'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as EventNode);
   const loyalty = readFileSync(here('fixtures/loyalty-2026-09-25.ndjson'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as Observation);
@@ -274,7 +274,7 @@ test('remerge: parity with aggregate\'s feed-side steps on a fixture with nothin
   runFeedSideSteps(mkdtempSync(join(tmpdir(), 'remerge-parity-')), new Resolver(live, prio, cfg, now), new LogBuffer(0, IT), { healDue: true, loadDays: 10, ingestTime: IT });
   const own = build();
   const t = Math.min(...own.map((n) => n.eventTimeMs));
-  remergeNodes({ own, memberDay: memberDays(own), startMs: Math.floor(t / DAY) * DAY, endMs: Math.floor(t / DAY) * DAY + DAY, older: [], newer: [], anchored: new Set(), registry, ingestTime: IT });
+  remergeNodes({ own, memberDay: memberDays(own), startMs: Math.floor(t / DAY) * DAY, endMs: Math.floor(t / DAY) * DAY + DAY, older: [], newer: [], anchored: new Set(), registry, ingestTime: IT, epoch: 1 });
   const liveIds = (ns: Iterable<EventNode>): string[] => [...ns].filter((n) => n.state === 'live').map((n) => n.feedId).sort();
   assert.deepEqual(liveIds(own), liveIds(live.values()));
 });
@@ -338,7 +338,7 @@ test('normalization (REMERGE_RULES 3, row-normalize.ts): archived AFAD rows stor
   const [emsc] = split([obs('emsc', '20250423_marmara', { eventTimeMs: target.eventTimeMs + 1_000, lat: target.lat + 0.02, lon: target.lon, mag: target.mag, magType: 'ml', status: 'reviewed' })]).values();
   const unit = [...own, emsc!];
   const t = Math.min(...unit.map((n) => n.eventTimeMs));
-  const res = remergeNodes({ own: unit, memberDay: memberDays(unit), startMs: Math.floor(t / DAY) * DAY, endMs: Math.max(...unit.map((n) => n.eventTimeMs)) + DAY, older: [], newer: [], anchored: new Set(), registry, ingestTime: IT });
+  const res = remergeNodes({ own: unit, memberDay: memberDays(unit), startMs: Math.floor(t / DAY) * DAY, endMs: Math.max(...unit.map((n) => n.eventTimeMs)) + DAY, older: [], newer: [], anchored: new Set(), registry, ingestTime: IT, epoch: 1 });
   const afadNode = unit.find((x) => x.provenance.some((p) => p.provider === 'afad' && p.nativeId === target.providerEventId))!;
   assert.ok(res.merges.some((m) => m.loser === afadNode.feedId || m.loser === emsc!.feedId), 'the re-timed AFAD event folds with the EMSC event of its quake');
 });

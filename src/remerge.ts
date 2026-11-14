@@ -1,8 +1,8 @@
 import { eventDayKey, nodeToFeature } from './bitemporal.js';
-import { HOT_WINDOW_DAYS, MAX_PAIR_DT_MS, REMERGE_RULES } from './config.js';
+import { GRID_CELL_DEG, HOT_WINDOW_DAYS, MAX_PAIR_DT_MS, REMERGE_RULES, SWARM_CELL_ABSOLUTE, identityRules } from './config.js';
 import { type RowNormalizeCounts, normalizeRows } from './row-normalize.js';
 import { Resolver } from './dedup.js';
-import { haversineKm } from './geo.js';
+import { gridKey, haversineKm } from './geo.js';
 import { feedSideSteps } from './heal.js';
 import { configMap, priorityMap } from './providers.js';
 import type { EventNode, ProviderConfig } from './types.js';
@@ -23,6 +23,10 @@ import type { EventNode, ProviderConfig } from './types.js';
  *    `intoNewer`) but never loses one;
  *  - no id is minted and none dropped: a loser becomes `superseded` with `superseded_by` and keeps a frozen copy of its
  *    rows, so no row leaves any asset; no row is withdrawn.
+ *
+ * The windows run the identity rules of the epoch the unit is merged to (config identityRules): from epoch 2 also ISC's
+ * copies of NEIC's and GFZ's origins, the authoritative-region window, and a pair's cell density counted as of the pair
+ * (swarmCellsAsOf) instead of as of the window's end.
  *
  * Deterministic: the same input gives the same output bytes (ingest time REMERGE_INGEST_TIME, never the clock).
  */
@@ -49,6 +53,8 @@ export interface RemergeInput {
   registry: ProviderConfig[];
   /** REMERGE_INGEST_TIME, never Date.now(). */
   ingestTime: string;
+  /** The epoch the unit is merged to: its identity rules (config identityRules) are the windows' rules. */
+  epoch: number;
 }
 
 export interface RemergeMerge {
@@ -137,6 +143,41 @@ export function mergeMeta(
   };
 }
 
+/**
+ * The re-merge's cell density as of a time (epoch 2, `densityAsOfPair`): a grid cell (GRID_CELL_DEG) is a swarm cell at
+ * `atMs` when at least SWARM_CELL_ABSOLUTE of the input's live events (the unit's and both contexts', as read) have an
+ * origin in it within the HOT_WINDOW_DAYS up to `atMs`. Live judges a cell's density when a quake's reports arrive,
+ * minutes after the origin and before its aftershocks; a window of the re-merge holds the seven days before its end, so
+ * without this a quake's own aftershocks turn its cell into a swarm cell, where only a shared id joins two events, and
+ * the agencies' solutions of a large quake stay apart (the Sındırgı M6.1 of 2025-08-10: ten events after epoch 1). Read
+ * from the input, not from the folds the windows make, so every window sees the same counts.
+ */
+export function swarmCellsAsOf(nodes: Iterable<EventNode>): (lat: number, lon: number, atMs: number) => boolean {
+  const cells = new Map<string, number[]>();
+  for (const n of nodes) {
+    if (n.state !== 'live') continue;
+    const k = gridKey(n.lat, n.lon, GRID_CELL_DEG);
+    (cells.get(k) ?? cells.set(k, []).get(k)!).push(n.eventTimeMs);
+  }
+  for (const ts of cells.values()) ts.sort((a, b) => a - b);
+  const firstAbove = (ts: number[], x: number, inclusive: boolean): number => {
+    let lo = 0;
+    let hi = ts.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (inclusive ? ts[mid]! <= x : ts[mid]! < x) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  const windowMs = HOT_WINDOW_DAYS * DAY;
+  return (lat, lon, atMs) => {
+    const ts = cells.get(gridKey(lat, lon, GRID_CELL_DEG));
+    if (!ts || ts.length < SWARM_CELL_ABSOLUTE) return false;
+    return firstAbove(ts, atMs, true) - firstAbove(ts, atMs - windowMs, false) >= SWARM_CELL_ABSOLUTE;
+  };
+}
+
 const byTimeThenId = (a: EventNode, b: EventNode): number => a.eventTimeMs - b.eventTimeMs || (a.feedId < b.feedId ? -1 : a.feedId > b.feedId ? 1 : 0);
 
 /** Re-merge one unit (see the module comment). Throws RemergeError on a broken invariant; the caller publishes nothing
@@ -167,6 +208,8 @@ export function remergeNodes(input: RemergeInput): RemergeResult {
   const cfg = configMap(input.registry);
   // One fixed iteration order for every window (the Resolver's own passes sort by time, then id, too).
   const order = [...older, ...own, ...newer].sort(byTimeThenId);
+  const rules = identityRules(input.epoch);
+  const densityAt = rules.densityAsOfPair ? swarmCellsAsOf(order) : undefined;
 
   const merges: { loser: EventNode; survivor: EventNode; reason: string }[] = [];
   const steps = { rehomed: 0, stranded: 0, rederived: 0, folds: 0, windows: 0, slowest_ms: 0 };
@@ -183,7 +226,7 @@ export function remergeNodes(input: RemergeInput): RemergeResult {
     }
     if (!ownLive) continue;
     const t0 = performance.now();
-    const r = new Resolver(w, prio, cfg, now, { hotFloorMs: floor, pinned, frozen, pairPrefilterMs: MAX_PAIR_DT_MS });
+    const r = new Resolver(w, prio, cfg, now, { hotFloorMs: floor, pinned, frozen, pairPrefilterMs: MAX_PAIR_DT_MS, rules, ...(densityAt ? { densityAt } : {}) });
     const s = feedSideSteps(r, input.ingestTime, { healDue: true, maxFolds: Infinity, withdrawals: false });
     steps.windows++;
     steps.rehomed += s.rehomed.length;

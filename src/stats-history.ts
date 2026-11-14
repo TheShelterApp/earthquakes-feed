@@ -752,6 +752,7 @@ export function buildYear(plan: YearPlan, reader: InputReader, o: { builder: num
         anchored,
         registry: o.registry,
         ingestTime: REMERGE_INGEST_TIME,
+        epoch: STATS_REMERGE_EPOCH,
       });
     } catch (e) {
       if (e instanceof RemergeError) throw new Error(`${month}: in-memory re-merge: ${e.message}`);

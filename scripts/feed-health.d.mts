@@ -2,6 +2,7 @@
 // the tests import it from TypeScript.
 
 import type { Finding } from './lib/findings.mjs';
+import type { QueueEntry } from './writer-queue.mjs';
 
 export const FEED_BASE: string;
 export const MANIFEST_V1_URL: string;
@@ -62,6 +63,12 @@ export type WalkRead =
   | { workflow: string; ok: true; marker: null }
   | { workflow: string; ok: true; marker: { createdAtMs: number; runId: number | null; artifactId?: number; text: string } };
 
+/** The writer queue as read: every unfinished writer run with its state (SHLTR-149). */
+export type WriterQueueRead = { ok: true; queue: QueueEntry[] } | { ok: false; message: string };
+
+/** feed:writer-queue: more than 3 writer runs queued, or the older manifest older than 15 min while any is. */
+export function evaluateWriterQueue(opts: { nowMs: number; writerQueue: WriterQueueRead | undefined; v1: ManifestRead; v2: ManifestRead }): Judged;
+
 /** walks:<workflow>:<source> for each line of a marker younger than 26 h, lines merged per key. */
 export function evaluateWalks(reads: WalkRead[], nowMs: number, ids: Iterable<string>): Judged;
 
@@ -89,6 +96,8 @@ export interface FeedInputs {
   repoSize: { ok: true; kb: number } | { ok: false; message: string };
   tree: { ok: true; json: unknown } | { ok: false; message: string };
   walks: WalkRead[];
+  /** The writer queue (scripts/writer-queue.mjs readQueue); a failed read or absent: feed:writer-queue unjudged. */
+  writerQueue?: WriterQueueRead;
   /** Source ids a marker line is filed under. */
   ids: string[];
   /** The statistics (providers/stats.json, the v1 pointer, the index); absent: not judged. */

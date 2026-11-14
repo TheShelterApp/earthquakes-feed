@@ -32,6 +32,7 @@ export type RuleId =
   | 'alerts:selftest'
   | 'feed:freshness'
   | 'feed:freshness:unreachable'
+  | 'feed:writer-queue'
   | 'feed:systemic'
   | 'feed:status'
   | 'feed:source'

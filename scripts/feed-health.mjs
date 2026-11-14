@@ -24,7 +24,10 @@
 //     every read fails, in a local run none is made;
 //   - providers/registry.json from the checkout (the source ids a marker line is filed under);
 //   - providers/stats.json from the checkout (derive_publish, history_enabled) and, when the v1 manifest has a `stats`
-//     pointer, v1/stats/index.json (the statistics: feed:stats, feed:stats-through, feed:stats-days).
+//     pointer, v1/stats/index.json (the statistics: feed:stats, feed:stats-through, feed:stats-days);
+//   - with GH_TOKEN, the writer queue (scripts/writer-queue.mjs readQueue, the gates' own count: every unfinished run of
+//     the repository and the jobs of each writer run): feed:writer-queue (SHLTR-149). A read that fails leaves it
+//     unjudged and is a member of watcher:feed-github.
 //
 //   node scripts/feed-health.mjs --findings findings/feed.json   # the CI invocation: writes the document
 //   node scripts/feed-health.mjs                                 # prints the document (a local run: no GitHub parts)
@@ -43,6 +46,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { inflateRawSync } from 'node:zlib';
 import { annotation, fetchJson } from './alerts-watchdog.mjs';
 import { ageText, findingsDocument, makeFinding, oneLine, RULES, utcText } from './lib/findings.mjs';
+import { describe as describeQueue, isQueued, readQueue, WRITER_GROUP } from './writer-queue.mjs';
 
 export const FEED_BASE = 'https://earthquakes-feed.theshelter.app';
 export const MANIFEST_V1_URL = `${FEED_BASE}/v1/manifest.json`;
@@ -616,6 +620,50 @@ export function registryIds(text) {
   return list.filter((p) => isObject(p) && typeof p.id === 'string').map((p) => p.id);
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// The writer queue: feed:writer-queue
+
+/**
+ * feed:writer-queue (P2, SHLTR-149): more than `maxQueued` (3) writer runs wait for the earthquakes-feed-writer group or
+ * are about to enter it, or the older of the readable manifests is older than `staleWithQueueMs` (15 min) while any
+ * writer run waits: every aggregate run waits behind them. `writerQueue` is readQueue()'s answer; unread: unjudged.
+ */
+export function evaluateWriterQueue({ nowMs, writerQueue, v1, v2 }) {
+  const { maxQueued, staleWithQueueMs } = RULES['feed:writer-queue'].limits;
+  if (!writerQueue || !writerQueue.ok) {
+    return { findings: [], unjudged: ['feed:writer-queue'], notes: [`writer queue: ${writerQueue ? oneLine(writerQueue.message, 200) : 'not read'}`] };
+  }
+  const queue = Array.isArray(writerQueue.queue) ? writerQueue.queue : [];
+  const queued = queue.filter((q) => isQueued(q.state));
+  const holding = queue.filter((q) => q.state === 'holding');
+  const readable = [v1, v2].filter((m) => m && m.ok);
+  const generatedMs = readable.length ? Math.min(...readable.map((m) => m.generatedMs)) : null;
+  const ageMs = generatedMs === null ? null : nowMs - generatedMs;
+  const over = queued.length > maxQueued;
+  const staleBehind = queued.length > 0 && ageMs !== null && ageMs > staleWithQueueMs;
+  if (!over && !staleBehind) return { findings: [], unjudged: [], notes: [] };
+  const created = queued.map((q) => Date.parse(q.created ?? '')).filter(Number.isFinite);
+  const shown = queued.slice(0, 6);
+  const list = `${describeQueue(shown)}${queued.length > shown.length ? `, ${queued.length - shown.length} more` : ''}`;
+  const why = over
+    ? `over ${maxQueued} queued: a burst of dispatches got past the gates (force=true, or a gate that misread the queue)`
+    : `the manifest is past ${ageText(staleWithQueueMs)} while writers wait`;
+  return {
+    findings: [
+      makeFinding('feed:writer-queue', {
+        sinceMs: staleBehind ? generatedMs + staleWithQueueMs : created.length ? Math.min(...created) : null,
+        members: queued.map((q) => q.workflow.replace(/\.yml$/, '')),
+        text:
+          `${queued.length} writer run(s) wait for the ${WRITER_GROUP} group (${list}; holding: ${describeQueue(holding)})` +
+          `${ageMs !== null ? `, live manifest generated ${ageText(ageMs)} ago` : ''}: every aggregate run (the live feed) waits behind them; ${why}; ` +
+          'cancel the surplus (gh run cancel <id>) and pace dispatches (README.md "Writer group")',
+      }),
+    ],
+    unjudged: [],
+    notes: [],
+  };
+}
+
 /**
  * Every feed finding of one run, from what collect() read. Pure.
  * @returns {{ findings: import('./lib/findings.d.mts').Finding[], unjudged: string[], notes: string[], summary: string }}
@@ -681,6 +729,11 @@ export function evaluateFeed(inputs) {
   add(evaluateWalks(inputs.walks ?? [], nowMs, inputs.ids ?? []));
   parts.push(`walks=${(inputs.walks ?? []).map((r) => `${r.workflow}:${!r.ok ? 'unreadable' : r.marker ? 'marker' : 'clear'}`).join(',')}`);
 
+  // The writer queue.
+  const wq = inputs.writerQueue;
+  add(evaluateWriterQueue({ nowMs, writerQueue: wq, v1: inputs.v1, v2: inputs.v2 }));
+  parts.push(`writer-queue=${wq && wq.ok ? `${wq.queue.filter((q) => isQueued(q.state)).length} queued` : 'unread'}`);
+
   // The GitHub reads (not in a local run): one that failed froze its keys above; watcher:feed-github says so on the
   // platform board, or a read that keeps failing (a lost `actions: read`, an API outage) would freeze them unseen.
   if (!inputs.githubSkipped) {
@@ -690,7 +743,9 @@ export function evaluateFeed(inputs) {
     if (!tree || !tree.ok) failed.push(['data-tree', 'the data tree', tree ? tree.message : 'not read']);
     else if (!isObject(tree.json) || !Array.isArray(tree.json.tree)) failed.push(['data-tree', 'the data tree', 'no tree in the answer']);
     for (const r of inputs.walks ?? []) if (!r.ok) failed.push([`walks:${r.workflow}`, `the ${r.workflow} walk's marker`, r.message]);
-    if (failed.length > 0) findings.push(githubWatcher(failed, [...new Set(unjudged)].filter((k) => k === 'feed:repo-size' || k === 'feed:size' || k.startsWith('walks:'))));
+    if (!wq || !wq.ok) failed.push(['writer-queue', 'the writer queue', wq ? wq.message : 'not read']);
+    const frozen = [...new Set(unjudged)].filter((k) => k === 'feed:repo-size' || k === 'feed:size' || k.startsWith('walks:') || k === 'feed:writer-queue');
+    if (failed.length > 0) findings.push(githubWatcher(failed, frozen));
   }
 
   return { findings, unjudged: [...new Set(unjudged)], notes, summary: parts.join(' ') };
@@ -798,6 +853,7 @@ function collectGitHub({ env, fetchImpl, sleep, now }) {
       repoSize: Promise.resolve({ ok: false, message }),
       tree: Promise.resolve({ ok: false, message }),
       walks: Promise.resolve(workflows.map((workflow) => ({ workflow, ok: false, message }))),
+      writerQueue: Promise.resolve({ ok: false, message }),
       notes: [`GitHub parts not judged: ${message}`],
       skipped: local ? message : null,
     };
@@ -824,7 +880,11 @@ function collectGitHub({ env, fetchImpl, sleep, now }) {
   });
   const tree = gh(`/repos/${repo}/git/trees/data?recursive=1`, { timeoutMs: 60_000 }).then((r) => (r.ok ? { ok: true, json: r.json } : { ok: false, message: failText(r) }));
   const walks = Promise.all(workflows.map((workflow) => readWalk(workflow, { gh, token, repo, fetchImpl, sleep, nowMs: now() })));
-  return { queue, repoSize, tree, walks, notes, skipped: null };
+  const writerQueue = readQueue({ repo, token, nowMs: now(), fetchImpl, sleep }).then(
+    (q) => ({ ok: true, queue: q }),
+    (e) => ({ ok: false, message: errMsg(e) }),
+  );
+  return { queue, repoSize, tree, walks, writerQueue, notes, skipped: null };
 }
 
 /**
@@ -892,8 +952,8 @@ export async function collect({ env = process.env, fetchImpl = globalThis.fetch,
   }
   const stats = { config: statsConfig, pointer, index: statsIndex };
 
-  const [repoSize, tree, walks] = await Promise.all([gh.repoSize, gh.tree, gh.walks]);
-  return { nowMs: clock(), v1, v2, reRead, queuedMs, queueError: queue.error, githubSkipped: gh.skipped, status, repoSize, tree, walks, ids, stats, notes: [...gh.notes, ...notes] };
+  const [repoSize, tree, walks, writerQueue] = await Promise.all([gh.repoSize, gh.tree, gh.walks, gh.writerQueue]);
+  return { nowMs: clock(), v1, v2, reRead, queuedMs, queueError: queue.error, githubSkipped: gh.skipped, status, repoSize, tree, walks, writerQueue, ids, stats, notes: [...gh.notes, ...notes] };
 }
 
 /** argv to options; throws an Error with a readable message on a bad argument. */

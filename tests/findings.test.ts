@@ -136,7 +136,7 @@ test('RULES: every key of the plan\'s section 3 has a rule, on the right board',
     ['alerts:budget', 'alerts'], ['alerts:degraded', 'alerts'], ['alerts:policy', 'alerts'], ['alerts:apns', 'alerts'], ['alerts:dispatch', 'alerts'],
     ['alerts:fanout', 'alerts'], ['alerts:canary', 'alerts'],
     ['feed:freshness', 'feed'], ['feed:systemic', 'feed'], ['feed:status', 'feed'], ['feed:source:tmd', 'feed'], ['feed:cert:phivolcs', 'feed'],
-    ['feed:size', 'feed'], ['feed:repo-size', 'feed'], ['walks:history:emsc', 'feed'],
+    ['feed:size', 'feed'], ['feed:repo-size', 'feed'], ['walks:history:emsc', 'feed'], ['feed:writer-queue', 'feed'],
     ['platform:api', 'platform'], ['platform:config-worker', 'platform'], ['config:bundle', 'platform'], ['platform:cf-usage', 'platform'],
     ['watcher:alerts-watchdog', 'platform'],
   ];

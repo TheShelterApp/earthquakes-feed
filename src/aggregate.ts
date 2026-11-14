@@ -12,6 +12,7 @@ import { activeProviders, configMap, loadRegistry, priorityMap } from './provide
 import { byIngestOrder, emptyTally, screen } from './quality.js';
 import { COMCAT_DELETE_REASON, revisionSweep } from './sweep.js';
 import { vanishedIds } from './absence.js';
+import { breakerPlan, breakerStatus, loadBreakers, saveBreakers, updateBreakers } from './breaker.js';
 import { frozenProviders, loadActivity, saveActivity, silentProviders, soonestLeaf, tlsErrorStatus, tlsLeafStatus, updateActivity } from './activity.js';
 import { isPinnedCertError, pinnedLeaf } from './custom.js';
 import { fetchRunInputs, loadSweepCursors, nextCursors, saveSweepCursors, sweepOriginFloorMs, sweepSpecs } from './sweep-cursor.js';
@@ -84,10 +85,26 @@ async function main(): Promise<void> {
   // advance are no longer where a sweep starts.
   const cursors = loadSweepCursors(DATA_DIR);
   const specs = sweepSpecs(active);
+  // The live-fetch circuit breaker (src/breaker.ts, SHLTR-147): a source that has not answered for BREAKER_TRIP_RUNS runs
+  // is not asked until its back-off has passed, then probed once; its status is a failure with `skipped: "breaker"`.
+  const paths = dataPaths(DATA_DIR);
+  const loadedBreakers = loadBreakers(paths.providerBreakers);
+  if (loadedBreakers.dropped.length) console.warn(`::warning title=Breaker state::unreadable entries of ${relative(DATA_DIR, paths.providerBreakers)} read as closed: ${loadedBreakers.dropped.join(', ')}`);
+  const plan = breakerPlan(loadedBreakers.index, active, nowMs);
   const { live: outcomes, sweeps: sweepRuns } = await fetchRunInputs(active, specs, cursors, {
     nowMs,
     originFloorMs: sweepOriginFloorMs(nowMs, loadDays),
+    skipLive: plan.skipped,
   });
+  const breakers = updateBreakers(loadedBreakers.index, outcomes, plan, active, nowMs, state.head.seq);
+  for (const id of Object.keys(plan.skipped)) console.log(`  breaker skipped ${id}: ${plan.skipped[id]!.error}; next probe ${plan.skipped[id]!.breaker?.next_probe}`);
+  for (const id of breakers.opened) console.log(`  breaker opened ${id}: ${breakers.index[id]!.failures} runs without an answer (last: ${breakers.index[id]!.lastError}); next probe ${breakerStatus(breakers.index[id]!)?.next_probe}`);
+  for (const id of breakers.reopened) console.log(`  breaker re-opened ${id}: the probe got no answer (${breakers.index[id]!.lastError}); next probe ${breakerStatus(breakers.index[id]!)?.next_probe}`);
+  for (const id of breakers.closed) {
+    const st = outcomes.find((o) => o.provider === id)?.status;
+    console.log(`  breaker closed ${id}: the probe got an answer (${st?.ok ? `ok, ${st.events_returned ?? 0} rows` : st?.error})`);
+  }
+  if (breakers.massFailure) console.warn(`::warning title=Breaker::most sources got no answer this run (a runner or network outage?): no breaker counted it`);
   const updateRuns = sweepRuns.filter((r) => r.spec.kind === 'updated');
   const deleteRuns = sweepRuns.filter((r) => r.spec.kind === 'deleted');
   for (const r of sweepRuns) {
@@ -259,11 +276,13 @@ async function main(): Promise<void> {
   for (const o of outcomes) {
     const newest = newestOrigin.get(o.provider);
     providers[o.provider] = newest != null ? { ...o.status, newest_origin: isoFromMs(newest) } : o.status;
+    // A breaker that opened or re-opened this run shows from this run on; a skipped source already carries it.
+    const open = breakers.index[o.provider] ? breakerStatus(breakers.index[o.provider]!) : undefined;
+    if (open && !o.status.breaker) providers[o.provider] = { ...providers[o.provider]!, breaker: open };
     if (!o.status.ok) degraded.push(o.provider);
   }
   // FEED-3: a source that keeps answering with no rows past its activity budget is silent, listed in `silent` and
   // counted in `degraded` (src/activity.ts). The first run seeds the index from the status history.
-  const paths = dataPaths(DATA_DIR);
   const loadedActivity = loadActivity(paths.providerActivity, paths.statusHistoryDir);
   if (loadedActivity.seeded) console.log(`aggregate: provider activity seeded from the status history (${Object.keys(loadedActivity.index).length} sources)`);
   // Pinned sources (FEED-SEC-1): the leaf each host presented in this run, kept in the index with the others it presented
@@ -362,6 +381,7 @@ async function main(): Promise<void> {
     );
   }
   saveActivity(paths.providerActivity, activity);
+  saveBreakers(paths.providerBreakers, breakers.index);
   saveSweepCursors(DATA_DIR, nextCursors(cursors, sweepRuns));
 
   // Onboard a newly-added source's recent live window [liveDay, now-lookback] into the
@@ -381,6 +401,10 @@ async function main(): Promise<void> {
       (comcatTwinsWithdrawn ? `comcat_twins_withdrawn=${comcatTwinsWithdrawn} ` : '') +
       (twinWithheld.length ? `twin_withheld=${twinWithheld.length} ` : '') +
       `providers=${outcomes.filter((o) => o.status.ok).length}/${outcomes.length}` +
+      (Object.keys(plan.skipped).length ? ` breaker_skipped=${Object.keys(plan.skipped).length}[${Object.keys(plan.skipped).join(',')}]` : '') +
+      (breakers.opened.length ? ` breaker_opened=[${breakers.opened.join(',')}]` : '') +
+      (breakers.reopened.length ? ` breaker_reopened=[${breakers.reopened.join(',')}]` : '') +
+      (breakers.closed.length ? ` breaker_closed=[${breakers.closed.join(',')}]` : '') +
       (tally.bad_coords ? ` bad_coords_dropped=${tally.bad_coords}` : '') +
       (tally.coordinateless ? ` coordinateless_dropped=${tally.coordinateless}` : '') +
       (zeroedOut.withdrawn ? ` coordinateless_withdrawn=${zeroedOut.withdrawn}` : '') +

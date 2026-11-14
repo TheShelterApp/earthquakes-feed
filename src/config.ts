@@ -829,6 +829,25 @@ export const SWEEP_MAX_PAGES = 8;
  *  revisions, 66 late events and 14 upstream deletes. Bump it only to run a new catch-up. */
 export const SWEEP_EPOCH = 1;
 
+// --- live-fetch circuit breaker (src/breaker.ts, SHLTR-147) ---
+/** Consecutive runs whose live fetch of a source got no answer at all (a timeout, an abort, a connection failure; not
+ *  an HTTP error status, not an empty answer) that open its breaker. In the week to 2026-11-13 (2,010 runs) such
+ *  streaks of 1 or 2 runs were common (CENC 281 and 62, GEOFON 42 and 19, PHIVOLCS 29 and 2): one or two misses never
+ *  open it. */
+export const BREAKER_TRIP_RUNS = 3;
+/** The runs an open breaker skips before it probes the source again, by how many times it has opened in a row: 2, then
+ *  4, then 8, then 12 for every later opening (the cap: one probe about every 65 min). Each is reduced by a jitter of up
+ *  to a quarter (src/breaker.ts breakerSkipRuns), so sources that failed together do not all come back on one run. */
+export const BREAKER_SKIP_RUNS: readonly number[] = [2, 4, 8, 12];
+/** The aggregate's cadence: the heartbeat Worker dispatches it every 5 min. An open breaker's next probe is the first
+ *  run at least (skips + 1) intervals minus half an interval after the run that opened it, so a run that starts a minute
+ *  or two early or late still counts as the run it stands for. */
+export const BREAKER_RUN_INTERVAL_MS = 5 * 60_000;
+/** A run in which more than this share of the sources asked got no answer (at least BREAKER_MASS_MIN_ASKED of them
+ *  asked) is a runner or network outage, not the sources': it neither counts toward nor re-opens any breaker. */
+export const BREAKER_MASS_FAILURE_SHARE = 0.5;
+export const BREAKER_MASS_MIN_ASKED = 6;
+
 // --- derived views ---
 export const MAX_PUBLISHED_BYTES = 18 * 1024 * 1024;
 export const SUMMARY_WINDOWS: Record<string, number> = {
@@ -868,6 +887,7 @@ export function dataPaths(root = DATA_DIR) {
     partitionFormat: join(root, 'knowledge', 'index', 'partition-format.json'),
     providerHealth: join(root, 'knowledge', 'index', 'provider_health.json'),
     providerActivity: join(root, 'knowledge', 'index', 'provider_activity.json'),
+    providerBreakers: join(root, 'knowledge', 'index', 'provider_breakers.json'),
     changesCursor: join(root, 'knowledge', 'index', 'changes.json'),
     changesDir: join(root, 'changes'),
     eventsDir: join(root, 'events'),

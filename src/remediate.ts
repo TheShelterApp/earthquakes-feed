@@ -55,7 +55,7 @@ import {
   rawAssetName,
   rawText,
   remediationTag,
-  remediationTasks,
+  saturatedPlan,
   tasksByDay,
   unbuiltRaws,
 } from './remediation.js';
@@ -480,7 +480,6 @@ async function main(): Promise<void> {
     throw new Error('REMEDIATION_PROVIDERS is given without REMEDIATION_REFILL');
   }
 
-  const done = new Set(idx.raw.map((r) => `${r.provider}:${r.day}`));
   // A source-day older than the source's retention (registry retentionDays, SHLTR-146) is never asked; the queue counts
   // it as done and an edition built for the day names it in `not_fetched`.
   const skip = (provider: string, day: string): boolean => {
@@ -488,8 +487,10 @@ async function main(): Promise<void> {
     return p != null && beyondRetention(p, day, nowMs);
   };
   const plan = queuePlan(idx, archivedDays, skip);
-  let tasks: DayTask[] = [...(queueOnly ? [] : remediationTasks(cursor, frozenBefore, done)), ...plan.tasks];
-  let editionOnly = plan.editionOnly;
+  // The saturated days (not on a queue-only run): archived, askable source-days, and the days whose raws await an edition.
+  const sat: ReturnType<typeof saturatedPlan> = queueOnly ? { tasks: [], editionOnly: [], waiting: [] } : saturatedPlan(cursor, frozenBefore, idx, archivedDays, skip);
+  let tasks: DayTask[] = [...sat.tasks, ...plan.tasks];
+  let editionOnly = [...new Set([...sat.editionOnly, ...plan.editionOnly])].sort();
   if (process.env.REMEDIATION_DAYS) {
     const only = new Set(process.env.REMEDIATION_DAYS.split(',').map((x) => x.trim()));
     tasks = tasks.filter((t) => only.has(`${t.provider}:${t.day}`));
@@ -515,7 +516,8 @@ async function main(): Promise<void> {
   };
   console.log(
     `remediate: ${store.label}; ${days.length} day(s) to do (${days.map((d) => `${d}[${(byDay.get(d) ?? []).map((t) => t.provider).join(',') || 'edition'}]`).join(' ') || 'none'}); ` +
-      `${maxDays} per run; queued days waiting for their archive: ${plan.waiting.join(', ') || 'none'}`,
+      `${maxDays} per run; queued days waiting for their archive: ${plan.waiting.join(', ') || 'none'}` +
+      (sat.waiting.length ? `; saturated days waiting for their archive: ${sat.waiting.join(', ')}` : ''),
   );
   // The archived days of this run and their neighbours, read once (one download per month, read only).
   const ctxAll = new Set(runDays.flatMap((d) => [dayShift(d, -1), d, dayShift(d, 1)]));

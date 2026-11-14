@@ -458,6 +458,8 @@ export function runArchive(root: string, nowMs: number, io: ArchiveIo, opts: Arc
     const runLogs = archiveLogFiles(root, logIndex, nowMs, io, join(staging, 'run-logs'), { dryRun: opts.dryRun });
     for (const b of runLogs.blocked) console.error(`::error::log-archive: ${b}`);
     blocked.push(...runLogs.blocked.map((b) => `run log ${b}`));
+    // The run-log pass has its own per-run cap: the files after it were never compared with their archived copies.
+    if (runLogs.capped) complete = false;
     if (!opts.dryRun) saveLogArchives(root, logIndex);
 
     if (blocked.length) writeFileSync(join(opts.markerDir, 'archive-blocked.txt'), blocked.join('\n') + '\n');

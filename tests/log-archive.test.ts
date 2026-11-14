@@ -178,8 +178,12 @@ test('the per-run cap stops after maxFiles uploads; the rest rolls next run', ()
   const root = dataRoot();
   const { io } = stubReleases();
   const idx = loadLogArchives(root);
-  assert.equal(archiveLogFiles(root, idx, NOW, io, join(root, '..', `${basename(root)}-c1`), { maxFiles: 3, log: () => {} }).archived.length, 3);
-  assert.equal(archiveLogFiles(root, idx, NOW, io, join(root, '..', `${basename(root)}-c2`), { maxFiles: 3, log: () => {} }).archived.length, 1);
+  const first = archiveLogFiles(root, idx, NOW, io, join(root, '..', `${basename(root)}-c1`), { maxFiles: 3, log: () => {} });
+  const second = archiveLogFiles(root, idx, NOW, io, join(root, '..', `${basename(root)}-c2`), { maxFiles: 3, log: () => {} });
+  // `capped`: the first run never looked at the fourth file (archive.ts then reports the run as not complete, so no '#'
+  // marker clears a standing block of a file it did not reach); the second one saw every file.
+  assert.deepEqual([first.archived.length, first.capped], [3, true]);
+  assert.deepEqual([second.archived.length, second.capped], [1, false]);
 });
 
 // Round 17 (LANE G): the status history is written per day. A finished month's files (October 2026: the month file

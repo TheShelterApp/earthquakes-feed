@@ -137,6 +137,8 @@ export interface LogArchiveResult {
   adopted: string[];
   /** Files left in the tree with the reason (the job goes red through archive-blocked.txt). */
   blocked: string[];
+  /** The per-run cap stopped the pass: the files after it were not looked at, so `blocked` may miss a standing block. */
+  capped: boolean;
 }
 
 /**
@@ -153,7 +155,7 @@ export function archiveLogFiles(
 ): LogArchiveResult {
   const log = opts.log ?? console.log;
   const maxFiles = opts.maxFiles ?? LOG_ARCHIVE_MAX_FILES;
-  const res: LogArchiveResult = { archived: [], leftoversRemoved: [], adopted: [], blocked: [] };
+  const res: LogArchiveResult = { archived: [], leftoversRemoved: [], adopted: [], blocked: [], capped: false };
   mkdirSync(staging, { recursive: true });
   const archivedAt = new Date(nowMs).toISOString();
   let n = 0;
@@ -177,6 +179,7 @@ export function archiveLogFiles(
     }
     if (n >= maxFiles) {
       log(`log-archive: reached the per-run cap (${maxFiles}); the rest rolls next run`);
+      res.capped = true;
       break;
     }
     n++;

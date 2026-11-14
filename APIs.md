@@ -1622,7 +1622,9 @@ Three kinds of days are incomplete for some sources although they are frozen:
   them: 98 KAGSR events of the day are missing (60 with ids above the newest one archived: KAGSR added them after the
   backfill fetched the day in July 2026). Since SHLTR-151 such a day is a block on backfill's marker
   (`walks:backfill:<source>`) on every run until an edition completes it (a raw asset of the source and day, not
-  partial, in the day's current edition), and the daily scheduled run takes the saturated days too.
+  partial, in the day's current edition), and the daily scheduled run takes the saturated days too: those of an
+  archived month (a frozen day whose month is not archived yet waits for it), never a day older than the source's
+  retention (a warning instead), and a day whose raws were uploaded without an edition is built again from them.
 - **The seam** 2026-06-28 → 07-03 05:42 UTC, which 15 sources never fetched (*History and backfill*).
 - **Late ComCat** (since 2026-11, SHLTR-150): ComCat's M4.5+ solutions published or revised after the live day froze
   (*Late publications*).

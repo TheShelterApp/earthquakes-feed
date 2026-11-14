@@ -492,9 +492,12 @@ a saturated day no remediation edition has completed yet; `stats` a year whose l
 blocks; `first-solutions` each source failing 72 runs or more in a row (from its cursor); `archive` a month it cannot
 re-roll and `remerge` a month it cannot merge (both stay flagged, so every run tries them again). A run that evaluated
 every standing block and found none uploads a marker with only a `#` line: the entry resolves on the next health run,
-no hand clearing. A run that could not evaluate them all uploads no such marker (`history` and `remerge` cut by their
-time budget, `archive` stopped by its per-run cap, a `remerge` dispatch naming months): the previous marker stands. The
-26 h hold is only the fallback, for a walk that stops running (switched off, a schedule GitHub dropped). A dispatched
+no hand clearing. A run that could not evaluate them all (`history` and `remerge` cut by their time budget, `archive`
+stopped by one of its per-run caps, a `remerge` dispatch naming months) uploads no `#` marker: with nothing blocked of
+its own the previous marker stands; with a block of its own its marker names only what it reached, so a standing block
+it never reached leaves the board until the next complete run names it again (a P3 that resolves and reopens, never a
+lost block). The 26 h hold is only the fallback, for a walk that stops running (switched off, a schedule GitHub
+dropped). A dispatched
 backfill window that overflowed, failed or held back a day stays open in `knowledge/index/backfill.json` (`dispatched`)
 until dispatched ranges of that provider that answered in full cover it (dispatch narrower ranges inside it).
 `aggregate` and `derive` still go red on a failed publish (owner decision 2026-10-22); `feed:freshness` is the symptom

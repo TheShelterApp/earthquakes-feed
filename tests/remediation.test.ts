@@ -36,6 +36,7 @@ import {
   rawText,
   remediationTag,
   remediationTasks,
+  saturatedPlan,
   type WindowFetcher,
 } from '../src/remediation.js';
 import { beyondRetention } from '../src/retention.js';
@@ -65,6 +66,34 @@ test('tasks: frozen saturated days only, Kamchatka first, then the Sındırgı d
   };
   const t = remediationTasks(cursor, '2026-09-24', new Set(['afad:2025-08-12']));
   assert.deepEqual(t.map((x) => `${x.provider}:${x.day}`), ['kagsr:2025-07-30', 'afad:2025-08-11', 'afad:2025-11-12', 'imo:2023-11-11', 'imo:2025-05-24']);
+});
+
+test('saturated plan: archived, askable days only; a day before its month\'s archive waits; raws without an edition are built (SHLTR-151)', () => {
+  const cursor = {
+    providers: {
+      kagsr: { saturatedDays: ['2025-07-30'] },
+      afad: { saturatedDays: ['2025-08-11', '2025-08-12', '2025-08-13'] },
+      imo: { saturatedDays: ['2026-08-20'] },
+      usgs: { saturatedDays: ['2026-11-12'] },
+    },
+  };
+  const archived = new Set(['2025-07-30', '2025-08-11', '2025-08-12', '2025-08-13']);
+  const raw = (provider: string, day: string) => ({ provider, day, tag: 'remediation-2025', asset: `raw-${provider}-${day}.ndjson.gz`, url: '', sha256: 'x', bytes: 1, rows: 1, requests: 1, partial: false, fetched_at: '2026-11-08T00:00:00.000Z', reason: 'saturated' as const });
+  const ed = (day: string, from: string[]) => ({ day, edition: 1, tag: 'remediation-2025', asset: `events-${day}.e1.ndjson.gz`, url: '', sha256: 'y', bytes: 1, built_on: { tag: 'a', asset: 'b', sha256: null }, built_from: from, reason: 'saturated' as const, stats: {} as never, built_at: '' });
+  const idx = emptyRemediationIndex();
+  // 08-12: its raw is in the day's edition (done). 08-13: a run uploaded its raw and built no edition.
+  idx.raw.push(raw('afad', '2025-08-12'), raw('afad', '2025-08-13'));
+  idx.editions.push(ed('2025-08-12', ['raw-afad-2025-08-12.ndjson.gz']));
+  // AFAD 08-11 is older than the source's retention: never asked, never a task (saturatedReport warns about it).
+  const skip = (p: string, d: string): boolean => p === 'afad' && d === '2025-08-11';
+  const plan = saturatedPlan(cursor, '2026-11-04', idx, archived, skip);
+  assert.deepEqual(plan.tasks.map((t) => `${t.provider}:${t.day}`), ['kagsr:2025-07-30'], 'the retention day and the unarchived IMO day take no slot');
+  assert.deepEqual(plan.editionOnly, ['2025-08-13']);
+  assert.deepEqual(plan.waiting, ['2026-08-20'], 'frozen, its month not archived yet; USGS 11-12 is not frozen');
+  // Once 08-13's edition holds its raw, the day is done; IMO's month archives and its day is taken.
+  idx.editions.push(ed('2025-08-13', ['raw-afad-2025-08-13.ndjson.gz']));
+  const later = saturatedPlan(cursor, '2026-11-04', idx, new Set([...archived, '2026-08-20']), skip);
+  assert.deepEqual([later.tasks.map((t) => `${t.provider}:${t.day}`), later.editionOnly, later.waiting], [['kagsr:2025-07-30', 'imo:2026-08-20'], [], []]);
 });
 
 /** A source holding `times` on the day that answers at most `cap` rows per window (overflow = full). */

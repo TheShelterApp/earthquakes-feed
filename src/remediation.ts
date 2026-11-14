@@ -645,6 +645,41 @@ export function queuePlan(idx: RemediationIndex, archivedDays: ReadonlySet<strin
   };
 }
 
+/**
+ * The saturated days a run that is not queue-only takes (SHLTR-151): remediationTasks' source-days of an ARCHIVED day
+ * that the source can still be asked for (a day older than its retention never gets a raw: backfill's saturatedReport
+ * warns about it instead, and it must not take a run's slot every day); a frozen day whose month is not archived yet
+ * waits (`waiting`: an edition is built on the archived day only). Edition-only: an archived saturated day whose sources
+ * all have a raw but whose current edition is not built from every raw of the day (a run uploaded them and built no
+ * edition: another source of the day failed, or the run died between the uploads); backfill's marker names such a day
+ * until an edition holds its raw.
+ */
+export function saturatedPlan(
+  cursor: { providers: Record<string, { saturatedDays?: string[] }> },
+  frozenBefore: string,
+  idx: RemediationIndex,
+  archivedDays: ReadonlySet<string>,
+  skip: SkipSource = NO_SKIP,
+): { tasks: DayTask[]; editionOnly: string[]; waiting: string[] } {
+  const done = new Set(idx.raw.map((r) => `${r.provider}:${r.day}`));
+  const tasks: DayTask[] = [];
+  const waiting = new Set<string>();
+  for (const t of remediationTasks(cursor, frozenBefore, done)) {
+    if (skip(t.provider, t.day)) continue;
+    if (archivedDays.has(t.day)) tasks.push(t);
+    else waiting.add(t.day);
+  }
+  const fetching = new Set(tasks.map((t) => t.day));
+  const editionOnly = new Set<string>();
+  for (const [provider, c] of Object.entries(cursor.providers)) {
+    for (const day of c.saturatedDays ?? []) {
+      if (day < frozenBefore && archivedDays.has(day) && !fetching.has(day) && done.has(`${provider}:${day}`) && unbuiltRaws(idx, day).length > 0) editionOnly.add(day);
+    }
+  }
+  const sort = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+  return { tasks, editionOnly: [...editionOnly].sort(sort), waiting: [...waiting].sort(sort) };
+}
+
 /** Drop the done days from the queue: each entry's range shrinks from both ends past its done days, and an entry with
  *  every day done leaves the queue. Returns the entries that left. */
 export function pruneQueue(idx: RemediationIndex, skip: SkipSource = NO_SKIP): RefillEntry[] {

@@ -69,6 +69,20 @@
       "reason": "seam"
     },
     {
+      "provider": "kagsr",
+      "day": "2025-07-30",
+      "tag": "remediation-2025",
+      "asset": "raw-kagsr-2025-07-30.ndjson.gz",
+      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/remediation-2025/raw-kagsr-2025-07-30.ndjson.gz",
+      "sha256": "b95f5ef4ca8a5e171007f9ddd1d441f33b8aa973e1d80a29f487a1232c2944f4",
+      "bytes": 35676,
+      "rows": 676,
+      "requests": 24,
+      "partial": false,
+      "fetched_at": "2026-11-14T18:20:06.370Z",
+      "reason": "saturated"
+    },
+    {
       "provider": "afad",
       "day": "2025-08-11",
       "tag": "remediation-2025",
@@ -3271,6 +3285,69 @@
         }
       },
       "built_at": "2026-11-08T18:19:03.439Z"
+    },
+    {
+      "day": "2025-07-30",
+      "edition": 1,
+      "tag": "remediation-2025",
+      "asset": "events-2025-07-30.e1.ndjson.gz",
+      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/remediation-2025/events-2025-07-30.e1.ndjson.gz",
+      "sha256": "16667b6f5df7df8db2f9156382543b66afbeffc8c2076bcab16f4b8a73d06690",
+      "bytes": 597635,
+      "built_on": {
+        "tag": "archive-2025-07",
+        "asset": "events-2025-07.e3.tar.zst",
+        "sha256": "ea352f9c643a992b2c4fe9541969fb8adf02d80e94aec79f6ae322596d3d8967"
+      },
+      "built_from": [
+        "raw-kagsr-2025-07-30.ndjson.gz"
+      ],
+      "reason": "saturated",
+      "context": {
+        "2025-07-29": {
+          "tag": "archive-2025-07",
+          "asset": "events-2025-07.e3.tar.zst",
+          "sha256": "ea352f9c643a992b2c4fe9541969fb8adf02d80e94aec79f6ae322596d3d8967"
+        },
+        "2025-07-30": {
+          "tag": "archive-2025-07",
+          "asset": "events-2025-07.e3.tar.zst",
+          "sha256": "ea352f9c643a992b2c4fe9541969fb8adf02d80e94aec79f6ae322596d3d8967"
+        },
+        "2025-07-31": {
+          "tag": "archive-2025-07",
+          "asset": "events-2025-07.e3.tar.zst",
+          "sha256": "ea352f9c643a992b2c4fe9541969fb8adf02d80e94aec79f6ae322596d3d8967"
+        }
+      },
+      "stats": {
+        "archived_events": 2822,
+        "events": 2885,
+        "live_before": 2093,
+        "live_after": 2152,
+        "rows": 676,
+        "changed": 108,
+        "unchanged": 568,
+        "screened": 0,
+        "new_events": 63,
+        "retired": 4,
+        "off_day": 0,
+        "neighbour_joins": 0,
+        "afad_retimed": 0,
+        "afad_moved_out": 0,
+        "merged": 4,
+        "provider_rows": {
+          "kagsr": {
+            "before": 578,
+            "after": 676
+          }
+        },
+        "remerge": {
+          "epoch": 1,
+          "from_edition": 0
+        }
+      },
+      "built_at": "2026-11-14T18:20:06.370Z"
     },
     {
       "day": "2025-08-11",

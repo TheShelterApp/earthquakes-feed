@@ -507,7 +507,8 @@ day tables.
 - **ComCat gate:** before a rebuilt year's files are written, its M6+ (the `m6` rows) and M4.5+ (Σ `m45`) are compared
   with `count?eventtype=earthquake` over `[Y-01-01, min(Y+1-01-01, through + 1 day))`, one request at a time, at most
   0.5 a second. Era B must be within ±2 %, later years within the `gate` bands of `providers/stats.json` (M6+ ratio
-  0.85–1.20, M4.5+ 0.85–1.40); the open current year only warns. A year that fails keeps its previous files (a first
+  0.85–1.20, M4.5+ 0.85–1.40); the open current year only warns, and its warning names the cause first: `late ComCat`
+  below a band (ComCat's late publications, *Late publications*), `split copies` above one. A year that fails keeps its previous files (a first
   build stays absent) and is not retried until its inputs change; every real run names each year whose ledger entry
   failed in its marker `walk-blocked-stats`, which reaches the health board (`walks:stats:run`), and a run with
   nothing blocked uploads a marker with only a `#` line, which resolves the board entry on the next health run.
@@ -519,7 +520,8 @@ day tables.
   only) counts pairs of M4.5+ rows of different chosen providers within 60 s and 100 km: splits the merge left.
 - **Verify:** a dispatch with `verify: sample` (the last 13 months and 6 older ones) or `full` (every month) compares
   each month's M4.5+ and M6+ with ComCat in the run's summary and `report.md`; a failing month adds a
-  `stats-verify-failed` line to the marker.
+  `stats-verify-failed` line to the marker. A month below ComCat that ends within 45 days of `through` is noted
+  `late ComCat, settles within 45 days` (it still fails).
 
 Versioning: a new optional column or field keeps `format: 1`; an incompatible change is a new directory and a new
 manifest key `stats2`, with `stats` kept for a deprecation window.
@@ -1136,6 +1138,18 @@ one. Because a late event (like a revision or an upstream delete) can still chan
 10 days old, `manifest.partitions[].frozen` turns true only after that (it was 3 days until
 2026-09-30).
 
+**ComCat settles within about 45 days.** ComCat keeps publishing after that: NEIC's reviewed solutions of M4.5+
+quakes far from a regional network often appear 10–22 days after the origin (us6000tz4j, M4.6 New Caledonia of
+2026-09-26: first published 22.0 days later; us6000u2u4, M4.6 Panama of 10-09: 21.1 days; us7000tv8m, M4.8 Tuamotu of
+10-24: 15.3 days), and it revises others across M4.5. A frozen day keeps ComCat's set as it was when it froze, so
+ComCat's counts for the live era (since 2026-07-05) are not final for a day younger than about **45 days**. Measured
+on 2026-11-14 over the 126 frozen days 2026-07-01…11-03, the `usgs` M4.5+ rows of each day against ComCat's M4.5+
+count for it now: 0.67 (July), 0.70 (August), 0.75 (September), 0.77 (October), 2,291 rows against 3,158 quakes; 962
+of ComCat's M4.5+ quakes had no `usgs` row at all (most were in the feed through EMSC, GEOFON or another source,
+without ComCat's solution), 39 rows had crossed M4.5 upwards since, 80 downwards, 26 had moved by 0.3 or more and 2
+were no longer listed. 124 of the 126 days had changed (33 of the 35 days 09-30…11-03). The days are completed by
+`late_usgs` remediation editions (*Remediation editions*), not in place.
+
 **Recovered reports.** Some sources publish only a rolling list: TMD's file holds its last 20 events (about 2.5 days).
 When the feed cannot read such a list for longer than that, events leave it unread. TMD keeps a page per event
 (`https://eq.tmd.go.th/EQ<id>`, the `path` its file names), so an aggregate run dispatched by hand with the input
@@ -1582,7 +1596,7 @@ nothing that needs another source. The dry run stays in the walk's concurrency g
 
 ## Remediation editions (saturated days and the 2026-07 seam)
 
-Two kinds of days are incomplete for some sources although they are frozen:
+Three kinds of days are incomplete for some sources although they are frozen:
 
 - **Saturated days.** When even a one-day backfill window filled a source's page cap, the walk kept the capped rows
   (the day is partial for that source) and listed the day in its cursor (`saturatedDays` in
@@ -1590,9 +1604,12 @@ Two kinds of days are incomplete for some sources although they are frozen:
   mainshock), 23 AFAD days of the Sındırgı sequences (2025-08-11 to 08-25 and 2025-10-28 to 11-12) and IMO 2023-11-11,
   2025-04-01 and 2025-05-24.
 - **The seam** 2026-06-28 → 07-03 05:42 UTC, which 15 sources never fetched (*History and backfill*).
+- **Late ComCat** (since 2026-11, SHLTR-150): ComCat's M4.5+ solutions published or revised after the live day froze
+  (*Late publications*).
 
 The feed never rewrites a frozen day or a published asset, so they are not repaired in place. The `remediate`
-workflow (`src/remediate.ts`) publishes ADDITIVE day editions instead, for archived days only:
+workflow (`src/remediate.ts`) publishes ADDITIVE day editions instead, for archived days (the first two kinds) and for
+frozen days not archived yet (late ComCat):
 
 - the saturated days are its default tasks on a dispatch; an explicit refill (inputs `refill`, a range of at most 31
   days, and `providers`, a comma list or `bootstrap-2026-07-05` for the 15 seam sources) is added to the PERSISTENT
@@ -1624,14 +1641,41 @@ workflow (`src/remediate.ts`) publishes ADDITIVE day editions instead, for archi
   joins one is counted in `stats.neighbour_joins` and stays unpublished; the event itself stays in its archive). Before
   upload the edition is checked: no report live twice in it, and none it adds live in a neighbouring archived day, so
   reading the edition instead of the archived day never drops an event or publishes one twice.
+- **Late ComCat** (`reason: "late_usgs"`): once a day the scheduled run asks ComCat (the `usgs` source) again for every
+  frozen day the archive has not rolled yet, from 45 days ago to the last frozen day whose next day is frozen too
+  (12–45 days old: the live run owns the 11 newest, and mints late ComCat events of its first 7 itself), one whole-day
+  fetch in 6-hour windows per day, at least 1.1 s apart. It compares ComCat's M4.5+ set with the `usgs` rows the day
+  holds (the `usgs` raw asset its current edition was built from, else the current edition, else the frozen partition;
+  ids matched through ComCat's `ids` too): the day changed when ComCat lists an M4.5+ solution the day holds no row of
+  or holds below M4.5, a solution moved by 0.3 or more, or one the day holds at M4.5+ is now below it. A changed day
+  gets an edition built like every other but on the day's **frozen partition** (`built_on`: `{"tag": "data", "asset":
+  "events/YYYY/MM/DD.ndjson", "sha256", "blob"}`; neighbours read as consumers read them, a frozen partition counting as
+  the neighbour's archived day), with ComCat's whole answer of the day as its raw asset; an unchanged day publishes
+  nothing. Each refresh of a day builds on the partition again with ComCat's newest answer, and is compared next time
+  with that answer, so a day gets a new edition only when ComCat changed again since its last one. The index keeps one
+  `late_usgs` entry per day: a new one replaces the day's earlier `late_usgs` editions and their raw assets in
+  `remediation.json` and names the editions it replaced in `superseded` (their assets stay in the Release). Unlike the other editions
+  it does not re-read the partition's AFAD rows stored 3 h early (before 2026-10-01): it adds ComCat's rows and moves
+  nothing else (the month's re-merge re-times them). A row ComCat no longer
+  lists (deleted upstream) is reported (`gone`) and kept: an edition never removes a row. Before upload, beyond the
+  checks above, every event and every report of the partition must be in the edition and every other source's live
+  report must still be live in it. The mode of the scheduled run is `LATE_USGS_SCHEDULED` in `src/remediation.ts`
+  (`plan`: ask and compare, publish nothing, the log lists what `on` would build; `on`; `off`); a dispatch with
+  `late_usgs` (`plan` or `on`, with `dry_run` into the run's artifact) runs it at once, over `late_usgs_range` (at most
+  31 days) instead of the last 45 for the frozen days older than that (the one-time catch-up of 2026-07…10). When the
+  month rolls, the archive holds the partition byte for byte, so the edition still replaces the day: the archive
+  re-merge (*Re-merged history*) takes an edition built on the partition whose archived file has the same sha256.
 
 `knowledge/index/remediation.json` lists every raw asset (`provider`, `day`, `rows`, `requests`, `partial`,
 `sha256`, `reason`, …) and every edition (`day`, `edition`, `url`, `sha256`, `built_on`: the archive asset and its
 checksum, `built_from`: the raw assets, `reason`: `saturated` or `seam` (absent on the entries of 2026-10-04: `saturated`),
 `context`: by day, the archive asset or the neighbour's edition the build read, with its checksum (absent on the
 entries of 2026-10-04: archives only), and `stats`: events before and after, new, retired, off the day, rows changed /
-unchanged, rows that joined a neighbouring day, AFAD rows re-read, rows per source before and after). The archived day, its `archive-YYYY-MM` asset and `manifest.json` are unchanged: a consumer that wants the
-repaired day reads the current edition (the highest `edition` of the day not `withdrawn`) instead of the archived day.
+unchanged, rows that joined a neighbouring day, AFAD rows re-read, rows per source before and after; `reason`
+`late_usgs` on the late ComCat entries). The archived day, its `archive-YYYY-MM` asset, the frozen partition and the
+manifests (`manifest.json` and the signed v2 manifest, which list neither) are unchanged: a consumer that wants the
+repaired day reads the current edition (the highest `edition` of the day not `withdrawn`) instead of the archived day or
+the frozen partition, as the statistics builder does.
 When the archive month is re-merged (*Re-merged history*), each of its remediated days gets a refreshed edition built
 on the new archive asset (`built_on`), with `stats.remerge` set.
 

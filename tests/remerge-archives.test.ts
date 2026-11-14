@@ -84,9 +84,10 @@ function stub() {
 }
 
 /** Archive months 2024-05 and 2024-06 (a split M6 in each), and a remediation edition of 2024-06-12 built on June's asset. */
-function world(opts: { remediationOn?: 'june' | 'other' } = {}) {
+function world(opts: { remediationOn?: 'june' | 'other' | 'partition' | 'other-partition' } = {}) {
   const s = stub();
   const archives: Archives = { list: [] };
+  const memberText = new Map<string, string>();
   const months: [string, EventNode[]][] = [
     ['2024-05', split(quake(Date.parse('2024-05-20T03:00:00Z'), 'may'))],
     ['2024-06', split([...quake(Date.parse('2024-06-12T03:00:00Z'), 'jun'), obs('usgs', 'usx', Date.parse('2024-06-12T09:00:00Z'), { mag: 4.0, lat: 30 })])],
@@ -100,7 +101,10 @@ function world(opts: { remediationOn?: 'june' | 'other' } = {}) {
       const d = new Date(n.eventTimeMs).toISOString().slice(0, 10);
       (byDay.get(d) ?? byDay.set(d, []).get(d)!).push(n);
     }
-    for (const [d, ns] of byDay) writeFileSync(join(m, `${d.slice(8, 10)}.ndjson`), ns.map((n) => JSON.stringify(nodeToFeature(n))).join('\n') + '\n');
+    for (const [d, ns] of byDay) {
+      memberText.set(d, ns.map((n) => JSON.stringify(nodeToFeature(n))).join('\n') + '\n');
+      writeFileSync(join(m, `${d.slice(8, 10)}.ndjson`), memberText.get(d)!);
+    }
     const { path, asset } = makeTarball(m, readdirSync(m), `events-${period}`);
     const tag = `archive-${period}`;
     s.io.ensureRelease(tag, '');
@@ -116,7 +120,11 @@ function world(opts: { remediationOn?: 'june' | 'other' } = {}) {
     s.store.get('remediation-2024')!.set('events-2024-06-12.e1.ndjson.gz', bytes);
     remediation.editions.push({
       day: '2024-06-12', edition: 1, tag: 'remediation-2024', asset: 'events-2024-06-12.e1.ndjson.gz', url: '', sha256: sha(bytes), bytes: bytes.length,
-      built_on: { tag: june.tag, asset: june.asset, sha256: opts.remediationOn === 'june' ? june.sha256 : 'another' }, built_from: ['raw-x'], stats: {} as EditionRef['stats'], built_at: IT,
+      built_on: opts.remediationOn === 'partition' || opts.remediationOn === 'other-partition'
+        // A late_usgs edition (SHLTR-150): built on the day's frozen partition before the month rolled.
+        ? { tag: 'data', asset: 'events/2024/06/12.ndjson', sha256: opts.remediationOn === 'partition' ? sha(Buffer.from(memberText.get('2024-06-12')!)) : 'another', blob: '0'.repeat(40) }
+        : { tag: june.tag, asset: june.asset, sha256: opts.remediationOn === 'june' ? june.sha256 : 'another' },
+      built_from: ['raw-x'], stats: {} as EditionRef['stats'], built_at: IT,
     });
   }
   const out = mkdtempSync(join(tmpdir(), 'remerge-out-'));
@@ -246,4 +254,15 @@ test('archive re-merge: a remediation edition built on an earlier asset is used 
       assert.match(r.report.blocked.join('\n'), /built on events-2024-06\.tar\.zst .*the re-roll changed that day/);
     }
   }
+});
+
+test('archive re-merge: a late_usgs edition built on the frozen partition is the day\'s input when the archive holds that file byte for byte, and blocks the month otherwise', { skip: !hasZstd && 'zstd not installed' }, () => {
+  const w = world({ remediationOn: 'partition' });
+  const r = silently(() => runRemergeArchives(w.ctx(), { max: 1 }));
+  assert.deepEqual(r.report.blocked, []);
+  assert.deepEqual(r.pending.months[0]!.entry.remediation, [{ day: '2024-06-12', edition: 1, sha256: w.remediation.editions[0]!.sha256 }]);
+  const other = world({ remediationOn: 'other-partition' });
+  const b = silently(() => runRemergeArchives(other.ctx(), { max: 1 }));
+  assert.match(b.report.blocked.join('\n'), /2024-06: remediation events-2024-06-12\.e1\.ndjson\.gz of 2024-06-12 was built on events\/2024\/06\/12\.ndjson/);
+  assert.deepEqual(other.uploads, []);
 });

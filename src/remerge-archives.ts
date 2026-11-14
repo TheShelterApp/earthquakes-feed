@@ -25,7 +25,7 @@ import {
   normalizeUnit,
   usgsResidual,
 } from './remerge.js';
-import { type EditionRef, type EditionStats, type RemediationIndex, currentEdition, editionAssetName, editionProblems, emptyRemediationIndex, nextFree, remediationTag } from './remediation.js';
+import { type EditionRef, type EditionStats, type RemediationIndex, PARTITION_TAG, currentEdition, editionAssetName, editionProblems, emptyRemediationIndex, nextFree, remediationTag } from './remediation.js';
 import type { EventNode, ProviderConfig } from './types.js';
 
 /**
@@ -300,7 +300,8 @@ function refreshedEdition(
   const bytes = gzipSync(Buffer.from(text), { level: 9 });
   const sum = sha256(bytes);
   const names = ctx.dryRun ? new Set<string>() : listNames(ctx.io, tag);
-  const indexed = new Set(ctx.remediation.editions.filter((e) => e.tag === tag).map((e) => e.asset));
+  // A late_usgs edition's `superseded` assets left the index (pruneLateUsgs) but are not unindexed uploads.
+  const indexed = new Set(ctx.remediation.editions.filter((e) => e.tag === tag).flatMap((e) => [e.asset, ...(e.superseded ?? [])]));
   // An earlier run's identical upload whose commit never landed (gzip without a timestamp: same bytes) is reused.
   let asset: string | null = null;
   for (const n of names) {
@@ -382,10 +383,13 @@ export function remergeMonth(
     if (ed.built_on.sha256 !== entry.sha256) {
       // Built on an earlier asset of the month (a re-roll since: a backfill fill of other days): still the day's input
       // when the re-roll left that day's file byte for byte as the edition's base had it; else the edition must be
-      // rebuilt on the new asset first (remediate.yml), and the month waits.
+      // rebuilt on the new asset first (remediate.yml), and the month waits. A late_usgs edition is built on the day's
+      // frozen partition before the month rolled (built_on tag "data"): the same when the archive holds that file byte
+      // for byte.
       const prior = (entry.previous ?? []).find((p) => p.sha256 === ed.built_on.sha256);
       const dd = `${day.slice(8, 10)}.ndjson`;
-      const same = prior != null && cache.members(entry.tag, prior.asset, prior.sha256).get(dd) === base.get(dd);
+      const onPartition = ed.built_on.tag === PARTITION_TAG && base.has(dd) && sha256(Buffer.from(base.get(dd)!, 'utf8')) === ed.built_on.sha256;
+      const same = onPartition || (prior != null && cache.members(entry.tag, prior.asset, prior.sha256).get(dd) === base.get(dd));
       if (!same) return { blocked: `${period}: remediation ${ed.asset} of ${day} was built on ${ed.built_on.asset} (${String(ed.built_on.sha256).slice(0, 12)}), not on the entry's ${entry.asset}${prior ? ', and the re-roll changed that day' : ''}` };
     }
     const f = join(ctx.work, ed.asset);

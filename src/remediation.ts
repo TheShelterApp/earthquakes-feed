@@ -38,10 +38,11 @@ export const FIRST_WINDOW_MS = 6 * 3_600_000;
 export const MIN_WINDOW_MS = 5 * 60_000;
 const DAY_MS = 86_400_000;
 
-/** Why a day is remediated: a source's backfill window filled its page cap (`saturated`, the default when absent), or
- *  the live layer's start left the day empty for some sources (`seam`, 2026-06-28..07-03; APIs.md, Remediation
+/** Why a day is remediated: a source's backfill window filled its page cap (`saturated`, the default when absent),
+ *  the live layer's start left the day empty for some sources (`seam`, 2026-06-28..07-03), or ComCat published or
+ *  revised M4.5+ solutions of a frozen live-era day after it froze (`late_usgs`, SHLTR-150; APIs.md, Remediation
  *  editions). */
-export type RemediationReason = 'saturated' | 'seam';
+export type RemediationReason = 'saturated' | 'seam' | 'late_usgs';
 
 export interface DayTask {
   provider: string;
@@ -247,6 +248,9 @@ export function buildDayEdition(input: {
   fmt: PartitionFormat;
   /** The re-merge epoch to merge the edition to (default config REMERGE_EPOCH; 0 = built as before). */
   remergeEpoch?: number;
+  /** Step 1, the AFAD re-read (default true). A late_usgs edition passes false: it adds ComCat's rows to a frozen
+   *  partition and moves nothing else; the partition's early AFAD rows are re-timed when its month is re-merged. */
+  afadRetime?: boolean;
 }): { text: string; nodes: EventNode[]; stats: EditionStats } {
   const map = new Map<string, EventNode>();
   for (const nodes of input.context.values()) for (const n of nodes) map.set(n.feedId, n);
@@ -273,7 +277,7 @@ export function buildDayEdition(input: {
   let afadRetimed = 0;
   let afadMovedOut = 0;
   const touched: string[] = [];
-  for (const raw of afadCorrections(dayMap, 0)) {
+  for (const raw of input.afadRetime === false ? [] : afadCorrections(dayMap, 0)) {
     const entries = fixer.correctReport(raw, input.ingestTime);
     for (const e of entries) {
       touched.push(e.result.node.feedId);
@@ -460,12 +464,18 @@ export interface RawRef {
   /** Absent: `saturated` (the index of 2026-10-04). */
   reason?: RemediationReason;
 }
-/** A published asset a build read: an archive month or a remediation edition, and its sha256. */
+/** A published asset a build read: an archive month, a remediation edition, or (`tag: "data"`, PARTITION_TAG) a frozen
+ *  day partition of the data branch, with the sha256 of its bytes and its git blob. */
 export interface AssetRef {
   tag: string;
   asset: string;
   sha256: string | null;
+  /** A frozen day partition only: its git blob on the data branch. */
+  blob?: string;
 }
+/** The `tag` of an AssetRef that names a frozen day partition of the data branch (`asset`: events/YYYY/MM/DD.ndjson). */
+export const PARTITION_TAG = 'data';
+export const partitionAsset = (day: string): string => `events/${day.slice(0, 4)}/${day.slice(5, 7)}/${day.slice(8, 10)}.ndjson`;
 export interface EditionRef {
   day: string;
   edition: number;
@@ -474,7 +484,8 @@ export interface EditionRef {
   url: string;
   sha256: string;
   bytes: number;
-  /** The archived day it is built on: its archive asset and that asset's sha256. */
+  /** The day it is built on: its archive asset and that asset's sha256, or (`late_usgs`, a day not archived yet) its
+   *  frozen partition on the data branch (`tag: "data"`, the file's sha256 and blob). */
   built_on: AssetRef;
   /** The raw assets it is built from. */
   built_from: string[];
@@ -487,6 +498,9 @@ export interface EditionRef {
   built_at: string;
   /** Withdrawn by scripts/remerge-rollback.ts: never current; the asset stays. */
   withdrawn?: { at: string; reason: string };
+  /** late_usgs only: the day's earlier late_usgs editions this one replaced in the index (pruneLateUsgs). Their assets
+   *  stay in the Release; their entries and those of their raw assets leave the index. */
+  superseded?: string[];
 }
 /**
  * A queued refill: its days are remediated as soon as each is archived (a remediation edition supplements an archived
@@ -513,6 +527,29 @@ export function indexText(idx: RemediationIndex): string {
   const raw = [...idx.raw].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : a.provider < b.provider ? -1 : 1));
   const editions = [...idx.editions].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : a.edition - b.edition));
   return JSON.stringify({ version: 1, raw, editions, refill_queue: idx.refill_queue ?? [] }, null, 2) + '\n';
+}
+
+/**
+ * Keep one late_usgs entry per day (SHLTR-150): once `cur`, a new late_usgs edition, is in the index, the day's earlier
+ * late_usgs editions (built on the frozen partition, not withdrawn) leave it, named in `cur.superseded`, and so do the
+ * day's late_usgs raw assets no remaining edition is built from. Nothing reads them: the current edition is the day's
+ * input (stats, remerge-archives, the next refresh, which compares with the raw `cur` is built from); a re-merge
+ * refreshes only the current edition of an archived day, and its rollback falls back to that one, which stays. The
+ * assets stay in the Release (immutable); remerge-archives counts the superseded names as indexed. Returns the asset
+ * names that left the index.
+ */
+export function pruneLateUsgs(idx: RemediationIndex, cur: EditionRef): string[] {
+  if (cur.reason !== 'late_usgs') return [];
+  const older = idx.editions.filter((e) => e !== cur && e.day === cur.day && e.reason === 'late_usgs' && e.built_on.tag === PARTITION_TAG && !e.withdrawn && e.edition < cur.edition);
+  if (!older.length) return [];
+  const drop = new Set(older);
+  idx.editions = idx.editions.filter((e) => !drop.has(e));
+  cur.superseded = [...new Set([...(cur.superseded ?? []), ...older.flatMap((e) => [...(e.superseded ?? []), e.asset])])].sort();
+  const used = new Set(idx.editions.filter((e) => e.day === cur.day).flatMap((e) => e.built_from));
+  const rawsGone = idx.raw.filter((r) => r.day === cur.day && r.reason === 'late_usgs' && !used.has(r.asset));
+  const goneRaw = new Set(rawsGone);
+  idx.raw = idx.raw.filter((r) => !goneRaw.has(r));
+  return [...older.map((e) => e.asset), ...rawsGone.map((r) => r.asset)];
 }
 
 /** Add a refill to the queue. Nothing is added when every day of the range is already done for these providers or
@@ -600,4 +637,151 @@ export function pruneQueue(idx: RemediationIndex): RefillEntry[] {
   }
   idx.refill_queue = keep;
   return left;
+}
+
+/**
+ * SHLTR-150: ComCat's late publications on the live era. ComCat (the `usgs` source) publishes many M4.5+ solutions only
+ * after review, days or weeks after the origin (NEIC's reviewed solutions: 10–22 days in the sample of 2026-11-14), and
+ * revises others across M4.5. The live run takes a late ComCat event only within 7 days of its origin (APIs.md, Late
+ * publications) and a day freezes after LIVE_INDEX_DAYS, so a frozen live-era day keeps ComCat's set as it was then.
+ * The archive roll tars the frozen partitions as they are, so nothing repairs them later.
+ *
+ * The refresh asks ComCat again, once a day, for every frozen day not archived yet within LATE_USGS_MAX_AGE_DAYS of
+ * today (the day after it frozen too, so both neighbours are immutable context), and diffs ComCat's M4.5+ set against
+ * the usgs rows the day holds (lateUsgsDiff). A day whose set changed gets a remediation edition with `reason:
+ * "late_usgs"`, built like every edition (buildDayEdition: additive, the day's events by feed id plus the events the
+ * build mints) but on the day's FROZEN PARTITION (built_on `tag: "data"`), with the whole-day ComCat answer as its raw
+ * asset. An unchanged day publishes nothing. A dispatch can name an older range (the one-time catch-up of 2026-07..10).
+ */
+export const LATE_USGS_PROVIDER = 'usgs';
+/** Days older than this settle (ComCat's late publications of 2026-09/10 arrived within about 22 days). */
+export const LATE_USGS_MAX_AGE_DAYS = 45;
+/** The magnitude the statistics count (M4.5+) and the revision that changes a day: |Δmag| ≥ 0.3. */
+export const LATE_USGS_MIN_MAG = 4.5;
+export const LATE_USGS_DMAG = 0.3;
+/** What the scheduled run does: `plan` asks ComCat and diffs, publishes nothing (the report lists what an `on` run
+ *  would build); `on` builds and publishes the editions; `off` skips the refresh. A one-line PR switches it. */
+export type LateUsgsMode = 'off' | 'plan' | 'on';
+export const LATE_USGS_SCHEDULED: LateUsgsMode = 'plan';
+
+const shiftDay = (day: string, n: number): string => new Date(Date.parse(`${day}T00:00:00Z`) + n * DAY_MS).toISOString().slice(0, 10);
+
+/**
+ * The days the refresh looks at, ascending: frozen partitions on the data branch (`partitionDays`) that no archive
+ * lists, whose next day is frozen too (before frozenBefore − 1), and from `today − maxAgeDays` on — or, with `range`
+ * (a dispatch's catch-up, at most MAX_REFILL_DAYS days), the range's days under the same rules. Never an unfrozen day
+ * (the live run's), never an archived one.
+ */
+export function lateUsgsDays(o: {
+  nowMs: number;
+  frozenBefore: string;
+  partitionDays: ReadonlySet<string>;
+  archivedDays: ReadonlySet<string>;
+  range?: string;
+  maxAgeDays?: number;
+}): string[] {
+  const last = shiftDay(o.frozenBefore, -2);
+  const candidates = o.range ? rangeDays(o.range) : [];
+  if (!o.range) {
+    const first = shiftDay(eventDayKey(o.nowMs), -(o.maxAgeDays ?? LATE_USGS_MAX_AGE_DAYS));
+    for (let d = first; d <= last; d = shiftDay(d, 1)) candidates.push(d);
+  }
+  return candidates.filter((d) => d <= last && o.partitionDays.has(d) && !o.archivedDays.has(d)).sort();
+}
+
+/** One ComCat solution as the diff sees it: its id, the ids ComCat lists for the event, its magnitude. */
+export interface LateUsgsRow {
+  id: string;
+  ids: string[];
+  mag: number | null;
+}
+const idsOf = (id: string, fields: Record<string, unknown> | null | undefined): string[] => {
+  const raw = typeof fields?.['ids'] === 'string' ? (fields['ids'] as string) : '';
+  return [...new Set([id, ...raw.split(',').map((x) => x.trim()).filter(Boolean)])];
+};
+/** The usgs rows of the live events of a day (a partition or an edition). */
+export const lateUsgsRowsOfNodes = (nodes: readonly EventNode[]): LateUsgsRow[] =>
+  nodes.filter((n) => n.state === 'live').flatMap((n) => n.provenance.filter((r) => r.provider === LATE_USGS_PROVIDER).map((r) => ({ id: r.nativeId, ids: idsOf(r.nativeId, r.fields), mag: r.mag })));
+/** The usgs rows of a fetch or a raw asset. */
+export const lateUsgsRowsOfRaw = (rows: readonly RawObs[]): LateUsgsRow[] =>
+  rows.filter((r) => r.provider === LATE_USGS_PROVIDER).map((r) => ({ id: r.providerEventId, ids: idsOf(r.providerEventId, r.fields), mag: r.mag }));
+
+export interface LateUsgsDiff {
+  /** M4.5+ in ComCat's answer, by the rows the day holds and by the answer. */
+  held: number;
+  fresh: number;
+  /** ComCat M4.5+ solutions the day holds no row of, or holds below M4.5. */
+  added: string[];
+  /** Solutions M4.5+ on both sides whose magnitude moved by LATE_USGS_DMAG or more. */
+  revised: { id: string; from: number; to: number }[];
+  /** M4.5+ rows of the day that ComCat now lists below M4.5. */
+  lowered: { id: string; from: number; to: number | null }[];
+  /** M4.5+ rows of the day ComCat no longer lists at all (deleted upstream, or no longer an earthquake): reported only.
+   *  An edition never removes a row (buildDayEdition is additive), so they change nothing and trigger nothing. */
+  gone: string[];
+  /** The day's M4.5+ set changed (added, revised or lowered): build an edition. */
+  changed: boolean;
+}
+
+const m45 = (r: LateUsgsRow, minMag: number): boolean => r.mag != null && r.mag >= minMag;
+/** |a − b| ≥ step at 0.01 resolution (ComCat's magnitudes have at most two decimals; 4.6 − 4.3 is 0.2999… in floats). */
+const movedBy = (a: number, b: number, step: number): boolean => Math.round(Math.abs(a - b) * 100) >= Math.round(step * 100);
+
+/**
+ * How ComCat's answer for a day (`fresh`, every magnitude) differs from the usgs rows the day holds (`held`), on M4.5+.
+ * Rows are matched by id, or by any id ComCat lists for the event on either side (ComCat moves an event's preferred id
+ * to the reviewing network's).
+ */
+export function lateUsgsDiff(held: readonly LateUsgsRow[], fresh: readonly LateUsgsRow[], o: { minMag?: number; dmag?: number } = {}): LateUsgsDiff {
+  const minMag = o.minMag ?? LATE_USGS_MIN_MAG;
+  const dmag = o.dmag ?? LATE_USGS_DMAG;
+  const index = (rows: readonly LateUsgsRow[]): Map<string, LateUsgsRow> => {
+    const by = new Map<string, LateUsgsRow>();
+    for (const r of rows) by.set(r.id, r);
+    for (const r of rows) for (const id of r.ids) if (!by.has(id)) by.set(id, r);
+    return by;
+  };
+  const find = (by: Map<string, LateUsgsRow>, r: LateUsgsRow): LateUsgsRow | undefined => by.get(r.id) ?? r.ids.map((id) => by.get(id)).find((x) => x != null);
+  const heldBy = index(held);
+  const freshBy = index(fresh);
+  const out: LateUsgsDiff = { held: held.filter((r) => m45(r, minMag)).length, fresh: fresh.filter((r) => m45(r, minMag)).length, added: [], revised: [], lowered: [], gone: [], changed: false };
+  for (const f of fresh) {
+    if (!m45(f, minMag)) continue;
+    const h = find(heldBy, f);
+    if (!h || !m45(h, minMag)) out.added.push(f.id);
+    else if (movedBy(h.mag!, f.mag!, dmag)) out.revised.push({ id: f.id, from: h.mag!, to: f.mag! });
+  }
+  for (const h of held) {
+    if (!m45(h, minMag)) continue;
+    const f = find(freshBy, h);
+    if (!f) out.gone.push(h.id);
+    else if (!m45(f, minMag)) out.lowered.push({ id: h.id, from: h.mag!, to: f.mag });
+  }
+  for (const k of ['added', 'gone'] as const) out[k].sort();
+  out.revised.sort((a, b) => (a.id < b.id ? -1 : 1));
+  out.lowered.sort((a, b) => (a.id < b.id ? -1 : 1));
+  out.changed = out.added.length > 0 || out.revised.length > 0 || out.lowered.length > 0;
+  return out;
+}
+
+/**
+ * What must hold for a late_usgs edition against the frozen partition it replaces (on top of editionProblems): every
+ * event of the partition is in the edition (by feed id, any state), every report of the partition is in it, and every
+ * report of another source that was live stays live. The edition only adds ComCat's rows and what follows from them;
+ * a build that would drop or retire anything else is refused (the 2026-07 −34.5k-events class of incident).
+ */
+export function lateUsgsKeeps(base: readonly EventNode[], edition: readonly EventNode[]): string[] {
+  const problems: string[] = [];
+  const ids = new Set(edition.map((n) => n.feedId));
+  const reports = new Set(edition.flatMap((n) => n.provenance.map(reportKey)));
+  const liveReports = new Set(edition.filter((n) => n.state === 'live').flatMap((n) => n.provenance.map(reportKey)));
+  for (const n of base) {
+    if (!ids.has(n.feedId)) problems.push(`${n.feedId} of the partition is not in the edition`);
+    for (const r of n.provenance) {
+      const key = reportKey(r);
+      if (!reports.has(key)) problems.push(`${key} of the partition is not in the edition`);
+      else if (n.state === 'live' && r.provider !== LATE_USGS_PROVIDER && !liveReports.has(key)) problems.push(`${key} was live in the partition and is not live in the edition`);
+    }
+  }
+  return problems;
 }

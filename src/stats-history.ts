@@ -15,7 +15,7 @@ import { historyQueryUrl } from './history-fetch.js';
 import { type EditionEntry, type HistoryIndex, currentEdition as currentHistoryEdition, editionIsMerged } from './history-index.js';
 import { frozenBefore } from './partitions.js';
 import { loadRegistry, priorityMap } from './providers.js';
-import { type EditionRef, type RemediationIndex, currentEdition as currentRemediationEdition, emptyRemediationIndex } from './remediation.js';
+import { type EditionRef, type RemediationIndex, LATE_USGS_MAX_AGE_DAYS, currentEdition as currentRemediationEdition, emptyRemediationIndex } from './remediation.js';
 import { RemergeError, normalizeUnit, remergeNodes } from './remerge.js';
 import { archiveIsMerged } from './remerge-archives.js';
 import { STATS_STATE_PATH, type StatsConfig, loadStatsConfig } from './stats.js';
@@ -818,8 +818,26 @@ export async function comcatGate(o: { year: number; through: string; eraB: boole
   const r = { m6: ratio(o.feed.m6, comcat.m6), m45: ratio(o.feed.m45, comcat.m45) };
   const pass = within(r.m6, bands.m6) && within(r.m45, bands.m45);
   const warnOnly = o.currentYear && o.gate.current_year === 'warn';
-  return { gate: pass ? 'ok' : warnOnly ? 'warn' : 'fail', ...base, comcat, ratio: r, ...(pass ? {} : { message: `M6+ ${o.feed.m6} vs ComCat ${comcat.m6} (ratio ${r.m6}), M4.5+ ${o.feed.m45} vs ${comcat.m45} (ratio ${r.m45}) outside M6+ [${bands.m6.join(', ')}] / M4.5+ [${bands.m45.join(', ')}]` }) };
+  const numbers = `M6+ ${o.feed.m6} vs ComCat ${comcat.m6} (ratio ${r.m6}), M4.5+ ${o.feed.m45} vs ${comcat.m45} (ratio ${r.m45}) outside M6+ [${bands.m6.join(', ')}] / M4.5+ [${bands.m45.join(', ')}]`;
+  // The open year warns with its cause first: below ComCat it is ComCat's late publications on the frozen live-era days
+  // (settled within LATE_USGS_MAX_AGE_DAYS by remediate.yml's late_usgs editions), above it the split copies.
+  const message = pass ? undefined : warnOnly ? `${gateCauses(r, bands).join(' + ')}: ${numbers}` : numbers;
+  return { gate: pass ? 'ok' : warnOnly ? 'warn' : 'fail', ...base, comcat, ratio: r, ...(message ? { message } : {}) };
 }
+
+/** Why the open year is off ComCat: `late ComCat` when a ratio is below its band (ComCat publishes and upgrades M4.5+
+ *  solutions days or weeks after the origin, after the live days froze: APIs.md, Remediation editions), `split copies`
+ *  when one is above it (one quake counted twice: SHLTR-148). */
+export function gateCauses(r: { m6: number | null; m45: number | null }, bands: { m6: [number, number]; m45: [number, number] }): string[] {
+  const below = (x: number | null, b: [number, number]): boolean => x != null && x < b[0];
+  const above = (x: number | null, b: [number, number]): boolean => x != null && x > b[1];
+  const causes: string[] = [];
+  if (below(r.m45, bands.m45) || below(r.m6, bands.m6)) causes.push(LATE_COMCAT);
+  if (above(r.m45, bands.m45) || above(r.m6, bands.m6)) causes.push('split copies');
+  return causes.length ? causes : ['no ComCat ratio'];
+}
+/** The name the warnings give ComCat's late publications (SHLTR-150). */
+export const LATE_COMCAT = 'late ComCat';
 
 /** The live ComCat count (fetchText; one request at a time, at least COMCAT_GAP_MS apart, 3 tries). */
 export function comcatCounter(usgs: ProviderConfig, o: { gapMs?: number; sleep?: (ms: number) => Promise<void> } = {}): ComcatCount {
@@ -874,12 +892,16 @@ export function verifyMonths(all: readonly string[], mode: 'sample' | 'full', se
   return [...picked.sort(), ...last];
 }
 
-/** One month against ComCat: M4.5+ within the era's band, M6+ within max(2, 20 %); the open month only reports. */
-export function verifyRow(month: string, feed: MonthCounts, comcat: { m45: number; m6: number }, bands: StatsConfig['gate']['default'], open: boolean): VerifyRow {
+/** One month against ComCat: M4.5+ within the era's band, M6+ within max(2, 20 %); the open month only reports. A
+ *  month that is not settled yet (`settling`: it ends within LATE_USGS_MAX_AGE_DAYS of `through`) and is below ComCat
+ *  names the cause, `late ComCat`, before its numbers. */
+export function verifyRow(month: string, feed: MonthCounts, comcat: { m45: number; m6: number }, bands: StatsConfig['gate']['default'], open: boolean, settling = false): VerifyRow {
   const r45 = ratio(feed.n45, comcat.m45);
   const m6ok = Math.abs(feed.m6 - comcat.m6) <= Math.max(2, Math.ceil(comcat.m6 * 0.2));
   const ok = open || (within(r45, bands.m45) && m6ok);
-  return { month, feed, comcat, ratio45: r45, ok, ...(open ? { note: 'open month' } : !ok ? { note: `M4.5+ ratio ${r45}, M6+ ${feed.m6} vs ${comcat.m6}` } : {}) };
+  const low = (r45 != null && r45 < bands.m45[0]) || feed.m6 < comcat.m6 - Math.max(2, Math.ceil(comcat.m6 * 0.2));
+  const numbers = `M4.5+ ratio ${r45}, M6+ ${feed.m6} vs ${comcat.m6}`;
+  return { month, feed, comcat, ratio45: r45, ok, ...(open ? { note: 'open month' } : !ok ? { note: settling && low ? `${LATE_COMCAT}, settles within ${LATE_USGS_MAX_AGE_DAYS} days: ${numbers}` : numbers } : {}) };
 }
 
 // --- the run ---
@@ -1051,7 +1073,7 @@ export async function runStatsHistory(o: RunOptions): Promise<RunResult> {
     }
     state.years[key] = base;
     reports.push(rep);
-    log(`stats: ${y}: ${check.gate}; ${acc.area.size} cells, M6+ ${feed.m6}, M4.5+ ${feed.m45}${check.comcat ? ` (ComCat ${check.comcat.m6} / ${check.comcat.m45})` : ''}, ${built.ms} ms`);
+    log(`stats: ${y}: ${check.gate}${check.gate === 'warn' && check.message ? ` (${check.message})` : ''}; ${acc.area.size} cells, M6+ ${feed.m6}, M4.5+ ${feed.m45}${check.comcat ? ` (ComCat ${check.comcat.m6} / ${check.comcat.m45})` : ''}, ${built.ms} ms`);
   }
 
   // Year files outside the current year and the two before it go.
@@ -1290,7 +1312,9 @@ async function main(): Promise<void> {
       const bands = y! < 2000 ? config.gate.eraB : config.gate.default;
       try {
         const c = { m45: await comcat(s, e, 4.5), m6: await comcat(s, e, 6) };
-        verify.push(verifyRow(m, counts.get(m)!, c, bands, m === openMonth));
+        // A month not settled yet: its last day is within LATE_USGS_MAX_AGE_DAYS of `through`.
+        const settling = dayShift(eventDayKey(e - DAY), LATE_USGS_MAX_AGE_DAYS) > res.through;
+        verify.push(verifyRow(m, counts.get(m)!, c, bands, m === openMonth, settling));
       } catch (err) {
         verify.push({ month: m, feed: counts.get(m)!, comcat: null, ratio45: null, ok: false, note: `ComCat: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}` });
       }

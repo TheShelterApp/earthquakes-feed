@@ -11,6 +11,12 @@ name: remediate
 # days are taken once their month is archived (archive.yml), by any later run and by the daily scheduled run, which
 # does the queue only (nothing when it is empty or still waiting). A run does at most `max_days` days, one request at
 # a time, at least 1.1 s apart.
+# The late-ComCat refresh (`late_usgs`, SHLTR-150): ComCat publishes and upgrades many M4.5+ solutions days or weeks
+# after the origin, after the live day froze. The scheduled run asks ComCat again for every frozen, unarchived day of the
+# last 45 and publishes a `late_usgs` edition, built on the day's frozen partition, for each day whose M4.5+ set changed;
+# the mode of the scheduled run is LATE_USGS_SCHEDULED in src/remediation.ts (`plan`: ask and diff, publish nothing;
+# `on`; `off`). A dispatch with `late_usgs` runs it now (with `dry_run`, into the artifact), over `late_usgs_range`
+# instead of the last 45 days for the catch-up of older frozen days.
 on:
   schedule:
     - cron: '43 4 * * *'
@@ -32,6 +38,14 @@ on:
       providers:
         description: 'With refill: bootstrap-2026-07-05 (the 15 sources of the seam) or a comma list of source ids'
         required: false
+      late_usgs:
+        description: 'Late-ComCat refresh of the frozen, unarchived days (SHLTR-150): on = build editions, plan = diff only; the run then skips the saturated days'
+        type: choice
+        options: ['off', 'plan', 'on']
+        default: 'off'
+      late_usgs_range:
+        description: 'With late_usgs: these days instead of the last 45, e.g. 2026-08-01..2026-08-31 (at most 31; frozen, unarchived days only)'
+        required: false
 
 concurrency:
   group: earthquakes-feed-remediate
@@ -45,7 +59,8 @@ jobs:
     # Outside the writer group: fetching and building take minutes and must not hold up the 5-minute aggregate.
     # It writes nothing to the data branch, only Release assets (immutable, never --clobber).
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # The late-ComCat refresh starts no day after 20 minutes (REMEDIATION_DEADLINE_S); the queue's days come first.
+    timeout-minutes: 45
     permissions:
       contents: write
     outputs:
@@ -54,11 +69,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Blobless and sparse: the index files; the late-ComCat refresh reads a frozen day partition by its blob (git
+      # fetches the one blob).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: data
           path: .data
           fetch-depth: 1
+          filter: blob:none
           persist-credentials: false
           sparse-checkout: |
             knowledge/index/backfill.json
@@ -83,6 +101,9 @@ jobs:
           REMEDIATION_REFILL: ${{ inputs.refill }}
           REMEDIATION_PROVIDERS: ${{ inputs.providers }}
           REMEDIATION_QUEUE_ONLY: ${{ github.event_name == 'schedule' && '1' || '' }}
+          # The scheduled run: the mode src/remediation.ts LATE_USGS_SCHEDULED names; a dispatch: its input.
+          REMEDIATION_LATE_USGS: ${{ github.event_name == 'schedule' && 'scheduled' || inputs.late_usgs }}
+          REMEDIATION_LATE_USGS_RANGE: ${{ inputs.late_usgs_range }}
           # gh: the archived months (read only) and the remediation assets.
           GH_TOKEN: ${{ github.token }}
         run: npx --no-install tsx src/remediate.ts

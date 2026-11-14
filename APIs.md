@@ -603,6 +603,23 @@ history), and a source with no rows for longer than its activity budget is **sil
 is never empty that long), `activityBudgetHours` in `providers/registry.json` for a quiet one (72 h: ETHZ, IPMA, NRCan,
 USP) and none for KNMI and LMU (regions that go weeks without an event) or a source the live path does not ask (ISC).
 The published v2 status adds `providers.<id>.silent`, `providers.<id>.lastNonEmptyAt` (ms) and `silentProviders`.
+
+**Circuit breaker (SHLTR-147).** A source whose live fetch gets no answer at all (a timeout, an abort, a refused or
+reset connection; not an HTTP error status, not an empty answer, not a pinned certificate failure) on 3 runs in a row is
+no longer asked: its breaker opens, it is skipped for 2 runs, then one run probes it. An answer of any kind closes the
+breaker; no answer opens it again for 4, then 8, then 12 runs (every later opening: a probe about every 65 minutes),
+each less a deterministic jitter of up to a quarter (a hash of the source and the run's seq), so sources that failed
+together do not all come back on the same run. A skipped source costs the run nothing, and is a failing one in
+`status.json`: `ok: false`, `skipped: "breaker"`, `error` (`not asked: circuit breaker open after N runs without an
+answer (last: …)`), and `breaker` (`open_since`, the run that opened it; `next_probe`, from when a run probes it;
+`failures`, the runs without an answer, probes included; `skip_runs`). A probe that gets no answer also carries
+`breaker`, without `skipped`. It is in `degraded`, keeps its `lastSuccessAt`, and goes silent like any failing source;
+the health workflow files it as `feed:source:<id>` and, after 6 hours open, `feed:breaker:<id>` (README *Health
+watchdogs*). Not tracked: `usgs` and `emsc` (their sweeps ask the same host every run, so a skip would save nothing)
+and the sources the live path does not ask. A run in which more than half of the sources asked got no answer (at least
+6 asked) is the runner's network, not theirs: it counts toward no breaker. The state is
+`knowledge/index/provider_breakers.json` (committed with the run; a missing or unreadable file, or entry, means closed),
+and the run's log names each skip, opening, re-opening and closing (`breaker_skipped=N[ids]` in its summary line).
 On 2026-10-04 three sources were silent the moment this went live: ENSN Egypt (no rows since 2026-07-29), Geoscience
 Australia (since 07-30) and TMD (since 08-18). None had stopped publishing: ENSN moved to a new site whose old JSON URL
 lists only stations (the feed now reads its RSS, `/en/events/feed.rss`), GA rewrote its RSS descriptions so no item

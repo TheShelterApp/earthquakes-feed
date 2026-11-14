@@ -25,7 +25,8 @@ Adding one is a single entry in [`providers/registry.json`](providers/registry.j
 - `queryFormat`: the value sent as the FDSN `format=` query param.
 - Add `"noLimit": true` if the service rejects the `limit` param (e.g. GeoNet).
 - `priority`: lower = more authoritative; it's the preferred-pick tiebreak.
-- `"timeoutMs": 20000` for a slow endpoint (default 8 s on the live path).
+- `"timeoutMs": 20000` for a slow endpoint (default 8 s on the live path). A source that does not answer within it on
+  3 runs in a row is skipped for a while by the live path's circuit breaker (APIs.md *Failing and silent sources*).
 - `"liveActive": false` for a months-delayed catalog (e.g. ISC) — skipped on the 5-min
   live path but still backfilled for historical depth.
 - `"lookbackDays": 7` for an FDSN source that publishes many events days after their origin

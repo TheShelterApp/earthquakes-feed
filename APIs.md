@@ -1087,7 +1087,7 @@ M4.5+ and 387 M6+ earthquakes; the feed's ComCat-anchored counts 22,485 and 387)
 higher where ComCat deleted events since, or types them as non-earthquakes (Kīlauea's 2018 collapse events). The
 remaining over-count is events the current rules keep apart (an ISC copy of a NEIC or GFZ origin at 0 km / 0 s, one
 agency's distant solution, a large quake's agencies in a swarm cell): epoch 2 (below) is the rule round for it, on since
-2026-11-15 (`REMERGE_INGEST_TIME` 2026-11-15T00:00:00.000Z, `REMERGE_RULES` 3). Above 0:
+2026-11-14 (`REMERGE_INGEST_TIME` 2026-11-14T00:00:00.000Z, `REMERGE_RULES` 3). Above 0:
 
 - *Deep history:* the hourly `history` walk gives each month whose current edition is not merged a new edition
   `events-YYYY-MM.e<N+1>.tar.zst`, built from edition N and nothing else, newest month first; a month waits until its
@@ -1116,7 +1116,7 @@ agency's distant solution, a large quake's agencies in a swarm cell): epoch 2 (b
   which is then merged within about 6 h. A month re-rolled later (a backfill fill, `needs_reroll`) gets a new asset
   without `merge_epoch` and is merged again.
 
-**Epoch 2** (SHLTR-148; config `identityRules`; `REMERGE_EPOCH` 2 since 2026-11-15). The epoch is one switch for the live
+**Epoch 2** (SHLTR-148; config `identityRules`; `REMERGE_EPOCH` 2 since 2026-11-14). The epoch is one switch for the live
 feed and the re-merge: the live Resolver (aggregate's merge pass and regular heal, backfill, the deep-history build, the
 remediation editions) runs the rules of `REMERGE_EPOCH`, and the re-merge of a unit runs the rules of the epoch it
 merges the unit to, so raising the epoch changes both at once and the archives, the history and the live hot window
@@ -1158,7 +1158,7 @@ solutions outside their regions with no global agency's event in the window, and
 quake; the statistics still collapse or leave those out. The first live run after the switch folds 17 pairs of the hot
 window (event map of 2026-11-14), all through the authoritative-region window.
 
-The switch (2026-11-15, after the dry runs above): `REMERGE_EPOCH` 2 with `REMERGE_INGEST_TIME`. From the next
+The switch (2026-11-14, after the dry runs above): `REMERGE_EPOCH` 2 with `REMERGE_INGEST_TIME`. From the next
 aggregate run the live regular heal folds the hot window's pairs under the new rules (at most `HEAL_MAX_FOLDS_PER_RUN` a
 run; 17 on the event map of 2026-11-14, all by the authoritative-region window, `scripts/heal-dryrun.ts --regular --epoch
 2`: raising `REMERGE_EPOCH` does not raise `HEAL_EPOCH`), and backfill, onboarding, the remediation editions and the

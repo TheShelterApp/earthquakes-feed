@@ -1630,7 +1630,9 @@ frozen days not archived yet (late ComCat):
   gets an edition built like every other but on the day's **frozen partition** (`built_on`: `{"tag": "data", "asset":
   "events/YYYY/MM/DD.ndjson", "sha256", "blob"}`; neighbours read as consumers read them, a frozen partition counting as
   the neighbour's archived day), with ComCat's whole answer of the day as its raw asset; an unchanged day publishes
-  nothing. Each refresh of a day builds on the partition again with ComCat's newest answer. A row ComCat no longer
+  nothing. Each refresh of a day builds on the partition again with ComCat's newest answer. Unlike the other editions
+  it does not re-read the partition's AFAD rows stored 3 h early (before 2026-10-01): it adds ComCat's rows and moves
+  nothing else (the month's re-merge re-times them). A row ComCat no longer
   lists (deleted upstream) is reported (`gone`) and kept: an edition never removes a row. Before upload, beyond the
   checks above, every event and every report of the partition must be in the edition and every other source's live
   report must still be live in it. The mode of the scheduled run is `LATE_USGS_SCHEDULED` in `src/remediation.ts`

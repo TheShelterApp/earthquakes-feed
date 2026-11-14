@@ -330,7 +330,7 @@ export async function remediateDay(day: string, tasks: readonly DayTask[], idx: 
 
   // 4) The edition (fresh nodes: buildDayEdition ingests into them), its check, then the uploads: raws first.
   const fresh = new Map([...context].map(([d, nodes]) => [d, nodes.map((n) => structuredClone(n))]));
-  const built = buildDayEdition({ day, context: fresh, rows, registry: deps.registry, nowMs: deps.nowMs, ingestTime: nowIso, seqMarker: deps.seqMarker, fmt: EDITION_FORMAT });
+  const built = buildDayEdition({ day, context: fresh, rows, registry: deps.registry, nowMs: deps.nowMs, ingestTime: nowIso, seqMarker: deps.seqMarker, fmt: EDITION_FORMAT, ...(late ? { afadRetime: false } : {}) });
   const problems = editionProblems(day, built.nodes, context);
   if (late) problems.push(...lateUsgsKeeps(part!.nodes, built.nodes));
   if (problems.length) {

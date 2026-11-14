@@ -248,6 +248,9 @@ export function buildDayEdition(input: {
   fmt: PartitionFormat;
   /** The re-merge epoch to merge the edition to (default config REMERGE_EPOCH; 0 = built as before). */
   remergeEpoch?: number;
+  /** Step 1, the AFAD re-read (default true). A late_usgs edition passes false: it adds ComCat's rows to a frozen
+   *  partition and moves nothing else; the partition's early AFAD rows are re-timed when its month is re-merged. */
+  afadRetime?: boolean;
 }): { text: string; nodes: EventNode[]; stats: EditionStats } {
   const map = new Map<string, EventNode>();
   for (const nodes of input.context.values()) for (const n of nodes) map.set(n.feedId, n);
@@ -274,7 +277,7 @@ export function buildDayEdition(input: {
   let afadRetimed = 0;
   let afadMovedOut = 0;
   const touched: string[] = [];
-  for (const raw of afadCorrections(dayMap, 0)) {
+  for (const raw of input.afadRetime === false ? [] : afadCorrections(dayMap, 0)) {
     const entries = fixer.correctReport(raw, input.ingestTime);
     for (const e of entries) {
       touched.push(e.result.node.feedId);

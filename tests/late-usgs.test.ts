@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { gunzipSync } from 'node:zlib';
-import { featureToNode } from '../src/bitemporal.js';
+import { featureToNode, nodeToFeature } from '../src/bitemporal.js';
 import { Resolver } from '../src/dedup.js';
 import { LocalStore } from '../src/history-store.js';
 import { dayPartitionText, frozenBefore } from '../src/partitions.js';
@@ -15,6 +15,7 @@ import {
   EDITION_FORMAT,
   LATE_USGS_SCHEDULED,
   type LateUsgsRow,
+  buildDayEdition,
   emptyRemediationIndex,
   lateUsgsDays,
   lateUsgsDiff,
@@ -247,6 +248,43 @@ test('late_usgs day: plan mode diffs only; an unchanged day, an archived day and
     const none = await remediateDay(D, task, idx, lateDeps(dir, parts, comcat(COMCAT).fetchWindow));
     assert.match(none.failed.join('\n'), /no frozen partition/);
     assert.deepEqual(assets(dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('late_usgs day: the partition\'s AFAD rows stored 3 h early (before 2026-10-01) are left as they are; only ComCat\'s rows are added', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'efd-late-'));
+  try {
+    const legacyAfad = (id: string, trueMs: number): RawObs => ({
+      provider: 'afad', providerEventId: id, eventTimeMs: trueMs - 3 * HOUR, providerUpdatedMs: null, status: null, lat: 39.2, lon: 28.1, depth: 7, mag: 2.1, magType: 'ML',
+      place: 'S\u0131nd\u0131rg\u0131 (Bal\u0131kesir)', knownAliasIds: [],
+      fields: { eventID: id, date: new Date(trueMs).toISOString().slice(0, 19), latitude: '39.2', longitude: '28.1', depth: '7', type: 'ML', magnitude: '2.1', location: 'S\u0131nd\u0131rg\u0131 (Bal\u0131kesir)' },
+    });
+    const parts = frozenPartitions();
+    // The day's partition gains two AFAD rows as the pre-2026-10-01 parser stored them (one re-reads onto the next day).
+    const map = new Map<string, EventNode>();
+    const r = new Resolver(map, priorityMap(registry), configMap(registry), D0 + 2 * DAY_MS, { hotFloorMs: 0, merge: false });
+    r.ingest(legacyAfad('900001', D0 + 10 * HOUR), '2026-09-16T00:00:00.000Z');
+    r.ingest(legacyAfad('900002', D0 + 25 * HOUR), '2026-09-16T00:00:00.000Z');
+    const base = parts.get(D)!;
+    const nodes = [...base.nodes, ...[...map.values()].map((n) => featureToNode(JSON.parse(JSON.stringify(nodeToFeature(n)))))];
+    parts.set(D, { nodes, ref: { ...base.ref, sha256: 'with-afad' } });
+    // An edition of another reason would re-read them (the fixture holds two legacy rows).
+    const ctx = new Map([...parts].map(([d, p]) => [d, p.nodes.map((n) => structuredClone(n))]));
+    assert.equal(buildDayEdition({ day: D, context: ctx, rows: [], registry, nowMs: NOW, ingestTime: '2026-11-14T12:00:00.000Z', seqMarker: 1, fmt: EDITION_FORMAT }).stats.afad_retimed, 2);
+    const res = await remediateDay(D, task, emptyRemediationIndex(), lateDeps(dir, parts, comcat(COMCAT).fetchWindow));
+    assert.deepEqual(res.failed, []);
+    assert.equal(res.edition!.stats.afad_retimed, 0);
+    assert.equal(res.edition!.stats.afad_moved_out, 0);
+    assert.deepEqual(res.edition!.stats.provider_rows.afad, undefined, 'AFAD\'s rows are untouched');
+    const text = gunzipSync(readFileSync(join(dir, 'releases', 'remediation-2026', res.edition!.asset))).toString('utf8');
+    const out = text.split('\n').filter(Boolean).map((l) => featureToNode(JSON.parse(l)));
+    for (const n of nodes.filter((x) => x.provenance.some((p) => p.provider === 'afad'))) {
+      const m = out.find((x) => x.feedId === n.feedId)!;
+      assert.equal(m.state, 'live');
+      assert.equal(m.eventTimeMs, n.eventTimeMs, 'kept at its stored time');
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

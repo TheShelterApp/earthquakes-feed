@@ -10,7 +10,7 @@ import { Resolver } from '../src/dedup.js';
 import { LocalStore } from '../src/history-store.js';
 import { dayPartitionText, frozenBefore } from '../src/partitions.js';
 import { configMap, loadRegistry, priorityMap, type WindowOutcome } from '../src/providers.js';
-import { type DayRunDeps, type FrozenPartition, remediateDay, resolveLateMode } from '../src/remediate.js';
+import { type DayRunDeps, type FrozenPartition, dryRunNotice, remediateDay, resolveLateMode } from '../src/remediate.js';
 import {
   EDITION_FORMAT,
   LATE_USGS_SCHEDULED,
@@ -24,7 +24,7 @@ import {
   partitionAsset,
   pruneLateUsgs,
 } from '../src/remediation.js';
-import { LATE_COMCAT, comcatGate, gateCauses, verifyRow } from '../src/stats-history.js';
+import { LATE_COMCAT, comcatGate, editionReasons, gateCauses, verifyRow } from '../src/stats-history.js';
 import type { EventNode, RawObs } from '../src/types.js';
 
 // SHLTR-150: ComCat publishes and upgrades many M4.5+ solutions days or weeks after the origin, after the live day
@@ -393,4 +393,14 @@ test('stats verify: a month that is not settled yet and below ComCat names "late
   assert.match(settling.note!, /^late ComCat, settles within 45 days: M4\.5\+ ratio 0\.8462/);
   assert.equal(verifyRow('2026-08', { n45: 660, m6: 12, dup: 0 }, { m45: 780, m6: 12 }, b, false, false).note, 'M4.5+ ratio 0.8462, M6+ 12 vs 12');
   assert.equal(verifyRow('2025-08', { n45: 1125, m6: 30, dup: 0 }, { m45: 983, m6: 14 }, b, false, true).note, 'M4.5+ ratio 1.1445, M6+ 30 vs 14', 'above ComCat is not late ComCat');
+});
+
+test('dry runs say so; the stats log names the editions by reason (the 2026-11-14 campaign ran as dry runs and published nothing)', () => {
+  assert.equal(dryRunNotice(false, 32), null);
+  assert.match(dryRunNotice(true, 32)!, /^DRY RUN: 32 edition\(s\) built into the workflow artifact remediation-dry-run; nothing was uploaded .* dry_run=false to publish\.$/);
+  const idx = emptyRemediationIndex();
+  assert.equal(editionReasons(idx), 'none');
+  const e = (reason?: 'late_usgs' | 'seam') => ({ ...(reason ? { reason } : {}) }) as never;
+  idx.editions.push(e('seam'), e(), e('late_usgs'), e('late_usgs'));
+  assert.equal(editionReasons(idx), 'late_usgs 2, saturated 1, seam 1');
 });

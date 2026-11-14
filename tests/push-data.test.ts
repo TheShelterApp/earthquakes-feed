@@ -223,3 +223,22 @@ for (const [shape, sparse, file] of [
     assert.equal(readFileSync(join(check, 'knowledge', 'index', 'head.json'), 'utf8'), '{"seq":9}\n');
   });
 }
+
+test('push-data: PUSH_JITTER_S adds a bounded random pause and the concurrent writer still lands', () => {
+  const s = setup();
+  commit(s, s.b, 'changes.ndjson', '{"derive":1}\n', 'derive: views');
+  s.git(s.b, 'push', '-q', 'origin', 'HEAD:data');
+  commit(s, s.a, 'status.json', '{"seq":2}\n', 'backfill: @ now');
+  const t0 = Date.now();
+  const r = push(s, s.a, { PUSH_ATTEMPTS: '6', PUSH_BACKOFF_S: '1', PUSH_JITTER_S: '1' });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.ok(Date.now() - t0 < 20_000, 'the pause is bounded by backoff + jitter');
+  assert.deepEqual(s.git(s.a, 'log', '--format=%s', 'origin/data').trim().split('\n'), ['backfill: @ now', 'derive: views', 'seed']);
+});
+
+test('backfill and archive push with the same attempts, back-off and jitter as the other writers', () => {
+  for (const f of ['backfill.yml', 'archive.yml']) {
+    const y = readFileSync(join(fileURLToPath(new URL('../.github/workflows/', import.meta.url)), f), 'utf8');
+    assert.match(y, /PUSH_ATTEMPTS=6 PUSH_BACKOFF_S=3 PUSH_JITTER_S=3 bash "\$GITHUB_WORKSPACE\/scripts\/push-data\.sh"/, f);
+  }
+});

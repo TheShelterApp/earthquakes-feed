@@ -96,8 +96,9 @@ jobs:
           git add events knowledge status changes
           git commit -m "archive: roll cold months to Releases @ $(date -u +%FT%TZ)" || { echo 'no changes'; exit 0; }
           # Fail-loud push loop (H3; tests/push-data.test.ts): a concurrent writer's commit is rebased onto, a conflict
-          # aborts the rebase and fails.
-          bash "$GITHUB_WORKSPACE/scripts/push-data.sh"
+          # aborts the rebase and fails. 6 attempts with a short randomised back-off: the lockless commit jobs
+          # (remediate, stats, history, first-solutions) can push in the same minute (audit feed-workflows #2).
+          PUSH_ATTEMPTS=6 PUSH_BACKOFF_S=3 PUSH_JITTER_S=3 bash "$GITHUB_WORKSPACE/scripts/push-data.sh"
       # LAST, and `always()`: a blocked month must not stop the commit above from landing. The
       # script deliberately exits 0 and leaves a marker instead, so the durable state (index
       # entries for uploaded assets, pruned tree) is safe on the data branch first. Failing

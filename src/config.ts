@@ -457,6 +457,90 @@ export const REMERGE_INGEST_TIME: string = '2026-11-08T00:00:00.000Z';
  *  3 (2026-11-08): row-normalize.ts normalizeRows on the unit and both context windows (AFAD as in 2, plus ISC
  *  magnitudes by untrusted authors dropped, the representatives re-derived). */
 export const REMERGE_RULES = 3;
+/**
+ * The identity rules of each re-merge epoch beyond the ones every epoch replays (APIs.md, Re-merged history; SHLTR-148).
+ * One switch for the live feed and the re-merge: the live Resolver (aggregate, backfill, the deep-history build, the
+ * remediation editions, onboarding, the one-time correction) runs the rules of REMERGE_EPOCH, and the re-merge of a unit
+ * runs the rules of the epoch it merges the unit to, so a dry run (REMERGE_EPOCH_OVERRIDE, HISTORY_REMERGE_EPOCH) shows
+ * what raising REMERGE_EPOCH would do to both before it is raised. Epoch 2:
+ *  - `iscCopies`: ISC's copies of NEIC's, GFZ's, GA's (AUST) and the Puerto Rico network's (RSPR) origins are those
+ *    agencies' solutions, as good as a shared id (ISC_ORIGIN_COPIES; Resolver.iscCopy);
+ *  - `authorityWindow`: a regional agency's solution of M4.5+ outside its authoritative region joins the global
+ *    agencies' event of the quake (AUTHORITY_WINDOW; Resolver.authorityJoin), by the region test the statistics use
+ *    (src/authority.ts);
+ *  - `densityAsOfPair` (the offline re-merge only, src/remerge.ts): a pair's grid-cell density is counted over the seven
+ *    days (HOT_WINDOW_DAYS) up to the later of its two origins, not up to the window's end (Resolver.isDense), close to
+ *    what live saw when the reports arrived: a quake's own aftershocks no longer turn its cell into a swarm cell that
+ *    keeps its agencies' solutions apart. Somewhat looser than live, which counts every loaded event of the cell
+ *    (LIVE_INDEX_DAYS, ten days, and any aftershock already in when the pair is judged); the re-merge's older context
+ *    holds seven days, so ten could not be counted at a unit's start;
+ *  - `largeQuakesInSwarms`: two events both of LARGE_EVENT_MAG or more are judged in a dense cell as in any other cell —
+ *    the base and large-event windows without the dense caps, the moderate-event window and a regional window (USP's
+ *    large-quake window) — without the swarm guard's shared-id demand (Resolver.largePair): a swarm is made of small
+ *    quakes, and a large quake in a cell its foreshocks or a swarm had filled stayed one event per agency (the Sındırgı
+ *    M6.1 of 2025-08-10, in a cell with 64 events in the week before it, stood as ten events of the archive after
+ *    epoch 1).
+ */
+export interface IdentityRules {
+  iscCopies: boolean;
+  authorityWindow: boolean;
+  densityAsOfPair: boolean;
+  largeQuakesInSwarms: boolean;
+}
+export function identityRules(epoch: number): IdentityRules {
+  const on = epoch >= 2;
+  return { iscCopies: on, authorityWindow: on, densityAsOfPair: on, largeQuakesInSwarms: on };
+}
+/** The rules a live (ingesting) Resolver runs at `epoch`: that epoch's, the offline-only density rule left out. */
+export function liveIdentityRules(epoch: number): IdentityRules {
+  return { ...identityRules(epoch), densityAsOfPair: false };
+}
+/** The rules the live Resolver runs: the current epoch's, the offline-only density rule left out. */
+export const LIVE_IDENTITY_RULES: IdentityRules = liveIdentityRules(REMERGE_EPOCH);
+/**
+ * ISC's copies of other agencies' origins (epoch 2, `iscCopies`; APIs.md, *ISC*), by the ISC `Author` code: the
+ * catalogue the copied row is from (util.ts catalogueOf: GA's rows reach the feed through AusPass) and, for ComCat, the
+ * network prefix its own id carries. ISC's preliminary bulletin re-publishes a contributing agency's hypocentre under
+ * ISC's own event id, with that agency in `Author`. Over the archives 2025-08 and 2025-09: of the 2,026 ISC rows authored
+ * `NEIC`, 1,773 lie at 0.0 s / 0.0 km of a ComCat `us…` row (97 more within 1 s and 5 km, most of the rest have no
+ * ComCat `us…` row); all 246 authored `GFZ` at 0.0 s / 0.0 km of a GEOFON row; 34 of the 62 authored `AUST` at 0.0 s /
+ * 0.0 km of GA's row (AusPass), and all 35 authored `RSPR` (the Puerto Rico network) of ComCat's `pr…` row. The magnitude
+ * is often another agency's (more than 1.0 apart in 123 of the NEIC and 47 of the GFZ copies), so it is not compared.
+ * Such a row and the agency's row within ISC_COPY_DT_MS and ISC_COPY_KM are one solution, as good as a shared id, also
+ * in a dense cell (Resolver.iscCopy). `unnamed`: an ISC row of another author whose origin equals such an agency's row
+ * within the same limits counts too, when the magnitudes are within ISC_COPY_UNNAMED_MAX_DM (or one is unknown): two
+ * solutions that close are one quake (23 IDC and 6 ISK rows of those archives against ComCat's `us…` rows).
+ */
+export const ISC_ORIGIN_COPIES: ReadonlyMap<string, { catalogue: string; network?: string; unnamed: boolean }> = new Map([
+  ['NEIC', { catalogue: 'usgs', network: 'us', unnamed: true }],
+  ['GFZ', { catalogue: 'geofon', unnamed: true }],
+  ['AUST', { catalogue: 'ga', unnamed: false }],
+  ['RSPR', { catalogue: 'usgs', network: 'pr', unnamed: false }],
+]);
+export const ISC_COPY_DT_MS = 1_000;
+export const ISC_COPY_KM = 5;
+export const ISC_COPY_UNNAMED_MAX_DM = 1.0;
+/**
+ * The authoritative-region window (epoch 2, `authorityWindow`; APIs.md, *Regional agencies outside their own region*).
+ * An event whose rows are all regional agencies' (none of STATS_GLOBAL_PROVIDERS), of at least `minMag`, whose place lies
+ * outside the authoritative region of every one of them (src/authority.ts outsideAuthority: AUTHORITY_REGIONS plus
+ * STATS_REGION_MARGIN_DEG, the test the statistics' reconciliation rule v3 leaves such rows out by), and an event holding
+ * a global agency's own solution (not EMSC's copy of the regional agency's) and no row of the regional side's
+ * catalogues, are one quake when the origins are at most `maxDtMs` apart, the places at most `km` and the magnitudes at
+ * most `maxDeltaMag`; `great` widens both when the larger magnitude reaches its `fromMag`. Mutual best, ranked with the
+ * moderate-event pairs; a dense cell does not block it; merge pass only. A provider with its own out-of-region window
+ * (REGION_RULES `window`: OVSICORI) keeps that one. Measured over the published history of 2013 and the archives
+ * 2025-08/09 (epoch 1): of 895 such live events of M4.5+, 597 have a global agency's event within the window (60 s
+ * would add 11, at twice the chance rate); moved ±10–30 min, where the quake's own event is gone, one finds a partner
+ * 0.01 times a shift (at 60 s 0.02: a RESIF M5.1 joined ComCat's M4.2 55 s away instead of its M5.0 262 km away).
+ */
+export const AUTHORITY_WINDOW = {
+  minMag: 4.5,
+  maxDtMs: 30_000,
+  km: 200,
+  maxDeltaMag: 1.0,
+  great: { fromMag: 7.0, km: 300, maxDeltaMag: 1.5 },
+} as const;
 /** Archive months `remerge.yml` merges per run, newest first (src/remerge-archives.ts). */
 export const REMERGE_MONTHS_PER_RUN = Number(process.env.REMERGE_MONTHS_PER_RUN || 4);
 /** The widest pair-time window any merge gate accepts: two events whose rows' origin times are all further apart can
@@ -466,7 +550,8 @@ export const REMERGE_MONTHS_PER_RUN = Number(process.env.REMERGE_MONTHS_PER_RUN 
  *  - MODERATE_EVENT_MAX_DT_MS 20 s (the regional windows share it);
  *  - OVSICORI_WINDOW.maxDtMs 30 s (the out-of-region window);
  *  - REVISED_ID_WINDOWS (csn) 3 s; REVIEWED_ID_WINDOWS near 4 s / far 40 s;
- *  - LOCATION_JOIN_DT_MS 8 s; REVIEWED_DT_HARD_MS (the reviewed-vs-reviewed guard only blocks).
+ *  - LOCATION_JOIN_DT_MS 8 s; REVIEWED_DT_HARD_MS (the reviewed-vs-reviewed guard only blocks);
+ *  - epoch 2: AUTHORITY_WINDOW.maxDtMs 30 s; ISC_COPY_DT_MS 1 s.
  *  ComCat exact-id twins (Resolver.comcatTwin) have no time gate and are not pre-filtered. Live never passes it; enabling
  *  it there is a separate decision after a replay proof. */
 export const MAX_PAIR_DT_MS = 60_000;

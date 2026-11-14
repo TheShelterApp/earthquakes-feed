@@ -413,7 +413,9 @@ The regions (config `AUTHORITY_REGIONS`, keyed by catalogue, so RESIF and IPGP a
 gateway's national boxes, plus coarse national boxes for the catalogues the gateway trusts nowhere (RéNaSS: France,
 the Lesser Antilles, Réunion and Mayotte; ETHZ, KNMI, LMU, USP, GeoSphere), each widened by 5° on every side so that
 an event near a border stays. A provider with no region counts as global. So a row holding a ComCat solution is never
-left out, and nothing below M4.5 is (a local network is authoritative for its small quakes). These rows are regional
+left out, and nothing below M4.5 is (a local network is authoritative for its small quakes). The test is
+`src/authority.ts` `outsideAuthority`, the one the merge's authoritative-region window (dedup epoch 2, *Re-merged
+history*) uses too, so both agree on which events are a regional agency's solution of a distant quake. These rows are regional
 networks' teleseismic solutions of quakes far outside their networks: in 2013 RéNaSS/RESIF solutions of the Santa Cruz
 Islands aftershocks at M6.1–6.6 that ComCat lists smaller, or a 2013-10-25 M7.8 twenty minutes off ComCat's M7.1. Links are taken closest first (time gap,
 then distance, then ids) and join two groups only while the groups share no provider (single link under that
@@ -962,6 +964,26 @@ events), 0 splits, rows in two live events 0; in 24 groups ComCat and EMSC list 
 member and no second one within 30 s, near the other 42 nothing. Two quakes the global agencies list stay two events
 whatever OVSICORI's two ids pair: their own ids keep them apart, and each is led by its own solution.
 
+**Dedup epoch 2: every regional agency outside its region** (config `AUTHORITY_WINDOW`, `Resolver.authorityJoin`;
+SHLTR-148; on with `REMERGE_EPOCH` 2, *Re-merged history*). The pattern above — lone events of M ≥ 4.5 that a regional
+agency places outside its own box, most of them its solution of a distant quake 50–200 km from where the global agencies
+place it, often with a higher magnitude — holds for GeoNet (Tonga, Kermadec, Vanuatu), USP, GA, INGV, RéNaSS/RESIF and
+the rest, and the statistics have left such events out since reconciliation rule v3. From epoch 2 the merge joins them:
+an event whose rows are all regional agencies' (none of `usgs`, `emsc`, `isc`, `geofon`, `gfz`, `gcmt`), of M4.5+, whose
+place lies outside the authoritative region of every one of them (`src/authority.ts` `outsideAuthority`: the
+statistics' own test, `AUTHORITY_REGIONS` plus 5° on every side), and an event holding a global agency's own solution
+(not EMSC's copy of the regional agency's) and no row of the regional side's catalogues are one quake when the origins
+are at most 30 s apart, the places at most 200 km and the magnitudes at most 1.0 (from a larger magnitude of M7.0:
+300 km and 1.5). Mutual best, ranked with the moderate-event pairs; a dense cell does not block it; the merge pass only
+(the live heal and the re-merge; backfill and the deep-history build stay as they are). OVSICORI keeps its own window
+above; NOA, without a window of its own, gets this one. Measured over the published history of 2013 and the archives
+2025-08/09 (epoch 1): of 895 such live events of M4.5+, 597 have a global agency's event within the window; moved by
+±10–30 min, where the quake's own event is gone, one finds a partner 0.01 times a shift (a 60 s limit would join 11
+more at twice that rate, and joined a RESIF M5.1 to ComCat's M4.2 55 s away instead of its M5.0 262 km away). The
+others stay events of their own (no global agency lists a quake near them: RéNaSS's automatic `scautoloc2` solutions
+of 2013 at M6–7.8 with nothing within 400 km, INGV's M7.2 of 2013-07-07 twelve minutes off ComCat's M7.3); the
+statistics still leave them out.
+
 ## Retired events
 
 An event can leave the live set in two ways: an upstream delete (`state: "tombstoned"`,
@@ -1050,7 +1072,7 @@ agencies' events of the quake (the Marmara M6.2 of 2025-04-23 09:49 UTC was arch
 another source's event at its wrong time stays and is counted (`afad_joined_kept`), and ISC magnitudes by authors the
 feed does not take (Geoscience Australia's automatic Mw) are dropped; each changed event's representative is
 re-derived. A unit merged under an older `rules` value is merged again: a new edition / asset, nothing replaced
-(`archives.json` and `history.json` record `merge_rules`). The rules are today's (epoch 1); a later rule round is a new epoch and a new campaign. Statistics should count
+(`archives.json` and `history.json` record `merge_rules`). Epoch 1 replays today's live rules; a rule round is a new epoch and a new campaign (epoch 2, below). Statistics should count
 ComCat-anchored events for global figures: the residual over-count after epoch 1 is documented by
 `scripts/remerge-verify.ts` (per month: live M4.5+ and M6+ before and after, the anchored counts, ComCat's count, the
 M4.5+ events without a ComCat row near one or not, every M6+ fold).
@@ -1064,7 +1086,7 @@ M4.5+ and 387 M6+ earthquakes; the feed's ComCat-anchored counts 22,485 and 387)
 197,002 M4.5+ and from 4,487 to 4,269 M6+ (ComCat 162,768 and 3,559; anchored 162,839 and 3,560). The anchored side is
 higher where ComCat deleted events since, or types them as non-earthquakes (Kīlauea's 2018 collapse events). The
 remaining over-count is events the current rules keep apart (an ISC copy of a NEIC or GFZ origin at 0 km / 0 s, one
-agency's distant solution); a later rule round is epoch 2. Above 0:
+agency's distant solution, a large quake's agencies in a swarm cell): epoch 2 (below) is the rule round for it. Above 0:
 
 - *Deep history:* the hourly `history` walk gives each month whose current edition is not merged a new edition
   `events-YYYY-MM.e<N+1>.tar.zst`, built from edition N and nothing else, newest month first; a month waits until its
@@ -1092,6 +1114,56 @@ agency's distant solution); a later rule round is epoch 2. Above 0:
 - *Frozen live days* (2026-07 → today) stay as published in `partitions[]` until their month rolls into an archive,
   which is then merged within about 6 h. A month re-rolled later (a backfill fill, `needs_reroll`) gets a new asset
   without `merge_epoch` and is merged again.
+
+**Epoch 2** (SHLTR-148; config `identityRules`; not on yet: `REMERGE_EPOCH` is 1). The epoch is one switch for the live
+feed and the re-merge: the live Resolver (aggregate's merge pass and regular heal, backfill, the deep-history build, the
+remediation editions) runs the rules of `REMERGE_EPOCH`, and the re-merge of a unit runs the rules of the epoch it
+merges the unit to, so raising the epoch changes both at once and the archives, the history and the live hot window
+agree. Epoch 2 adds four rules to epoch 1's:
+
+- *ISC's copies* (`iscCopies`, *ISC*): an ISC row that re-publishes NEIC's, GFZ's, GA's or the Puerto Rico network's
+  origin (its `Author`, within 1 s and 5 km of that agency's own row) is that agency's solution, as good as a shared id,
+  also in a swarm cell; such a row no longer keeps two events apart as "ISC under two ids".
+- *The authoritative-region window* (`authorityWindow`, *Regional agencies outside their own region*): a regional-only
+  M4.5+ event outside every one of its agencies' authoritative regions joins the global agencies' event of the quake
+  (30 s, 200 km, |ΔM| 1.0; from M7.0 300 km and 1.5), by the statistics' own region test (`src/authority.ts`).
+- *Large quakes in swarm cells* (`largeQuakesInSwarms`): two events both of M5.5 or more are judged in a dense cell as
+  in any other cell — the base and large-event windows without the dense caps, the moderate-event window and a regional
+  window (USP's large-quake window) — without the swarm guard's shared-id demand (a swarm is made of small quakes).
+  The Sındırgı M6.1 of 2025-08-10, in a cell with 64 events in the week before it, was ten events of the archive after
+  epoch 1 (AFAD, ComCat, ISC's NEIC copy, SCEDC's NEIC copy, GEOFON, GA, USP, EMSC, INGV, RéNaSS); it is one.
+- *Density as of the pair* (`densityAsOfPair`, the re-merge only): a pair's cell density is counted over the seven days
+  up to the later of its two origins (`src/remerge.ts` `swarmCellsAsOf`, over the unit's input), close to what live saw
+  when the reports arrived, instead of over the seven days before the window's end, where a quake's own aftershocks had
+  made its cell a swarm cell. It is somewhat looser than live, which counts every loaded event of the cell over ten
+  days (`LIVE_INDEX_DAYS`) and any aftershock already in when the pair is judged.
+
+Nothing else changes: the hard checks, the ComCat anchor (no ComCat id lost, no two ComCat events welded), the context,
+the windows of epoch 1. Dry runs of 2026-11-14 (local, read-only, `scripts/remerge-verify.ts --comcat`): the 36
+archive months go from 31,920 to 29,357 live M4.5+ and from 567 to 456 M6+ events (ComCat 22,476 and 387; the anchored
+counts unchanged in every month, no new weld), 4,890 folds (1,947 by the authoritative-region window, 417 ISC copies,
+50 large quakes in swarm cells, 1,752 by the density as of the pair, and 724 by epoch 1's windows, pairs another fold
+made reachable); 29 history months
+(2005-06, 2009-05, 2013, 2022-05 → 2023-07) from 427 to 376 M6+ (ComCat 311). What stays above ComCat at M6+ is
+regional agencies' own solutions inside their regions at a higher magnitude (KAGSR's Kamchatka aftershocks), regional
+solutions outside their regions with no global agency's event in the window, and global agencies' second ids of one
+quake; the statistics still collapse or leave those out. The first live run after the switch folds 17 pairs of the hot
+window (event map of 2026-11-14), all through the authoritative-region window.
+
+To switch it on (the lead, after reviewing the dry runs): raise `REMERGE_EPOCH` to 2 together with
+`REMERGE_INGEST_TIME`; `remerge.yml` then merges every archive month again (newest first, a new asset each), the hourly
+`history` walk every era-A / pilot month (a new edition each), each remediated day of a merged month gets a refreshed
+edition, and from the next aggregate run the live regular heal folds the hot window's pairs under the new rules (at most
+`HEAL_MAX_FOLDS_PER_RUN` a run). Dry runs first: `remerge.yml` / `src/remerge-archives.ts` with `REMERGE_DRY_RUN=1`
+and `REMERGE_EPOCH_OVERRIDE=2` (locally also `REMERGE_NO_WAIT=1` for a sample of months: `remerge.yml` has no input
+for it, so a runner dry run with `only:` leaves every month but the newest waiting), `src/history.ts` with
+`HISTORY_DRY_RUN=1`, `HISTORY_REMERGE_EPOCH=2` and `HISTORY_REMERGE_NO_WAIT=1`, each read by
+`scripts/remerge-verify.ts --comcat`; and `scripts/heal-dryrun.ts --regular --epoch 2` on the event map for the live
+side (the first run after the switch is a regular run: raising `REMERGE_EPOCH` does not raise `HEAL_EPOCH`). The statistics' reconciliation stays as a safety
+net (*Statistics*, Reconciliation): epoch 2 joins in the feed what the authoritative-region filter and the collapse
+leave out of the counts where a global agency's event is within the window, and the rest (regional solutions with no
+global event near them, phantoms of automatic teleseismic locators) stays an event of its own that the statistics still
+leave out.
 
 The `merge` block: `{epoch, ingest_time, code, window_days, from: {edition, asset, sha256} | null, older_context,
 newer_context: {label, sha256, days} | null, anchored[], steps: {rehomed, stranded, rederived, folds, windows},
@@ -2051,8 +2123,17 @@ before any fold.
 **Split copies.** ISC's preliminary rows re-publish the contributing agency's origin: 110 of the 116 ISC-represented
 M5+ events of 2025-08 and 2025-09 have another live event within 60 s and 150 km, many at 0 km and 0.0 s (NEIC's
 origin beside ComCat's `us…` row, GFZ's beside GEOFON's). Backfill ingests with the merge pass off, so they stay two
-events until a re-merge folds them; an `Author`-named copy rule for ISC (as SCEDC's `Author` `US`,
-SOURCE_NETWORK_COPIES) is not in the rules yet.
+events until a re-merge folds them, and in a swarm cell (a quake's own aftershocks) the merge joined them only on a
+shared id. **Dedup epoch 2** (config `ISC_ORIGIN_COPIES`, `Resolver.iscCopy`; *Re-merged history*) makes such a row a
+copy, as good as a shared id, also in a swarm cell: an ISC row whose `Author` is `NEIC`, `GFZ`, `AUST` or `RSPR` and
+whose origin lies within 1 s and 5 km of that agency's own row (ComCat's `us…` row, GEOFON's, GA's through AusPass,
+ComCat's `pr…` row), whatever the two magnitudes (ISC's preferred magnitude is often another agency's); and an ISC row
+of another author within 1 s and 5 km of NEIC's or GFZ's row with the magnitudes within 1.0. Over the archives
+2025-08/09: 1,773 of the 2,026 `NEIC` rows lie at 0.0 s / 0.0 km of a `us…` row, all 246 `GFZ` rows at 0.0 s / 0.0 km
+of GEOFON's, 34 of 62 `AUST` rows of GA's, all 35 `RSPR` rows of a `pr…` row. ISC's preliminary bulletin also lists one
+quake under several ISC ids, one per contributing agency's origin (the Kamchatka M6.0 of 2025-08-09 14:04 as NEIC's
+origin 643893330 and IDC's 643893547), so from epoch 2 an ISC row that is such a copy no longer keeps two events apart as
+"ISC under two ids".
 
 ## Canada (NRCan)
 

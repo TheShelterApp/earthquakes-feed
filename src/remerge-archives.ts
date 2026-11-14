@@ -47,7 +47,10 @@ import type { EventNode, ProviderConfig } from './types.js';
  *   REMERGE_DRY_RUN=1     nothing is uploaded: the assets go to REMERGE_OUT/releases/<tag>/; pending.json is written
  *                         but the workflow does not commit it
  *   REMERGE_EPOCH_OVERRIDE  dry runs only: merge to this epoch although config REMERGE_EPOCH is lower (the dry runs
- *                         before epoch 1 is switched on)
+ *                         before an epoch is switched on)
+ *   REMERGE_NO_WAIT=1     dry runs only: a month does not wait for its newer month to be merged (that month's current
+ *                         asset is the newer context), so a sample of months can be reviewed without merging every
+ *                         newer month first
  *   REMERGE_MONTHS        months per run (default config REMERGE_MONTHS_PER_RUN)
  *   REMERGE_ONLY          only these months (comma-separated YYYY-MM)
  *   REMERGE_DEADLINE_S    no new month starts after this many seconds (default 2100)
@@ -170,6 +173,8 @@ export interface RemergeArchivesCtx {
   now: () => string;
   /** The in-tree day file of `day` ('' when the data branch has none). Default: the checkout, else `git show`. */
   readTreeDay?: (day: string) => string;
+  /** Dry runs only (REMERGE_NO_WAIT=1): a month does not wait for its newer month to be merged. */
+  noWait?: boolean;
 }
 
 /** The members of a tar asset (DD.ndjson and _*.json), downloaded once per run and checked against `sha`. */
@@ -440,6 +445,7 @@ export function remergeMonth(
       anchored,
       registry: ctx.registry,
       ingestTime: ctx.ingestTime,
+      epoch: ctx.epoch,
     });
   } catch (e) {
     return { blocked: `${period}: ${e instanceof Error ? e.message : String(e)}` };
@@ -625,7 +631,7 @@ export function runRemergeArchives(ctx: RemergeArchivesCtx, opts: { max: number;
     // data branch's day partitions.
     const i = sortedList.findIndex((e) => e.period === entry.period);
     const newerEntry = sortedList[i + 1];
-    if (newerEntry && !merged.has(newerEntry.period) && (!archiveIsMerged(newerEntry, ctx.epoch) || newerEntry.needs_reroll)) {
+    if (!ctx.noWait && newerEntry && !merged.has(newerEntry.period) && (!archiveIsMerged(newerEntry, ctx.epoch) || newerEntry.needs_reroll)) {
       report.waiting.push(`${entry.period}: waits for ${newerEntry.period} to be merged`);
       continue;
     }
@@ -680,6 +686,8 @@ function main(): void {
   const dryRun = process.env.REMERGE_DRY_RUN === '1';
   const override = Number(process.env.REMERGE_EPOCH_OVERRIDE || 0);
   if (override && !dryRun) throw new Error('REMERGE_EPOCH_OVERRIDE is for dry runs only');
+  const noWait = process.env.REMERGE_NO_WAIT === '1';
+  if (noWait && !dryRun) throw new Error('REMERGE_NO_WAIT is for dry runs only');
   const epoch = override || REMERGE_EPOCH;
   mkdirSync(out, { recursive: true });
   const paths = dataPaths(DATA_DIR);
@@ -703,6 +711,7 @@ function main(): void {
     remediation,
     history,
     now: () => new Date().toISOString(),
+    ...(noWait ? { noWait } : {}),
   };
   console.log(`remerge: epoch ${epoch} rules ${REMERGE_RULES}${dryRun ? ' (dry run)' : ''}; ${archives.list.length} archive month(s), ${archives.list.filter((e) => archiveIsMerged(e, epoch)).length} merged`);
   let res: ReturnType<typeof runRemergeArchives>;

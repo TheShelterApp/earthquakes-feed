@@ -742,7 +742,7 @@ export function remergePeriods(ctx: Ctx): void {
       normalized = normalizeUnit(own, ctx.registry);
       normalizeUnit(older, ctx.registry);
       normalizeUnit(newer, ctx.registry);
-      res = remergeNodes({ own, memberDay, startMs: p.startMs, endMs: p.endMs, older, newer, anchored, registry: ctx.registry, ingestTime: REMERGE_INGEST_TIME });
+      res = remergeNodes({ own, memberDay, startMs: p.startMs, endMs: p.endMs, older, newer, anchored, registry: ctx.registry, ingestTime: REMERGE_INGEST_TIME, epoch });
     } catch (e) {
       ctx.report.blocked.push(`history: re-merge of ${p.key} blocked: ${e instanceof Error ? e.message : String(e)}`);
       continue;

@@ -181,7 +181,7 @@ async function main(): Promise<void> {
   // status counts late_minted and late_withheld.
   const updates = screen(updateRuns.flatMap((o) => o.obs).filter((r) => r.eventTimeMs <= futureCeil), tally, undefined, zeroed);
   updates.sort(byIngestOrder);
-  const sweep = revisionSweep(resolver, log, updates, state.watermarks, ingestTime);
+  const sweep = revisionSweep(resolver, log, updates, state.watermarks, ingestTime, undefined, nowMs);
   const revisions = sweep.revisions;
   const lateMinted = sweep.lateMinted.length;
   const lateWithheld = sweep.lateWithheld.length;

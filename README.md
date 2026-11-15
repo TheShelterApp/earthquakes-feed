@@ -43,8 +43,10 @@ curl -s https://earthquakes-feed.theshelter.app/v1/detail/2026-10-05T09.geojson
 # HTML for people and link previews, the target of https://theshelter.app/event/<feed id> (APIs.md, Share pages):
 curl -s https://earthquakes-feed.theshelter.app/share/event/efd_01M6Z5Z7N0YS0YZKJ7H5HDQMVE
 
-# Any frozen day as NDJSON, straight from the data branch (full history):
-curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2026/07/04.ndjson
+# Any frozen day as NDJSON from the data branch, pinned to the manifest's data_commit (immutable; jsDelivr's `@data`
+# branch ref can answer 403 for a file its package no longer holds). Days older than about 120 days are in archives[]:
+M=$(curl -s https://earthquakes-feed.theshelter.app/v1/manifest.json)
+curl -s "https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@$(jq -r .data_commit <<<"$M")/$(jq -r '[.partitions[] | select(.frozen)][0].path' <<<"$M")"
 
 # A day of the last 11 (not frozen yet) as NDJSON: the manifest's `url` for it, on Pages:
 curl -s "https://earthquakes-feed.theshelter.app/events/$(date -u +%Y/%m/%d).ndjson"
@@ -185,10 +187,10 @@ new sources are reviewed and enabled by hand, then **auto-backfilled** into hist
 
 Kazakhstan, Kyrgyzstan, Uzbekistan, Tajikistan, Turkmenistan, Belarus, Ukraine, and
 Pakistan have no open real-time earthquake API (KNDC is CTBTO-restricted; others publish
-only delayed waveforms); Iran (IRSC) geo-restricts to domestic IPs, the Philippines
-(PHIVOLCS) has no machine API (its HTML bulletin is read by a custom adapter), and Romania (INFP) has no
+only delayed waveforms); Iran (IRSC) geo-restricts to domestic IPs, and Romania (INFP) has no
 reachable event service. Those regions are covered via the global catalogs until an
-open, reachable source appears.
+open, reachable source appears. The Philippines (PHIVOLCS) has no machine API either, but is a source: its public
+HTML bulletin is read by a custom adapter (hypocentre parameters only).
 
 ## Architecture
 
@@ -285,7 +287,8 @@ apart) queued ahead of every aggregate run and the live manifest went 1 h 47 min
   outside every group ([`scripts/writer-queue.mjs`](scripts/writer-queue.mjs)): it counts the writer runs created before
   its own that wait for the group or are about to enter it (aggregate included) and lets the writing job join only while
   fewer than 2 do. A refused dispatch fails in seconds with an `::error::` naming what waits; a refused scheduled run
-  (backfill's hourly walk, also when the heartbeat Worker dispatches it without a window; archive's 6-hourly run) is a
+  (backfill's hourly walk, which the heartbeat Worker dispatches without a window, or `walk-fallback.yml` after two
+  missed ticks; archive's 6-hourly run) is a
   `::warning::` and a green run, and its next run does the work. `aggregate.yml` has no gate: it is never refused. The
   bound is "about 2": a gate that cannot see a run created a moment before its own can let a third in, and a gate
   that cannot read the queue refuses (the input `force` overrides both).

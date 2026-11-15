@@ -46,6 +46,7 @@ import {
   lateUsgsKeeps,
   lateUsgsRowsOfNodes,
   lateUsgsRowsOfRaw,
+  staleLateUsgsDays,
   nextFree,
   partitionAsset,
   parseRawText,
@@ -512,7 +513,7 @@ async function main(): Promise<void> {
     days: [] as { day: string; edition: string | null; raws: string[]; stats: EditionStats | null; failed: string[] }[],
     queue_done: [] as string[],
     queue: [] as unknown[],
-    late_usgs: { mode: lateMode, range: lateRange || null, days: [] as string[], checked: [] as LateReport[], built: [] as string[], pruned: [] as string[], planned: [] as string[], unchanged: 0, failed: [] as string[], not_reached: [] as string[] },
+    late_usgs: { mode: lateMode, range: lateRange || null, days: [] as string[], stale: [] as string[], checked: [] as LateReport[], built: [] as string[], pruned: [] as string[], planned: [] as string[], unchanged: 0, failed: [] as string[], not_reached: [] as string[] },
   };
   console.log(
     `remediate: ${store.label}; ${days.length} day(s) to do (${days.map((d) => `${d}[${(byDay.get(d) ?? []).map((t) => t.provider).join(',') || 'edition'}]`).join(' ') || 'none'}); ` +
@@ -543,9 +544,14 @@ async function main(): Promise<void> {
     if (lateMode !== 'off') {
       const lastFrozen = dayShift(frozenBeforeAt(nowMs), -1);
       const blobs = partitionBlobs(DATA_DIR, lastFrozen);
-      const lateDays = lateUsgsDays({ nowMs, frozenBefore: frozenBeforeAt(nowMs), partitionDays: new Set(blobs.keys()), archivedDays, ...(lateRange ? { range: lateRange } : {}) });
+      // A day past the window whose edition is built on a partition a backfill rewrote since is looked at again, so its
+      // edition follows the partition before the archive roll (2026-11-15 audit, remerge M-2).
+      const stale = lateRange ? [] : staleLateUsgsDays(idx, blobs);
+      const lateDays = lateUsgsDays({ nowMs, frozenBefore: frozenBeforeAt(nowMs), partitionDays: new Set(blobs.keys()), archivedDays, ...(lateRange ? { range: lateRange } : { stale }) });
       report.late_usgs.days = lateDays;
-      console.log(`remediate: late ComCat (${lateMode}): ${lateDays.length} frozen day(s) not archived${lateRange ? ` in ${lateRange}` : ` of the last ${LATE_USGS_MAX_AGE_DAYS}`}: ${lateDays[0] ?? '-'}..${lateDays.at(-1) ?? '-'}`);
+      report.late_usgs.stale = stale.filter((d) => lateDays.includes(d));
+      console.log(`remediate: late ComCat (${lateMode}): ${lateDays.length} frozen day(s) not archived${lateRange ? ` in ${lateRange}` : ` of the last ${LATE_USGS_MAX_AGE_DAYS}`}: ${lateDays[0] ?? '-'}..${lateDays.at(-1) ?? '-'}` +
+        (report.late_usgs.stale.length ? `; edition older than its rewritten partition: ${report.late_usgs.stale.join(', ')}` : ''));
       const partitions = new Map<string, FrozenPartition>();
       const lateArch = readArchivedDays(archives, new Set(lateDays.flatMap((d) => [dayShift(d, -1), dayShift(d, 1)]).filter((d) => archivedDays.has(d))));
       for (const day of lateDays) {

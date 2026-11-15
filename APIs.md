@@ -538,7 +538,8 @@ line full-fat. Resolve the path and freshness from `manifest.partitions[]`:
 curl -s "https://earthquakes-feed.theshelter.app/events/$(date -u +%Y/%m/%d).ndjson"
 # immutable (cache forever) — use manifest.data_commit for a frozen day:
 curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@<data_commit>/events/2026/07/04.ndjson
-# via branch (12 h cache), any frozen day:
+# via branch (12 h cache), any frozen day; jsDelivr can answer 403 here (its `data` package is past its size limit,
+# only files it cached still serve), so prefer the @<data_commit> form above:
 curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2026/07/04.ndjson
 ```
 
@@ -998,7 +999,11 @@ in the day partitions (full-fat, every state). Tombstoned events joined that 48 
 republication on 2026-09-28 (until then they left those files at once). Consumers must drop
 every feature whose `feed.state !== "live"` (or whose `tombstone` is true) — never plot one:
 a tombstoned marker keeps its last solution, which for a retracted placeholder is 0, 0;
-`metadata.count` counts live features only. The
+`metadata.count` counts live features only. A tombstoned event comes back under its own feed id when its source lists
+the id located again and nothing live claims the report (no other event holds the id or matches it in space): in the
+run that tombstoned it and, since 2026-11-15, in any later run (before, a later run minted a second feed id and the old
+one, the id share links and alerts name, stayed deleted). An id ComCat deleted still never comes back through AEC
+(*Alaska (AEC)*), and a held solution stays tombstoned while it is held. The
 survivor of a merge keeps the loser's `aliases[]` and provenance rows, so the loser's
 provider ids resolve to it, and its `first_ingest_time` / `first_seen_seq` become the
 earlier of the two. `superseded_by` names the event that was live when the line was written:
@@ -1681,7 +1686,10 @@ wait and no cancellation in the group. The fallback for a Worker outage is `walk
 (`scripts/walk-fallback.mjs`): on its `:29` and `:50` crons it reads the walk's newest `workflow_dispatch` run and
 dispatches the walk as the Worker does only when that run is more than 2 h 5 min old (two missed ticks; the Worker
 missed 1 of 48 first-solutions ticks in those 48 hours, 10-06 19:48, and a single miss costs one hour of the walk). It
-holds a group of its own, so a delivery that finds nothing to do never waits behind a walk or cancels one.
+holds a group of its own, so a delivery that finds nothing to do never waits behind a walk or cancels one. Its `:45`
+cron does the same for `backfill.yml`'s backward walk (the Worker dispatches it at `:41`), which lost its own hourly
+cron for the same reason (2026-11-15: 4 of 30 backfill runs were cron deliveries, each a second walk in its hour that
+took a writer-queue slot the gate counts).
 
 **When the walk stops.** A run with work left (source months to fetch, or complete months to seal) that fetches, seals
 and takes over nothing is a no-progress run. It is explained when it only waited for a source's Retry-After, was
@@ -1693,7 +1701,11 @@ and the 26 h hold carried the board in between; `alarmed_at` still records that 
 in `history-state.json`. A source month that has failed 24 runs is a block of its own (`walks:history:<source>`) on
 every run until it is fetched. Progress, or no work left, ends the stall. Round 24 added it: since round 23 a month that never succeeds lets its source's older months go on,
 so its own alarm (one red run, at its 24th failure) came long before the walk ran out of other work, and the walk then
-stopped silently once only that month was left.
+stopped silently once only that month was left. A month whose seal or re-merge throws (an asset unreadable for now or
+no longer matching its index checksum, a line that does not parse, a failed upload) is a block of that month for the run
+(`history: sealing|re-merging YYYY-MM failed: …`), tried once a run; the fetches and the other months go on, and its
+older months wait for it as they wait for any newer month (2026-11-15; before, the throw stopped the whole walk, the
+fetches included). Only an upload that reads back with other bytes still stops the run.
 
 **Dry runs.** `gh workflow run history.yml -f dry_run=true` (or `HISTORY_DRY_RUN=1 HISTORY_FORCE=1` locally, with
 `DATA_DIR` a copy of the `data` branch's `knowledge/index`) creates no Release, uploads nothing and commits nothing: the
@@ -1787,7 +1799,12 @@ frozen days not archived yet (late ComCat):
   the run's artifact only, publishes nothing and ends with a `DRY RUN` warning — over `late_usgs_range` (at most
   31 days) instead of the last 45 for the frozen days older than that (the one-time catch-up of 2026-07…10). When the
   month rolls, the archive holds the partition byte for byte, so the edition still replaces the day: the archive
-  re-merge (*Re-merged history*) takes an edition built on the partition whose archived file has the same sha256.
+  re-merge (*Re-merged history*) takes an edition built on the partition whose archived file has the same sha256. A
+  day older than 45 days whose current `late_usgs` edition is built on another blob than its partition holds now (a
+  backfill rewrites the days below the live floor, about 45 days back, exactly the days that just left the window) is
+  asked again by the scheduled run whatever its age, after the window's days so they keep the run's cap
+  (`late_usgs.stale` in the report), and rebuilt on the current
+  partition, so the edition never shadows the backfilled rows and the month's re-merge is not blocked at the roll.
 
 `knowledge/index/remediation.json` lists every raw asset (`provider`, `day`, `rows`, `requests`, `partial`,
 `sha256`, `reason`, …) and every edition (`day`, `edition`, `url`, `sha256`, `built_on`: the archive asset and its
@@ -2331,7 +2348,8 @@ The monthly discovery (`discover.yml`, src/discover.ts) lists every FDSN event s
 source. Its suggested registry entry claims no licence (`license: "unknown"`): the probe reads none. A service looked
 at and declined goes into `DECLINED` in src/discover.ts with the issue that holds the evidence, so the next run does
 not list it again. ComCat's regional networks, PNSN among them, were looked at in 2026-09; only Alaska's AEC was
-added (*Alaska (AEC)*).
+added then (*Alaska (AEC)*). California's NCEDC and SCEDC, also ANSS regional networks, were sources from the start
+(2026-07-05).
 
 **GeoShake (`api.geoshake.org`, issue #38), declined 2026-10-06.** All pages and the service read 2026-10-06.
 

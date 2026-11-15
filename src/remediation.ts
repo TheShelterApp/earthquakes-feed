@@ -718,6 +718,7 @@ export function pruneQueue(idx: RemediationIndex, skip: SkipSource = NO_SKIP): R
  * "late_usgs"`, built like every edition (buildDayEdition: additive, the day's events by feed id plus the events the
  * build mints) but on the day's FROZEN PARTITION (built_on `tag: "data"`), with the whole-day ComCat answer as its raw
  * asset. An unchanged day publishes nothing. A dispatch can name an older range (the one-time catch-up of 2026-07..10).
+ * An older day whose edition is built on a partition a backfill rewrote since is looked at too (staleLateUsgsDays).
  */
 export const LATE_USGS_PROVIDER = 'usgs';
 /** Days older than this settle (ComCat's late publications of 2026-09/10 arrived within about 22 days). */
@@ -733,10 +734,10 @@ export const LATE_USGS_SCHEDULED: LateUsgsMode = 'on';
 const shiftDay = (day: string, n: number): string => new Date(Date.parse(`${day}T00:00:00Z`) + n * DAY_MS).toISOString().slice(0, 10);
 
 /**
- * The days the refresh looks at, ascending: frozen partitions on the data branch (`partitionDays`) that no archive
- * lists, whose next day is frozen too (before frozenBefore − 1), and from `today − maxAgeDays` on — or, with `range`
- * (a dispatch's catch-up, at most MAX_REFILL_DAYS days), the range's days under the same rules. Never an unfrozen day
- * (the live run's), never an archived one.
+ * The days the refresh looks at, ascending within each part: frozen partitions on the data branch (`partitionDays`) that no archive
+ * lists, whose next day is frozen too (before frozenBefore − 1), and from `today − maxAgeDays` on, then (after those,
+ * ascending) the `stale` days whatever their age — or, with `range` (a dispatch's catch-up, at most MAX_REFILL_DAYS
+ * days), the range's days under the same rules. Never an unfrozen day (the live run's), never an archived one.
  */
 export function lateUsgsDays(o: {
   nowMs: number;
@@ -745,6 +746,9 @@ export function lateUsgsDays(o: {
   archivedDays: ReadonlySet<string>;
   range?: string;
   maxAgeDays?: number;
+  /** Days whose current late_usgs edition is built on other bytes than the partition now (staleLateUsgsDays): looked at
+   *  whatever their age, so the edition is rebuilt on the rewritten partition before the archive roll. */
+  stale?: Iterable<string>;
 }): string[] {
   const last = shiftDay(o.frozenBefore, -2);
   const candidates = o.range ? rangeDays(o.range) : [];
@@ -752,7 +756,34 @@ export function lateUsgsDays(o: {
     const first = shiftDay(eventDayKey(o.nowMs), -(o.maxAgeDays ?? LATE_USGS_MAX_AGE_DAYS));
     for (let d = first; d <= last; d = shiftDay(d, 1)) candidates.push(d);
   }
-  return candidates.filter((d) => d <= last && o.partitionDays.has(d) && !o.archivedDays.has(d)).sort();
+  const keep = (d: string): boolean => d <= last && o.partitionDays.has(d) && !o.archivedDays.has(d);
+  const days = [...new Set(candidates)].filter(keep).sort();
+  // The stale days after the window's: a run's cap (REMEDIATION_LATE_MAX_DAYS) and deadline go to the window first, so
+  // a backlog of stale days never leaves the window's oldest day unchecked until it ages out of the window. A stale
+  // day not reached is asked again by the next run (it stays stale until rebuilt).
+  const inWindow = new Set(days);
+  const stale = [...new Set(o.stale ?? [])].filter((d) => !inWindow.has(d) && keep(d)).sort();
+  return [...days, ...stale];
+}
+
+/**
+ * The days whose current edition is a late_usgs edition built on a frozen partition whose blob is not the partition's
+ * blob on the data branch now (`blobs`, partitionBlobs). A backfill writes days below the live floor (about 45 days
+ * back), exactly the days that just left the refresh window, so such a day's edition (the partition as it was plus
+ * ComCat's rows) would shadow the backfilled rows, and remerge-archives would block the month at the archive roll
+ * (the edition is built on neither the archived member nor a previous asset). The refresh rebuilds these days on the
+ * current partition whatever their age (remediateDay's base_changed). A day without a partition now (archived, or
+ * never written) is not stale here: the archive's own checks take over.
+ */
+export function staleLateUsgsDays(idx: RemediationIndex, blobs: ReadonlyMap<string, string>): string[] {
+  const out = new Set<string>();
+  for (const day of new Set(idx.editions.filter((e) => e.reason === 'late_usgs').map((e) => e.day))) {
+    const cur = currentEdition(idx, day);
+    if (!cur || cur.reason !== 'late_usgs' || cur.built_on.tag !== PARTITION_TAG || !cur.built_on.blob) continue;
+    const now = blobs.get(day);
+    if (now && now !== cur.built_on.blob) out.add(day);
+  }
+  return [...out].sort();
 }
 
 /** One ComCat solution as the diff sees it: its id, the ids ComCat lists for the event, its magnitude. */

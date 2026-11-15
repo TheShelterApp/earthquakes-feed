@@ -167,6 +167,19 @@ test('history re-merge: each month gets e2 built from e1 (newest first), built_f
   assert.match(ctx.report.unused.join('\n'), /events-2022-12\.e3\.tar\.zst: merged from events-2022-12\.e1\.tar\.zst, which is not the current edition/);
 });
 
+test('history re-merge: a month whose edition no longer matches its index checksum is that month\'s block; the run goes on (2026-11-15 audit)', { skip: !hasZstd && 'zstd not installed' }, () => {
+  const ctx = ctxOf();
+  const e1Dec = publishE1(ctx, '2022-12', split(quake(Date.parse('2022-12-10T05:00:00Z'), 'dec')));
+  publishE1(ctx, '2022-11', split(quake(Date.parse('2022-11-15T05:00:00Z'), 'nov')));
+  e1Dec.sha256 = '0'.repeat(64);
+  assert.doesNotThrow(() => remergePeriods(ctx));
+  assert.deepEqual(ctx.report.remerged, []);
+  assert.equal(ctx.report.blocked.length, 1, ctx.report.blocked.join('\n'));
+  assert.match(ctx.report.blocked[0]!, /^history: re-merging 2022-12 failed: .*the index says 0{64}; the month is tried again next run/);
+  // November waits for December (its newer neighbour) as before; nothing was uploaded for either.
+  assert.deepEqual(periodsToRemerge(CFG, ctx.idx, 1).map((p) => p.key), ['2022-12', '2022-11']);
+});
+
 test('history re-merge: a month waits for its newer month to be merged, and the boundary month for its archive; withdrawn editions are never current', () => {
   const idx: HistoryIndex = emptyIndex('2023-01-01');
   const cfg: HistoryConfig = { ...CFG, boundary: '2023-01-01' };

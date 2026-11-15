@@ -1,8 +1,10 @@
 name: walk-fallback
 
-# The fallback of the two hourly walks, history.yml and first-solutions.yml (R16-FOLLOWUPS (7), round 22;
+# The fallback of the hourly walks, history.yml and first-solutions.yml (R16-FOLLOWUPS (7), round 22) and backfill.yml's
+# backward walk (2026-11-15 audit: its own cron at :41 was a second walk beside the Worker's dispatch at :41;
 # scripts/walk-fallback.mjs). The heartbeat Worker dispatches them (history at :26, first-solutions at :48 with
-# tick=1; heartbeat/src/worker.js) and they take turns in the concurrency group `earthquakes-feed-history`. They have
+# tick=1, backfill at :41; heartbeat/src/worker.js); history and first-solutions take turns in the concurrency group
+# `earthquakes-feed-history`, backfill joins the writer group through its gate. They have
 # no cron of their own: GitHub delivered each walk's hourly cron about 4 times a day at whatever minute its scheduler
 # reached it, and each delivery started a second run in the hour while the Worker had dispatched the first, so a
 # first-solutions run held the group across history's turn (10 of 48 heartbeat history runs waited 2.2–31 minutes in
@@ -16,21 +18,25 @@ on:
   schedule:
     - cron: '29 * * * *' # history.yml
     - cron: '50 * * * *' # first-solutions.yml
+    - cron: '45 * * * *' # backfill.yml (the Worker dispatches it at :41)
   workflow_dispatch:
     inputs:
       workflow:
         description: 'The walk to check'
         type: choice
-        options: [history.yml, first-solutions.yml]
+        options: [history.yml, first-solutions.yml, backfill.yml]
         required: true
       dry_run:
         description: 'Dry run: decide and print, dispatch nothing'
         type: boolean
         default: true
 
+# `queue: max`: three crons share the group (one per walk), and GitHub otherwise keeps one pending run per group, a
+# newer arrival cancelling it: one walk's check must never cancel another's.
 concurrency:
   group: earthquakes-feed-walk-fallback
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read

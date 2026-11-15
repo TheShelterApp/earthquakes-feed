@@ -1524,7 +1524,43 @@ export class Resolver {
     // provider keeps listing it); once it is not (reviewed, or given a magnitude) it brings its event back.
     const held = this.retiredHeldNode(raw);
     if (held) return Resolver.heldSolution(raw) ? { node: held, changed: false, revision: held.revision, merges: [] } : this.applyIngest(held.feedId, raw, ingestTime);
+    const revived = this.retiredById(raw);
+    if (revived) return this.applyIngest(revived, raw, ingestTime);
     return this.applyIngest(this.mintId(raw), raw, ingestTime);
+  }
+
+  /** The tombstoned event whose own id this report carries, for a report nothing live claims (2026-11-15 audit,
+   *  dedup MEDIUM 1). Within one run the alias map still holds a tombstoned node's ids, so a later located report of
+   *  the id un-hides it (withdrawRow); a new Resolver builds the alias map from live nodes only, and without this the
+   *  report minted a second feed id (mintId salts past the tombstoned node's identical deterministic id) while the old
+   *  id, the one share links and alert deep links name, stayed deleted. The exceptions stay as they are:
+   *  a COMCAT_LIFECYCLE_PROVIDERS id ComCat deleted never comes back (retiredComcatNode, checked before), a held
+   *  solution keeps its tombstone while held (retiredHeldNode, checked before), and a context node of the offline
+   *  re-merge (pinned or frozen) is never revived. Its ids go back on the alias map, as for any live node. */
+  private retiredById(raw: RawObs): string | null {
+    if (COMCAT_LIFECYCLE_PROVIDERS.has(raw.provider)) return null;
+    const fid = this.retired.get(`${raw.provider}:${raw.providerEventId}`);
+    const node = fid ? this.eventMap.get(fid) : undefined;
+    if (!node || node.state !== 'tombstoned' || this.ctx(node)) return null;
+    // ComCat restoring the id lifts what its delete withdrew with it: the COMCAT_LIFECYCLE_PROVIDERS row of the same
+    // ComCat id (withdrawComcatTwins) may join again. Its alias leaves the node, so withdrawnFrom no longer refuses the
+    // provider's next report of the id, which then finds the revived node through the `usgs:` id it names.
+    if (raw.provider === COMCAT_PROVIDER) {
+      const lifted = new Set<string>();
+      for (const id of comcatIdsNamed(raw.provider, raw.providerEventId, raw.fields)) {
+        for (const p of COMCAT_LIFECYCLE_PROVIDERS) {
+          const native = nativeIdOfComcat(p, id);
+          if (native) lifted.add(`${p}:${native}`);
+        }
+      }
+      const gone = node.aliases.filter((a) => lifted.has(a) && !node.provenance.some((r) => `${r.provider}:${r.nativeId}` === a));
+      if (gone.length) {
+        node.aliases = node.aliases.filter((a) => !gone.includes(a));
+        for (const a of gone) this.retired.delete(a);
+      }
+    }
+    for (const a of node.aliases) if (!this.alias.has(a)) this.alias.set(a, node.feedId);
+    return node.feedId;
   }
 
   /** The tombstoned event retractHeld left behind for this report's id (a REGION_RULES provider's, its node with no row
@@ -1623,6 +1659,9 @@ export class Resolver {
     // the hot floor are in the spatial index, so a copy of this quake less than 60 s older than
     // a row at the floor itself would be invisible to findExisting and lateTwin alike.
     if (raw.eventTimeMs < this.hotFloor + TEMPORAL_MS) return { kind: 'skipped' };
+    // ComCat restoring an id it deleted: the event comes back under its own feed id (retiredById), not a second one.
+    const revived = this.retiredById(raw);
+    if (revived) return { kind: 'revised', result: this.applyIngest(revived, raw, ingestTime) };
     const twin = this.lateTwin(raw);
     if (twin) return { kind: 'withheld', ...twin };
     return { kind: 'minted', result: this.applyIngest(this.mintId(raw), raw, ingestTime) };

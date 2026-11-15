@@ -79,7 +79,9 @@ import type { ProviderConfig, RawObs } from './types.js';
  *
  * The run writes nothing to DATA_DIR. It exits non-zero only for a broken invariant (after writing the index of the
  * work already uploaded); a source month that fails is retried next run, and from a day of failed runs it is a block; a
- * month that failed before no longer holds back its source's older months. A walk that makes no progress (work left,
+ * month that failed before no longer holds back its source's older months. A month whose seal or re-merge throws is a
+ * block of that month for the run (isolateMonth) and the walk goes on; only an upload that reads back with other bytes
+ * (ReadBackMismatch) stops it. A walk that makes no progress (work left,
  * nothing fetched, sealed or adopted) is a block after a day of such runs that no Retry-After and no time budget
  * explain, or three days of any (round 24, src/history-state.ts).
  *
@@ -190,6 +192,37 @@ function assets(ctx: Ctx, tag: string): AssetInfo[] {
 }
 const assetNames = (ctx: Ctx, tag: string): Set<string> => new Set(assets(ctx, tag).map((a) => a.name));
 
+/** An uploaded asset that reads back with other bytes than were checked: the one broken invariant that stops the
+ *  whole walk (runWalk's `fatal`). Every other failure of a month's seal or re-merge blocks that month only. */
+export class ReadBackMismatch extends Error {}
+
+/**
+ * Run one month's seal or re-merge (2026-11-15 audit, history 1): a month that throws (an asset that is unreadable for
+ * now or no longer matches its index checksum, a line that does not parse, a failed upload) is a block of that month,
+ * stated by this run (`blocked`, the red marker), and is not tried again in this run (`skip`: sealPeriods runs again
+ * after every month the fetches complete); the walk goes on with the other months and the fetches, and the next run
+ * tries the month again. Before, the throw left runWalk's single try, so no older month was fetched while one month was
+ * poisoned. An upload that did happen before the throw is an orphan the next run adopts (adoptOrphans). A read-back
+ * mismatch (ReadBackMismatch) still stops the walk.
+ */
+function isolateMonth(ctx: Ctx, skip: Set<string>, what: string, key: string, body: () => void): void {
+  try {
+    body();
+  } catch (e) {
+    if (e instanceof ReadBackMismatch) throw e;
+    skip.add(`${what} ${key}`);
+    const line = `history: ${what} ${key} failed: ${e instanceof Error ? e.message : String(e)}; the month is tried again next run, the walk goes on`;
+    ctx.report.blocked.push(line);
+    console.log(`::warning::${line}`);
+  }
+}
+const skippedMonths = new WeakMap<Ctx, Set<string>>();
+const skipOf = (ctx: Ctx): Set<string> => {
+  let s = skippedMonths.get(ctx);
+  if (!s) skippedMonths.set(ctx, (s = new Set()));
+  return s;
+};
+
 /** Upload `file` (named as the asset) and read it back: the copy in the Release must be the bytes we checked. */
 function uploadVerified(ctx: Ctx, tag: string, file: string, sha256: string): void {
   ctx.store.ensureRelease(tag);
@@ -201,7 +234,7 @@ function uploadVerified(ctx: Ctx, tag: string, file: string, sha256: string): vo
   if (cached) cached.push({ name, size: readFileSync(file).length, state: 'uploaded' });
   const back = join(ctx.work, `verify-${Date.now()}`);
   ctx.store.download(tag, file.split('/').pop()!, back);
-  if (sha256File(back) !== sha256) throw new Error(`uploaded ${tag}/${file.split('/').pop()} reads back with another checksum`);
+  if (sha256File(back) !== sha256) throw new ReadBackMismatch(`uploaded ${tag}/${file.split('/').pop()} reads back with another checksum`);
   rmSync(back, { force: true });
 }
 
@@ -589,7 +622,9 @@ function editionContext(ctx: Ctx, e: EditionEntry, day: string): ContextInput {
 /** Build, verify and upload the next edition of every month that is complete and stale, newest first (a month waits
  *  until its newer neighbour is frozen). Exported for tests/history-run.test.ts. */
 export function sealPeriods(ctx: Ctx): void {
+  const skip = skipOf(ctx);
   for (const p of periodsToSeal(ctx.cfg, ctx.idx)) {
+    if (skip.has(`sealing ${p.key}`)) continue;
     // With the re-merge on, a new edition is merged as it is built (buildEdition), so its newer neighbour must be merged
     // first, like remergePeriods' (remergeNeighbour is newerNeighbour while the epoch is 0).
     const nb = remergeNeighbour(ctx.cfg, ctx.idx, ctx.archives, p, epochOf(ctx));
@@ -601,38 +636,42 @@ export function sealPeriods(ctx: Ctx): void {
       if (!ctx.report.budget.includes(entry)) ctx.report.budget.push(entry);
       break;
     }
-    const context = nb.kind === 'boundary' ? boundaryContext(ctx, nb.day) : nb.kind === 'edition' ? editionContext(ctx, nb.edition, nb.day) : null;
-    const era = eraOf(ctx.cfg, p);
-    const raws = era.sources.map((s) => {
-      const e = rawOf(ctx.idx, s, p.key)!;
-      return loadRaw(ctx, e.tag, e.asset, e.sha256);
-    });
-    const tag = historyTag(p.key);
-    const edition = nextEdition(assetNames(ctx, tag), p.key, (currentEdition(ctx.idx, p.key)?.edition ?? 0) + 1);
-    const built = buildEdition({ period: p, era, edition, raws, context, registry: ctx.registry, boundary: ctx.cfg.boundary, archivedDays: ctx.archivedDays, remergeEpoch: epochOf(ctx) });
-    const check = verifyEdition(built.dayFiles, { period: p, boundary: ctx.cfg.boundary, archivedDays: ctx.archivedDays, meta: built.meta, raws });
-    if (check.errors.length) throw new Error(`history ${p.key} e${edition} fails verification: ${check.errors.slice(0, 5).join('; ')}`);
-    const asset = editionAssetName(p.key, edition);
-    const dir = join(ctx.work, `build-${p.key}`);
-    mkdirSync(dir, { recursive: true });
-    for (const [day, text] of built.dayFiles) writeFileSync(join(dir, `${day.slice(8, 10)}.ndjson`), text);
-    writeFileSync(join(dir, '_edition.json'), JSON.stringify(built.meta, null, 2) + '\n');
-    const tar = join(ctx.work, asset.replace(/\.zst$/, ''));
-    createTar(tar, dir, readdirSync(dir));
-    const file = zstdCompress(tar);
-    const sha = sha256File(file);
-    const bytes = readFileSync(file).length;
-    uploadVerified(ctx, tag, file, sha);
-    ctx.idx.editions.push(editionEntryOf(tag, asset, sha, bytes, built.meta));
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(file, { force: true });
-    const m = built.meta;
-    ctx.report.sealed.push(
-      `${tag}/${asset}: ${m.events} events on ${m.days.length} day(s) from ${m.rows.fetched} rows (${m.rows.written} written, ${m.rows.joined_newer} joined the newer neighbour, ` +
-        `${m.rows.below_floor} below the floor, ${m.rows.bad_coords + m.rows.coordinateless} screened); context ${m.context?.label ?? 'none'}; ${(bytes / 1e6).toFixed(2)} MB`,
-    );
-    console.log(`history: sealed ${tag}/${asset} (${m.events} events, ${m.rows.joined_newer} joined the newer neighbour)`);
+    isolateMonth(ctx, skip, 'sealing', p.key, () => sealOne(ctx, p, nb));
   }
+}
+
+function sealOne(ctx: Ctx, p: Period, nb: ReturnType<typeof remergeNeighbour>): void {
+  const context = nb.kind === 'boundary' ? boundaryContext(ctx, nb.day) : nb.kind === 'edition' ? editionContext(ctx, nb.edition, nb.day) : null;
+  const era = eraOf(ctx.cfg, p);
+  const raws = era.sources.map((s) => {
+    const e = rawOf(ctx.idx, s, p.key)!;
+    return loadRaw(ctx, e.tag, e.asset, e.sha256);
+  });
+  const tag = historyTag(p.key);
+  const edition = nextEdition(assetNames(ctx, tag), p.key, (currentEdition(ctx.idx, p.key)?.edition ?? 0) + 1);
+  const built = buildEdition({ period: p, era, edition, raws, context, registry: ctx.registry, boundary: ctx.cfg.boundary, archivedDays: ctx.archivedDays, remergeEpoch: epochOf(ctx) });
+  const check = verifyEdition(built.dayFiles, { period: p, boundary: ctx.cfg.boundary, archivedDays: ctx.archivedDays, meta: built.meta, raws });
+  if (check.errors.length) throw new Error(`history ${p.key} e${edition} fails verification: ${check.errors.slice(0, 5).join('; ')}`);
+  const asset = editionAssetName(p.key, edition);
+  const dir = join(ctx.work, `build-${p.key}`);
+  mkdirSync(dir, { recursive: true });
+  for (const [day, text] of built.dayFiles) writeFileSync(join(dir, `${day.slice(8, 10)}.ndjson`), text);
+  writeFileSync(join(dir, '_edition.json'), JSON.stringify(built.meta, null, 2) + '\n');
+  const tar = join(ctx.work, asset.replace(/\.zst$/, ''));
+  createTar(tar, dir, readdirSync(dir));
+  const file = zstdCompress(tar);
+  const sha = sha256File(file);
+  const bytes = readFileSync(file).length;
+  uploadVerified(ctx, tag, file, sha);
+  ctx.idx.editions.push(editionEntryOf(tag, asset, sha, bytes, built.meta));
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(file, { force: true });
+  const m = built.meta;
+  ctx.report.sealed.push(
+    `${tag}/${asset}: ${m.events} events on ${m.days.length} day(s) from ${m.rows.fetched} rows (${m.rows.written} written, ${m.rows.joined_newer} joined the newer neighbour, ` +
+      `${m.rows.below_floor} below the floor, ${m.rows.bad_coords + m.rows.coordinateless} screened); context ${m.context?.label ?? 'none'}; ${(bytes / 1e6).toFixed(2)} MB`,
+  );
+  console.log(`history: sealed ${tag}/${asset} (${m.events} events, ${m.rows.joined_newer} joined the newer neighbour)`);
 }
 
 const DAY_MS = 86_400_000;
@@ -682,125 +721,132 @@ export function remergePeriods(ctx: Ctx): void {
       if (!ctx.report.budget.includes(entry)) ctx.report.budget.push(entry);
       break;
     }
-    const started = Date.now();
-    const prevEntry = currentEdition(ctx.idx, p.key)!;
-    const prev = loadCurrent(ctx, cache, prevEntry);
-    const own: EventNode[] = [];
-    const memberDay = new Map<string, string>();
-    for (const [day, text] of prev.dayFiles) {
-      for (const n of linesToNodes(text)) {
-        own.push(n);
-        memberDay.set(n.feedId, day);
+    try {
+      const started = Date.now();
+      const prevEntry = currentEdition(ctx.idx, p.key)!;
+      const prev = loadCurrent(ctx, cache, prevEntry);
+      const own: EventNode[] = [];
+      const memberDay = new Map<string, string>();
+      for (const [day, text] of prev.dayFiles) {
+        for (const n of linesToNodes(text)) {
+          own.push(n);
+          memberDay.set(n.feedId, day);
+        }
       }
-    }
-    // Newer context: the first 7 days after the month (the newer edition, or the archive at the boundary), pinned.
-    const newerDays = Array.from({ length: 7 }, (_, i) => dayAfter(dayKeyOf(p.endMs), i));
-    let newer: EventNode[] = [];
-    let newerMeta: ContextMeta | null = null;
-    if (nb.kind === 'edition') {
-      let files = lastMerged?.asset === nb.edition.asset ? lastMerged.dayFiles : null;
-      if (!files) {
-        const ed = loadEdition(ctx, nb.edition.tag, nb.edition.asset);
-        if (ed.sha256 !== nb.edition.sha256) throw new Error(`${nb.edition.asset} has another checksum than the index lists`);
-        files = ed.dayFiles;
+      // Newer context: the first 7 days after the month (the newer edition, or the archive at the boundary), pinned.
+      const newerDays = Array.from({ length: 7 }, (_, i) => dayAfter(dayKeyOf(p.endMs), i));
+      let newer: EventNode[] = [];
+      let newerMeta: ContextMeta | null = null;
+      if (nb.kind === 'edition') {
+        let files = lastMerged?.asset === nb.edition.asset ? lastMerged.dayFiles : null;
+        if (!files) {
+          const ed = loadEdition(ctx, nb.edition.tag, nb.edition.asset);
+          if (ed.sha256 !== nb.edition.sha256) throw new Error(`${nb.edition.asset} has another checksum than the index lists`);
+          files = ed.dayFiles;
+        }
+        const dayFilesOfNewer = files;
+        const days = newerDays.filter((d) => dayFilesOfNewer.has(d));
+        newer = days.flatMap((d) => linesToNodes(dayFilesOfNewer.get(d)!));
+        newerMeta = { label: `${nb.edition.tag}/${nb.edition.asset}`, sha256: nb.edition.sha256, days };
+      } else if (nb.kind === 'boundary') {
+        const entries = ctx.archives.filter((a) => (a.days ?? []).some((d) => newerDays.includes(d)));
+        const read = (ctx.readArchive ?? readArchivedDays)(entries, new Set(newerDays));
+        if (read.failedMonths.size) {
+          ctx.report.blocked.push(`history: re-merge of ${p.key} waits: the archive of the boundary days could not be read (${[...read.failedMonths].join(', ')})`);
+          continue;
+        }
+        const days = newerDays.filter((d) => read.days.has(d));
+        newer = days.flatMap((d) => read.days.get(d)!);
+        const a = entries[0];
+        newerMeta = { label: entries.map((x) => `${x.tag}/${x.asset}`).join(' + '), sha256: a?.sha256 ?? null, days };
       }
-      const dayFilesOfNewer = files;
-      const days = newerDays.filter((d) => dayFilesOfNewer.has(d));
-      newer = days.flatMap((d) => linesToNodes(dayFilesOfNewer.get(d)!));
-      newerMeta = { label: `${nb.edition.tag}/${nb.edition.asset}`, sha256: nb.edition.sha256, days };
-    } else if (nb.kind === 'boundary') {
-      const entries = ctx.archives.filter((a) => (a.days ?? []).some((d) => newerDays.includes(d)));
-      const read = (ctx.readArchive ?? readArchivedDays)(entries, new Set(newerDays));
-      if (read.failedMonths.size) {
-        ctx.report.blocked.push(`history: re-merge of ${p.key} waits: the archive of the boundary days could not be read (${[...read.failedMonths].join(', ')})`);
+      // Older context: the older month's last 7 days (its current edition, merged or not), frozen; its into_newer
+      // survivors are this month's anchored events.
+      const olderP = periods.find((q) => q.endMs === p.startMs);
+      const olderEntry = olderP ? currentEdition(ctx.idx, olderP.key) : undefined;
+      let older: EventNode[] = [];
+      let olderMeta: ContextMeta | null = null;
+      const anchored = new Set<string>();
+      if (olderEntry) {
+        const od = loadCurrent(ctx, cache, olderEntry, prevEntry.asset);
+        const days = Array.from({ length: 7 }, (_, i) => dayAfter(dayKeyOf(p.startMs), i - 7)).filter((d) => od.dayFiles.has(d));
+        older = days.flatMap((d) => linesToNodes(od.dayFiles.get(d)!));
+        olderMeta = { label: `${olderEntry.tag}/${olderEntry.asset}`, sha256: olderEntry.sha256, days };
+        const ownIds = new Set(own.map((n) => n.feedId));
+        for (const x of od.meta.merge?.into_newer ?? []) if (ownIds.has(x.survivor)) anchored.add(x.survivor);
+      }
+      const before = snapshotUnit(own);
+      let res: ReturnType<typeof remergeNodes>;
+      let normalized: ReturnType<typeof normalizeUnit>;
+      try {
+        normalized = normalizeUnit(own, ctx.registry);
+        normalizeUnit(older, ctx.registry);
+        normalizeUnit(newer, ctx.registry);
+        res = remergeNodes({ own, memberDay, startMs: p.startMs, endMs: p.endMs, older, newer, anchored, registry: ctx.registry, ingestTime: REMERGE_INGEST_TIME, epoch });
+      } catch (e) {
+        ctx.report.blocked.push(`history: re-merge of ${p.key} blocked: ${e instanceof Error ? e.message : String(e)}`);
         continue;
       }
-      const days = newerDays.filter((d) => read.days.has(d));
-      newer = days.flatMap((d) => read.days.get(d)!);
-      const a = entries[0];
-      newerMeta = { label: entries.map((x) => `${x.tag}/${x.asset}`).join(' + '), sha256: a?.sha256 ?? null, days };
-    }
-    // Older context: the older month's last 7 days (its current edition, merged or not), frozen; its into_newer
-    // survivors are this month's anchored events.
-    const olderP = periods.find((q) => q.endMs === p.startMs);
-    const olderEntry = olderP ? currentEdition(ctx.idx, olderP.key) : undefined;
-    let older: EventNode[] = [];
-    let olderMeta: ContextMeta | null = null;
-    const anchored = new Set<string>();
-    if (olderEntry) {
-      const od = loadCurrent(ctx, cache, olderEntry, prevEntry.asset);
-      const days = Array.from({ length: 7 }, (_, i) => dayAfter(dayKeyOf(p.startMs), i - 7)).filter((d) => od.dayFiles.has(d));
-      older = days.flatMap((d) => linesToNodes(od.dayFiles.get(d)!));
-      olderMeta = { label: `${olderEntry.tag}/${olderEntry.asset}`, sha256: olderEntry.sha256, days };
-      const ownIds = new Set(own.map((n) => n.feedId));
-      for (const x of od.meta.merge?.into_newer ?? []) if (ownIds.has(x.survivor)) anchored.add(x.survivor);
-    }
-    const before = snapshotUnit(own);
-    let res: ReturnType<typeof remergeNodes>;
-    let normalized: ReturnType<typeof normalizeUnit>;
-    try {
-      normalized = normalizeUnit(own, ctx.registry);
-      normalizeUnit(older, ctx.registry);
-      normalizeUnit(newer, ctx.registry);
-      res = remergeNodes({ own, memberDay, startMs: p.startMs, endMs: p.endMs, older, newer, anchored, registry: ctx.registry, ingestTime: REMERGE_INGEST_TIME, epoch });
+      const gates = remergeGateProblems(before, own, res);
+      if (gates.length) {
+        ctx.report.blocked.push(`history: re-merge of ${p.key} blocked by its gates: ${gates.slice(0, 5).join('; ')}`);
+        continue;
+      }
+      const tag = historyTag(p.key);
+      const edition = nextEdition(assetNames(ctx, tag), p.key, prevEntry.edition + 1);
+      const dayFiles = remergedDayFiles(own, res.dayOf);
+      const live = own.filter((n) => n.state === 'live').length;
+      const meta: EditionMeta = {
+        ...prev.meta,
+        edition,
+        events: live,
+        days: [...dayFiles.keys()],
+        merge: mergeMeta(res, {
+          epoch,
+          ingestTime: REMERGE_INGEST_TIME,
+          from: { edition: prevEntry.edition, asset: prevEntry.asset, sha256: prevEntry.sha256 },
+          older: olderMeta,
+          newer: newerMeta,
+          anchored,
+          normalized,
+        }),
+        lines: own.length,
+        superseded: own.filter((n) => n.state === 'superseded').length,
+      };
+      const prevCheck = verifyEdition(prev.dayFiles, { period: p, boundary: ctx.cfg.boundary, archivedDays: ctx.archivedDays, meta: prev.meta });
+      const check = verifyEdition(dayFiles, { period: p, boundary: ctx.cfg.boundary, archivedDays: ctx.archivedDays, meta, prev: prevCheck });
+      if (check.errors.length) {
+        ctx.report.blocked.push(`history: re-merge of ${p.key} e${edition} fails verification: ${check.errors.slice(0, 5).join('; ')}`);
+        continue;
+      }
+      const asset = editionAssetName(p.key, edition);
+      const dir = join(ctx.work, `remerge-${p.key}`);
+      mkdirSync(dir, { recursive: true });
+      for (const [day, text] of dayFiles) writeFileSync(join(dir, `${day.slice(8, 10)}.ndjson`), text);
+      writeFileSync(join(dir, '_edition.json'), JSON.stringify(meta, null, 2) + '\n');
+      const tar = join(ctx.work, asset.replace(/\.zst$/, ''));
+      createTar(tar, dir, readdirSync(dir));
+      const file = zstdCompress(tar);
+      const sha = sha256File(file);
+      const bytes = readFileSync(file).length;
+      uploadVerified(ctx, tag, file, sha);
+      ctx.idx.editions.push(editionEntryOf(tag, asset, sha, bytes, meta));
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(file, { force: true });
+      lastMerged = { asset, dayFiles };
+      cache.delete(prevEntry.asset);
+      const m = meta.merge!;
+      ctx.report.remerged.push(
+        `${tag}/${asset}: ${m.live_before} -> ${m.live_after} live (${m.merges.length} folded, ${m.into_newer.length} into the newer month, ${m.off_unit.length} off the month) ` +
+          `from ${prevEntry.asset} in ${m.steps.windows} window(s), slowest ${res.steps.slowest_ms} ms, ${((Date.now() - started) / 1000).toFixed(1)} s in all; ${(bytes / 1e6).toFixed(2)} MB`,
+      );
+      console.log(`history: re-merged ${p.key} -> ${tag}/${asset} (${m.live_before} -> ${m.live_after} live)`);
     } catch (e) {
-      ctx.report.blocked.push(`history: re-merge of ${p.key} blocked: ${e instanceof Error ? e.message : String(e)}`);
-      continue;
+      // One month's failure is that month's block (isolateMonth); the older months wait for it, the fetches go on.
+      isolateMonth(ctx, skipOf(ctx), 're-merging', p.key, () => {
+        throw e;
+      });
     }
-    const gates = remergeGateProblems(before, own, res);
-    if (gates.length) {
-      ctx.report.blocked.push(`history: re-merge of ${p.key} blocked by its gates: ${gates.slice(0, 5).join('; ')}`);
-      continue;
-    }
-    const tag = historyTag(p.key);
-    const edition = nextEdition(assetNames(ctx, tag), p.key, prevEntry.edition + 1);
-    const dayFiles = remergedDayFiles(own, res.dayOf);
-    const live = own.filter((n) => n.state === 'live').length;
-    const meta: EditionMeta = {
-      ...prev.meta,
-      edition,
-      events: live,
-      days: [...dayFiles.keys()],
-      merge: mergeMeta(res, {
-        epoch,
-        ingestTime: REMERGE_INGEST_TIME,
-        from: { edition: prevEntry.edition, asset: prevEntry.asset, sha256: prevEntry.sha256 },
-        older: olderMeta,
-        newer: newerMeta,
-        anchored,
-        normalized,
-      }),
-      lines: own.length,
-      superseded: own.filter((n) => n.state === 'superseded').length,
-    };
-    const prevCheck = verifyEdition(prev.dayFiles, { period: p, boundary: ctx.cfg.boundary, archivedDays: ctx.archivedDays, meta: prev.meta });
-    const check = verifyEdition(dayFiles, { period: p, boundary: ctx.cfg.boundary, archivedDays: ctx.archivedDays, meta, prev: prevCheck });
-    if (check.errors.length) {
-      ctx.report.blocked.push(`history: re-merge of ${p.key} e${edition} fails verification: ${check.errors.slice(0, 5).join('; ')}`);
-      continue;
-    }
-    const asset = editionAssetName(p.key, edition);
-    const dir = join(ctx.work, `remerge-${p.key}`);
-    mkdirSync(dir, { recursive: true });
-    for (const [day, text] of dayFiles) writeFileSync(join(dir, `${day.slice(8, 10)}.ndjson`), text);
-    writeFileSync(join(dir, '_edition.json'), JSON.stringify(meta, null, 2) + '\n');
-    const tar = join(ctx.work, asset.replace(/\.zst$/, ''));
-    createTar(tar, dir, readdirSync(dir));
-    const file = zstdCompress(tar);
-    const sha = sha256File(file);
-    const bytes = readFileSync(file).length;
-    uploadVerified(ctx, tag, file, sha);
-    ctx.idx.editions.push(editionEntryOf(tag, asset, sha, bytes, meta));
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(file, { force: true });
-    lastMerged = { asset, dayFiles };
-    cache.delete(prevEntry.asset);
-    const m = meta.merge!;
-    ctx.report.remerged.push(
-      `${tag}/${asset}: ${m.live_before} -> ${m.live_after} live (${m.merges.length} folded, ${m.into_newer.length} into the newer month, ${m.off_unit.length} off the month) ` +
-        `from ${prevEntry.asset} in ${m.steps.windows} window(s), slowest ${res.steps.slowest_ms} ms, ${((Date.now() - started) / 1000).toFixed(1)} s in all; ${(bytes / 1e6).toFixed(2)} MB`,
-    );
-    console.log(`history: re-merged ${p.key} -> ${tag}/${asset} (${m.live_before} -> ${m.live_after} live)`);
   }
 }
 

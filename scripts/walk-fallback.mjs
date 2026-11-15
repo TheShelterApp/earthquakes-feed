@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// The fallback of the two hourly walks (run by .github/workflows/walk-fallback.yml; R16-FOLLOWUPS (7), round 22).
+// The fallback of the hourly walks (run by .github/workflows/walk-fallback.yml; R16-FOLLOWUPS (7), round 22): history.yml,
+// first-solutions.yml and, since the 2026-11-15 audit, backfill.yml's backward walk.
 //
 // The deep-history walk (history.yml) and first-solutions' collect job share the concurrency group
 // `earthquakes-feed-history`, so the two never ask a host at the same time. The heartbeat Worker dispatches them at
@@ -37,6 +38,9 @@ import { pathToFileURL } from 'node:url';
 export const WALKS = Object.freeze({
   'history.yml': Object.freeze({ cron: '29 * * * *', heartbeatMinute: 26, inputs: null }),
   'first-solutions.yml': Object.freeze({ cron: '50 * * * *', heartbeatMinute: 48, inputs: Object.freeze({ tick: '1' }) }),
+  // The backward walk of backfill.yml (writer group): its own hourly cron at :41 beside the Worker's dispatch at :41 was
+  // a second walk in a delivered hour, taking a writer-queue slot the gate counts (2026-11-15 audit, feed-workflows 3).
+  'backfill.yml': Object.freeze({ cron: '45 * * * *', heartbeatMinute: 41, inputs: null }),
 });
 
 /** Two hourly ticks of the Worker plus 5 minutes of dispatch lag (the Worker's runs are created 25–44 s after the minute). */

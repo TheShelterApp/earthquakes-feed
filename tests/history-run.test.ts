@@ -672,3 +672,54 @@ test('history-verify --era: one era is verified with only its own assets on disk
   assert.notEqual(verify().status, 0, 'every era: era A\'s assets are missing');
   assert.equal(verify('--era', 'C').status, 2, 'an unknown era is a usage error');
 });
+
+// 2026-11-15 audit (history 1): one month whose seal or re-merge throws no longer stops the walk. Before, the throw left
+// runWalk's single try, so the fetches of every older month waited until the month was fixed.
+
+/** An indexed raw asset of `period` in the store; `sha256` overrides the index checksum (a drifted or poisoned entry). */
+function indexedRaw(ctx: Ctx, period: string, sha256?: string): void {
+  const tag = historyTag(period);
+  ctx.store.ensureRelease(tag);
+  const src = mkdtempSync(join(tmpdir(), 'history-raw-'));
+  const file = rawAsset(src, period);
+  ctx.store.upload(tag, file);
+  const bytes = readFileSync(file);
+  const p = allPeriods(CFG).find((x) => x.key === period)!;
+  ctx.idx.raw.push({
+    source: 'usgs', period, tag, asset: rawAssetName('usgs', period, 1), url: 'x', sha256: sha256 ?? createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length,
+    rows: 0, provider_count: 0, start: new Date(p.startMs).toISOString(), end: new Date(p.endMs).toISOString(), fetch_min_magnitude: null, fetched_at: NOW_ISO,
+  });
+}
+
+test('isolation: a month whose seal throws is that month\'s block, tried once per run; the older months are still fetched', { skip: !hasZstd && 'zstd not installed' }, async () => {
+  const h = answering();
+  const ctx = ctxOf({ fetchOptions: h.fetchOptions });
+  indexedRaw(ctx, '2022-12', '0'.repeat(64));
+  const run = await runWalk(ctx, emptyState(), ctx.cfg.maxUnitsPerRun);
+  assert.equal(run.fatal, null, 'not a stop of the whole walk');
+  assert.deepEqual(ctx.idx.raw.map((r) => r.period).sort(), ['2022-11', '2022-12'], 'the older month was fetched');
+  assert.equal(ctx.report.fetched.length, 1);
+  const sealBlocks = ctx.report.blocked.filter((m) => m.includes('sealing 2022-12 failed'));
+  assert.equal(sealBlocks.length, 1, `stated once though sealPeriods ran three times: ${ctx.report.blocked.join(' | ')}`);
+  assert.match(sealBlocks[0]!, /has checksum .* the index says 0{64}.*tried again next run/);
+  assert.deepEqual(ctx.report.sealed, [], '2022-11 waits for its newer neighbour');
+  assert.equal(run.unsealed, 2);
+});
+
+test('isolation: an upload that reads back with other bytes still stops the walk (fatal)', { skip: !hasZstd && 'zstd not installed' }, async () => {
+  class Tampering extends LocalStore {
+    override download(tag: string, asset: string, dest: string): void {
+      super.download(tag, asset, dest);
+      if (dest.includes('verify-')) writeFileSync(dest, 'tampered');
+    }
+  }
+  const h = answering();
+  const ctx = ctxOf({ fetchOptions: h.fetchOptions, idx: emptyIndex(CFG.boundary) });
+  ctx.store = new Tampering(join(ctx.work, '..', 'releases'));
+  indexedRaw(ctx, '2022-11');
+  indexedRaw(ctx, '2022-12');
+  const run = await runWalk(ctx, emptyState(), ctx.cfg.maxUnitsPerRun);
+  assert.ok(run.fatal instanceof Error);
+  assert.match((run.fatal as Error).message, /reads back with another checksum/);
+  assert.equal(run.complete, false);
+});

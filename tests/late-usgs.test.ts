@@ -23,6 +23,7 @@ import {
   lateUsgsRowsOfNodes,
   partitionAsset,
   pruneLateUsgs,
+  staleLateUsgsDays,
 } from '../src/remediation.js';
 import { LATE_COMCAT, comcatGate, editionReasons, gateCauses, verifyRow } from '../src/stats-history.js';
 import type { EventNode, RawObs } from '../src/types.js';
@@ -276,6 +277,36 @@ test('late_usgs prune: only earlier late_usgs editions of the day leave the inde
   assert.deepEqual(idx.editions.map((e) => e.asset), ['events-2026-09-15.e2.ndjson.gz', 'events-2026-09-16.e1.ndjson.gz', 'events-2026-06-29.e1.ndjson.gz', 'events-2026-09-15.e3.ndjson.gz']);
   assert.deepEqual(idx.raw.map((r) => r.asset), ['raw-2026-09-16-1', 'raw-2026-06-29-1', 'raw-2026-09-15-3']);
   assert.deepEqual(pruneLateUsgs(idx, ref('2026-06-29', 2, 'seam', 'archive-2026-06')), [], 'never for another reason');
+});
+
+test('late_usgs stale editions (audit M-2): a day past the 45-day window whose partition a backfill rewrote since its edition is looked at again; an unchanged blob, another reason or an archived day is not', () => {
+  const ed = (day: string, edition: number, blob: string | undefined, reason: 'late_usgs' | 'seam' = 'late_usgs', tag = 'data') => ({
+    day, edition, tag: 'remediation-2026', asset: `events-${day}.e${edition}.ndjson.gz`, url: '', sha256: 'x', bytes: 1,
+    built_on: { tag, asset: partitionAsset(day), sha256: 'b', ...(blob ? { blob } : {}) }, built_from: [], reason, stats: {} as never, built_at: '',
+  });
+  const idx = emptyRemediationIndex();
+  idx.editions.push(
+    ed('2026-08-10', 1, 'old1'), // rewritten by a backfill since: stale
+    ed('2026-08-11', 1, 'same'), // untouched
+    ed('2026-08-12', 1, 'old2'), { ...ed('2026-08-12', 2, 'new2') }, // the current edition already follows the partition
+    ed('2026-08-13', 1, 'old3'), { ...ed('2026-08-13', 2, 'new3'), withdrawn: { at: '', reason: 'r' } }, // the current one is e1, stale
+    ed('2026-08-14', 1, undefined), // no blob recorded: not compared
+    ed('2026-06-20', 1, 'arch', 'seam', 'archive-2026-06'), // another reason, built on an archive
+    ed('2026-08-15', 1, 'old5'), // no partition now (rolled into an archive)
+  );
+  const blobs = new Map([['2026-08-10', 'new1'], ['2026-08-11', 'same'], ['2026-08-12', 'new2'], ['2026-08-13', 'new3'], ['2026-08-14', 'x'], ['2026-06-20', 'y']]);
+  const stale = staleLateUsgsDays(idx, blobs);
+  assert.deepEqual(stale, ['2026-08-10', '2026-08-13']);
+  const fb = frozenBefore(NOW);
+  const partitionDays = new Set(days('2026-07-01', '2026-11-14'));
+  const archivedDays = new Set([...days('2026-06-01', '2026-06-30'), '2026-08-13']);
+  const d = lateUsgsDays({ nowMs: NOW, frozenBefore: fb, partitionDays, archivedDays, stale });
+  assert.equal(d[0], '2026-08-10', 'a stale day 96 days old is looked at (oldest first, ahead of the window)');
+  assert.ok(!d.includes('2026-08-13'), 'never an archived day');
+  assert.equal(d[1], '2026-09-30', 'then the 45-day window as before');
+  assert.equal(d.length, 35, '34 window days (09-30..11-02) + 1 stale');
+  assert.equal(new Set(d).size, d.length, 'a stale day inside the window is listed once');
+  assert.deepEqual(lateUsgsDays({ nowMs: NOW, frozenBefore: fb, partitionDays, archivedDays, stale: ['2026-10-05'] }).length, 34);
 });
 
 test('late_usgs day: plan mode diffs only; an unchanged day, an archived day and a day without a partition publish nothing', async () => {

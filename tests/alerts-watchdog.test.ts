@@ -729,6 +729,35 @@ test('APNs: dry, key problems and split without production are P1 with members; 
   assert.equal(plainExitCode(counters.findings), 0);
 });
 
+test('APNs: an APNs-wide failure (sent 0 with failures or queued retries) is P1, a failed last job or a high failure share P2', () => {
+  const day = '2026-09-25';
+  const base = (patch: Record<string, unknown>) => {
+    const doc = statusFixture('healthy-r3');
+    doc.fanout = { ...doc.fanout, ...patch };
+    return doc;
+  };
+  const none = must(evaluateStatus(base({ jobs: 2, sent: 0, failed: 0, retry_queued: 40 }), { nowMs: NOW }), 'alerts:apns');
+  assert.deepEqual([none.severity, none.check, none.members], ['P1', 'gh-deliver', ['delivery-none']]);
+  assert.match(none.text, /^no push was delivered today \(UTC 2026-09-25\): 2 fan-out job\(s\) sent 0 with 0 failed and 40 queued for retry/);
+  assert.deepEqual(must(evaluateStatus(base({ jobs: 1, sent: 0, failed: 5, retry_queued: 0 }), { nowMs: NOW }), 'alerts:apns').members, ['delivery-none']);
+  // Below the floor, or no job yet, or something delivered: not P1.
+  assert.deepEqual(evaluateStatus(base({ jobs: 1, sent: 0, failed: 1, retry_queued: 1 }), { nowMs: NOW }).findings, []);
+  assert.deepEqual(evaluateStatus(base({ jobs: 0, sent: 0, failed: 9, retry_queued: 9 }), { nowMs: NOW }).findings, []);
+  assert.deepEqual(evaluateStatus(base({ jobs: 3, sent: 100, failed: 5, retry_queued: 5 }), { nowMs: NOW }).findings, []);
+  // A high failure share with something delivered: P2.
+  const share = must(evaluateStatus(base({ jobs: 3, sent: 20, failed: 25, retry_queued: 10 }), { nowMs: NOW }), 'alerts:apns');
+  assert.deepEqual([share.severity, share.members], ['P2', ['delivery-failure-share']]);
+  assert.equal(plainExitCode(evaluateStatus(base({ jobs: 3, sent: 20, failed: 25, retry_queued: 10 }), { nowMs: NOW }).findings), 1);
+  // The last job ended failed today: P2; a failed job of an earlier day is not.
+  const failedJob = (atMs: number) => base({ jobs: 3, sent: 41, lastJob: { eventId: 'ae_x', rev: 1, status: 'failed', shards: 4, atMs, sent: 0, failed: 0 } });
+  const lj = must(evaluateStatus(failedJob(Date.parse(`${day}T10:00:00Z`)), { nowMs: NOW }), 'alerts:apns');
+  assert.deepEqual([lj.severity, lj.members], ['P2', ['last-job-failed']]);
+  assert.deepEqual(evaluateStatus(failedJob(Date.parse('2026-09-24T10:00:00Z')), { nowMs: NOW }).findings, []);
+  // P1 outranks the P2 members, which are listed with it.
+  const both = must(evaluateStatus(base({ jobs: 2, sent: 0, failed: 4, lastJob: { eventId: 'ae_x', rev: 1, status: 'failed', shards: 4, atMs: Date.parse(`${day}T10:00:00Z`) } }), { nowMs: NOW }), 'alerts:apns');
+  assert.deepEqual([both.severity, both.members], ['P1', ['delivery-none', 'last-job-failed']]);
+});
+
 test('APNs: fields an older gateway does not publish are never a finding', () => {
   const legacy = evaluateStatus(HEALTHY, { nowMs: NOW, canary: usgsSummary() });
   assert.deepEqual([legacy.findings, legacy.unjudged], [[], []]);

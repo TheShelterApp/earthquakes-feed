@@ -310,7 +310,9 @@ export const RULES = Object.freeze({
   'alerts:apns': rule('alerts:apns', {
     title: 'APNs',
     // P1: not configured, apns.problems not empty, or split mode without production. P3: today's skipped_no_key > 0
-    // with production present, or retry_dropped_budget > 0 (cleared by the next UTC day).
+    // with production present, or retry_dropped_budget > 0 (cleared by the next UTC day). P1 also when today's jobs
+    // delivered nothing (fanout.sent 0 with failed + retry_queued >= 3: revoked key, APNs outage); P2 when
+    // fanout.lastJob.status is 'failed' today or fanout.failed is >= 20 and >= half of sent + failed.
     board: 'alerts', class: 'symptom', severity: 'P1', key: 'alerts:apns', check: 'gh-deliver',
   }),
   'alerts:canary': rule('alerts:canary', {

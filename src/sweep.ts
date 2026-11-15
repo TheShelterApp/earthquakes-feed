@@ -2,6 +2,7 @@ import { LATE_MINT_PROVIDERS } from './config.js';
 import type { Resolver } from './dedup.js';
 import type { LogBuffer } from './oplog.js';
 import type { RawObs, Watermarks } from './types.js';
+import { advanceWatermark } from './watermark.js';
 
 /** One event the sweep minted (the run log names each). */
 export interface LateMint {
@@ -73,6 +74,8 @@ export function revisionSweep(
   watermarks: Watermarks,
   ingestTime: string,
   lateMintProviders: ReadonlySet<string> = LATE_MINT_PROVIDERS,
+  /** The run clock the watermark ceiling is measured from (advanceWatermark); the ingest time by default. */
+  nowMs: number = Date.parse(ingestTime),
 ): SweepResult {
   let revisions = 0;
   const lateMinted: LateMint[] = [];
@@ -80,7 +83,9 @@ export function revisionSweep(
   let stale = 0;
   for (const raw of updates) {
     if (raw.providerUpdatedMs != null) {
-      watermarks[raw.provider] = Math.max(watermarks[raw.provider] ?? 0, raw.providerUpdatedMs);
+      // Clamped like the live path (2026-11-15 audit): a future update stamp from a sweep row must not pin the very
+      // watermark the next sweep asks `updatedafter` from.
+      watermarks[raw.provider] = advanceWatermark(watermarks[raw.provider], raw.providerUpdatedMs, nowMs);
     }
     if (resolver.isOlderThanStored(raw)) {
       stale++;

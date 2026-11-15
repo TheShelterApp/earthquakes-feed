@@ -208,3 +208,44 @@ test('the map iterates in the same order in either layout: day by day, feed ids 
     rmSync(hours, { recursive: true, force: true });
   }
 });
+
+// 2026-11-15 audit: aggregate loads LIVE_INDEX_DAYS of event-days, but the updatedafter sweep reaches further back. A
+// revision that moves a node across midnight onto a day below the loaded window must not rewrite that (unloaded) day
+// from the map alone — that deleted the day's other shards and emptied its frozen partition.
+test('a node moved below the load floor merges into the unloaded day, which keeps its other events', () => {
+  const root = mkdtempSync(join(tmpdir(), 'evmap-floor-'));
+  const nowMs = Date.parse('2026-10-12T12:00:00Z');
+  const dayMs = (i: number): number => Date.parse('2026-10-01T00:00:00Z') + i * 86_400_000;
+  const all = new Map<string, EventNode>();
+  for (let d = 0; d < 12; d++) {
+    for (const h of [1, 7, 13, 19]) {
+      const n = node(`d${d}h${h}`, dayMs(d) + h * 3_600_000);
+      all.set(n.feedId, n);
+    }
+  }
+  saveEventMap(root, all);
+  const sinceDays = 10;
+  const loaded = loadEventMap(root, { sinceDays, nowMs });
+  const floorDay = '2026-10-02';
+  assert.ok(![...loaded.values()].some((n) => n.eventTimeMs < Date.parse(`${floorDay}T00:00:00Z`)));
+  assert.ok(loaded.has('d1h1'));
+  // A revision moves the oldest loaded day's first event across midnight onto the day before (not loaded).
+  const moved = loaded.get('d1h1')!;
+  moved.eventTimeMs = dayMs(1) - 30 * 60_000;
+  moved.lastSeq = 2;
+  saveEventMap(root, loaded, undefined, { floorDay });
+  const after = loadEventMap(root);
+  for (const h of [1, 7, 13, 19]) assert.ok(after.has(`d0h${h}`), `d0h${h} survives`);
+  assert.equal(after.get('d1h1')!.eventTimeMs, dayMs(1) - 30 * 60_000);
+  assert.equal(after.get('d1h1')!.lastSeq, 2);
+  assert.equal([...after.values()].filter((n) => n.feedId === 'd1h1').length, 1);
+  const day0 = readdirSync(dataPaths(root).eventMapDir).filter((f) => f.startsWith('2026-10-01'));
+  const day0Ids = day0.flatMap((f) =>
+    readFileSync(join(dataPaths(root).eventMapDir, f), 'utf8').trim().split('\n').map((l) => (JSON.parse(l) as EventNode).feedId),
+  );
+  assert.deepEqual(day0Ids.sort(), ['d0h1', 'd0h13', 'd0h19', 'd0h7', 'd1h1'].sort());
+  // The oldest loaded day lost the moved node and kept the rest.
+  const day1 = loadEventMap(root, { sinceDays: 11, nowMs });
+  for (const h of [7, 13, 19]) assert.ok(day1.has(`d1h${h}`));
+  rmSync(root, { recursive: true, force: true });
+});

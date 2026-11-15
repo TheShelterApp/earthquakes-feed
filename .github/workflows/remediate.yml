@@ -48,9 +48,11 @@ on:
         description: 'With late_usgs: these days instead of the last 45, e.g. 2026-08-01..2026-08-31 (at most 31; frozen, unarchived days only)'
         required: false
 
+# `queue: max` (as in remerge.yml, which shares the group): every waiting run is kept, none cancels another.
 concurrency:
   group: earthquakes-feed-remediate
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read

@@ -4,9 +4,11 @@ name: backfill
 # (idempotent via the same dedup path), toward a 3-year target. Cold months are rolled
 # to Releases by archive.yml so the tree stays bounded. A dispatch with start/end is a
 # one-off fill of that range and does NOT move the auto-cursor.
+# The walk is dispatched by the heartbeat Worker at :41 (heartbeat/src/worker.js) and has no cron of its own: a
+# delivered cron was a second walk in the hour beside the Worker's (4 of 30 runs on 2026-11-14), each taking a writer
+# queue slot the gate counts. walk-fallback.yml (scripts/walk-fallback.mjs) dispatches it when the Worker has missed two
+# ticks in a row (2026-11-15 audit, feed-workflows 3).
 on:
-  schedule:
-    - cron: '41 * * * *'
   workflow_dispatch:
     inputs:
       starttime:

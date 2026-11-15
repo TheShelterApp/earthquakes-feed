@@ -40,9 +40,13 @@ on:
         description: 'Rollback instead of a merge: <epoch>[:YYYY-MM,...] withdraws what that epoch published (scripts/remerge-commit.mjs rollback); set REMERGE_EPOCH to 0 first'
         required: false
 
+# `queue: max`: GitHub otherwise keeps one pending run per group and a newer arrival cancels it, so a remerge dispatch
+# cancelled the daily scheduled remediate waiting behind a 40-minute remerge run, or the reverse (remediate run
+# 42490202367, 2026-11-08; 2026-11-15 audit, feed-workflows 1). Every run of either workflow is distinct work.
 concurrency:
   group: earthquakes-feed-remediate
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
@@ -51,8 +55,11 @@ jobs:
   collect:
     if: ${{ !inputs.rollback }}
     runs-on: ubuntu-24.04
-    # About 20-40 s of merge work per month and three downloads; a dry run of all 36 months takes longer.
-    timeout-minutes: ${{ inputs.dry_run && 120 || 40 }}
+    # About 20-40 s of merge work per month and three downloads; a dry run of all 36 months takes longer. The budget is
+    # REMERGE_DEADLINE_S (below: no month starts after it) plus the slowest month (a swarm month took about 7 min) plus
+    # setup and the uploads: 35 + 15 min (110 + 20 for a dry run). At 40 a month started at the deadline could hit the
+    # job timeout and lose the run's upload of remerge-pending (2026-11-15 audit, feed-workflows 5).
+    timeout-minutes: ${{ inputs.dry_run && 130 || 50 }}
     permissions:
       contents: write
     outputs:

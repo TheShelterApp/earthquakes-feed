@@ -39,7 +39,7 @@ const env = (more: Record<string, string>): Record<string, string> => ({ GH_TOKE
 const quiet = { log: (): void => {}, annotate: (): void => {}, sleep: async (): Promise<void> => {} };
 
 test('walk-fallback: the walks have no cron of their own; walk-fallback.yml holds one cron per walk', () => {
-  for (const name of ['history.yml', 'first-solutions.yml']) {
+  for (const name of ['history.yml', 'first-solutions.yml', 'backfill.yml']) {
     const text = yml(name);
     // The `on:` block: up to the next top-level key.
     const from = text.indexOf('\non:\n') + 1;
@@ -125,6 +125,11 @@ test('walk-fallback: after two missed ticks it dispatches the walk on main with 
   const fs = fakeGitHub(stale);
   assert.equal(await run({ env: env({ SCHEDULE: '50 * * * *' }), nowMs: NOW, fetchImpl: fs.fetchImpl, ...quiet }), 0);
   assert.deepEqual(fs.calls[1]!.body, { ref: 'main', inputs: { tick: '1' } });
+
+  // backfill.yml (2026-11-15 audit): dispatched as the Worker does, no inputs (a walk tick, not a window).
+  const bf = fakeGitHub(stale);
+  assert.equal(await run({ env: env({ SCHEDULE: '45 * * * *' }), nowMs: NOW, fetchImpl: bf.fetchImpl, ...quiet }), 0);
+  assert.deepEqual([bf.calls[1]!.url, bf.calls[1]!.body], ['https://api.github.com/repos/TheShelterApp/earthquakes-feed/actions/workflows/backfill.yml/dispatches', { ref: 'main' }]);
 
   // No workflow_dispatch run at all: dispatch.
   const none = fakeGitHub(null);

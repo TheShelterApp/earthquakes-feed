@@ -343,8 +343,9 @@ test('workflows: the side-index commit jobs push without the lock and stage only
 test('workflows: remerge.yml shares the remediate group (both write remediation.json); its commit job applies compare-and-set and stages only archives.json and remediation.json (history.json for a rollback)', () => {
   const yml = read('.github/workflows/remerge.yml');
   const top = yml.slice(0, yml.indexOf('\njobs:'));
-  assert.match(top, /\nconcurrency:\n {2}group: earthquakes-feed-remediate\n {2}cancel-in-progress: false\n/);
-  assert.match(read('.github/workflows/remediate.yml'), /\nconcurrency:\n {2}group: earthquakes-feed-remediate\n/);
+  // queue: max on both (2026-11-15 audit): a pending run of one is never cancelled by a newer run of the other.
+  assert.match(top, /\nconcurrency:\n {2}group: earthquakes-feed-remediate\n {2}cancel-in-progress: false\n {2}queue: max\n/);
+  assert.match(read('.github/workflows/remediate.yml'), /\nconcurrency:\n {2}group: earthquakes-feed-remediate\n {2}cancel-in-progress: false\n {2}queue: max\n/);
   const commit = yml.slice(yml.indexOf('\n  commit:'));
   assert.doesNotMatch(commit, /concurrency:/, 'no job-level lock (it would be cancelled while waiting)');
   const steps = commit.slice(commit.indexOf('steps:'));

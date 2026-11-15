@@ -215,7 +215,11 @@ async function main(): Promise<void> {
   // a re-materialized day cannot lose it on the re-roll (C6).
   const homeDay = new Map<string, string>();
   const remember = (day: string, n: EventNode): void => rememberHomeDay(homeDay, day, n);
-  for (let ms = dayStartMs(eventDayKey(minStart)); ms <= maxEnd; ms += DAY) {
+  // The fetch keeps rows up to a minute outside each window (src/providers.ts `inWindow`), so read the margin
+  // days too: a row landing on the day before/after must merge into that day's events, never replace its partition.
+  const readFrom = dayStartMs(eventDayKey(minStart - 60_000));
+  const readTo = maxEnd + 60_000;
+  for (let ms = readFrom; ms <= readTo; ms += DAY) {
     const day = eventDayKey(ms);
     if (day >= liveDay) continue; // never touch live-owned days
     const nodes = readDayPartitionNodes(root, day);

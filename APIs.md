@@ -535,7 +535,7 @@ line full-fat. Resolve the path and freshness from `manifest.partitions[]`:
 
 ```bash
 # an unfrozen day (the last 11 days): its `url`, the Pages copy, always the current bytes:
-curl -s https://earthquakes-feed.theshelter.app/events/2026/10/13.ndjson
+curl -s "https://earthquakes-feed.theshelter.app/events/$(date -u +%Y/%m/%d).ndjson"
 # immutable (cache forever) — use manifest.data_commit for a frozen day:
 curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@<data_commit>/events/2026/07/04.ndjson
 # via branch (12 h cache), any frozen day:
@@ -736,7 +736,7 @@ said automatic or reviewed for 3,192); EMSC represents 1,354 of the rest.
 ## Freshness contract
 
 Scheduled runs are best-effort. A consumer should compute
-`age = (Date.now() - metadata.generated) / 1000` and, if it exceeds
+`age = (Date.now() - metadata.generated) / 1000` (a FeatureCollection's `metadata.generated`, or the manifest's top-level `generated`) and, if it exceeds
 `manifest.freshness.stale_after_seconds`, mark the layer **degraded** and fall back to
 its own realtime source (e.g. the EMSC WebSocket) if it has one.
 The v2 manifest adds `freshness.offline_after_seconds`: if a consumer's **own last successful

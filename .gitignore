@@ -15,3 +15,10 @@ history-blocked.txt
 stats-blocked.txt
 stats-out/
 history-out/
+
+# Secrets and signing material: never commit (CI holds them as secrets). Public test certificates live under tests/fixtures.
+*.p8
+*.p12
+*.pem
+*.key
+!tests/fixtures/**

@@ -1,3 +1,4 @@
+import { advanceWatermark } from './watermark.js';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { CORRECTION_EPOCH, DATA_DIR, EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS, SWEEP_EPOCH, dataPaths } from './config.js';
@@ -154,7 +155,7 @@ async function main(): Promise<void> {
   for (const raw of raws) {
     const r = resolver.ingest(raw, ingestTime);
     if (raw.providerUpdatedMs != null) {
-      state.watermarks[raw.provider] = Math.max(state.watermarks[raw.provider] ?? 0, raw.providerUpdatedMs);
+      state.watermarks[raw.provider] = advanceWatermark(state.watermarks[raw.provider], raw.providerUpdatedMs, nowMs);
     }
     // A change, or a revision of a row that represents nothing (its own line since round 15, status `rows_revised`).
     const page = recovery?.pages.get(raw);
@@ -196,7 +197,7 @@ async function main(): Promise<void> {
   // only unknown ids are dropped at the door. Watermarks count them as seen, like any report.
   for (const raw of zeroed) {
     if (raw.providerUpdatedMs != null) {
-      state.watermarks[raw.provider] = Math.max(state.watermarks[raw.provider] ?? 0, raw.providerUpdatedMs);
+      state.watermarks[raw.provider] = advanceWatermark(state.watermarks[raw.provider], raw.providerUpdatedMs, nowMs);
     }
   }
   const zeroedOut = withdrawZeroedReports(resolver, log, zeroed, ingestTime);

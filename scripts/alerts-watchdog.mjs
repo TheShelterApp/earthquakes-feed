@@ -93,6 +93,11 @@ export const DIRECT_PROVIDERS = Object.freeze(['usgs', 'emsc', 'gfz']);
 export const BACKSTOP_PROVIDER = 'feed';
 
 const DAY_MS = 86_400_000;
+// alerts:apns delivery rules (today's fan-out totals): P1 at sent 0 with this many failed + queued pushes, P2 at a failure
+// share of DELIVERY_FAILURE_SHARE (fanout.failed against sent) with at least DELIVERY_MIN_SHARE_PUSHES failed (a single device must not page).
+const DELIVERY_MIN_FAILURES = 3;
+const DELIVERY_MIN_SHARE_PUSHES = 20;
+const DELIVERY_FAILURE_SHARE = 0.5;
 const STATUS_BACKOFF_MS = [2_000, 5_000];
 const STATUS_TIMEOUT_MS = 15_000;
 const CANARY_TIMEOUT_MS = 15_000;
@@ -642,6 +647,7 @@ export function evaluateStatus(doc, { nowMs, canary = null, selftest = false } =
   const fanout = doc.fanout;
   const severe = [];
   const minor = [];
+  const degradedDelivery = [];
   const texts = [];
   // Each key fault is judged on its own: an older gateway may publish some of these fields and not others.
   const apnsKnown = isObject(apns) && typeof apns.configured === 'boolean';
@@ -677,11 +683,31 @@ export function evaluateStatus(doc, { nowMs, canary = null, selftest = false } =
       minor.push('retry_dropped_budget');
       texts.push(`${fanout.retry_dropped_budget} transient push failure(s) today${day} were dropped without a retry: the fan-out job's retry budget was spent (fanout.retry_dropped_budget)`);
     }
+    // An APNs-wide failure (revoked or invalid provider key, outage) shows as sent 0 with failures or queued retries:
+    // the provider-token errors are retried, so skipped_no_key and the key fields stay clean. Only today's published
+    // totals are used (sent, failed, retry_queued, jobs, lastJob.status/atMs).
+    const failedN = isNum(fanout.failed) ? fanout.failed : 0;
+    const queuedN = isNum(fanout.retry_queued) ? fanout.retry_queued : 0;
+    const failedPushes = failedN + queuedN;
+    if (isNum(fanout.jobs) && fanout.jobs > 0 && fanout.sent === 0 && failedPushes >= DELIVERY_MIN_FAILURES) {
+      severe.push('delivery-none');
+      texts.push(`no push was delivered today${day}: ${fanout.jobs} fan-out job(s) sent 0 with ${failedN} failed and ${queuedN} queued for retry (fanout.sent, failed, retry_queued): check the APNs provider key and Apple's status`);
+    } else if (isNum(fanout.sent) && failedN >= DELIVERY_MIN_SHARE_PUSHES && failedN / (fanout.sent + failedN) >= DELIVERY_FAILURE_SHARE) {
+      // Queued retries are left out of the share: most of them recover on the retry drain, a failed push does not.
+      degradedDelivery.push('delivery-failure-share');
+      texts.push(`${failedN} of ${fanout.sent + failedN} pushes today${day} failed for good or lost their retry (fanout.failed against sent)`);
+    }
+    const last = fanout.lastJob;
+    if (isObject(last) && last.status === 'failed' && isNum(last.atMs) && typeof fanout.day === 'string' && new Date(last.atMs).toISOString().slice(0, 10) === fanout.day) {
+      degradedDelivery.push('last-job-failed');
+      texts.push(`the last fan-out job (${oneLine(last.eventId ?? '?', 40)}) ended failed: its deadline passed before every shard reported (fanout.lastJob.status)`);
+    }
   } else {
     parts.push(fanout === null ? 'fanout=none' : 'fanout=n/a');
   }
-  if (severe.length > 0 || minor.length > 0) {
-    findings.push(makeFinding('alerts:apns', { severity: severe.length > 0 ? 'P1' : 'P3', text: texts.join('. '), members: [...severe, ...minor] }));
+  if (severe.length > 0 || degradedDelivery.length > 0 || minor.length > 0) {
+    const severity = severe.length > 0 ? 'P1' : degradedDelivery.length > 0 ? 'P2' : 'P3';
+    findings.push(makeFinding('alerts:apns', { severity, text: texts.join('. '), members: [...severe, ...degradedDelivery, ...minor] }));
   } else if (!apnsKnown) {
     unjudged.push('alerts:apns');
   }

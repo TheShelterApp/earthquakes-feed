@@ -26,8 +26,8 @@ curl -s https://earthquakes-feed.theshelter.app/v1/manifest.json
 curl -s https://earthquakes-feed.theshelter.app/v1/all_day.geojson
 
 # One recent day as a ready-to-render full-detail FeatureCollection (Pages; days in the
-# live window — a partition's pages_url in manifest.json tells you it exists):
-curl -s https://earthquakes-feed.theshelter.app/v1/events/2026-07-04.geojson
+# live window only, older days 404 — a partition's pages_url in manifest.json tells you it exists):
+curl -s "https://earthquakes-feed.theshelter.app/v1/events/$(date -u +%F).geojson"
 
 # The week kept current without re-downloading it: per-day files with sha256 fingerprints plus
 # head_seq deltas (APIs.md, Live index):
@@ -47,7 +47,7 @@ curl -s https://earthquakes-feed.theshelter.app/share/event/efd_01M6Z5Z7N0YS0YZK
 curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2026/07/04.ndjson
 
 # A day of the last 11 (not frozen yet) as NDJSON: the manifest's `url` for it, on Pages:
-curl -s https://earthquakes-feed.theshelter.app/events/2026/10/13.ndjson
+curl -s "https://earthquakes-feed.theshelter.app/events/$(date -u +%Y/%m/%d).ndjson"
 
 # Statistics: the catalog of the columnar day tables (today - 60 .. today) and the year and area files, each with
 # its sha256 (APIs.md, Statistics; listed while providers/stats.json has derive_publish "on"):
@@ -154,8 +154,9 @@ lowest-common-denominator subset). Feed-specific data lives under `properties.fe
 
 Scheduled runs are best-effort (GitHub delays low-activity crons — often ~hourly,
 not every 5 min). Treat the feed as an archive that is usually minutes-fresh, not a
-guaranteed real-time bus. Every FeatureCollection and the manifest carry
-`metadata.generated` (ms epoch) and `metadata.age_seconds`; the manifest also carries
+guaranteed real-time bus. Every FeatureCollection carries
+`metadata.generated` (ms epoch) and `metadata.age_seconds`; the manifest carries the same
+clock as the top-level `generated` (ms epoch) and `generated_iso`, plus
 `freshness.stale_after_seconds` (default 1800). Consumers should mark the layer
 degraded past that and fall back to their own real-time source (e.g. the EMSC
 WebSocket) if they have one. For live-map dedup, index `feed.aliases[]` and merge a
@@ -176,7 +177,7 @@ local magnitudes. Full credits: [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
 - **Global (FDSN):** USGS/ANSS, EMSC/CSEM, GEOFON, ISC (reviewed but months-delayed — backfill-only).
 - **Europe (FDSN):** INGV (Italy), RESIF + RéNaSS + IPGP (France), NOA (Greece), ETHZ (Switzerland), KNMI (Netherlands), LMU (Germany/Bavaria).
 - **Americas / Oceania (FDSN):** NCEDC + SCEDC (California), NRCan (Canada), GeoNet (New Zealand), AusPass (Australia), USP (Brazil).
-- **National APIs (custom adapters):** AFAD (Turkey, to ~M0.6), CENC (China), JMA (Japan), NCS (India), TMD (Thailand + Myanmar), CWA (Taiwan), KAGSR (Russia — Kamchatka/Kurils), BMKG (Indonesia), IGN (Spain), IMO (Iceland), IPMA (Portugal + Azores), BGS (UK), ENSN (Egypt), SSN (Mexico), IGP (Peru), OVSICORI (Costa Rica), IG-EPN (Ecuador), CSN (Chile), INPRES (Argentina), GA (Australia), AEC (Alaska — automatic solutions within minutes, published as `automatic`; its ids are ComCat ids).
+- **National APIs (custom adapters):** AFAD (Turkey, to ~M0.6), CENC (China), JMA (Japan), NCS (India), TMD (Thailand + Myanmar), CWA (Taiwan), KAGSR (Russia — Kamchatka/Kurils), BMKG (Indonesia), IGN (Spain), IMO (Iceland), IPMA (Portugal + Azores), BGS (UK), ENSN (Egypt), SSN (Mexico), IGP (Peru), OVSICORI (Costa Rica), IG-EPN (Ecuador), CSN (Chile), INPRES (Argentina), GA (Australia), GeoSphere (Austria), KOERI (Turkey), PHIVOLCS (Philippines, an HTML bulletin parsed by a custom adapter), AEC (Alaska — automatic solutions within minutes, published as `automatic`; its ids are ComCat ids).
 
 A monthly [`discover.yml`](.github/workflows/discover.yml) scans the FDSN datacenter
 registry and re-probes known-down endpoints, opening an issue with vetted candidates —
@@ -185,7 +186,7 @@ new sources are reviewed and enabled by hand, then **auto-backfilled** into hist
 Kazakhstan, Kyrgyzstan, Uzbekistan, Tajikistan, Turkmenistan, Belarus, Ukraine, and
 Pakistan have no open real-time earthquake API (KNDC is CTBTO-restricted; others publish
 only delayed waveforms); Iran (IRSC) geo-restricts to domestic IPs, the Philippines
-(PHIVOLCS) publishes an HTML bulletin with no machine API, and Romania (INFP) has no
+(PHIVOLCS) has no machine API (its HTML bulletin is read by a custom adapter), and Romania (INFP) has no
 reachable event service. Those regions are covered via the global catalogs until an
 open, reachable source appears.
 
@@ -224,7 +225,7 @@ open, reachable source appears.
   (2023-07-06) in July 2026 except ISC, whose walk is paused; a backfilled row is the
   source's solution when it was fetched, while the log holds each report as first seen
   since 2026-07-05 (`scripts/first-observations.ts`; [APIs.md](APIs.md#history-and-backfill)). A source that answers
-  for its recent past only (registry `retentionDays`; AFAD since late 2026: its newest 1,000 events, about 12 days) is
+  for its recent past only (registry `retentionDays`; AFAD since late 2026: it answers its newest 1,000 events, about 12 days at its usual rate, and is asked for the last 7 whole days only, `retentionDays: 7`) is
   never asked for an older day: backfill skips such windows with the reason `retention` and remediation builds the day
   without it (`not_fetched` in the edition), instead of recording its empty answer as filled
   ([APIs.md](APIs.md#turkey-afad)). `gh workflow run backfill.yml -f dry_run=true` (with `starttime`, `endtime`,

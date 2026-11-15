@@ -201,7 +201,10 @@ export function buildManifestV2(input: BuildInput): ManifestV2 {
 
   const partitions = v1.partitions.map((p) => {
     const bytes = read(p.path, 'partition');
-    return { ...p, bytes: bytes.byteLength, sha256: sha256Hex(bytes) };
+    // A frozen day's `url` is the immutable one: jsDelivr's `@data` branch ref stops serving files its package no longer
+    // holds (2026-11-14: 26 of 126 frozen days answered 403), `@<data_commit>` always serves them.
+    const url = p.frozen && p.url.startsWith(`${JSDELIVR_BASE}@data/`) ? `${JSDELIVR_BASE}@${dataCommit}/${p.path}` : p.url;
+    return { ...p, url, bytes: bytes.byteLength, sha256: sha256Hex(bytes) };
   });
 
   let stats: StatsRef | null = null;

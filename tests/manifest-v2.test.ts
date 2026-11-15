@@ -238,3 +238,9 @@ test('stats: the index pointer is carried with its bytes and sha256 and signed; 
   assert.equal(v1schema({ ...v, summaries: {}, partitions: [], archives: [] }), true, ajv.errorsText(v1schema.errors));
   assert.equal(v1schema({ ...v, summaries: {}, partitions: [], archives: [], stats: { ...v.stats, format: 2 } }), false);
 });
+
+test('v2 publishes the immutable @data_commit url for a frozen day, the v1 url for an unfrozen one', () => {
+  const m = build();
+  assert.equal(m.partitions.find((p) => p.date === '2025-08-01')!.url, `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@${COMMIT}/events/2025/08/01.ndjson`);
+  assert.equal(m.partitions.find((p) => p.date === '2025-09-04')!.url, v1().partitions[0]!.url);
+});

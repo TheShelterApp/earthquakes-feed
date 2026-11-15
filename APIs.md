@@ -272,7 +272,7 @@ also written under each **retired** id whose final live survivor has a page, so 
 preview; its canonical URL is the survivor's. At most `SHARE_PAGE_CAP` = 5,000 pages, the most significant first (PAGER
 level, tsunami flag, magnitude, felt reports, then the newer event), an event always with all its retired ids. Every
 other path under `/share/event/` gets `share/event/404.html` with status 404: "An earthquake on Shelter", which shows no
-id, no date and nothing else a crafted link could put on a preview. A page leaves with its event (after about 45 days, a
+id, no date and nothing else a crafted link could put on a preview. The ids are case-sensitive (Pages paths are): a lower-case id answers the same generic 404 page, so a link must carry the id as the feed wrote it (the app emits canonical upper-case links). A page leaves with its event (after about 45 days, a
 tombstone, a magnitude revised below 4.0); a link then shows the generic page.
 
 **What a page shows**, only from the feed's event, never from the URL: the magnitude (`M 6.4`), the place, the origin

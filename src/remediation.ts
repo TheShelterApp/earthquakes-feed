@@ -734,10 +734,10 @@ export const LATE_USGS_SCHEDULED: LateUsgsMode = 'on';
 const shiftDay = (day: string, n: number): string => new Date(Date.parse(`${day}T00:00:00Z`) + n * DAY_MS).toISOString().slice(0, 10);
 
 /**
- * The days the refresh looks at, ascending: frozen partitions on the data branch (`partitionDays`) that no archive
- * lists, whose next day is frozen too (before frozenBefore − 1), and from `today − maxAgeDays` on, plus the `stale` days
- * whatever their age — or, with `range` (a dispatch's catch-up, at most MAX_REFILL_DAYS days), the range's days under
- * the same rules. Never an unfrozen day (the live run's), never an archived one.
+ * The days the refresh looks at, ascending within each part: frozen partitions on the data branch (`partitionDays`) that no archive
+ * lists, whose next day is frozen too (before frozenBefore − 1), and from `today − maxAgeDays` on, then (after those,
+ * ascending) the `stale` days whatever their age — or, with `range` (a dispatch's catch-up, at most MAX_REFILL_DAYS
+ * days), the range's days under the same rules. Never an unfrozen day (the live run's), never an archived one.
  */
 export function lateUsgsDays(o: {
   nowMs: number;
@@ -756,8 +756,14 @@ export function lateUsgsDays(o: {
     const first = shiftDay(eventDayKey(o.nowMs), -(o.maxAgeDays ?? LATE_USGS_MAX_AGE_DAYS));
     for (let d = first; d <= last; d = shiftDay(d, 1)) candidates.push(d);
   }
-  for (const d of o.stale ?? []) candidates.push(d);
-  return [...new Set(candidates)].filter((d) => d <= last && o.partitionDays.has(d) && !o.archivedDays.has(d)).sort();
+  const keep = (d: string): boolean => d <= last && o.partitionDays.has(d) && !o.archivedDays.has(d);
+  const days = [...new Set(candidates)].filter(keep).sort();
+  // The stale days after the window's: a run's cap (REMEDIATION_LATE_MAX_DAYS) and deadline go to the window first, so
+  // a backlog of stale days never leaves the window's oldest day unchecked until it ages out of the window. A stale
+  // day not reached is asked again by the next run (it stays stale until rebuilt).
+  const inWindow = new Set(days);
+  const stale = [...new Set(o.stale ?? [])].filter((d) => !inWindow.has(d) && keep(d)).sort();
+  return [...days, ...stale];
 }
 
 /**

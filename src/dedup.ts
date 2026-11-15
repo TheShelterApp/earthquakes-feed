@@ -1542,6 +1542,23 @@ export class Resolver {
     const fid = this.retired.get(`${raw.provider}:${raw.providerEventId}`);
     const node = fid ? this.eventMap.get(fid) : undefined;
     if (!node || node.state !== 'tombstoned' || this.ctx(node)) return null;
+    // ComCat restoring the id lifts what its delete withdrew with it: the COMCAT_LIFECYCLE_PROVIDERS row of the same
+    // ComCat id (withdrawComcatTwins) may join again. Its alias leaves the node, so withdrawnFrom no longer refuses the
+    // provider's next report of the id, which then finds the revived node through the `usgs:` id it names.
+    if (raw.provider === COMCAT_PROVIDER) {
+      const lifted = new Set<string>();
+      for (const id of comcatIdsNamed(raw.provider, raw.providerEventId, raw.fields)) {
+        for (const p of COMCAT_LIFECYCLE_PROVIDERS) {
+          const native = nativeIdOfComcat(p, id);
+          if (native) lifted.add(`${p}:${native}`);
+        }
+      }
+      const gone = node.aliases.filter((a) => lifted.has(a) && !node.provenance.some((r) => `${r.provider}:${r.nativeId}` === a));
+      if (gone.length) {
+        node.aliases = node.aliases.filter((a) => !gone.includes(a));
+        for (const a of gone) this.retired.delete(a);
+      }
+    }
     for (const a of node.aliases) if (!this.alias.has(a)) this.alias.set(a, node.feedId);
     return node.feedId;
   }

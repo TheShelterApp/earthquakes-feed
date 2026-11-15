@@ -1802,7 +1802,8 @@ frozen days not archived yet (late ComCat):
   re-merge (*Re-merged history*) takes an edition built on the partition whose archived file has the same sha256. A
   day older than 45 days whose current `late_usgs` edition is built on another blob than its partition holds now (a
   backfill rewrites the days below the live floor, about 45 days back, exactly the days that just left the window) is
-  asked again by the scheduled run whatever its age (`late_usgs.stale` in the report) and rebuilt on the current
+  asked again by the scheduled run whatever its age, after the window's days so they keep the run's cap
+  (`late_usgs.stale` in the report), and rebuilt on the current
   partition, so the edition never shadows the backfilled rows and the month's re-merge is not blocked at the roll.
 
 `knowledge/index/remediation.json` lists every raw asset (`provider`, `day`, `rows`, `requests`, `partial`,

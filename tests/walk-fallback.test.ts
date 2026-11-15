@@ -56,7 +56,7 @@ test('walk-fallback: the walks have no cron of their own; walk-fallback.yml hold
   assert.equal(walkForSchedule(undefined), null);
   // Its own group: a fallback run that finds nothing to do never queues in, or cancels from, either walk's group.
   const top = fb.slice(0, fb.indexOf('\njobs:'));
-  assert.match(top, /concurrency:\n {2}group: earthquakes-feed-walk-fallback\n/);
+  assert.match(top, /concurrency:\n {2}group: earthquakes-feed-walk-fallback\n {2}cancel-in-progress: false\n {2}queue: max\n/, 'one walk\'s check never cancels another\'s waiting one');
   assert.doesNotMatch(fb, /group: earthquakes-feed-(history|first-solutions)\b/);
   // actions: write only on the job that dispatches; the workflow default stays read-only.
   assert.match(top, /\npermissions:\n {2}contents: read\n/);

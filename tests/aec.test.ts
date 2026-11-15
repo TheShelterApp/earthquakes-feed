@@ -386,6 +386,44 @@ test('aec deletes (v): a ComCat delete of the id withdraws the AEC row too; AEC 
   assert.equal(deleteRun(map, 'aka2026tegabx').withdrawn, 0);
 });
 
+test('aec deletes: ComCat restoring the id in a later run revives the same event, and AEC may join it again (2026-11-15 review)', () => {
+  const map = new Map<string, EventNode>();
+  const r = newResolver(map);
+  r.ingest(aec('aka2026tegabx'), INGEST);
+  r.ingest(usgs('aka2026tegabx'), INGEST);
+  deleteRun(map, 'aka2026tegabx');
+  const node = [...map.values()][0]!;
+  assert.equal(node.state, 'tombstoned');
+  const later = newResolver(map);
+  const back = later.ingest(usgs('aka2026tegabx'), INGEST);
+  assert.equal(back.node.feedId, node.feedId, 'the same feed id, no second event');
+  assert.equal(node.state, 'live');
+  assert.ok(!node.aliases.includes('aec:aka2026tegabx'), 'the withdrawal ComCat lifted leaves the node');
+  const joined = later.ingest(aec('aka2026tegabx'), INGEST);
+  assert.equal(joined.node.feedId, node.feedId);
+  assert.equal(providersOf(node), 'aec:aka2026tegabx usgs:aka2026tegabx');
+  assert.equal(map.size, 1);
+  // A third run reads both by id as usual.
+  assert.equal(newResolver(map).ingest(aec('aka2026tegabx', { mag: 4.4 }), INGEST).node.feedId, node.feedId);
+});
+
+test('aec deletes: an event another agency revives keeps the AEC row of the deleted ComCat id out', () => {
+  const map = new Map<string, EventNode>();
+  const r = newResolver(map);
+  r.ingest(aec('aka2026tegabx'), INGEST);
+  r.ingest(emsc('20260930_0000001'), INGEST);
+  r.ingest(usgs('aka2026tegabx'), INGEST);
+  deleteRun(map, 'aka2026tegabx');
+  const node = live(map)[0]!;
+  // EMSC withdraws its copy too: the event is tombstoned; EMSC lists it again in a later run.
+  newResolver(map).tombstoneProvider(emsc('20260930_0000001'), INGEST);
+  assert.equal(node.state, 'tombstoned');
+  const later = newResolver(map);
+  assert.equal(later.ingest(emsc('20260930_0000001'), INGEST).node.feedId, node.feedId);
+  assert.equal(later.ingest(aec('aka2026tegabx'), INGEST).changed, false, 'ComCat has not restored the id');
+  assert.equal(providersOf(node), 'emsc:20260930_0000001');
+});
+
 test('aec deletes: an AEC-only event (ComCat never reached the feed) is tombstoned by the ComCat delete of its id', () => {
   const map = new Map<string, EventNode>();
   newResolver(map).ingest(aec('aka2026tegabx'), INGEST);

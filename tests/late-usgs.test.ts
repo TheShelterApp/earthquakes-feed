@@ -301,12 +301,27 @@ test('late_usgs stale editions (audit M-2): a day past the 45-day window whose p
   const partitionDays = new Set(days('2026-07-01', '2026-11-14'));
   const archivedDays = new Set([...days('2026-06-01', '2026-06-30'), '2026-08-13']);
   const d = lateUsgsDays({ nowMs: NOW, frozenBefore: fb, partitionDays, archivedDays, stale });
-  assert.equal(d[0], '2026-08-10', 'a stale day 96 days old is looked at (oldest first, ahead of the window)');
+  assert.equal(d[0], '2026-09-30', 'the 45-day window first, as before');
+  assert.equal(d.at(-1), '2026-08-10', 'then the stale day, 96 days old');
   assert.ok(!d.includes('2026-08-13'), 'never an archived day');
-  assert.equal(d[1], '2026-09-30', 'then the 45-day window as before');
   assert.equal(d.length, 35, '34 window days (09-30..11-02) + 1 stale');
   assert.equal(new Set(d).size, d.length, 'a stale day inside the window is listed once');
   assert.deepEqual(lateUsgsDays({ nowMs: NOW, frozenBefore: fb, partitionDays, archivedDays, stale: ['2026-10-05'] }).length, 34);
+});
+
+test('late_usgs stale editions (review): a backlog of stale days never takes the run cap from the window days', () => {
+  const fb = frozenBefore(NOW);
+  const partitionDays = new Set(days('2026-07-01', '2026-11-14'));
+  const stale = days('2026-07-10', '2026-09-20'); // 73 stale days, all older than the window
+  const window = lateUsgsDays({ nowMs: NOW, frozenBefore: fb, partitionDays, archivedDays: new Set() });
+  const d = lateUsgsDays({ nowMs: NOW, frozenBefore: fb, partitionDays, archivedDays: new Set(), stale });
+  assert.equal(d.length, window.length + stale.length);
+  // remediate.ts builds at most REMEDIATION_LATE_MAX_DAYS (40) a run, in this order: every window day is within it.
+  const reached = d.slice(0, 40);
+  for (const w of window) assert.ok(reached.includes(w), `window day ${w} reached`);
+  assert.deepEqual(d.slice(0, window.length), window, 'the window first, ascending');
+  assert.deepEqual(d.slice(window.length), stale, 'then the stale days, ascending');
+  assert.ok(window.includes('2026-09-30'), 'the oldest window day, the next to age out, is checked');
 });
 
 test('late_usgs day: plan mode diffs only; an unchanged day, an archived day and a day without a partition publish nothing', async () => {

@@ -31,9 +31,12 @@ on:
         type: boolean
         default: true
 
+# `queue: max`: three crons share the group (one per walk), and GitHub otherwise keeps one pending run per group, a
+# newer arrival cancelling it: one walk's check must never cancel another's.
 concurrency:
   group: earthquakes-feed-walk-fallback
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read

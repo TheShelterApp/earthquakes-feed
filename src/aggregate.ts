@@ -2,7 +2,7 @@ import { advanceWatermark } from './watermark.js';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { CORRECTION_EPOCH, DATA_DIR, EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS, SWEEP_EPOCH, dataPaths } from './config.js';
-import { HISTORY_FILE_WARN_BYTES, appendObservations, earliestEventMapDay, loadState, saveEventMap, saveMeta } from './bitemporal.js';
+import { HISTORY_FILE_WARN_BYTES, appendObservations, earliestEventMapDay, eventDayKey, loadState, saveEventMap, saveMeta } from './bitemporal.js';
 import { onboardStep } from './onboard.js';
 import { correctedEpoch, correctionFloor, runCorrection } from './correction.js';
 import { Resolver } from './dedup.js';
@@ -374,7 +374,7 @@ async function main(): Promise<void> {
     providers,
     sweeps,
   };
-  saveEventMap(DATA_DIR, state.eventMap);
+  saveEventMap(DATA_DIR, state.eventMap, undefined, { floorDay: eventDayKey(nowMs - loadDays * 86_400_000) });
   const history = saveMeta(DATA_DIR, state.head, state.watermarks, status);
   if (history.historyBytes > HISTORY_FILE_WARN_BYTES) {
     console.warn(

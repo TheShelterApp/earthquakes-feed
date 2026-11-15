@@ -103,7 +103,12 @@ export function loadEventMap(root: string, opts: { sinceDays?: number; nowMs?: n
  *  Round 17 (LANE G): each aggregate commit rewrote ~2.3 day shards of ~1.7 MB, and GitHub's incremental repacks keep
  *  about one compressed copy of every rewritten file per repack (APIs.md, Repository size): ~30 MB a day of the
  *  repository's growth. A run's changes fall into 1–3 hours of a day, so hour shards rewrite ~70 KB files instead. */
-export function saveEventMap(root: string, map: Map<string, EventNode>, hours: number = EVENT_MAP_SHARD_HOURS): void {
+export function saveEventMap(
+  root: string,
+  map: Map<string, EventNode>,
+  hours: number = EVENT_MAP_SHARD_HOURS,
+  opts: { floorDay?: string } = {},
+): void {
   const p = dataPaths(root);
   const byDay = new Map<string, EventNode[]>();
   for (const node of map.values()) {
@@ -115,6 +120,27 @@ export function saveEventMap(root: string, map: Map<string, EventNode>, hours: n
     for (const f of readdirSync(p.eventMapDir)) {
       const m = EVENT_MAP_SHARD.exec(f);
       if (m) (existing.get(m[1]!) ?? existing.set(m[1]!, []).get(m[1]!)!).push(f);
+    }
+  }
+  // A day below the load floor (`floorDay`, the first event-day loadEventMap read) was NOT loaded: `map` holds only the
+  // nodes a revision moved onto it (an updatedafter sweep reaches further back than the loaded window). Rewriting it
+  // from `map` alone would drop every other event of that day, so merge: the day's nodes on disk, upserted by feed id
+  // with the moved nodes (2026-11-15 audit).
+  if (opts.floorDay) {
+    for (const [day, nodes] of byDay) {
+      if (day >= opts.floorDay) continue;
+      const merged = new Map<string, EventNode>();
+      for (const f of (existing.get(day) ?? []).sort()) {
+        for (const line of readFileSync(join(p.eventMapDir, f), 'utf8').split('\n')) {
+          const t = line.trim();
+          if (!t) continue;
+          const n = JSON.parse(t) as EventNode;
+          const held = merged.get(n.feedId);
+          if (!held || (held.lastSeq ?? -1) <= (n.lastSeq ?? -1)) merged.set(n.feedId, n);
+        }
+      }
+      for (const n of nodes) merged.set(n.feedId, n);
+      byDay.set(day, [...merged.values()].filter((n) => eventDayKey(n.eventTimeMs) === day));
     }
   }
   for (const [day, nodes] of byDay) {

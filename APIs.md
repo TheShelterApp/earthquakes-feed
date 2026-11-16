@@ -1807,6 +1807,9 @@ frozen days not archived yet (late ComCat):
   asked again by the scheduled run whatever its age, after the window's days so they keep the run's cap
   (`late_usgs.stale` in the report), and rebuilt on the current
   partition, so the edition never shadows the backfilled rows and the month's re-merge is not blocked at the roll.
+  The scheduled run comes from GitHub's cron alone (the heartbeat Worker does not dispatch `remediate`, `remerge` or
+  `stats`; README, *Cron-only workflows*): a late or dropped delivery delays a day's refresh and loses nothing, since
+  every day stays in the 12–45-day window for 33 daily runs.
 
 `knowledge/index/remediation.json` lists every raw asset (`provider`, `day`, `rows`, `requests`, `partial`,
 `sha256`, `reason`, …) and every edition (`day`, `edition`, `url`, `sha256`, `built_on`: the archive asset and its

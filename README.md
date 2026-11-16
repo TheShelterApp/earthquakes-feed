@@ -353,6 +353,14 @@ skipped as stale, and an unreachable ledger never stops a dispatch. Each activat
 (`wrangler deployments list` lists oldest first; the active version is the last entry). A change
 to the Worker goes through a pull request like any other code and is deployed after the merge.
 
+**Cron-only workflows.** `remediate` (daily, 04:43 UTC), `remerge` (`:41` every 6 h) and `stats` (`:43` every 6 h) run
+on GitHub's crons and by hand only: the Worker does not dispatch them and `walk-fallback.yml` does not cover them, so
+GitHub's late or dropped deliveries delay them (accepted, 2026-11-15 audit, FEED-WF-4). A delay loses nothing: the
+late-ComCat refresh asks again for every frozen day 12–45 days old, so a day stays in its window for 33 daily runs; the
+refill queue and the saturated days persist in `remediation.json` until a run takes them; a re-merge month waits for
+the next run; and a statistics index more than 3 days behind is `feed:stats-through` (P3, below). Covering them from
+the Worker would need hour-aware dispatch (`workflowFor` takes only the minute, and `:41` is backfill's).
+
 ## Health watchdogs (`.github/workflows/health.yml`)
 
 The heartbeat Worker dispatches `health.yml` every 15 minutes (:07, :22, :37, :52). The workflow's own `:25` cron is

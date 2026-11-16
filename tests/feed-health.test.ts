@@ -911,7 +911,7 @@ function stateWorld(o: { shadow?: Record<string, unknown>; gcAgoMs?: number | nu
     [`${API_REPO}/actions/artifacts?name=state-backup&per_page=10`, () => json({ artifacts: o.backupNewest === null ? [] : [art(903, 'state-backup', HOUR)] })],
     [`${API_REPO}/actions/artifacts/903/zip`, () => zipJson({ 'state-backup': { ok: true, newest: o.backupNewest ?? '2026-10-22' } })],
     [`${API_REPO}/actions/artifacts?name=repo-size-samples&per_page=10`, () => json({ artifacts: [art(904, 'repo-size-samples', 2 * HOUR)] })],
-    // A week ago the repository was 50 MB smaller: about 7 MB a day, under the 10 MB line.
+    // A week ago the repository was 50 MB smaller: about 7 MB a day, under the 16 MB line.
     [`${API_REPO}/actions/artifacts/904/zip`, () => zipJson({ 'repo-size': { samples: [{ atMs: NOW - 7 * DAY, kb: 6_050_000 }, { atMs: NOW - 2 * HOUR, kb: 6_099_000 }] } })],
     // The runs behind them: scheduled runs of the expected workflow files on main.
     run(9010, 'aggregate.yml'),
@@ -1432,7 +1432,7 @@ test('feed:state-budget: a ceiling over 70 % is P2 (the Worker\'s snapshot shape
   assert.deepEqual(evaluateStateBudget({ ok: true, json: { a: 1 } }).unjudged, ['feed:state-budget']);
 });
 
-test('feed:repo-growth: a sample a day kept as a series; MB a day since the newest sample 6 days old, over 10 is P3', () => {
+test('feed:repo-growth: a sample a day kept as a series; MB a day since the newest sample 6 days old, over the phase\'s 16 is P3', () => {
   const first = nextSamples(null, NOW - 8 * DAY, 6_000_000);
   assert.deepEqual(first, { samples: [{ atMs: NOW - 8 * DAY, kb: 6_000_000 }], changed: true });
   assert.equal(nextSamples(first, NOW - 8 * DAY + HOUR, 6_000_100).changed, false, 'one sample a day');
@@ -1443,6 +1443,9 @@ test('feed:repo-growth: a sample a day kept as a series; MB a day since the newe
   const ok = evaluateRepoGrowth(series.samples, NOW, 6_072_000);
   assert.deepEqual(ok.findings, []);
   assert.match(ok.notes[0]!, /^repository growth: 9\.0 MB a day over 6\.0 days/);
+  // Phase 2 and the 3a soak grow 14–15 MB a day (APIs.md): within the line, no standing row.
+  assert.deepEqual(evaluateRepoGrowth(series.samples, NOW, 6_018_000 + 15 * 6_000).findings, [], '15 MB a day');
+  assert.equal(RULES['feed:repo-growth'].limits.maxMbPerDay, 16);
   const fast = evaluateRepoGrowth(series.samples, NOW, 6_200_000);
   assert.deepEqual(fast.findings.map((f) => [f.key, f.severity]), [['feed:repo-growth', 'P3']]);
   assert.deepEqual(evaluateRepoGrowth(first.samples, NOW - 7 * DAY, 6_000_000).unjudged, ['feed:repo-growth'], 'not 6 days of samples yet');

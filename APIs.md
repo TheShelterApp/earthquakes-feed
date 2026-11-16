@@ -1696,7 +1696,8 @@ in all; GitHub keeps 1.5–2 times a local pack). The budget, per phase, at GitH
 | phase 4 (the generation under a ref; about 1 commit a day) | 6.6–8.8 | about 1–1.3 years |
 | phase 4 + phase 5 (the rewrite fixes below) | 1.5–2 | about 4.4–5.8 years |
 
-`feed:repo-growth` (P3) files a 7-day growth over 10 MB a day; `feed:repo-size` stays at 8,000,000 KB.
+`feed:repo-growth` (P3) files a 7-day growth over the current phase's budget: 16 MB a day through phase 3a, lowered to
+11 by the phase-3b PR (`maxMbPerDay`, scripts/lib/findings.mjs); `feed:repo-size` stays at 8,000,000 KB.
 
 **The end state.** Git's `data` holds only what consumers fetch from git: the frozen day partitions and small signed
 catalogs, about one commit a day (phase 4). The working state lives in one R2 bucket of content-addressed blobs, with
@@ -1880,8 +1881,9 @@ nothing but the shadow.
 2. `npx tsx scripts/state-restore.ts state-D.tar.zst --out restored/` verifies every blob the generation names and
    unpacks the archive.
 3. Refill the bucket: the owner runs `rclone copy restored/cas r2:earthquakes-feed-state/cas` with their own
-   credentials, or an allow-listed workflow runs `--put` through the Worker. `state-rehearsal.yml` rehearses the same
-   path into staging.
+   credentials. That is the only production path: the Worker's production write allow-list is `aggregate.yml` alone,
+   which never runs the restore, so `--put` through the Worker would need a workflow of its own on that list and a
+   Worker redeploy. `--put` through the Worker is the staging path, which `state-rehearsal.yml` rehearses.
 4. Bump `SWEEP_EPOCH` on main first: a restored generation is older than the cursors git holds, and the 7-day catch-up
    re-asks the sources for what changed since.
 5. Commit the generation under the writer lock: `--data-dir` writes it into a fresh checkout of `data`.

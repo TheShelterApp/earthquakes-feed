@@ -10,10 +10,11 @@
  *   npx tsx scripts/state-restore.ts <asset> --data-dir .data                      # write its generation.json there
  *
  * The archive is verified first (every blob the generation names, its sha256 and size). `--put` with
- * FEED_STATE_BACKEND=worker works only from a workflow the Worker allows to write: on staging, state-rehearsal.yml (the
- * rehearsal of a restore); production's bucket is filled by the owner from `--out`'s cas/ directory with their own
- * Cloudflare credentials (`rclone copy restored/cas r2:earthquakes-feed-state/cas`), or through the Worker by an
- * allow-listed workflow. Then, under the writer lock (README "Writer group"), the generation is committed by hand:
+ * FEED_STATE_BACKEND=worker works only from a workflow the Worker allows to write, which on production is aggregate.yml
+ * alone (state/src/auth.js), and aggregate never runs this script: `--put` through the Worker is the staging path
+ * (state-rehearsal.yml rehearses a restore there). Production's bucket is refilled by the owner alone, from `--out`'s
+ * cas/ directory with their own Cloudflare credentials (`rclone copy restored/cas r2:earthquakes-feed-state/cas`); a
+ * workflow that ran `--put` on production would need its own write allow-list entry and a Worker redeploy. Then, under the writer lock (README "Writer group"), the generation is committed by hand:
  * `--data-dir` writes it into a fresh checkout of `data`, with SWEEP_EPOCH bumped in src/config.ts on main first.
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';

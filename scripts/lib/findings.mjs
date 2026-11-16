@@ -495,10 +495,12 @@ export const RULES = Object.freeze({
   'feed:repo-growth': rule('feed:repo-growth', {
     title: 'repository growth over budget',
     // The repository's `size` (feed:repo-size's reading) sampled about once a day (the artifact repo-size-samples the
-    // feed job keeps): the growth from the newest sample at least minSpanMs old, in MB a day, over maxMbPerDay. GitHub
+    // feed job keeps): the growth from the newest sample at least minSpanMs old, in MB a day, over maxMbPerDay: the
+    // current storage phase's budget (APIs.md "Where the repository stands": phase 2 and the 3a soak 14–15 MB a day, so
+    // 16 now; lower it to 11 in the phase-3b PR, 8–10.7 expected), so the row means growth beyond the budget. GitHub
     // counts no rewrite back; 10 GB is about 3.2 GB away (APIs.md Repository size, the budget per storage phase).
     board: 'feed', class: 'capacity', severity: 'P3', key: 'feed:repo-growth',
-    limits: { artifact: 'repo-size-samples', workflows: ['health.yml'], sampleEveryMs: 20 * HOUR, minSpanMs: 6 * DAY, keepSamples: 40, maxMbPerDay: 10 },
+    limits: { artifact: 'repo-size-samples', workflows: ['health.yml'], sampleEveryMs: 20 * HOUR, minSpanMs: 6 * DAY, keepSamples: 40, maxMbPerDay: 16 },
   }),
   'walks': rule('walks', {
     title: 'maintenance walk blocked',

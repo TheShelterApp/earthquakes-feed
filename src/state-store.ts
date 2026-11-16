@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 
@@ -45,6 +45,25 @@ import { dirname, join, relative, sep } from 'node:path';
  *   not allow · 426 protocol too old · 429 {"error":"budget"} a free-tier ceiling is reached (never retried: the store
  *   refuses until 00:00 UTC) · 500 {"error":"misconfigured: …"} a deploy error (never retried, kind config) · other
  *   429 and 5xx: retried, after the answer's Retry-After when it names at most 60 s (a longer one ends the retries).
+ *   A Cloudflare error 1027 (the account's daily Workers requests are used up) is kind `quota`, never retried (it
+ *   lasts until 00:00 UTC); a platform 429 that outlives the retries is kind `quota` too (feed:state-quota).
+ *
+ * Protocol 2 (storage phase 4.0; additive, nothing in the production pipeline calls it yet): CAS refs, one per writer
+ * lane (main, main-shadow, first-solutions, history), and their reflog. Every ref call sends x-feed-state-protocol 2;
+ * the blob routes above keep sending 1 until 4.3's flip (MIN_PROTOCOL then fences pre-flip runs).
+ *   GET  /v1/refs/<lane>            200 the ref's canonical JSON with a strong ETag, or 404 {"error":"no ref"}.
+ *   PUT  /v1/refs/<lane>            body = the new ref (canonical JSON ≤ 4 KiB), If-Match: "<etag>" of the ref it
+ *                                   replaces, or If-None-Match: * for the lane's first ref (428 without either).
+ *                                   200 {lane, seq, generation, etag, reflog: {previous, entry}}; 412 {current, etag}
+ *                                   when the ref is no longer the version named (fail closed, never rebased); 409
+ *                                   when the body is not the successor (seq + 1, parent = current generation, head_seq
+ *                                   not backwards) or its generation blob is missing. A body with `restore_of` is a
+ *                                   restore (state-restore.yml in the Environment state-restore only).
+ *   GET  /v1/gen/<lane>?after&limit 200 {lane, entries: [{seq, generation, parent, head_seq, data_commit, written,
+ *                                   writer, restore_of, uploaded, size}], next}: the reflog, ascending, ≤ 1,000 a page.
+ *   An answer whose outcome is unknown (a timeout, a cut connection, a 5xx after the swap) is reconciled by swapRef:
+ *   re-GET the ref; our writer nonce there means it landed, the ETag still the one named means retry, anything else is
+ *   a 412 (state/README.md "Protocol 2").
  */
 
 export const STATE_PROTOCOL = 1;
@@ -127,11 +146,15 @@ export interface GcPage {
   dryRun: boolean;
 }
 
-/** GET /v1/budget (state/src/budget.js snapshot). */
+/** GET /v1/budget (state/src/budget.js snapshot). The protocol-2 fields (4.0) are absent from an older Worker. */
 export interface StateBudget {
   day: string;
-  used: { class_a: number; class_b: number; bytes_written: number; requests: number; refused: number };
+  used: { class_a: number; class_b: number; bytes_written: number; requests: number; refused: number; refused_critical?: number; ref_conflicts?: number };
   stored_bytes: number;
+  /** Ref and reflog bytes inside stored_bytes. */
+  meta_bytes?: number;
+  /** The priority lanes' shares of every ceiling ({critical: 0.95, background: 0.6}). */
+  lanes?: { critical: number; background: number };
   stored_seeded_at: string | null;
   gc_pass_open: boolean;
   ceilings: { class_a: number; class_b: number; bytes_written: number; stored_bytes: number };
@@ -149,7 +172,7 @@ export interface StateBackend {
   budget(): Promise<StateBudget | null>;
 }
 
-export type StateErrorKind = 'config' | 'auth' | 'forbidden' | 'protocol' | 'budget' | 'refused' | 'integrity' | 'missing' | 'transport' | 'client';
+export type StateErrorKind = 'config' | 'auth' | 'forbidden' | 'protocol' | 'budget' | 'quota' | 'refused' | 'conflict' | 'integrity' | 'missing' | 'transport' | 'client';
 
 /** A store failure. `retryable` only for transport-class failures (the client has already retried those). */
 export class StateStoreError extends Error {
@@ -294,11 +317,17 @@ export function parseBudget(j: unknown): StateBudget {
   if (!isCount(j.stored_bytes)) bad('no stored_bytes');
   if (!(j.stored_seeded_at === null || typeof j.stored_seeded_at === 'string')) bad('stored_seeded_at');
   if (typeof j.gc_pass_open !== 'boolean') bad('gc_pass_open');
+  for (const k of ['refused_critical', 'ref_conflicts']) if (used[k] !== undefined && !isCount(used[k])) bad(`used.${k}`);
+  if (j.meta_bytes !== undefined && !isCount(j.meta_bytes)) bad('meta_bytes');
+  const lanes = obj(j.lanes) && typeof j.lanes.critical === 'number' && typeof j.lanes.background === 'number' ? { critical: j.lanes.critical, background: j.lanes.background } : undefined;
   const n = (o: Record<string, unknown>, k: string): number => o[k] as number;
+  const opt = (o: Record<string, unknown>, k: string): Record<string, number> => (o[k] === undefined ? {} : { [k]: o[k] as number });
   return {
     day: j.day as string,
-    used: { class_a: n(used, 'class_a'), class_b: n(used, 'class_b'), bytes_written: n(used, 'bytes_written'), requests: n(used, 'requests'), refused: n(used, 'refused') },
+    used: { class_a: n(used, 'class_a'), class_b: n(used, 'class_b'), bytes_written: n(used, 'bytes_written'), requests: n(used, 'requests'), refused: n(used, 'refused'), ...opt(used, 'refused_critical'), ...opt(used, 'ref_conflicts') },
     stored_bytes: j.stored_bytes as number,
+    ...opt(j, 'meta_bytes'),
+    ...(lanes ? { lanes } : {}),
     stored_seeded_at: j.stored_seeded_at as string | null,
     gc_pass_open: j.gc_pass_open as boolean,
     ceilings: { class_a: n(ceilings, 'class_a'), class_b: n(ceilings, 'class_b'), bytes_written: n(ceilings, 'bytes_written'), stored_bytes: n(ceilings, 'stored_bytes') },
@@ -342,6 +371,284 @@ export function retryAfterMs(raw: string | null, nowMs: number = Date.now()): nu
   if (/^\d{1,9}$/.test(v)) return Number(v) * 1000;
   const at = Date.parse(v);
   return Number.isFinite(at) && /[a-z]/i.test(v) ? Math.max(0, at - nowMs) : null;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Protocol 2: lane refs and the reflog (state/src/refs.js is the Worker's side of the same rules)
+
+export const REF_PROTOCOL = 2;
+export const REF_FORMAT = 1;
+export const REF_MAX_BYTES = 4096;
+/** The production lanes (staging adds `rehearsal-<run>` lanes for state-rehearsal.yml). */
+export const STATE_LANES = ['main', 'main-shadow', 'first-solutions', 'history'] as const;
+const REHEARSAL_LANE = /^rehearsal-[a-z0-9][a-z0-9-]{0,47}$/;
+const MAX_SEQ = 999_999_999_999;
+const WRITER = /^([A-Za-z0-9._-]+\.ya?ml)\/([0-9]{1,20})-([0-9]{1,6})\/([A-Za-z0-9._-]{1,64})\/([0-9a-f]{16,64})$/;
+
+/** A lane's ref (format 1): the generation it names and its place in the lane's chain. */
+export interface StateRef {
+  format: 1;
+  lane: string;
+  /** The sha256 of the generation blob (a CAS key). */
+  generation: string;
+  seq: number;
+  /** The generation this one replaced (null: the lane's first, or a bootstrap). */
+  parent: string | null;
+  head_seq: number;
+  data_commit: string;
+  written: string;
+  /** `<workflow>/<run_id>-<attempt>/<step>/<nonce>`: the Worker checks the run against the token; the nonce makes an
+   *  ambiguous answer decidable (swapRef). */
+  writer: string;
+  /** A restore only: the reflog entry it restores. */
+  restore_of?: { seq: number; generation: string };
+}
+
+/** A ref as read: the parsed ref, its exact bytes and its HTTP ETag (quoted, as If-Match wants it back). */
+export interface RefRead {
+  ref: StateRef;
+  text: string;
+  etag: string;
+}
+
+/** What a ref PUT replaces: the version read ({etag}), or no ref at all ({create: true}, the lane's bootstrap). */
+export type RefPrecondition = { etag: string } | { create: true };
+
+export interface RefSwap {
+  lane: string;
+  seq: number;
+  generation: string;
+  etag: string;
+  /** previous: whether the replaced ref's reflog entry was there ('present'), had to be written ('repaired'), or there
+   *  was none ('none'); entry: the new seq's entry 'created', or 'exists' (its slot was taken: an integrity alarm). */
+  reflog: { previous: 'none' | 'present' | 'repaired'; entry: 'created' | 'exists' };
+  /** The bucket and ref-store operations the Worker made (x-feed-state-store-ops; null when the backend has none). */
+  storeOps: number | null;
+  ledgerCalls: number | null;
+}
+
+export interface ReflogEntry {
+  seq: number;
+  generation: string | null;
+  parent: string | null;
+  head_seq: number | null;
+  data_commit: string | null;
+  written: string | null;
+  writer: string | null;
+  restore_of: { seq: number; generation: string } | null;
+  uploaded: string;
+  size: number;
+}
+export interface ReflogPage {
+  lane: string;
+  entries: ReflogEntry[];
+  /** Ask again with after = next; null at the end. */
+  next: number | null;
+}
+
+/** The ref routes (protocol 2). Both backends implement them; neither is used by the production pipeline in 4.0. */
+export interface StateRefs {
+  getRef(lane: string): Promise<RefRead | null>;
+  /** One attempt, never retried blindly (a CAS): 412 throws RefConflict, an unknown outcome a retryable error. */
+  putRef(lane: string, ref: StateRef, pre: RefPrecondition): Promise<RefSwap>;
+  reflog(lane: string, opts?: { after?: number; limit?: number }): Promise<ReflogPage>;
+}
+
+/** A 412: the ref is no longer the version named. `current` is the ref the store holds now (null: none). */
+export class RefConflict extends StateStoreError {
+  constructor(
+    message: string,
+    readonly current: RefRead | null,
+    /** Which check refused: 'read' (the Worker's GET saw another version) or 'swap' (the conditional put itself). */
+    readonly at: 'read' | 'swap' | null = null,
+  ) {
+    super(message, 'conflict', 412);
+    this.name = 'RefConflict';
+  }
+}
+
+/** JSON with every object's keys sorted, no whitespace: the one serialization of a ref (the Worker refuses others). */
+export function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
+  if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .filter((k) => o[k] !== undefined)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(v);
+}
+
+export function isLane(lane: string, opts: { rehearsal?: boolean } = {}): boolean {
+  return (STATE_LANES as readonly string[]).includes(lane) || (!!opts.rehearsal && REHEARSAL_LANE.test(lane));
+}
+
+/**
+ * A ref's text checked: exactly the ref fields, for `lane`, canonical. Throws kind integrity (a store that answers
+ * something else is not trusted with the chain).
+ */
+export function parseRef(text: string, lane: string): StateRef {
+  const bad = (why: string): never => {
+    throw new StateStoreError(`ref ${lane}: ${why}`, 'integrity');
+  };
+  let j: unknown;
+  try {
+    j = JSON.parse(text);
+  } catch {
+    return bad('not JSON');
+  }
+  if (!j || typeof j !== 'object' || Array.isArray(j)) return bad('not a JSON object');
+  const r = j as Record<string, unknown>;
+  const fields = new Set(['data_commit', 'format', 'generation', 'head_seq', 'lane', 'parent', 'restore_of', 'seq', 'written', 'writer']);
+  for (const k of Object.keys(r)) if (!fields.has(k)) bad(`unknown field ${k.slice(0, 40)}`);
+  const seq = (v: unknown): boolean => Number.isSafeInteger(v) && (v as number) >= 1 && (v as number) <= MAX_SEQ;
+  if (r.format !== REF_FORMAT) bad(`format ${String(r.format)}`);
+  if (r.lane !== lane) bad(`lane ${String(r.lane)}`);
+  if (!isSha256Hex(r.generation)) bad('generation');
+  if (!seq(r.seq)) bad('seq');
+  if (!(r.parent === null || isSha256Hex(r.parent))) bad('parent');
+  if (!Number.isSafeInteger(r.head_seq) || (r.head_seq as number) < 0) bad('head_seq');
+  if (typeof r.data_commit !== 'string' || !/^[0-9a-f]{40}$/.test(r.data_commit)) bad('data_commit');
+  if (typeof r.written !== 'string' || !Number.isFinite(Date.parse(r.written))) bad('written');
+  if (typeof r.writer !== 'string' || !WRITER.test(r.writer)) bad('writer');
+  if (r.restore_of !== undefined) {
+    const o = r.restore_of as Record<string, unknown> | null;
+    if (!o || typeof o !== 'object' || !seq(o.seq) || !isSha256Hex(o.generation) || Object.keys(o).length !== 2) bad('restore_of');
+  }
+  if (canonicalJson(r) !== text) bad('not canonical');
+  return r as unknown as StateRef;
+}
+
+/** A writer id: `<workflow>/<run_id>-<attempt>/<step>/<nonce>` (the nonce: 32 random hex unless given). */
+export function writerId(p: { workflow: string; runId: string; runAttempt: string; step: string; nonce?: string }): string {
+  const id = `${p.workflow}/${p.runId}-${p.runAttempt}/${p.step}/${p.nonce ?? randomBytes(16).toString('hex')}`;
+  if (!WRITER.test(id)) throw new StateStoreError(`writer id ${id.slice(0, 120)}: not <workflow>/<run_id>-<attempt>/<step>/<hex nonce>`, 'client');
+  return id;
+}
+
+/** The writer id of this Actions run's `step` (GITHUB_WORKFLOW_REF, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT): what the Worker
+ *  checks against the token's workflow_ref, run_id and run_attempt. */
+export function writerFromEnv(step: string, env: NodeJS.ProcessEnv = process.env, nonce?: string): string {
+  const m = /\/\.github\/workflows\/([A-Za-z0-9._-]+\.ya?ml)@/.exec(env.GITHUB_WORKFLOW_REF ?? '');
+  if (!m || !env.GITHUB_RUN_ID || !env.GITHUB_RUN_ATTEMPT) {
+    throw new StateStoreError('no writer id: GITHUB_WORKFLOW_REF, GITHUB_RUN_ID or GITHUB_RUN_ATTEMPT is unset (an Actions run only)', 'config');
+  }
+  return writerId({ workflow: m[1]!, runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT, step, nonce });
+}
+
+/**
+ * The successor of `cur` (null: the lane's first ref, seq `firstSeq`): seq + 1, parent = cur's generation, head_seq
+ * never below cur's. A restore names restore_of and must jump head_seq forward (the Worker checks both).
+ */
+export function nextRef(
+  cur: StateRef | null,
+  f: { lane: string; generation: string; head_seq: number; data_commit: string; writer: string; written?: string; restore_of?: StateRef['restore_of']; firstSeq?: number; parent?: string | null },
+): StateRef {
+  const ref: StateRef = {
+    format: REF_FORMAT,
+    lane: f.lane,
+    generation: f.generation,
+    seq: cur ? cur.seq + 1 : (f.firstSeq ?? 1),
+    parent: cur ? cur.generation : (f.parent ?? null),
+    head_seq: f.head_seq,
+    data_commit: f.data_commit,
+    written: f.written ?? new Date().toISOString(),
+    writer: f.writer,
+  };
+  if (f.restore_of) ref.restore_of = f.restore_of;
+  return ref;
+}
+
+/** The successor rules (state/src/refs.js checkSuccessor), for the directory backend. Throws kind refused (409). */
+function checkSuccessor(cur: StateRef | null, next: StateRef): void {
+  if (!cur) return;
+  const no = (why: string): never => {
+    throw new StateStoreError(`ref ${next.lane}: ${why}`, 'refused', 409);
+  };
+  if (next.seq !== cur.seq + 1) no(`seq must be ${cur.seq + 1}`);
+  if (next.parent !== cur.generation) no('parent must be the current generation');
+  if (next.restore_of ? next.head_seq <= cur.head_seq : next.head_seq < cur.head_seq) no(next.restore_of ? 'a restore must jump head_seq forward' : 'head_seq must not go backwards');
+}
+
+export type SwapOutcome =
+  /** The PUT answered 200. */
+  | 'swapped'
+  /** A 412 whose current ref is ours: an earlier attempt of this same write landed (its answer was lost). */
+  | 'landed-before'
+  /** The PUT's outcome was unknown; the re-GET found our writer nonce. */
+  | 'reconciled'
+  /** The PUT's outcome was unknown; the ref was still the version named, so the same write was sent again. */
+  | 'retried';
+
+/**
+ * One compare-and-swap of a lane's ref with the ambiguous-answer rule (APIs.md phase 4 crash matrix): a PUT whose
+ * outcome is unknown (timeout, cut connection, a 5xx) is never repeated blindly. The ref is read again: our writer nonce
+ * there means the write landed; the ETag still the one named (or still no ref, for a create) means it did not, and the
+ * same body goes again (at most `attempts` PUTs); anything else is someone else's write, a RefConflict (fail closed).
+ * A 412 whose current ref carries our nonce is a landed earlier attempt, not a conflict.
+ */
+export async function swapRef(
+  refs: StateRefs,
+  lane: string,
+  ref: StateRef,
+  pre: RefPrecondition,
+  opts: { attempts?: number; log?: (line: string) => void } = {},
+): Promise<{ outcome: SwapOutcome; etag: string; swap: RefSwap | null; attempts: number }> {
+  const attempts = opts.attempts ?? 3;
+  const log = opts.log ?? (() => {});
+  let lastError: StateStoreError | null = null;
+  let retried = false;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const swap = await refs.putRef(lane, ref, pre);
+      return { outcome: retried ? 'retried' : 'swapped', etag: swap.etag, swap, attempts: attempt };
+    } catch (e) {
+      if (e instanceof RefConflict) {
+        if (e.current?.ref.writer === ref.writer) return { outcome: 'landed-before', etag: e.current.etag, swap: null, attempts: attempt };
+        throw e;
+      }
+      if (!(e instanceof StateStoreError) || !e.retryable) throw e;
+      lastError = e;
+      log(`state ref ${lane}: the PUT of seq ${ref.seq} has no certain outcome (${e.message}); reading the ref back`);
+    }
+    const cur = await refs.getRef(lane);
+    if (cur?.ref.writer === ref.writer) return { outcome: 'reconciled', etag: cur.etag, swap: null, attempts: attempt };
+    const unchanged = 'create' in pre ? cur == null : cur?.etag === pre.etag;
+    if (!unchanged) throw new RefConflict(`ref ${lane}: after an unknown outcome the ref is ${cur ? `seq ${cur.ref.seq} by ${cur.ref.writer}` : 'gone'}, not ours: fail closed`, cur);
+    retried = true;
+  }
+  throw new StateStoreError(`ref ${lane}: seq ${ref.seq} not swapped after ${attempts} attempt(s): ${lastError?.message ?? 'no answer'}`, lastError?.kind ?? 'transport', lastError?.status ?? null, true);
+}
+
+/** Every reflog entry of a lane after `after` (paged). */
+export async function reflogAll(refs: StateRefs, lane: string, after = 0): Promise<ReflogEntry[]> {
+  const out: ReflogEntry[] = [];
+  let next: number | null = after;
+  while (next != null) {
+    const page: ReflogPage = await refs.reflog(lane, { after: next });
+    out.push(...page.entries);
+    if (page.next != null && page.next <= next) throw new StateStoreError(`reflog ${lane}: next ${page.next} does not advance past ${next}`, 'integrity');
+    next = page.next;
+  }
+  return out;
+}
+
+function parseReflogPage(j: unknown, lane: string): ReflogPage {
+  const bad = (why: string): never => {
+    throw new StateStoreError(`reflog ${lane}: ${why}: ${JSON.stringify(j).slice(0, 300)}`, 'integrity');
+  };
+  if (!j || typeof j !== 'object' || Array.isArray(j)) return bad('not a JSON object');
+  const o = j as Record<string, unknown>;
+  if (o.lane !== lane || !Array.isArray(o.entries)) return bad('no lane or entries');
+  if (!(o.next === null || (Number.isSafeInteger(o.next) && (o.next as number) > 0))) bad('next');
+  let prev = 0;
+  for (const e of o.entries as Record<string, unknown>[]) {
+    if (!e || typeof e !== 'object' || !Number.isSafeInteger(e.seq) || (e.seq as number) <= prev) bad('entries not ascending by seq');
+    prev = e.seq as number;
+  }
+  return o as unknown as ReflogPage;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -466,7 +773,19 @@ const errorOf = (text: string): string | null => {
   }
 };
 
-export class WorkerBackend implements StateBackend {
+/** The extra knobs of one request: a different protocol header, extra headers, statuses besides 200 that `read`
+ *  handles (404 for a ref GET, 412 for a ref PUT), and a cap on attempts (1 for a CAS). */
+interface RequestOpts {
+  protocol?: number;
+  headers?: Record<string, string>;
+  accept?: readonly number[];
+  attempts?: number;
+}
+
+/** A Cloudflare error 1027 page: the account's daily Workers requests are used up until 00:00 UTC. */
+export const isQuota1027 = (text: string): boolean => /\berror(?: code)?:?\s*1027\b/i.test(text) && errorOf(text) == null;
+
+export class WorkerBackend implements StateBackend, StateRefs {
   readonly label: string;
   private readonly base: string;
   private readonly fetchImpl: FetchImpl;
@@ -510,14 +829,15 @@ export class WorkerBackend implements StateBackend {
    * may throw a retryable StateStoreError (a stream cut short). With a deadline, no attempt starts or waits past it and
    * a running attempt's timeout is cut to it.
    */
-  private async request<T>(method: string, path: string, body: Uint8Array | string | null, contentType: string | null, read: (res: Response) => Promise<T>): Promise<T> {
-    const route = `${method} ${path.replace(/[0-9a-f]{64}/, '<hex>')}`;
+  private async request<T>(method: string, path: string, body: Uint8Array | string | null, contentType: string | null, read: (res: Response) => Promise<T>, ro: RequestOpts = {}): Promise<T> {
+    const route = `${method} ${path.replace(/[0-9a-f]{64}/, '<hex>').replace(/\?.*$/, '')}`;
+    const maxAttempts = Math.min(this.attempts, ro.attempts ?? this.attempts);
     let last: StateStoreError | null = null;
     let slept = 0;
     let asked: number | null = null;
     let attempt = 0;
     let stop = '';
-    while (attempt < this.attempts) {
+    while (attempt < maxAttempts) {
       if (attempt > 0) {
         const wait = asked ?? backoffMs(attempt + 1, this.random);
         if (slept + wait > this.retryBudgetMs) {
@@ -542,7 +862,8 @@ export class WorkerBackend implements StateBackend {
       const headers: Record<string, string> = {
         authorization: `Bearer ${token}`,
         'user-agent': STATE_USER_AGENT,
-        'x-feed-state-protocol': String(STATE_PROTOCOL),
+        'x-feed-state-protocol': String(ro.protocol ?? STATE_PROTOCOL),
+        ...ro.headers,
       };
       if (contentType) headers['content-type'] = contentType;
       // Content-Length is not set here: fetch derives it from a buffered body (a string or bytes, never a stream), and
@@ -555,19 +876,24 @@ export class WorkerBackend implements StateBackend {
         const res = await this.fetchImpl(`${this.base}${path}`, { method, headers, body: body ?? undefined, signal: ctrl.signal });
         status = res.status;
         const rid = res.headers.get('x-request-id') ?? '-';
-        if (res.status === 200) {
-          const out = await read(res);
-          this.log(`state ${route}: 200 in ${Date.now() - t0} ms (attempt ${attempt}, request ${rid})`);
-          return out;
+        if (res.status === 200 || ro.accept?.includes(res.status)) {
+          this.log(`state ${route}: ${res.status} in ${Date.now() - t0} ms (attempt ${attempt}, request ${rid})`);
+          return await read(res);
         }
         const text = await res.text().catch(() => '');
         const err = errorOf(text);
+        if (isQuota1027(text)) {
+          this.log(`state ${route}: HTTP ${res.status} error 1027 in ${Date.now() - t0} ms (attempt ${attempt}, request ${rid})`);
+          throw new StateStoreError(`${route}: HTTP ${res.status}: Cloudflare error 1027, the account's daily Workers requests are used up until 00:00 UTC (feed:state-quota)`, 'quota', res.status);
+        }
         this.log(`state ${route}: HTTP ${res.status}${err ? ` (${err})` : ''} in ${Date.now() - t0} ms (attempt ${attempt}, request ${rid})`);
         const what = `${route}: HTTP ${res.status}${err ? ` ${err}` : ''}`;
         if (res.status === 429 && err === 'budget') throw new StateStoreError(`${what}: a free-tier ceiling of the store is reached until 00:00 UTC`, 'budget', 429);
         if (res.status === 500 && err?.startsWith('misconfigured')) throw new StateStoreError(`${what}: the store's deployment is broken (state/README.md)`, 'config', 500);
         if (res.status >= 500 || res.status === 429) {
-          last = new StateStoreError(what, 'transport', res.status, true);
+          // A 429 that is not the Worker's budget is the platform's (a zone rate limit): retried, and kind quota if it
+          // outlives the retries (feed:state-quota), so health tells it from a Worker that is down.
+          last = new StateStoreError(what, res.status === 429 ? 'quota' : 'transport', res.status, true);
           const ra = retryAfterMs(res.headers.get('retry-after'));
           if (ra != null && ra > RETRY_AFTER_MAX_MS) {
             stop = `: the store asks to retry after ${Math.round(ra / 1000)} s, over ${RETRY_AFTER_MAX_MS / 1000} s`;
@@ -585,7 +911,9 @@ export class WorkerBackend implements StateBackend {
                 ? 'protocol'
                 : res.status === 409
                   ? 'refused'
-                  : res.status === 400 && err?.startsWith('checksum mismatch')
+                  : res.status === 412
+                    ? 'conflict'
+                    : res.status === 400 && err?.startsWith('checksum mismatch')
                     ? 'integrity'
                     : 'client';
         throw new StateStoreError(what, kind, res.status);
@@ -638,6 +966,94 @@ export class WorkerBackend implements StateBackend {
   async budget(): Promise<StateBudget> {
     return this.request('GET', '/v1/budget', null, null, async (res) => parseBudget(await res.json()));
   }
+
+  async getRef(lane: string): Promise<RefRead | null> {
+    if (!isLane(lane, { rehearsal: true })) throw new StateStoreError(`ref: not a lane: ${lane.slice(0, 80)}`, 'client');
+    return this.request(
+      'GET',
+      `/v1/refs/${lane}`,
+      null,
+      null,
+      async (res) => {
+        if (res.status === 404) return null;
+        const etag = res.headers.get('etag');
+        if (!etag || !/^"[^"\s]+"$/.test(etag)) throw new StateStoreError(`ref ${lane}: no strong ETag in the answer`, 'integrity');
+        const text = await res.text();
+        return { ref: parseRef(text, lane), text, etag };
+      },
+      { protocol: REF_PROTOCOL, accept: [404] },
+    );
+  }
+
+  /**
+   * One PUT, never retried here (a CAS: swapRef decides after an unknown outcome). 412 → RefConflict with the current
+   * ref; a 404 answer (the lane is unknown to the Worker) is kind client.
+   */
+  async putRef(lane: string, ref: StateRef, pre: RefPrecondition): Promise<RefSwap> {
+    if (!isLane(lane, { rehearsal: true }) || ref.lane !== lane) throw new StateStoreError(`ref: not a lane, or the ref is another lane's: ${lane.slice(0, 80)}`, 'client');
+    const text = canonicalJson(ref);
+    parseRef(text, lane);
+    if (Buffer.byteLength(text) > REF_MAX_BYTES) throw new StateStoreError(`ref ${lane}: ${Buffer.byteLength(text)} bytes, over ${REF_MAX_BYTES}`, 'client');
+    const headers: Record<string, string> = 'create' in pre ? { 'if-none-match': '*' } : { 'if-match': pre.etag };
+    return this.request(
+      'PUT',
+      `/v1/refs/${lane}`,
+      text,
+      'application/json',
+      async (res) => {
+        const num = (h: string): number | null => (res.headers.get(h) != null && /^\d+$/.test(res.headers.get(h)!) ? Number(res.headers.get(h)) : null);
+        if (res.status === 412) {
+          const j = (await res.json().catch(() => null)) as { current?: unknown; etag?: unknown; at?: unknown } | null;
+          let current: RefRead | null = null;
+          if (j && j.current != null && typeof j.etag === 'string') {
+            const t = canonicalJson(j.current);
+            current = { ref: parseRef(t, lane), text: t, etag: j.etag };
+          }
+          const at = j?.at === 'read' || j?.at === 'swap' ? j.at : null;
+          throw new RefConflict(`ref ${lane}: 412, the ref is ${current ? `seq ${current.ref.seq} by ${current.ref.writer}` : 'absent'}, not the version named`, current, at);
+        }
+        const j = (await res.json()) as Partial<RefSwap> & { reflog?: RefSwap['reflog'] };
+        if (j.lane !== lane || j.seq !== ref.seq || j.generation !== ref.generation || typeof j.etag !== 'string' || !j.reflog) {
+          throw new StateStoreError(`ref ${lane}: the store answered ${JSON.stringify(j).slice(0, 200)}`, 'integrity');
+        }
+        return { lane, seq: ref.seq, generation: ref.generation, etag: j.etag, reflog: j.reflog, storeOps: num('x-feed-state-store-ops'), ledgerCalls: num('x-feed-state-ledger-calls') };
+      },
+      { protocol: REF_PROTOCOL, headers, accept: [412], attempts: 1 },
+    );
+  }
+
+  async reflog(lane: string, opts: { after?: number; limit?: number } = {}): Promise<ReflogPage> {
+    if (!isLane(lane, { rehearsal: true })) throw new StateStoreError(`reflog: not a lane: ${lane.slice(0, 80)}`, 'client');
+    const q = new URLSearchParams();
+    if (opts.after) q.set('after', String(opts.after));
+    if (opts.limit) q.set('limit', String(opts.limit));
+    const qs = q.toString();
+    return this.request('GET', `/v1/gen/${lane}${qs ? `?${qs}` : ''}`, null, null, async (res) => parseReflogPage(await res.json(), lane), { protocol: REF_PROTOCOL });
+  }
+
+  /** Staging's rehearsal probes (POST /v1/rehearsal/<lane>; the Worker has the route on staging only). */
+  async rehearsalProbe(lane: string, body: { op: 'create-only'; form: 'headers' | 'conditional' } | { op: 'drop-reflog'; seq: number }): Promise<Record<string, unknown>> {
+    if (!REHEARSAL_LANE.test(lane)) throw new StateStoreError(`probe: not a rehearsal lane: ${lane.slice(0, 80)}`, 'client');
+    return this.request('POST', `/v1/rehearsal/${lane}`, JSON.stringify(body), 'application/json', async (res) => (await res.json()) as Record<string, unknown>, { protocol: REF_PROTOCOL, attempts: 1 });
+  }
+
+  /** A raw request for the rehearsal's negative checks (status and parsed JSON, never thrown). */
+  async rawRef(method: 'GET' | 'PUT', lane: string, body: string | null, headers: Record<string, string>): Promise<{ status: number; json: unknown; headers: Headers }> {
+    const token = await this.opts.token();
+    const res = await this.fetchImpl(`${this.base}/v1/refs/${lane}`, {
+      method,
+      headers: { authorization: `Bearer ${token}`, 'user-agent': STATE_USER_AGENT, ...(body != null ? { 'content-type': 'application/json' } : {}), ...headers },
+      body: body ?? undefined,
+    });
+    const text = await res.text();
+    let json: unknown = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = text;
+    }
+    return { status: res.status, json, headers: res.headers };
+  }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -650,7 +1066,7 @@ const DAY_MS = 86_400_000;
  * bytes must hash to the key; at most 40 per batchGet; GC's rules), so a dry run or a test exercises the client's
  * paths. A file's mtime stands for R2's `uploaded`; a put rewrites the file, refreshing it.
  */
-export class FsBackend implements StateBackend {
+export class FsBackend implements StateBackend, StateRefs {
   readonly label: string;
   constructor(
     readonly dir: string,
@@ -749,6 +1165,68 @@ export class FsBackend implements StateBackend {
 
   async budget(): Promise<StateBudget | null> {
     return null;
+  }
+
+  // The refs: `<dir>/refs/<lane>` and `<dir>/gen/<lane>/<seq12>`, the Worker's rules (successor, the generation blob
+  // present, create-only reflog with repair), an ETag of the body's sha256 (32 hex, as the Worker's Durable Object
+  // fallback computes it). One process at a time (a dry run, a test): the swap is a read-compare-rename, not atomic
+  // between processes.
+  private refFile(lane: string): string {
+    return join(this.dir, 'refs', lane);
+  }
+
+  private reflogFile(lane: string, seq: number): string {
+    return join(this.dir, 'gen', lane, String(seq).padStart(12, '0'));
+  }
+
+  async getRef(lane: string): Promise<RefRead | null> {
+    if (!isLane(lane, { rehearsal: true })) throw new StateStoreError(`ref: not a lane: ${lane.slice(0, 80)}`, 'client');
+    const f = this.refFile(lane);
+    if (!existsSync(f)) return null;
+    const text = readFileSync(f, 'utf8');
+    return { ref: parseRef(text, lane), text, etag: `"${sha256Hex(text).slice(0, 32)}"` };
+  }
+
+  async putRef(lane: string, ref: StateRef, pre: RefPrecondition): Promise<RefSwap> {
+    if (!isLane(lane, { rehearsal: true }) || ref.lane !== lane) throw new StateStoreError(`ref: not a lane, or the ref is another lane's: ${lane.slice(0, 80)}`, 'client');
+    const text = canonicalJson(ref);
+    parseRef(text, lane);
+    const cur = await this.getRef(lane);
+    if ('create' in pre ? cur != null : cur?.etag !== pre.etag) throw new RefConflict(`ref ${lane}: 412`, cur);
+    checkSuccessor(cur?.ref ?? null, ref);
+    if (!existsSync(this.file(ref.generation))) throw new StateStoreError(`ref ${lane}: the generation blob is missing from the store`, 'refused', 409);
+    const createOnly = (f: string, body: string): boolean => {
+      mkdirSync(dirname(f), { recursive: true });
+      try {
+        writeFileSync(f, body, { flag: 'wx' });
+        return true;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'EEXIST') return false;
+        throw e;
+      }
+    };
+    const previous = cur ? (createOnly(this.reflogFile(lane, cur.ref.seq), cur.text) ? 'repaired' : 'present') : 'none';
+    const f = this.refFile(lane);
+    mkdirSync(dirname(f), { recursive: true });
+    writeFileSync(`${f}.tmp-${process.pid}`, text);
+    renameSync(`${f}.tmp-${process.pid}`, f);
+    const entry = createOnly(this.reflogFile(lane, ref.seq), text) ? 'created' : 'exists';
+    return { lane, seq: ref.seq, generation: ref.generation, etag: `"${sha256Hex(text).slice(0, 32)}"`, reflog: { previous, entry }, storeOps: null, ledgerCalls: null };
+  }
+
+  async reflog(lane: string, opts: { after?: number; limit?: number } = {}): Promise<ReflogPage> {
+    const d = join(this.dir, 'gen', lane);
+    const after = opts.after ?? 0;
+    const limit = Math.min(opts.limit ?? 1000, 1000);
+    const names = existsSync(d) ? readdirSync(d).filter((n) => /^\d{12}$/.test(n) && Number(n) > after).sort() : [];
+    const page = names.slice(0, limit);
+    const entries: ReflogEntry[] = page.map((n) => {
+      const p = join(d, n);
+      const r = parseRef(readFileSync(p, 'utf8'), lane);
+      const st = statSync(p);
+      return { seq: Number(n), generation: r.generation, parent: r.parent, head_seq: r.head_seq, data_commit: r.data_commit, written: r.written, writer: r.writer, restore_of: r.restore_of ?? null, uploaded: new Date(st.mtimeMs).toISOString(), size: st.size };
+    });
+    return { lane, entries, next: names.length > limit && entries.length ? entries.at(-1)!.seq : null };
   }
 }
 

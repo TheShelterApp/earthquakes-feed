@@ -38,6 +38,7 @@ import { GitHubStore } from './history-store.js';
 import { partitionTexts } from './live-baseline.js';
 import { FROZEN_AFTER_DAYS, PAGES_PARTITION_GRACE_DAYS, dayPartitionFile, frozenBefore, loadPartitionFormat } from './partitions.js';
 import { isoFromMs } from './util.js';
+import type { EventNode } from './types.js';
 
 /**
  * The earliest-solutions collector (PF-5i P-3, `.github/workflows/first-solutions.yml`). Each run walks every
@@ -258,9 +259,12 @@ export function reopenChangedDeepMonths(provider: string, cur: SourceCursor, dee
 }
 
 /** A recent day's partition rebuilt from the event map: `from` is the first day read so (partitions.ts frozenBefore,
- *  a grace day earlier), `text` the day's partition (dayPartitionText; '' for a day without events). */
+ *  a grace day earlier), `text` the day's partition (dayPartitionText; '' for a day without events). `horizonFrom` is
+ *  the first day the event map holds whole (its 45-day horizon, the partly loaded edge day excluded): `text` also
+ *  serves a frozen day from it on, the fallback for a day missing from the tree (PartitionReader.dayText). */
 export interface UnfrozenDays {
   from: string;
+  horizonFrom?: string;
   text(day: string): string;
 }
 
@@ -270,21 +274,24 @@ export interface UnfrozenDays {
  *  after a failed derive) does not hold the day that froze at midnight. The event map holds it (45-day horizon), and the
  *  partition derive commits is the same pure function of it. */
 export function unfrozenFromEventMap(root: string, nowMs: number): UnfrozenDays {
-  let byDay: Map<string, string> | null = null;
+  let map: Map<string, EventNode> | null = null;
+  const texts = new Map<string, string>();
   const from = frozenBefore(nowMs - PAGES_PARTITION_GRACE_DAYS * DAY);
+  // loadEventMap reads the shards from this day on; the day itself can be cut at derive's own horizon, so the first
+  // day served whole is the next one.
+  const horizonFrom = addDays(eventDayKey(nowMs - EVENT_MAP_HORIZON_DAYS * DAY), 1);
   return {
     from,
+    horizonFrom,
     text(day) {
-      if (!byDay) {
-        const days = new Set<string>();
-        const map = loadEventMap(root, { sinceDays: EVENT_MAP_HORIZON_DAYS, nowMs });
-        for (const n of map.values()) {
-          const d = eventDayKey(n.eventTimeMs);
-          if (d >= from) days.add(d);
-        }
-        byDay = partitionTexts(map.values(), days, loadPartitionFormat(root));
+      if (day < horizonFrom) throw new Error(`first-solutions: ${day} is outside the event map's horizon (from ${horizonFrom})`);
+      let text = texts.get(day);
+      if (text === undefined) {
+        map ??= loadEventMap(root, { sinceDays: EVENT_MAP_HORIZON_DAYS, nowMs });
+        text = partitionTexts(map.values(), [day], loadPartitionFormat(root)).get(day) ?? '';
+        texts.set(day, text);
       }
-      return byDay.get(day) ?? '';
+      return text;
     },
   };
 }
@@ -328,7 +335,10 @@ export class PartitionReader {
   }
 
   /** The partition's text, '' when the feed has no partition of that day; throws when an archive or edition cannot be
-   *  read. */
+   *  read. A frozen day missing from the tree and the archives but inside the event map's horizon is read from the
+   *  event map: from storage option 4 phase 2 a day reaches the tree with the first derive commit after it froze, so a
+   *  derive that has not committed for over PAGES_PARTITION_GRACE_DAYS leaves the newest frozen days out of the tree,
+   *  and reading them as empty would move the walk past them. */
   async dayText(day: string): Promise<string> {
     if (this.unfrozen && day >= this.unfrozen.from) return this.unfrozen.text(day);
     const inTree = dayPartitionFile(this.root, day);
@@ -337,6 +347,10 @@ export class PartitionReader {
     if (!entry && this.deep.boundary && day < this.deep.boundary) {
       const e = this.deep.current.get(day.slice(0, 7));
       if (e && e.days.includes(day)) entry = e;
+    }
+    if (!entry && this.unfrozen?.horizonFrom && day >= this.unfrozen.horizonFrom) {
+      console.warn(`::warning::first-solutions: the frozen day ${day} is not in the data checkout (no derive commit since it froze?); read from the event map`);
+      return this.unfrozen.text(day);
     }
     if (!entry) return '';
     const file = join(await this.fetchAsset(entry), `${day.slice(8, 10)}.ndjson`);

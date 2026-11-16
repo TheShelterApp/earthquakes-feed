@@ -184,6 +184,18 @@ test('first-solutions reads an unfrozen day from the event map, a frozen one fro
       dayPartitionText([...map.values()].filter((n) => eventDayKey(n.eventTimeMs) === lastFrozen), lastFrozen, NO_PARTITION_FORMAT),
     );
     assert.match(await reader.dayText(lastFrozen), /us11x0/);
+    // A frozen day past the grace that is missing from the tree (no derive commit for over a day) is not read as
+    // empty while the event map holds it: the walk would move its cursor past the day.
+    const notCommitted = dayOf(NOW - 13 * DAY);
+    assert.ok(!existsSync(dayPartitionFile(root, notCommitted)), 'setup: not in the tree');
+    assert.ok(isFrozenDay(notCommitted, NOW - PAGES_PARTITION_GRACE_DAYS * DAY), 'setup: past the grace day');
+    assert.equal(
+      await reader.dayText(notCommitted),
+      dayPartitionText([...map.values()].filter((n) => eventDayKey(n.eventTimeMs) === notCommitted), notCommitted, NO_PARTITION_FORMAT),
+    );
+    assert.match(await reader.dayText(notCommitted), /us13x0/);
+    // Beyond the event map's horizon a day missing from the tree and the archives has no partition, as before.
+    assert.equal(await reader.dayText(dayOf(NOW - 60 * DAY)), '');
     assert.equal(await reader.dayText(dayOf(NOW + 3 * DAY)), '', 'an unfrozen day without events');
     // Without the event-map reader (the class's default) the tree is read, as before.
     assert.equal(await new PartitionReader(root, []).dayText(unfrozenDay), 'stale\n');

@@ -1910,8 +1910,9 @@ Exit path: the bucket is plain S3 keys; `rclone` it to any S3 store and add an S
     - every later commit refuses a staged event-map file;
     - derive-publish's hydrate after the push restores any day a push retry's rebase removed;
     - first-solutions' collect hydrates before it reads.
-  - Remove `continue-on-error` from aggregate's and derive.yml's two state steps, and give them the client's default
-    retry policy (the store is authoritative: `SHADOW_RETRY_POLICY` is 3a only).
+  - Remove `continue-on-error` from aggregate's and derive.yml's two state steps. They then run with the client's
+    default retry policy (`SHADOW_RETRY_POLICY` applies only while `EVENT_MAP_STORE_AUTHORITATIVE` is false), up to
+    about 87 s a request, so raise their 2-minute `timeout-minutes` back (hydrate 3, persist 4).
   - Lower `feed:repo-growth`'s `maxMbPerDay` to 11 (scripts/lib/findings.mjs).
 - *The sentinel* is one line that is not JSON. Code from before 3a that parses it throws instead of reading an
   untracked map as empty, and its live floor becomes `0000-00-00`, so an old backfill writes nothing. New code skips

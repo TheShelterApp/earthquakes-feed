@@ -86,9 +86,10 @@ jobs:
           cache: npm
       - run: npm ci
       - name: State shadow hydrate
-        # As in aggregate.yml (storage phase 3a): the store's days against the checkout, reported, never fatal.
+        # As in aggregate.yml (storage phase 3a): the store's days against the checkout, reported, never fatal; a 30 s
+        # deadline over the step (SHADOW_RETRY_POLICY), this timeout only the backstop.
         continue-on-error: true
-        timeout-minutes: 3
+        timeout-minutes: 2
         env:
           DATA_DIR: .data
           FEED_STATE_BACKEND: worker

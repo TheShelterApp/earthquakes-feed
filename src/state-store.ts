@@ -64,6 +64,19 @@ export const RETRY_AFTER_MAX_MS = 60_000;
 /** At most this much sleeping between the attempts of one request (backoff and Retry-After together): a request's
  *  retries stay inside its step's time budget (the writer jobs' steps run a few minutes). */
 export const RETRY_BUDGET_MS = 90_000;
+
+/**
+ * How hard a run tries (the defaults above, or a tighter policy): per-request timeout, attempts, the sleep budget of one
+ * request, and `deadlineMs`, an epoch-ms instant after which no attempt starts and no wait reaches past (a running
+ * attempt's timeout is cut to it). The deadline spans every request of the backend and the OIDC token requests, so it
+ * bounds a whole step however many requests it makes (phase 3a's shadow steps, src/event-map-store.ts).
+ */
+export interface RetryPolicy {
+  timeoutMs?: number;
+  attempts?: number;
+  retryBudgetMs?: number;
+  deadlineMs?: number | null;
+}
 /** The Worker's limits on a GC call (state/src/cas.js). */
 export const GC_MAX_KEEP = 10_000;
 export const GC_MIN_AGE_DAYS_FLOOR = 14;
@@ -357,12 +370,17 @@ export function jwtExpiryMs(jwt: string): number | null {
  */
 export function githubOidcTokenSource(
   audience: string,
-  opts: { env?: NodeJS.ProcessEnv; fetchImpl?: FetchImpl; now?: () => number; sleep?: (ms: number) => Promise<void> } = {},
+  opts: { env?: NodeJS.ProcessEnv; fetchImpl?: FetchImpl; now?: () => number; sleep?: (ms: number) => Promise<void>; policy?: RetryPolicy } = {},
 ): TokenSource {
   const env = opts.env ?? process.env;
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
   const now = opts.now ?? Date.now;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const timeoutMs = opts.policy?.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const attempts = opts.policy?.attempts ?? MAX_ATTEMPTS;
+  const deadlineMs = opts.policy?.deadlineMs ?? null;
+  // The deadline is wall-clock time (Date.now), whatever `now` a test passes for the token's expiry.
+  const left = (): number => (deadlineMs == null ? Infinity : deadlineMs - Date.now());
   let cached: { token: string; expMs: number } | null = null;
   return async () => {
     if (cached && cached.expMs - now() > TOKEN_MIN_LEFT_MS) return cached.token;
@@ -373,10 +391,24 @@ export function githubOidcTokenSource(
     }
     const target = `${url}${url.includes('?') ? '&' : '?'}audience=${encodeURIComponent(audience)}`;
     let last = '';
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      if (attempt > 1) await sleep(backoffMs(attempt, Math.random));
+    let tried = 0;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      if (attempt > 1) {
+        const wait = backoffMs(attempt, Math.random);
+        if (wait >= left()) {
+          last += ` (the step's deadline leaves no room for attempt ${attempt})`;
+          break;
+        }
+        await sleep(wait);
+      }
+      if (left() <= 0) {
+        last += ' (the step\'s deadline passed)';
+        break;
+      }
+      tried = attempt;
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+      const limit = Math.max(1, Math.min(timeoutMs, left()));
+      const timer = setTimeout(() => ctrl.abort(), limit);
       try {
         const res = await fetchImpl(target, { headers: { authorization: `bearer ${bearer}`, accept: 'application/json', 'user-agent': STATE_USER_AGENT }, signal: ctrl.signal });
         if (!res.ok) {
@@ -391,12 +423,12 @@ export function githubOidcTokenSource(
         return value;
       } catch (e) {
         if (e instanceof StateStoreError) throw e;
-        last = ctrl.signal.aborted ? `timed out after ${REQUEST_TIMEOUT_MS} ms` : `network error: ${(e as Error).message}`;
+        last = ctrl.signal.aborted ? `timed out after ${limit} ms` : `network error: ${(e as Error).message}`;
       } finally {
         clearTimeout(timer);
       }
     }
-    throw new StateStoreError(`the OIDC token request failed: ${last} after ${MAX_ATTEMPTS} attempts`, 'transport', null, true);
+    throw new StateStoreError(`the OIDC token request failed: ${last || 'no attempt'} after ${tried} attempt${tried === 1 ? '' : 's'}`, 'transport', null, true);
   };
 }
 
@@ -419,6 +451,8 @@ export interface WorkerBackendOptions {
   attempts?: number;
   /** At most this much sleeping between one request's attempts (default RETRY_BUDGET_MS). */
   retryBudgetMs?: number;
+  /** No attempt starts after this epoch-ms instant and none runs past it (RetryPolicy); null: none. */
+  deadlineMs?: number | null;
   /** One line per request (route, status, attempts, ms; never the token). */
   log?: (line: string) => void;
 }
@@ -441,6 +475,7 @@ export class WorkerBackend implements StateBackend {
   private readonly timeoutMs: number;
   private readonly attempts: number;
   private readonly retryBudgetMs: number;
+  private readonly deadlineMs: number | null;
   private readonly log: (line: string) => void;
 
   constructor(private readonly opts: WorkerBackendOptions) {
@@ -458,7 +493,13 @@ export class WorkerBackend implements StateBackend {
     this.timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
     this.attempts = opts.attempts ?? MAX_ATTEMPTS;
     this.retryBudgetMs = opts.retryBudgetMs ?? RETRY_BUDGET_MS;
+    this.deadlineMs = opts.deadlineMs ?? null;
     this.log = opts.log ?? (() => {});
+  }
+
+  /** ms left before the deadline (Infinity without one). */
+  private left(): number {
+    return this.deadlineMs == null ? Infinity : this.deadlineMs - Date.now();
   }
 
   /**
@@ -466,7 +507,8 @@ export class WorkerBackend implements StateBackend {
    * again (at most `attempts` in all), after the answer's Retry-After when it names at most RETRY_AFTER_MAX_MS
    * (longer: no more attempts), otherwise after a jittered backoff, and never sleeping more than `retryBudgetMs` in
    * all. A 500 `misconfigured` (a deploy error) and any other status are final. `read` turns a 200 into the result and
-   * may throw a retryable StateStoreError (a stream cut short).
+   * may throw a retryable StateStoreError (a stream cut short). With a deadline, no attempt starts or waits past it and
+   * a running attempt's timeout is cut to it.
    */
   private async request<T>(method: string, path: string, body: Uint8Array | string | null, contentType: string | null, read: (res: Response) => Promise<T>): Promise<T> {
     const route = `${method} ${path.replace(/[0-9a-f]{64}/, '<hex>')}`;
@@ -482,8 +524,16 @@ export class WorkerBackend implements StateBackend {
           stop = `: the next wait of ${Math.round(wait / 1000)} s would pass the retry budget of ${Math.round(this.retryBudgetMs / 1000)} s`;
           break;
         }
+        if (wait >= this.left()) {
+          stop = ": the step's deadline leaves no room for another attempt";
+          break;
+        }
         await this.sleep(wait);
         slept += wait;
+      }
+      if (this.left() <= 0) {
+        stop = ": the step's deadline passed";
+        break;
       }
       attempt++;
       asked = null;
@@ -498,7 +548,8 @@ export class WorkerBackend implements StateBackend {
       // Content-Length is not set here: fetch derives it from a buffered body (a string or bytes, never a stream), and
       // the Worker refuses a body without one (411; R2's put needs a known length). tests/state-store.test.ts checks it.
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
+      const limit = Math.max(1, Math.min(this.timeoutMs, this.left()));
+      const timer = setTimeout(() => ctrl.abort(), limit);
       let status: number | null = null;
       try {
         const res = await this.fetchImpl(`${this.base}${path}`, { method, headers, body: body ?? undefined, signal: ctrl.signal });
@@ -544,7 +595,7 @@ export class WorkerBackend implements StateBackend {
           last = e;
           continue;
         }
-        last = new StateStoreError(`${route}: ${ctrl.signal.aborted ? `timed out after ${this.timeoutMs} ms` : `network error: ${(e as Error).message}`}`, 'transport', status, true);
+        last = new StateStoreError(`${route}: ${ctrl.signal.aborted ? `timed out after ${limit} ms` : `network error: ${(e as Error).message}`}`, 'transport', status, true);
         this.log(`state ${route}: ${last.message} (attempt ${attempt})`);
       } finally {
         clearTimeout(timer);
@@ -706,17 +757,25 @@ export class FsBackend implements StateBackend {
 
 /**
  * The backend FEED_STATE_BACKEND names: `worker` (FEED_STATE_URL, FEED_STATE_AUDIENCE), `fs:<dir>`, or null when unset
- * or empty (no store). Anything else throws.
+ * or empty (no store). Anything else throws. `policy` (the Worker only) tightens the retry defaults and sets a step
+ * deadline over every request, the token requests included.
  */
-export function backendFromEnv(env: NodeJS.ProcessEnv = process.env, opts: { log?: (line: string) => void; fetchImpl?: FetchImpl } = {}): StateBackend | null {
+export function backendFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  opts: { log?: (line: string) => void; fetchImpl?: FetchImpl; policy?: RetryPolicy } = {},
+): StateBackend | null {
   const raw = (env.FEED_STATE_BACKEND ?? '').trim();
   if (!raw) return null;
   if (raw === 'worker') {
     const audience = (env.FEED_STATE_AUDIENCE ?? '').trim() || DEFAULT_STATE_AUDIENCE;
     return new WorkerBackend({
       baseUrl: (env.FEED_STATE_URL ?? '').trim() || DEFAULT_STATE_URL,
-      token: githubOidcTokenSource(audience, { env, fetchImpl: opts.fetchImpl }),
+      token: githubOidcTokenSource(audience, { env, fetchImpl: opts.fetchImpl, policy: opts.policy }),
       fetchImpl: opts.fetchImpl,
+      timeoutMs: opts.policy?.timeoutMs,
+      attempts: opts.policy?.attempts,
+      retryBudgetMs: opts.policy?.retryBudgetMs,
+      deadlineMs: opts.policy?.deadlineMs ?? null,
       log: opts.log ?? ((l) => console.log(l)),
     });
   }

@@ -65,6 +65,16 @@ export const EVENT_MAP_STORE_AUTHORITATIVE = false;
 export const BLOB_GZIP_LEVEL = 9;
 /** PUTs in flight at once (the first phase-3a run uploads all 46 days). */
 export const PUT_CONCURRENCY = 4;
+/**
+ * Phase 3a's retry policy for the two shadow steps (hydrate, persist): the store only shadows git, so a slow or hanging
+ * store must not stretch the 5-minute aggregate job (the client's defaults allow ~87 s per request: 4 × 20 s plus
+ * backoff). Two attempts of at most 15 s each, 5 s of backoff, and a deadline over the whole step, the OIDC token
+ * requests included: hydrate (2 batchGets of the 46 days, ~12 MB) 30 s, persist (the first run's 46 PUTs) 60 s, so a
+ * hung store costs a run at most ~90 s. A step cut by its deadline reports a transport error (feed:state-shadow).
+ * Phase 3b keeps the client's defaults: the store is authoritative there and a failure stops the run.
+ */
+export const SHADOW_RETRY_POLICY = { attempts: 2, timeoutMs: 15_000, retryBudgetMs: 5_000 } as const;
+export const SHADOW_STEP_DEADLINE_MS = { hydrate: 30_000, persist: 60_000 } as const;
 
 const DAY_MS = 86_400_000;
 const dayKey = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
@@ -627,6 +637,24 @@ export interface StateMarker {
   error_kind?: string;
 }
 
+/**
+ * The marker a step writes when it starts, before any request: not ok, error_kind `killed`. The step overwrites it with
+ * its real report when it ends, so it survives only when the runner killed the step (its timeout-minutes) before it
+ * could report: health then sees a hung store as a failed step (feed:state-shadow), not as a missing marker.
+ */
+export function markStarted(step: StateMarker['step'], common: Pick<StateMarker, 'at' | 'run_id' | 'data_commit'>, env: NodeJS.ProcessEnv = process.env): void {
+  if (!env.FEED_STATE_MARKER_DIR) return;
+  const m: StateMarker = {
+    step,
+    ok: false,
+    ...common,
+    summary: 'started and never reported: the step was killed before it ended (its timeout-minutes; a hanging store or OIDC endpoint?)',
+    error_kind: 'killed',
+  };
+  mkdirSync(env.FEED_STATE_MARKER_DIR, { recursive: true });
+  writeFileSync(join(env.FEED_STATE_MARKER_DIR, `${step}.json`), `${JSON.stringify(m, null, 2)}\n`);
+}
+
 /** The step's marker for the health workflow (FEED_STATE_MARKER_DIR/<step>.json, uploaded as the artifact
  *  state-shadow), its step-summary line and its log line. */
 export function report(m: StateMarker, env: NodeJS.ProcessEnv = process.env, log: (l: string) => void = console.log): void {
@@ -699,9 +727,11 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
     console.log(`state ${cmd}: phase 3a (git holds the event map): nothing to do`);
     return 0;
   }
+  markStarted(cmd, common, env);
+  const t0 = Date.now();
   let backend: StateBackend | null;
   try {
-    backend = backendFromEnv(env);
+    backend = backendFromEnv(env, authoritative ? {} : { policy: { ...SHADOW_RETRY_POLICY, deadlineMs: t0 + SHADOW_STEP_DEADLINE_MS[cmd] } });
   } catch (e) {
     report({ step: cmd, ok: false, ...common, summary: `store misconfigured: ${errText(e)}`, error: errText(e), error_kind: 'config' }, env);
     return authoritative ? 1 : 0;
@@ -714,7 +744,6 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
     }
     return 0;
   }
-  const t0 = Date.now();
   if (cmd === 'hydrate') {
     const mode: HydrateMode = modeArg === 'authoritative' || modeArg === 'shadow' ? modeArg : authoritative ? 'authoritative' : 'shadow';
     try {

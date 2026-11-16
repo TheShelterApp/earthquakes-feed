@@ -89,8 +89,11 @@ jobs:
         # is reported (the step summary, a ::warning::, and the marker the health workflow reads: feed:state-shadow),
         # never repaired here and never a reason to stop the feed. Before anything writes the checkout.
         continue-on-error: true
-        # 46 day blobs (about 12 MB) in two requests of at most 40; each request has 20 s and 4 attempts.
-        timeout-minutes: 3
+        # 46 day blobs (about 12 MB) in two requests of at most 40. Phase 3a's policy (src/event-map-store.ts
+        # SHADOW_RETRY_POLICY): 2 attempts of at most 15 s a request and a 30 s deadline over the whole step, so a
+        # hanging store costs this 5-minute job seconds, not minutes; this timeout is only the backstop (a step it kills
+        # leaves its "killed" marker, which health reads as a failed step).
+        timeout-minutes: 2
         env:
           DATA_DIR: .data
           FEED_STATE_BACKEND: worker
@@ -132,10 +135,11 @@ jobs:
         # PUT to the state store, then knowledge/index/generation.json is rewritten, before the commit below stages it
         # with the rest of `knowledge` (the one push commits the generation with head.json, sweeps.json, watermarks.json,
         # the markers and onboard.json). A store error leaves generation.json as it was, so a generation only names
-        # blobs that exist; the next run uploads again. Phase 3a: reported, never fatal (git still tracks the day files).
-        # The first phase-3a run uploads all 46 days (about 12 MB, 4 PUTs at a time).
+        # blobs that exist; the next run uploads again. Phase 3a: reported, never fatal (git still tracks the event map).
+        # The first phase-3a run uploads all 46 days (about 12 MB, 4 PUTs at a time). Phase 3a's policy: 2 attempts of at
+        # most 15 s a request and a 60 s deadline over the whole step; this timeout is only the backstop.
         continue-on-error: true
-        timeout-minutes: 4
+        timeout-minutes: 2
         env:
           DATA_DIR: .data
           FEED_STATE_BACKEND: worker

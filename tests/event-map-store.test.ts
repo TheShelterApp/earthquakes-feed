@@ -18,8 +18,11 @@ import {
   eventMapFiles,
   eventMapInGit,
   eventMapStagingProblems,
+  SHADOW_RETRY_POLICY,
+  SHADOW_STEP_DEADLINE_MS,
   hydrate,
   main,
+  markStarted,
   parseGeneration,
   persist,
   pruneGeneration,
@@ -390,6 +393,15 @@ test('the steps: markers for the health workflow; the store off, a mismatch or a
     assert.equal(await main(['persist'], env({ FEED_STATE_BACKEND: `fs:${dir}` })), 1);
     assert.equal(marker('persist').error_kind, 'refused');
     assert.equal(await main(['nonsense'], env({})), 3);
+    // A step killed by its timeout-minutes before it reports leaves the marker it wrote when it started: a failed step
+    // health sees (feed:state-shadow), never a missing marker. Every step that ends overwrites it.
+    markStarted('hydrate', { at: '2026-11-16T12:00:00.000Z', run_id: '43' }, env({}));
+    assert.deepEqual([marker('hydrate').ok, marker('hydrate').error_kind, marker('hydrate').run_id], [false, 'killed', '43']);
+    assert.equal(await main(['hydrate'], env({ FEED_STATE_BACKEND: `fs:${dir}` })), 0);
+    assert.notEqual(marker('hydrate').error_kind, 'killed');
+    // Phase 3a's bound on a hanging store: 2 attempts, and a step deadline well inside the 5-minute job.
+    assert.equal(SHADOW_RETRY_POLICY.attempts, 2);
+    assert.ok(SHADOW_STEP_DEADLINE_MS.hydrate + SHADOW_STEP_DEADLINE_MS.persist <= 90_000);
     // The phase-3b-only steps (derive-publish, first-solutions) and the commit step's transition do nothing in 3a.
     rmSync(markers, { recursive: true, force: true });
     assert.equal(await main(['hydrate', '--3b-only'], env({ FEED_STATE_BACKEND: `fs:${dir}` })), 0);

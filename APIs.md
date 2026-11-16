@@ -1741,7 +1741,11 @@ to the ref.
     free-tier ceiling) and 500 `misconfigured` (a deploy error). The client (`src/state-store.ts`) retries network
     errors, any other 5xx and any other 429, at most 4 attempts with jittered backoff (or the answer's Retry-After when
     it is at most 60 s; a longer one ends the retries) and at most 90 s of waiting in all, a 20 s timeout each; it
-    never retries a 4xx, the budget or a 500 `misconfigured`. It mints a fresh OIDC token unless the cached one has more than 60 s left. `FsBackend` is the same
+    never retries a 4xx, the budget or a 500 `misconfigured`. Phase 3a's shadow steps use a tighter policy
+    (`SHADOW_RETRY_POLICY`): 2 attempts of at most 15 s, 5 s of backoff, and a deadline over the whole step, OIDC token
+    requests included (hydrate 30 s, persist 60 s), so a hanging store adds at most about 90 s to an aggregate run; each
+    step writes a `killed` marker when it starts, which its report overwrites, so a step its timeout kills still reads
+    as failed. It mints a fresh OIDC token unless the cached one has more than 60 s left. `FsBackend` is the same
     contract on a directory (tests, `scripts/phase3/dryrun.sh`, a disaster replay).
 - *The generation* (format 1) is canonical text: one day per line in ascending order, `{"sha256", "bytes", "nodes",
   "blob", "blob_bytes"}` (the NDJSON's sha256, size and node count; the gzip's sha256 and size), plus `head_seq` and

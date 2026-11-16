@@ -312,6 +312,29 @@ test('state client: a request that hangs times out and is retried', async () => 
   }
 });
 
+test('state client: a step deadline bounds every request and the token requests, however many attempts are left (phase 3a)', async () => {
+  // A store that never answers: each attempt hangs until its abort.
+  const hang = (async (_url: string | URL, init?: RequestInit) =>
+    new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted'))))) as typeof fetch;
+  const t0 = Date.now();
+  const be = new WorkerBackend({ baseUrl: 'https://feed-state.example', fetchImpl: hang, token: quick.token, random: () => 0, attempts: 4, timeoutMs: 20_000, deadlineMs: t0 + 150 });
+  await assert.rejects(be.budget(), (e: unknown) => e instanceof StateStoreError && e.kind === 'transport' && e.retryable && /deadline/.test(e.message));
+  const took = Date.now() - t0;
+  assert.ok(took < 2_000, `stopped at the deadline, not after 4 × 20 s (${took} ms)`);
+  // A deadline already passed: no attempt at all.
+  await assert.rejects(new WorkerBackend({ baseUrl: 'https://feed-state.example', fetchImpl: hang, token: quick.token, deadlineMs: Date.now() - 1 }).budget(), /after 0 attempts: the step's deadline passed/);
+  // The OIDC token request under the same deadline.
+  const env = { ACTIONS_ID_TOKEN_REQUEST_URL: 'https://token.example/req', ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'request-token' };
+  const t1 = Date.now();
+  await assert.rejects(githubOidcTokenSource('a', { env, fetchImpl: hang, sleep: async () => {}, policy: { attempts: 4, timeoutMs: 20_000, deadlineMs: t1 + 150 } })(), /timed out after .*deadline/);
+  assert.ok(Date.now() - t1 < 2_000);
+  // backendFromEnv passes the policy to both.
+  const fromEnv = backendFromEnv({ FEED_STATE_BACKEND: 'worker', ...env }, { fetchImpl: hang, log: () => {}, policy: { attempts: 2, timeoutMs: 20_000, deadlineMs: Date.now() + 150 } })!;
+  const t2 = Date.now();
+  await assert.rejects(fromEnv.budget(), /deadline/);
+  assert.ok(Date.now() - t2 < 2_000);
+});
+
 test('state client: the OIDC token is minted for the audience, reused while it has more than 60 s left, never sent elsewhere', async () => {
   let minted = 0;
   let now = 1_800_000_000_000;

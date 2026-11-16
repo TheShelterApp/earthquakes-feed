@@ -796,23 +796,77 @@ export function budgetShares(json) {
   return out.length ? out.sort((a, b) => b.share - a.share) : null;
 }
 
-/** feed:state-budget (P2): any ceiling over `share` (0.7). Unreadable: unjudged. */
+/** feed:state-budget: any ceiling over `share` (0.6, the background lane's line) or this Worker's requests over
+ *  requestsPerDay: P2; any refusal on the critical lane today, or any reflog collision (a ref swapped onto a reflog
+ *  slot already taken: the client failed that run, kind integrity): P1. Unreadable: unjudged. */
 export function evaluateStateBudget(read) {
-  const { share } = RULES['feed:state-budget'].limits;
+  const { share, requestsPerDay } = RULES['feed:state-budget'].limits;
   if (!read || !read.ok) return { findings: [], unjudged: ['feed:state-budget'], notes: [`state budget: ${read ? oneLine(read.message, 200) : 'not read'}`] };
   const shares = budgetShares(read.json);
   if (!shares) return { findings: [], unjudged: ['feed:state-budget'], notes: ['state budget: the answer has no used counters and ceilings'] };
   const fmt = (x) => `${x.key} ${Math.round(x.share * 100)} % (${x.used} of ${x.cap})`;
   const notes = [`state budget${isObject(read.json) && typeof read.json.day === 'string' ? ` ${read.json.day}` : ''}: ${shares.map(fmt).join(', ')}`];
   const over = shares.filter((x) => x.share > share);
-  if (!over.length) return { findings: [], unjudged: [], notes };
+  const used = read.json.used;
+  const requests = isNum(used.requests) ? used.requests : 0;
+  const critical = isNum(used.refused_critical) ? used.refused_critical : 0;
+  const collisions = isNum(used.reflog_collisions) ? used.reflog_collisions : 0;
+  const busy = requests > requestsPerDay;
+  if (!over.length && !busy && critical === 0 && collisions === 0) return { findings: [], unjudged: [], notes };
+  const parts = [];
+  if (over.length) parts.push(`the state store is at ${over.map(fmt).join(', ')} of its daily free-tier ceilings (line ${Math.round(share * 100)} %, where background jobs are refused)`);
+  if (busy) parts.push(`the state Worker served ${requests} requests today (line ${requestsPerDay}; the account's 100,000 Workers requests a day are shared with the platform)`);
+  if (critical > 0) parts.push(`${critical} request(s) of the feed itself (aggregate, derive, restore: the critical lane, refused only above 95 %) were refused today`);
+  if (collisions > 0) parts.push(`${collisions} ref swap(s) today found their seq's reflog slot already taken (an integrity alarm: a non-atomic compare-and-swap or an entry left by a lost ref; the Worker log names the lane and seq)`);
+  const spend = over.length || busy || critical > 0;
   return {
     findings: [makeFinding('feed:state-budget', {
-      members: over.map((x) => x.key),
-      text: `the state store is at ${over.map(fmt).join(', ')} of its daily free-tier ceilings (line ${Math.round(share * 100)} %): at a ceiling it refuses until 00:00 UTC; see what spends them (state/README.md)`,
+      severity: critical > 0 || collisions > 0 ? 'P1' : 'P2',
+      members: [...over.map((x) => x.key), ...(busy ? ['requests'] : []), ...(critical > 0 ? ['critical'] : []), ...(collisions > 0 ? ['reflog'] : [])],
+      text: `${parts.join('; ')}${spend ? ': at a ceiling the store refuses until 00:00 UTC; see what spends them' : ''} (state/README.md)`,
     })],
     unjudged: [],
     notes,
+  };
+}
+
+/** Whether a failed GET /v1/budget was the platform's refusal: a Cloudflare 1027 page, or a 429 that is not the
+ *  Worker's own {"error":"budget"} (a zone rate limit). Returns '1027', '429' or null. */
+export function quotaOf(read) {
+  if (!read || read.ok || !isNum(read.status)) return null;
+  const body = typeof read.body === 'string' ? read.body : '';
+  if (/\berror(?: code)?:?\s*1027\b/i.test(body)) return '1027';
+  if (read.status === 429 && !/"error"\s*:\s*"budget"/.test(body)) return '429';
+  return null;
+}
+
+/**
+ * feed:state-quota (P1): health's own budget read refused by the platform (quotaOf), or a state-shadow marker step
+ * younger than holdMs whose error_kind is `quota`. Unjudged when neither input could be read.
+ */
+export function evaluateStateQuota({ stateBudget, stateShadow }, nowMs) {
+  const { holdMs } = RULES['feed:state-quota'].limits;
+  const seen = [];
+  const q = quotaOf(stateBudget);
+  if (q) seen.push({ atMs: nowMs, text: q === '1027' ? "health's GET /v1/budget answered Cloudflare error 1027 (the account's daily Workers requests are used up until 00:00 UTC)" : `health's GET /v1/budget answered a platform 429 (a zone rate limit, not the Worker's budget)` });
+  const markersRead = !!(stateShadow && stateShadow.ok);
+  if (markersRead) {
+    for (const m of stateShadow.markers) {
+      if (!isNum(m.createdAtMs) || nowMs - m.createdAtMs >= holdMs || !isObject(m.steps)) continue;
+      for (const [step, j] of Object.entries(m.steps)) {
+        if (isObject(j) && j.error_kind === 'quota') seen.push({ atMs: m.createdAtMs, text: `${step} of run ${m.runId ?? '?'} (${utcText(m.createdAtMs)}) was refused by the platform: ${oneLine(typeof j.summary === 'string' ? j.summary : 'no summary', 160)}` });
+      }
+    }
+  }
+  const budgetRead = !!stateBudget && (stateBudget.ok || isNum(stateBudget.status));
+  if (!seen.length) return budgetRead || markersRead ? { findings: [], unjudged: [], notes: [] } : { findings: [], unjudged: ['feed:state-quota'], notes: [] };
+  return {
+    findings: [makeFinding('feed:state-quota', {
+      sinceMs: Math.min(...seen.map((x) => x.atMs)),
+      text: `${seen[0].text}${seen.length > 1 ? ` (+${seen.length - 1} more)` : ''}: the Cloudflare account's shared Workers quota, not the store, stopped the state calls; from phase 3b the feed waits until 00:00 UTC (APIs.md outage table; what spends the 100,000 requests: platform:cf-usage)`,
+    })],
+    unjudged: [],
+    notes: [],
   };
 }
 
@@ -981,6 +1035,7 @@ export function evaluateFeed(inputs) {
   const samplesRead = !!(inputs.repoSamples && inputs.repoSamples.ok);
   const samples = samplesRead ? nextSamples(inputs.repoSamples.json, nowMs, repo && repo.ok ? repo.kb : null) : { samples: [], changed: false };
   if (inputs.repoSamples) add(samplesRead ? evaluateRepoGrowth(samples.samples, nowMs, repo && repo.ok ? repo.kb : null) : { findings: [], unjudged: ['feed:repo-growth'], notes: [] });
+  if (inputs.stateBudget || inputs.stateShadow) add(evaluateStateQuota({ stateBudget: inputs.stateBudget ?? null, stateShadow: inputs.stateShadow ?? null }, nowMs));
   if (inputs.stateBudget) {
     add(evaluateStateBudget(inputs.stateBudget));
     if (!inputs.stateBudget.ok && !inputs.stateBudget.skipped) {
@@ -1234,7 +1289,7 @@ export async function readStateBudget({ env, fetchImpl, sleep }) {
     attempts: 3,
     backoffMs: [2_000, 5_000],
   });
-  return r.ok ? { ok: true, json: r.json } : { ok: false, message: `GET /v1/budget: ${failText(r)}` };
+  return r.ok ? { ok: true, json: r.json } : { ok: false, message: `GET /v1/budget: ${failText(r)}`, ...(isNum(r.status) ? { status: r.status, body: typeof r.body === 'string' ? r.body.slice(0, 300) : '' } : {}) };
 }
 
 /**

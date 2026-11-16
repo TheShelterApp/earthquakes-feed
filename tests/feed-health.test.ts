@@ -18,6 +18,8 @@ import {
   evaluateStateBackup,
   trustedRun,
   evaluateStateBudget,
+  evaluateStateQuota,
+  quotaOf,
   evaluateStateGc,
   evaluateStateShadow,
   evaluateWalks,
@@ -1098,7 +1100,7 @@ test('main: every network call failing still writes a document: unreachable mani
   assert.match(doc.findings[3].text, /^feed:repo-size, feed:size, walks:history:\*, walks:first-solutions:\*, walks:backfill:\*, walks:archive:\*, walks:remerge:\*, walks:stats:\*, feed:writer-queue, feed:state-shadow, feed:state-gc, feed:state-backup, feed:repo-growth not judged this run: the feed evaluator's GitHub reads failed/);
   assert.ok(doc.findings[3].text.length <= 500);
   assert.match(doc.findings[2].text, /^feed:state-budget not judged this run: the state Worker's budget could not be read \(the OIDC token request failed/);
-  assert.deepEqual(doc.unjudged, ['feed:source:*', 'feed:breaker:*', 'feed:cert:*', 'feed:systemic', 'feed:repo-size', 'feed:size', 'feed:stats', 'feed:stats-through', 'feed:stats-days', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue', 'feed:state-shadow', 'feed:state-gc', 'feed:state-backup', 'feed:repo-growth', 'feed:state-budget']);
+  assert.deepEqual(doc.unjudged, ['feed:source:*', 'feed:breaker:*', 'feed:cert:*', 'feed:systemic', 'feed:repo-size', 'feed:size', 'feed:stats', 'feed:stats-through', 'feed:stats-days', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue', 'feed:state-shadow', 'feed:state-gc', 'feed:state-backup', 'feed:repo-growth', 'feed:state-quota', 'feed:state-budget']);
   assert.match(doc.notes.join('\n'), /queue time unknown \(network error: .*\): counted as 0/);
 });
 
@@ -1113,7 +1115,7 @@ test('main: no GH_TOKEN (a local run): the GitHub parts are unjudged, nothing is
   const doc = JSON.parse(printed);
   assert.ok(parseFindingsDocument(doc).ok);
   assert.deepEqual(doc.findings, []);
-  assert.deepEqual(doc.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue', 'feed:state-shadow', 'feed:state-gc', 'feed:state-backup', 'feed:repo-growth', 'feed:state-budget']);
+  assert.deepEqual(doc.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue', 'feed:state-shadow', 'feed:state-gc', 'feed:state-backup', 'feed:repo-growth', 'feed:state-quota', 'feed:state-budget']);
   assert.match(doc.notes.join(), /GitHub parts not judged: no GH_TOKEN or GITHUB_REPOSITORY \(a local run\)/);
   assert.match(doc.notes.join(), /state budget: no OIDC token \(a local run\)/);
   // A token without the run id: the queue time is 0, with a note.
@@ -1135,7 +1137,7 @@ test('main: in Actions, no GH_TOKEN or a failed created_at read is watcher:feed-
   };
   // GH_TOKEN dropped from the feed job: every GitHub part unjudged, and the watcher names the cause once.
   const noToken = (await findingsOf({ GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: '4242', FEED_STATE_BACKEND: 'worker' })).doc;
-  assert.deepEqual(noToken.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue', 'feed:state-shadow', 'feed:state-gc', 'feed:state-backup', 'feed:repo-growth', 'feed:state-budget']);
+  assert.deepEqual(noToken.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue', 'feed:state-shadow', 'feed:state-gc', 'feed:state-backup', 'feed:repo-growth', 'feed:state-quota', 'feed:state-budget']);
   assert.deepEqual(noToken.findings.map((f) => [f.key, f.members]), [
     ['watcher:feed-state', undefined],
     ['watcher:feed-github', ['run', 'repository', 'data-tree', 'walks:history', 'walks:first-solutions', 'walks:backfill', 'walks:archive', 'walks:remerge', 'walks:stats', 'writer-queue', 'state-shadow', 'state-gc', 'state-backup', 'repo-size-samples']],
@@ -1409,7 +1411,7 @@ test('feed:state-gc and feed:state-backup: a GC older than 3 days or none is P2;
   assert.deepEqual(evaluateStateBackup({ ok: false, message: 'x' }, NOW).unjudged, ['feed:state-backup']);
 });
 
-test('feed:state-budget: a ceiling over 70 % is P2 (the Worker\'s snapshot shape); an answer without used counters and ceilings is unjudged', () => {
+test('feed:state-budget: a ceiling over 60 % (the background lane\'s line) is P2 (the Worker\'s snapshot shape); an answer without used counters and ceilings is unjudged', () => {
   // The answer exactly as state/src/budget.js snapshot() writes it.
   const snap = (used: { class_a: number; class_b: number; bytes_written: number }, stored: number) => ({
     day: '2026-10-22',
@@ -1430,6 +1432,50 @@ test('feed:state-budget: a ceiling over 70 % is P2 (the Worker\'s snapshot shape
   assert.match(calm.notes[0]!, /^state budget 2026-10-22: /);
   assert.deepEqual(evaluateStateBudget({ ok: true, json: { counters: { classA: 1 }, ceilings: { classA: 20_000 } } }).unjudged, ['feed:state-budget'], 'the old shape is not read');
   assert.deepEqual(evaluateStateBudget({ ok: true, json: { a: 1 } }).unjudged, ['feed:state-budget']);
+});
+
+test('feed:state-budget: a refusal on the critical lane is P1; this Worker over 10,000 requests a day is a member', () => {
+  const snap = (used: Record<string, number>) => ({
+    day: '2026-11-16',
+    used: { class_a: 10, class_b: 10, bytes_written: 10, requests: 400, refused: 0, refused_critical: 0, ref_conflicts: 0, ...used },
+    stored_bytes: 10,
+    meta_bytes: 0,
+    lanes: { critical: 0.95, background: 0.6 },
+    stored_seeded_at: null,
+    gc_pass_open: false,
+    ceilings: { class_a: 20_000, class_b: 200_000, bytes_written: 2 ** 30, stored_bytes: 6 * 2 ** 30 },
+  });
+  assert.deepEqual(evaluateStateBudget({ ok: true, json: snap({}) }).findings, []);
+  const critical = evaluateStateBudget({ ok: true, json: snap({ refused: 3, refused_critical: 1 }) });
+  assert.deepEqual(critical.findings.map((f) => [f.key, f.severity, f.members]), [['feed:state-budget', 'P1', ['critical']]]);
+  assert.match(critical.findings[0]!.text, /1 request\(s\) of the feed itself/);
+  const collided = evaluateStateBudget({ ok: true, json: snap({ reflog_collisions: 1 }) });
+  assert.deepEqual(collided.findings.map((f) => [f.severity, f.members]), [['P1', ['reflog']]]);
+  assert.match(collided.findings[0]!.text, /reflog slot already taken/);
+  const busy = evaluateStateBudget({ ok: true, json: snap({ requests: 12_000, class_a: 13_000 }) });
+  assert.deepEqual(busy.findings.map((f) => [f.severity, f.members]), [['P2', ['class_a', 'requests']]]);
+  // A protocol-1 Worker (no refused_critical) is judged as before.
+  const old = snap({});
+  delete (old.used as Record<string, number>).refused_critical;
+  assert.deepEqual(evaluateStateBudget({ ok: true, json: old }).findings, []);
+});
+
+test('feed:state-quota: a 1027 or a platform 429 on health\'s budget read, or a quota step in a recent marker, is P1', () => {
+  assert.equal(quotaOf({ ok: false, message: 'x', status: 429, body: 'error code: 1027' }), '1027');
+  assert.equal(quotaOf({ ok: false, message: 'x', status: 503, body: '<title>Error 1027</title>' }), '1027');
+  assert.equal(quotaOf({ ok: false, message: 'x', status: 429, body: 'Too Many Requests' }), '429');
+  assert.equal(quotaOf({ ok: false, message: 'x', status: 429, body: '{"error":"budget","ceiling":"class_a"}' }), null, 'the Worker\'s own budget');
+  assert.equal(quotaOf({ ok: false, message: 'x', status: 502, body: 'bad gateway' }), null);
+  assert.equal(quotaOf({ ok: false, message: 'no token' }), null);
+  const fromBudget = evaluateStateQuota({ stateBudget: { ok: false, message: 'x', status: 429, body: 'error code: 1027' }, stateShadow: null }, NOW);
+  assert.deepEqual(fromBudget.findings.map((f) => [f.key, f.severity, f.sinceMs]), [['feed:state-quota', 'P1', NOW]]);
+  const marker = (ageMs: number, kind: string) => ({ createdAtMs: NOW - ageMs, runId: 7, steps: { hydrate: { ok: false, summary: 'failed: error 1027', error_kind: kind } } });
+  const shadow = (ms: unknown[]) => ({ ok: true as const, markers: ms as never });
+  const fromMarker = evaluateStateQuota({ stateBudget: { ok: true, json: {} }, stateShadow: shadow([marker(HOUR, 'quota'), marker(3 * HOUR, 'quota')]) }, NOW);
+  assert.deepEqual(fromMarker.findings.map((f) => [f.key, f.sinceMs]), [['feed:state-quota', NOW - HOUR]], 'only markers within 2 h');
+  assert.match(fromMarker.findings[0]!.text, /^hydrate of run 7/);
+  assert.deepEqual(evaluateStateQuota({ stateBudget: { ok: true, json: {} }, stateShadow: shadow([marker(HOUR, 'transport')]) }, NOW), { findings: [], unjudged: [], notes: [] });
+  assert.deepEqual(evaluateStateQuota({ stateBudget: { ok: false, message: 'no token' }, stateShadow: { ok: false, message: 'x' } as never }, NOW).unjudged, ['feed:state-quota']);
 });
 
 test('feed:repo-growth: a sample a day kept as a series; MB a day since the newest sample 6 days old, over the phase\'s 16 is P3', () => {

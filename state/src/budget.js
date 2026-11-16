@@ -3,16 +3,32 @@
 //
 // Every authenticated route reserves its worst case here BEFORE it touches the bucket, and is refused (429
 // {"error":"budget"}) when the reservation would cross a ceiling:
-// - Class A (PutObject, ListObjects): a PUT is 1, a GC page is 1 (its list; DeleteObject is free).
+// - Class A (PutObject, ListObjects): a PUT is 1, a GC page is 1 (its list; DeleteObject is free); a ref PUT is 3 (the
+//   reflog repair or, on a create, the reflog listing; the swap; the reflog entry), a reflog page 1 (its list).
 // - Class B (GetObject, HeadObject): a batchGet of n blobs is n (a missing blob still costs its GET), a GC first page
-//   HEADs every `current` blob.
-// - Bytes written: a PUT's Content-Length.
+//   HEADs every `current` blob; a ref GET is 1, a ref PUT 3 (the GET of the current ref, the HEAD of its generation, and
+//   the re-GET for the 412 body when the swap itself is refused).
+// - Bytes written: a PUT's Content-Length; a ref PUT three times its body.
 // - Stored bytes: a running estimate of the bucket's size, refusing a PUT that would take it above the ceiling. It is
 //   raised by every PUT (an overwrite of an existing key counts again: the estimate errs high, never low), lowered by
 //   the bytes a GC page deletes, refunded when a PUT fails, and re-seeded from the listing totals of every complete GC
 //   pass (cursor null through to the page whose cursor is null) plus the bytes PUT while that pass ran (counted from
 //   the first page's admission, before its listing, so no PUT of the pass's window is missed).
 // The ceilings come from the Worker's vars and are passed in on every call, so a redeploy changes them at once.
+//
+// Priority lanes (storage phase 4.0; the owner keeps the store on the account that also runs the platform, so the
+// daily budgets are shared and a background job must never starve the feed): every reservation names its lane.
+// `critical` (aggregate, derive and the restore: the 5-minute feed and its repair) is refused only above 95 % of a
+// ceiling; `background` (GC, backup, history, first-solutions, stats, health, the rehearsal) already above 60 %. So the
+// last 35 % of every ceiling is the feed's alone, and feed:state-budget (60 %) fires when background work starts to be
+// refused, long before the feed is. A refusal on the critical lane is counted apart (`refused_critical`): health
+// raises it as P1.
+//
+// Ref and reflog bytes (protocol 2, refs.js) are `meta` bytes: counted into the stored estimate like a blob PUT, but
+// also into `meta_bytes`, which a GC pass's re-seed adds back (GC lists cas/ only, so the listing never sees refs/ or
+// gen/, and the estimate must never read low). A ref PUT reserves its reflog entry (and, creating a lane, the ref
+// object); swapping a ref overwrites one object of at most 4 KiB per lane, which is not counted again. A ref PUT that
+// is refused after its reservation (412, 409) gives its meta bytes back and, on a 412, counts a `ref_conflicts`.
 //
 // One object (idFromName 'global'), SQLite-backed (the only kind on the Workers Free plan). A method of the object runs
 // alone and every statement here is synchronous, so each call is one atomic read-check-write. Cost (account-wide free
@@ -51,6 +67,45 @@ export const SCHEMA = [
   `INSERT INTO store (id) VALUES (1) ON CONFLICT DO NOTHING`,
 ];
 
+/** Columns added after the first deploy (the schema only grows, so an older version still reads every row). */
+export const ADDED_COLUMNS = [
+  ['days', 'refused_critical', 'INTEGER NOT NULL DEFAULT 0'],
+  ['days', 'ref_conflicts', 'INTEGER NOT NULL DEFAULT 0'],
+  ['days', 'reflog_collisions', 'INTEGER NOT NULL DEFAULT 0'],
+  ['store', 'meta_bytes', 'INTEGER NOT NULL DEFAULT 0'],
+];
+
+/** The lanes' share of every ceiling (above it a reservation of that lane is refused). */
+export const LANE_SHARES = { critical: 0.95, background: 0.6 };
+
+/** The columns of a table (PRAGMA table_info, which Durable Object SQLite admits), or null when it cannot be read. */
+function columnsOf(sql, table) {
+  try {
+    return new Set(sql.exec(`PRAGMA table_info(${table})`).toArray().map((r) => String(r.name)));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Bring the object's schema up to date: SCHEMA, the protocol-2 columns, and the extra statements (the fallback's refs
+ * table, refs.js). ALTER TABLE has no IF NOT EXISTS, so a column is added only when table_info lacks it; should the
+ * pragma be refused, the ALTER runs anyway and its "duplicate column name" is the no-op.
+ */
+export function migrate(sql, extra = []) {
+  for (const statement of SCHEMA) sql.exec(statement);
+  for (const [table, column, type] of ADDED_COLUMNS) {
+    const have = columnsOf(sql, table);
+    if (have?.has(column)) continue;
+    try {
+      sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    } catch (err) {
+      if (!/duplicate column/i.test(String(err?.message ?? err))) throw err;
+    }
+  }
+  for (const statement of extra) sql.exec(statement);
+}
+
 /** The names of the ceilings, as the Worker's vars spell them, and the counter each one bounds. */
 export const CEILINGS = {
   CLASS_A_PER_DAY: 'class_a',
@@ -66,7 +121,7 @@ export function utcDay(nowMs) {
 
 function dayRow(sql, day) {
   const rows = sql
-    .exec('SELECT class_a, class_b, bytes_written, requests, refused FROM days WHERE day = ?', day)
+    .exec('SELECT class_a, class_b, bytes_written, requests, refused, refused_critical, ref_conflicts, reflog_collisions FROM days WHERE day = ?', day)
     .toArray();
   const r = rows[0];
   return r
@@ -76,14 +131,17 @@ function dayRow(sql, day) {
         bytes_written: Number(r.bytes_written),
         requests: Number(r.requests),
         refused: Number(r.refused),
+        refused_critical: Number(r.refused_critical),
+        ref_conflicts: Number(r.ref_conflicts),
+        reflog_collisions: Number(r.reflog_collisions),
       }
-    : { class_a: 0, class_b: 0, bytes_written: 0, requests: 0, refused: 0 };
+    : { class_a: 0, class_b: 0, bytes_written: 0, requests: 0, refused: 0, refused_critical: 0, ref_conflicts: 0, reflog_collisions: 0 };
 }
 
 function storeRow(sql) {
   const r = sql
     .exec(
-      'SELECT stored_bytes, seeded_ms, pass_cursor, pass_keep, pass_bytes, pass_started_ms, put_since_pass FROM store WHERE id = 1',
+      'SELECT stored_bytes, seeded_ms, pass_cursor, pass_keep, pass_bytes, pass_started_ms, put_since_pass, meta_bytes FROM store WHERE id = 1',
     )
     .toArray()[0];
   return {
@@ -94,6 +152,7 @@ function storeRow(sql) {
     pass_bytes: r.pass_bytes == null ? null : Number(r.pass_bytes),
     pass_started_ms: r.pass_started_ms == null ? null : Number(r.pass_started_ms),
     put_since_pass: Number(r.put_since_pass),
+    meta_bytes: Number(r.meta_bytes),
   };
 }
 
@@ -103,29 +162,39 @@ function pruneBefore(nowMs) {
 }
 
 /**
- * Reserve one request's worst-case cost for the UTC day of nowMs.
- * cost: {classA, classB, bytes} (bytes = bytes written AND added to the stored estimate).
+ * Reserve one request's worst-case cost for the UTC day of nowMs, on a priority lane ('critical' or 'background':
+ * refused above LANE_SHARES of a ceiling).
+ * cost: {classA, classB, bytes, metaBytes, extraWritten}: bytes = a blob's bytes, written AND added to the stored
+ * estimate; metaBytes = ref/reflog bytes, written, stored and kept in meta_bytes; extraWritten = written only (a ref
+ * swap's overwrite, a repair that most often writes nothing).
  * Returns {ok: true} or {ok: false, ceiling} naming the first ceiling the reservation would cross; a refusal is counted
- * in the day's `refused` and reserves nothing.
+ * in the day's `refused` (and `refused_critical` on that lane) and reserves nothing.
  */
-export function reserve(sql, { nowMs, cost, ceilings }) {
+export function reserve(sql, { nowMs, cost, ceilings, priority = 'critical' }) {
   const day = utcDay(nowMs);
   sql.exec('DELETE FROM days WHERE day < ?', pruneBefore(nowMs));
   const used = dayRow(sql, day);
   const store = storeRow(sql);
+  const share = LANE_SHARES[priority] ?? LANE_SHARES.background;
   const classA = cost.classA ?? 0;
   const classB = cost.classB ?? 0;
   const bytes = cost.bytes ?? 0;
+  const meta = cost.metaBytes ?? 0;
+  const written = bytes + meta + (cost.extraWritten ?? 0);
+  const over = (now, add, cap) => now + add > cap * share;
   let ceiling = null;
-  if (used.class_a + classA > ceilings.CLASS_A_PER_DAY) ceiling = 'class_a';
-  else if (used.class_b + classB > ceilings.CLASS_B_PER_DAY) ceiling = 'class_b';
-  else if (used.bytes_written + bytes > ceilings.BYTES_WRITTEN_PER_DAY) ceiling = 'bytes_written';
-  else if (bytes > 0 && store.stored_bytes + bytes > ceilings.STORED_BYTES_MAX) ceiling = 'stored_bytes';
+  if (over(used.class_a, classA, ceilings.CLASS_A_PER_DAY)) ceiling = 'class_a';
+  else if (over(used.class_b, classB, ceilings.CLASS_B_PER_DAY)) ceiling = 'class_b';
+  else if (over(used.bytes_written, written, ceilings.BYTES_WRITTEN_PER_DAY)) ceiling = 'bytes_written';
+  else if (bytes + meta > 0 && over(store.stored_bytes, bytes + meta, ceilings.STORED_BYTES_MAX)) ceiling = 'stored_bytes';
   if (ceiling) {
+    const critical = priority === 'critical' ? 1 : 0;
     sql.exec(
-      `INSERT INTO days (day, requests, refused) VALUES (?, 1, 1)
-       ON CONFLICT (day) DO UPDATE SET requests = requests + 1, refused = refused + 1`,
+      `INSERT INTO days (day, requests, refused, refused_critical) VALUES (?, 1, 1, ?)
+       ON CONFLICT (day) DO UPDATE SET requests = requests + 1, refused = refused + 1,
+         refused_critical = refused_critical + excluded.refused_critical`,
       day,
+      critical,
     );
     return { ok: false, ceiling };
   }
@@ -136,16 +205,52 @@ export function reserve(sql, { nowMs, cost, ceilings }) {
     day,
     classA,
     classB,
-    bytes,
+    written,
   );
-  if (bytes > 0) {
+  if (bytes + meta > 0) {
     sql.exec(
-      'UPDATE store SET stored_bytes = stored_bytes + ?, put_since_pass = put_since_pass + ? WHERE id = 1',
+      'UPDATE store SET stored_bytes = stored_bytes + ?, put_since_pass = put_since_pass + ?, meta_bytes = meta_bytes + ? WHERE id = 1',
+      bytes + meta,
       bytes,
-      bytes,
+      meta,
     );
   }
   return { ok: true };
+}
+
+/**
+ * Settle a ref PUT that was refused after its reservation: give back the meta bytes it reserved (nothing was stored)
+ * and, for a 412, count one ref conflict of the day (feed:state-ref-conflict reads it from 4.3).
+ */
+export function refundRef(sql, { nowMs, metaBytes, conflict }) {
+  if (metaBytes > 0) {
+    sql.exec(
+      'UPDATE store SET stored_bytes = MAX(0, stored_bytes - ?), meta_bytes = MAX(0, meta_bytes - ?) WHERE id = 1',
+      metaBytes,
+      metaBytes,
+    );
+  }
+  if (conflict) {
+    sql.exec(
+      `INSERT INTO days (day, ref_conflicts) VALUES (?, 1)
+       ON CONFLICT (day) DO UPDATE SET ref_conflicts = ref_conflicts + 1`,
+      utcDay(nowMs),
+    );
+  }
+}
+
+/**
+ * Count one reflog collision of the day: a ref PUT whose swap happened but whose new seq's reflog slot was already
+ * taken (refs.js `entry: 'exists'`: a non-atomic CAS, or an entry left by a lost ref). The client fails that run
+ * (kind integrity), and feed-health raises any collision of the day (feed:state-budget, member `reflog`, P1), because
+ * the Worker's log line alone reaches no one.
+ */
+export function reflogCollision(sql, { nowMs }) {
+  sql.exec(
+    `INSERT INTO days (day, reflog_collisions) VALUES (?, 1)
+     ON CONFLICT (day) DO UPDATE SET reflog_collisions = reflog_collisions + 1`,
+    utcDay(nowMs),
+  );
 }
 
 /**
@@ -171,19 +276,20 @@ export function refundStored(sql, bytes, reservedMs = null) {
  * put_since_pass restarts at 0 and pass_started_ms is set, so every PUT reserved from now on is added on top of what
  * the listing finds (one the listing also saw counts twice: the estimate errs high, never low).
  */
-export function gcBegin(sql, { nowMs, cursor, keepHash, cost, ceilings }) {
+export function gcBegin(sql, { nowMs, cursor, keepHash, cost, ceilings, priority = 'background' }) {
   if (cursor != null) {
     const store = storeRow(sql);
     if (store.pass_cursor !== cursor || store.pass_keep !== keepHash) return { ok: false, pass: true };
   }
-  const verdict = reserve(sql, { nowMs, cost, ceilings });
+  const verdict = reserve(sql, { nowMs, cost, ceilings, priority });
   if (verdict.ok && cursor == null) sql.exec('UPDATE store SET put_since_pass = 0, pass_started_ms = ? WHERE id = 1', nowMs);
   return verdict;
 }
 
 /**
  * Record one GC page: subtract the bytes it deleted, carry the pass on to nextCursor, and on the pass's last page
- * (nextCursor null) re-seed the stored estimate with what the pass listed and kept plus what was PUT meanwhile.
+ * (nextCursor null) re-seed the stored estimate with what the pass listed and kept plus the blobs PUT meanwhile plus
+ * the ref and reflog bytes (meta_bytes: outside cas/, so never listed by GC).
  * keptBytes is the size of every listed object the page did not delete.
  */
 export function gcEnd(sql, { nowMs, cursor, nextCursor, keepHash, keptBytes, deletedBytes }) {
@@ -196,7 +302,7 @@ export function gcEnd(sql, { nowMs, cursor, nextCursor, keepHash, keptBytes, del
   }
   if (nextCursor == null) {
     sql.exec(
-      `UPDATE store SET stored_bytes = pass_bytes + put_since_pass, seeded_ms = ?, pass_cursor = NULL, pass_keep = NULL,
+      `UPDATE store SET stored_bytes = pass_bytes + put_since_pass + meta_bytes, seeded_ms = ?, pass_cursor = NULL, pass_keep = NULL,
          pass_bytes = NULL, pass_started_ms = NULL, put_since_pass = 0 WHERE id = 1`,
       nowMs,
     );
@@ -205,7 +311,8 @@ export function gcEnd(sql, { nowMs, cursor, nextCursor, keepHash, keptBytes, del
   }
 }
 
-/** Today's counters, the stored estimate and the ceilings (GET /v1/budget, read by feed-health). */
+/** Today's counters (with the critical lane's refusals, the ref conflicts and the reflog collisions), the stored estimate, the lanes' shares
+ *  and the ceilings (GET /v1/budget, read by feed-health). */
 export function snapshot(sql, { nowMs, ceilings }) {
   const day = utcDay(nowMs);
   const used = dayRow(sql, day);
@@ -214,6 +321,8 @@ export function snapshot(sql, { nowMs, ceilings }) {
     day,
     used,
     stored_bytes: store.stored_bytes,
+    meta_bytes: store.meta_bytes,
+    lanes: { ...LANE_SHARES },
     stored_seeded_at: store.seeded_ms == null ? null : new Date(store.seeded_ms).toISOString(),
     gc_pass_open: store.pass_cursor != null,
     ceilings: {

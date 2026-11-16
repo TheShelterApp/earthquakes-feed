@@ -1,16 +1,20 @@
 // The Worker's entry module (wrangler.toml `main`): the HTTP handler from worker.js and the budget ledger's Durable
-// Object class. Only this module imports `cloudflare:workers`, so worker.js, auth.js, cas.js and budget.js stay
-// importable by the Node tests (tests/state-worker.test.ts), as in heartbeat/src/index.js.
+// Object class. Only this module imports `cloudflare:workers`, so worker.js, auth.js, cas.js, refs.js and budget.js stay
+// importable by the Node tests (tests/state-worker.test.ts, tests/state-refs.test.ts), as in heartbeat/src/index.js.
 import { DurableObject } from 'cloudflare:workers';
-import { SCHEMA, gcBegin, gcEnd, refundStored, reserve, snapshot } from './budget.js';
+import { gcBegin, gcEnd, migrate, reflogCollision, refundRef, refundStored, reserve, snapshot } from './budget.js';
+import { REFS_SCHEMA, refGetSql, refSwapSql } from './refs.js';
 
 export { default } from './worker.js';
 
-/** One instance (idFromName 'global'), SQLite-backed (wrangler.toml migration v1). See budget.js. */
+/**
+ * One instance (idFromName 'global'), SQLite-backed (wrangler.toml migration v1). See budget.js. It also holds the
+ * refs table of the ref fallback (REF_BACKEND = "do", refs.js): empty and unused while refs live in R2.
+ */
 export class BudgetLedger extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
-    for (const statement of SCHEMA) ctx.storage.sql.exec(statement);
+    migrate(ctx.storage.sql, [REFS_SCHEMA]);
   }
 
   reserve(args) {
@@ -19,6 +23,14 @@ export class BudgetLedger extends DurableObject {
 
   refundStored(bytes, reservedMs) {
     refundStored(this.ctx.storage.sql, bytes, reservedMs);
+  }
+
+  refundRef(args) {
+    refundRef(this.ctx.storage.sql, args);
+  }
+
+  reflogCollision(args) {
+    reflogCollision(this.ctx.storage.sql, args);
   }
 
   gcBegin(args) {
@@ -31,5 +43,13 @@ export class BudgetLedger extends DurableObject {
 
   snapshot(args) {
     return snapshot(this.ctx.storage.sql, args);
+  }
+
+  refGet(lane) {
+    return refGetSql(this.ctx.storage.sql, lane);
+  }
+
+  refSwap(args) {
+    return refSwapSql(this.ctx.storage.sql, args);
   }
 }

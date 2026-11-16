@@ -1868,10 +1868,13 @@ for ever (the Releases). Until phase 3, git kept every 5-minute version for ever
 - Storage: about 0.1 GB written a day, about 3.3 GB held at GC's 30-day age, against the account's 10 GB, which the
   platform shares (about 0.4 GB).
 - The Worker refuses (429 budget) above its ceilings: 20,000 Class A and 200,000 Class B a day, 1 GiB written a day,
-  6 GiB stored. `feed:state-budget` (P2) fires at 70 % of any of them.
+  6 GiB stored. Since phase 4.0 the ceilings have priority lanes: background work (GC, backup, history,
+  first-solutions, stats, health) is refused above 60 % of any of them, the feed (aggregate, derive, the restore)
+  only above 95 %. `feed:state-budget` fires at 60 % (P2) and on any refusal of the feed's own lane (P1).
 - The coupling to the shared request cap: when the account reaches 100,000 requests a day (Error 1027 until 00:00
   UTC), the store refuses with it. In phase 3a that is a `feed:state-shadow` row. From phase 3b the feed stops until
-  then; the 30-minute freshness contract is broken, and `feed:freshness` fires.
+  then; the 30-minute freshness contract is broken, and `feed:freshness` fires. `feed:state-quota` (P1) names the
+  cause: health's own budget read, or a job's state step, met a 1027 or a platform 429.
 
 **Outage budget (from phase 3b).** A store outage stops the feed: aggregate fails closed at its hydrate, Pages goes
 stale, and `feed:freshness` fires at 30 minutes. No data is lost for about 48 hours: the sources' live query windows
@@ -1923,6 +1926,23 @@ Exit path: the bucket is plain S3 keys; `rclone` it to any S3 store and add an S
 - *Rollback after 3b*: a revert to 3a, which fails closed on a checkout without day files, so the revert must restore
   the tracked files first. Hydrate authoritatively, commit the day files with the sentinel and the ignore lines
   removed, then revert.
+
+**Phase 4.0: the Worker's protocol 2, inert.** The state Worker gained one compare-and-swap ref per writer lane
+(`refs/main`, `refs/main-shadow`, `refs/first-solutions`, `refs/history`) and a create-only reflog
+(`gen/<lane>/<seq>`), the mechanism phases 4.1–4.5 move the mutable state onto (state/README.md "Protocol 2"). A ref
+names a generation blob and its place in the chain (seq, parent, head_seq, data_commit, the writer run with a nonce);
+the Worker swaps it only to the direct successor of the version the writer read (If-Match), answers 412 with the current
+ref otherwise (the writer fails closed, no automatic rebase), and keeps every version in the reflog, the future GC root
+set, backup index and restore index. Allow-lists are (repository_id, workflow) pairs, ready for the escape route's
+second repository; a restore is admitted only for `state-restore.yml` in the GitHub Environment `state-restore`, which
+the owner creates with a required reviewer before that workflow lands (state/README.md, Owner setup). The
+step changes nothing in production: no job calls the new routes, `MIN_PROTOCOL` stays 1, and the blob routes are
+unchanged apart from the priority lanes above. Its gate is `state-rehearsal.yml` on staging: R2's create-only
+precondition, two racing writers (exactly one 412), the ambiguous-answer reconcile, the reflog repair and at most 5
+store operations per ref PUT, each reported in the job summary. If the race shows R2's conditional put is not atomic,
+the refs move to a row of the Worker's Durable Object (`REF_BACKEND = "do"`) behind the same API; if the binding does
+not honour the configured create-only form, `CREATE_ONLY_FORM` moves to the form the probe proved (or `"off"`, with
+every lane bootstrapped by the runbook).
 
 ## Deep history (before 2023-07-06)
 

@@ -50,6 +50,7 @@ export type RuleId =
   | 'feed:state-gc'
   | 'feed:state-backup'
   | 'feed:state-budget'
+  | 'feed:state-quota'
   | 'feed:repo-growth'
   | 'walks'
   | 'platform:api'

@@ -2,7 +2,12 @@ name: state-rehearsal
 
 # The state store's rehearsal against STAGING (storage phase 3; src/state-rehearsal.ts): the whole client path (PUT,
 # batchGet, the shadow and the authoritative hydrate, a GC dry run, the budget) on synthetic data, from any branch, so a
-# change to the client or to the Worker (state/, its staging environment) is rehearsed before it reaches main. Staging
+# change to the client or to the Worker (state/, its staging environment) is rehearsed before it reaches main. Then
+# protocol 2 (storage phase 4.0's gate, state/README.md "The 4.0 gate"): R2's create-only precondition, the bootstrap
+# twice and racing creates, two racing writers on one ref, the ambiguous-answer reconcile, the reflog repair, the
+# refused answers and at most 5 store operations per ref PUT, on fresh rehearsal lanes, written to the job summary as a
+# table; a FAIL row fails the job, a WARN row names the runbook bootstrap. The writer ids name this run
+# (GITHUB_WORKFLOW_REF, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT), which the Worker checks against the token. Staging
 # (feed-state-staging.theshelter.app, audience earthquakes-feed-state-staging, its own bucket) admits any branch of
 # this repository; production admits main only. Staging never reads production's state.
 #
@@ -16,7 +21,7 @@ permissions:
 jobs:
   rehearse:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
       # An OIDC token for the staging state Worker.

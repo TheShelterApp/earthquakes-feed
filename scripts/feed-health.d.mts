@@ -118,7 +118,7 @@ export interface FeedInputs {
 export type StateShadowRead =
   | { ok: true; markers: Array<{ createdAtMs: number; runId: number | null; steps: Record<string, unknown> }> }
   | { ok: false; message: string };
-export type StateBudgetRead = { ok: true; json: unknown } | { ok: false; message: string; skipped?: boolean };
+export type StateBudgetRead = { ok: true; json: unknown } | { ok: false; message: string; skipped?: boolean; status?: number; body?: string };
 export interface RepoSample {
   atMs: number;
   kb: number;
@@ -137,6 +137,8 @@ export function evaluateStateBackup(read: FeedInputs['stateBackup'], nowMs: numb
 export function budgetShares(json: unknown): Array<{ key: string; used: number; cap: number; share: number }> | null;
 /** feed:state-budget (P2): a ceiling over 70 % used. */
 export function evaluateStateBudget(read: StateBudgetRead | undefined): Judged;
+export function quotaOf(read: StateBudgetRead | null | undefined): '1027' | '429' | null;
+export function evaluateStateQuota(inputs: { stateBudget: StateBudgetRead | null; stateShadow: StateShadowRead | null }, nowMs: number): Judged;
 export function readStateBudget(opts: { env: Record<string, string | undefined>; fetchImpl: FetchImpl; sleep: (ms: number) => Promise<void> }): Promise<StateBudgetRead>;
 /** This run's repository-size sample appended when the newest is 20 h old or more (at most 40 kept). */
 export function nextSamples(prev: unknown, nowMs: number, kb: unknown): { samples: RepoSample[]; changed: boolean };

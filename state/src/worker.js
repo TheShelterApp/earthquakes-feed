@@ -1,20 +1,31 @@
 // The feed's state Worker: the HTTP surface of the event map's blob store (README.md in this directory has the
 // contract, the auth policy, the budgets and the runbook).
 //
-//   PUT  /v1/cas/sha256/<hex>   write   store one blob (gzip bytes whose sha256 is <hex>)
-//   POST /v1/cas:batchGet       read    1..40 blobs in one framed stream
-//   POST /v1/gc                 gc      one page of garbage collection
-//   GET  /v1/budget             budget  today's counters and the ceilings (feed-health)
+//   PUT  /v1/cas/sha256/<hex>   write      store one blob (gzip bytes whose sha256 is <hex>)
+//   POST /v1/cas:batchGet       read       1..40 blobs in one framed stream
+//   POST /v1/gc                 gc         one page of garbage collection
+//   GET  /v1/budget             budget     today's counters and the ceilings (feed-health)
+// Protocol 2 (storage phase 4.0, refs.js; additive: MIN_PROTOCOL stays 1, and nothing in production calls these yet):
+//   GET  /v1/refs/<lane>        ref-read   the lane's ref and its strong ETag, or 404
+//   PUT  /v1/refs/<lane>        ref-write  compare-and-swap (If-Match, or If-None-Match: * once); `restore` when the
+//                                          body carries restore_of
+//   GET  /v1/gen/<lane>         reflog     one page of the lane's reflog (?after=<seq>&limit=<n ≤ 1000>)
+//   POST /v1/rehearsal/<lane>   (staging)  the rehearsal's probes on a rehearsal lane (create-only, drop-reflog)
 //
-// Every route: a GitHub OIDC token (auth.js) → the route's workflow allow-list → (writes and gc) the protocol gate →
+// Every route: a GitHub OIDC token (auth.js) → the route's (repository_id, workflow) pairs → (writes and gc) the protocol gate →
 // request validation → the budget reservation (budget.js, Durable Object BUDGET) → the bucket (binding STATE).
 // Order matters for cost: an unauthenticated request never reaches the Durable Object or the bucket, so a flood costs
 // Worker requests only (account-wide 100,000/day on Workers Free; the zone's rate limits sit in front).
 //
-// One structured JSON line per request (route, workflow, run_id, run_attempt, n, bytes, status, ms, error), never the
-// token; every response carries x-request-id (the cf-ray when there is one), which the client logs on failure.
+// One structured JSON line per request (route, workflow, run_id, run_attempt, lane, n, bytes, status, ms, error, ops,
+// ledger), never the token; every response carries x-request-id (the cf-ray when there is one), which the client logs on
+// failure. A ref route's answer also carries x-feed-state-store-ops (bucket and ref-store operations it made) and
+// x-feed-state-ledger-calls (budget ledger calls), so the rehearsal can prove the subrequest bound.
+//
+// Priority lanes (budget.js): aggregate, derive and the restore reserve on the `critical` lane (refused above 95 % of a
+// ceiling); every other workflow on `background` (above 60 %).
 
-import { AuthError, authorize, bearerToken, createKeyStore, verifyToken } from './auth.js';
+import { AuthError, DEFAULT_POLICY, LANES, REHEARSAL_LANE, authorize, bearerToken, createKeyStore, knownRepositories, verifyToken } from './auth.js';
 import {
   MAX_BATCH,
   MAX_BLOB_BYTES,
@@ -30,13 +41,31 @@ import {
   r2ErrorCode,
   streamBlobs,
 } from './cas.js';
+import {
+  CREATE_ONLY_FORMS,
+  MAX_REFLOG_PAGE,
+  MAX_REF_BYTES,
+  REF_PROTOCOL,
+  RefError,
+  doRefStore,
+  httpEtag,
+  parseRefBody,
+  preconditionOf,
+  probe,
+  putRef,
+  r2RefStore,
+  reflogPage,
+} from './refs.js';
 
 /** The name of the one budget ledger object (Durable Object class BudgetLedger in index.js, budget.js). */
 export const BUDGET_NAME = 'global';
 export const PROTOCOL_HEADER = 'x-feed-state-protocol';
 const MAX_BATCH_BODY = 8 * 1024;
 const MAX_GC_BODY = 1024 * 1024;
+const MAX_PROBE_BODY = 1024;
 const CEILING_VARS = ['CLASS_A_PER_DAY', 'CLASS_B_PER_DAY', 'BYTES_WRITTEN_PER_DAY', 'STORED_BYTES_MAX'];
+/** The workflows of this repository that reserve on the critical lane; every other caller is background. */
+export const CRITICAL_WORKFLOWS = ['aggregate.yml', 'derive.yml', 'state-restore.yml'];
 
 class HttpError extends Error {
   constructor(status, message, extra = {}) {
@@ -67,6 +96,10 @@ export function configFrom(env) {
     if (!Number.isSafeInteger(v) || v <= 0) problems.push(name);
     ceilings[name] = v;
   }
+  const refBackend = String(env.REF_BACKEND ?? '');
+  if (refBackend !== 'r2' && refBackend !== 'do') problems.push('REF_BACKEND');
+  const createOnlyForm = String(env.CREATE_ONLY_FORM ?? '');
+  if (!CREATE_ONLY_FORMS.includes(createOnlyForm)) problems.push('CREATE_ONLY_FORM');
   if (!env.STATE) problems.push('STATE');
   if (!env.BUDGET) problems.push('BUDGET');
   if (problems.length) throw new HttpError(500, `misconfigured: ${problems.join(', ')}`);
@@ -76,24 +109,48 @@ export function configFrom(env) {
     allowAnyRef: allowAnyRef === '1',
     staging: environment === 'staging',
     minProtocol,
+    refBackend,
+    createOnlyForm,
     ceilings,
   };
 }
 
+// `no-transform` on every answer: Cloudflare's edge compresses a response for a client that accepts gzip or brotli and
+// then turns a strong ETag into a weak one (W/"…"), which a ref's If-Match cannot use; the 4.0 rehearsal on staging
+// (run 43838294375) saw exactly that. The ref's ETag also travels in x-feed-state-etag, a header the edge never
+// rewrites, and the client reads that first.
 function json(status, body, requestId, extraHeaders = {}) {
   return new Response(JSON.stringify(body) + '\n', {
     status,
     headers: {
       'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store',
+      'cache-control': 'no-store, no-transform',
       'x-request-id': requestId,
       ...extraHeaders,
     },
   });
 }
 
-/** The route of a request: {name, right} or an HttpError (404 unknown path, 405 wrong method). */
-function routeOf(method, pathname) {
+/** Whether `lane` names a lane here: a production lane, or (staging only) a rehearsal lane. */
+function laneOk(lane, staging) {
+  return LANES.includes(lane) || (staging && REHEARSAL_LANE.test(lane));
+}
+
+/** The route of a request: {name, right, lane?} or an HttpError (404 unknown path or lane, 405 wrong method). */
+function routeOf(method, pathname, staging) {
+  const lanePath = /^\/v1\/(refs|gen|rehearsal)\/([a-z0-9-]{1,64})$/.exec(pathname);
+  if (lanePath) {
+    const [, kind, lane] = lanePath;
+    if (kind === 'rehearsal' ? !(staging && REHEARSAL_LANE.test(lane)) : !laneOk(lane, staging)) throw new HttpError(404, 'not found');
+    if (kind === 'refs') {
+      if (method === 'GET') return { name: 'refGet', right: 'ref-read', lane };
+      if (method === 'PUT') return { name: 'refPut', right: 'ref-write', lane };
+      throw new HttpError(405, 'method not allowed', { allow: 'GET, PUT' });
+    }
+    const want = kind === 'gen' ? 'GET' : 'POST';
+    if (method !== want) throw new HttpError(405, 'method not allowed', { allow: want });
+    return kind === 'gen' ? { name: 'reflog', right: 'reflog', lane } : { name: 'probe', right: 'probe', lane };
+  }
   const put = /^\/v1\/cas\/sha256\/([0-9a-f]{64})$/.exec(pathname);
   const routes = [
     [put != null, 'PUT', { name: 'put', right: 'write', sha: put?.[1] }],
@@ -117,8 +174,8 @@ function contentLength(request) {
   return Number(raw);
 }
 
-/** Read a JSON request body of at most max bytes (413 above it, 400 if not a JSON object). */
-async function readJson(request, max) {
+/** Read a request body of at most max bytes as text (413 above it). */
+async function readText(request, max) {
   const declared = contentLength(request);
   if (declared != null && declared > max) throw new HttpError(413, `body above ${max} bytes`);
   const chunks = [];
@@ -143,7 +200,17 @@ async function readJson(request, max) {
     at += c.byteLength;
   }
   try {
-    const v = JSON.parse(new TextDecoder().decode(bytes));
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw new HttpError(400, 'body is not UTF-8');
+  }
+}
+
+/** Read a JSON request body of at most max bytes (413 above it, 400 if not a JSON object). */
+async function readJson(request, max) {
+  const text = await readText(request, max);
+  try {
+    const v = JSON.parse(text);
     if (v && typeof v === 'object' && !Array.isArray(v)) return v;
   } catch {
     // fall through
@@ -160,6 +227,13 @@ function shaList(v, field, min, max) {
   return v;
 }
 
+/** The lowest protocol a right needs: blob writes and GC MIN_PROTOCOL, ref writes (and restore, probes) at least 2. */
+function protocolFor(right, cfg) {
+  if (right === 'write' || right === 'gc') return cfg.minProtocol;
+  if (right === 'ref-write' || right === 'restore' || right === 'probe') return Math.max(cfg.minProtocol, REF_PROTOCOL);
+  return null;
+}
+
 function protocolOk(request, min) {
   const raw = request.headers.get(PROTOCOL_HEADER);
   return raw != null && /^[0-9]{1,6}$/.test(raw) && Number(raw) >= min;
@@ -169,8 +243,10 @@ function budgetStub(env) {
   return env.BUDGET.get(env.BUDGET.idFromName(BUDGET_NAME));
 }
 
-/** Call the budget ledger; an unreachable ledger is a 503 (retryable), never an unmetered request. */
-async function ledger(env, call) {
+/** Call the budget ledger; an unreachable ledger is a 503 (retryable), never an unmetered request. `log.ledger` counts
+ *  the calls of the request. */
+async function ledger(env, log, call) {
+  log.ledger = (log.ledger ?? 0) + 1;
   try {
     return await call(budgetStub(env));
   } catch (err) {
@@ -192,15 +268,15 @@ async function handlePut(request, env, cfg, route, log, nowMs) {
   if (length > MAX_BLOB_BYTES) throw new HttpError(413, `blob above ${MAX_BLOB_BYTES} bytes`);
   if (length === 0 || !request.body) throw new HttpError(400, 'empty body');
   log.bytes = length;
-  const verdict = await ledger(env, (b) =>
-    b.reserve({ nowMs, cost: { classA: 1, classB: 0, bytes: length }, ceilings: cfg.ceilings }),
+  const verdict = await ledger(env, log, (b) =>
+    b.reserve({ nowMs, cost: { classA: 1, classB: 0, bytes: length }, ceilings: cfg.ceilings, priority: log.priority }),
   );
   refusedByBudget(verdict);
   let object;
   try {
     object = await putBlob(env.STATE, route.sha, request.body);
   } catch (err) {
-    await ledger(env, (b) => b.refundStored(length, nowMs)).catch(() => {});
+    await ledger(env, log, (b) => b.refundStored(length, nowMs)).catch(() => {});
     const code = r2ErrorCode(err);
     if (code === 10037) throw new HttpError(400, 'checksum mismatch: the body is not the blob its sha256 names', { retryable: false });
     throw new HttpError(503, 'store write failed', { cause: String(err) });
@@ -223,8 +299,8 @@ async function handleBatchGet(request, env, cfg, ctx, log, nowMs, started, emit)
   const body = await readJson(request, MAX_BATCH_BODY);
   const shas = shaList(body.shas, 'shas', 1, MAX_BATCH);
   log.n = shas.length;
-  const verdict = await ledger(env, (b) =>
-    b.reserve({ nowMs, cost: { classA: 0, classB: shas.length, bytes: 0 }, ceilings: cfg.ceilings }),
+  const verdict = await ledger(env, log, (b) =>
+    b.reserve({ nowMs, cost: { classA: 0, classB: shas.length, bytes: 0 }, ceilings: cfg.ceilings, priority: log.priority }),
   );
   refusedByBudget(verdict);
   const { readable, writable } = byteStream();
@@ -281,8 +357,8 @@ async function handleGc(request, env, cfg, log, nowMs) {
   const outside = current.filter((s) => !keepSet.has(s));
   if (outside.length) throw new HttpError(409, 'current is not inside keep', { outside });
   const hash = await keepHash(keep);
-  const verdict = await ledger(env, (b) =>
-    b.gcBegin({ nowMs, cursor, keepHash: hash, cost: { classA: 1, classB: current.length, bytes: 0 }, ceilings: cfg.ceilings }),
+  const verdict = await ledger(env, log, (b) =>
+    b.gcBegin({ nowMs, cursor, keepHash: hash, cost: { classA: 1, classB: current.length, bytes: 0 }, ceilings: cfg.ceilings, priority: log.priority }),
   );
   refusedByBudget(verdict);
   const missing = [];
@@ -291,7 +367,7 @@ async function handleGc(request, env, cfg, log, nowMs) {
   }
   if (missing.length) throw new HttpError(409, 'a current blob is missing from the store', { missing });
   const page = await gcPage(env.STATE, { keep, cursor, minAgeDays, maxDeletes, dryRun, nowMs });
-  await ledger(env, (b) =>
+  await ledger(env, log, (b) =>
     b.gcEnd({
       nowMs,
       cursor,
@@ -307,10 +383,155 @@ async function handleGc(request, env, cfg, log, nowMs) {
   return json(200, { ...result, dryRun }, log.rid);
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Protocol 2: refs and the reflog (refs.js)
+
+/** The bucket as one request sees it: every call counted in log.ops (the subrequest bound of a ref route). */
+function countedBucket(bucket, log) {
+  const count =
+    (name) =>
+    (...args) => {
+      log.ops = (log.ops ?? 0) + 1;
+      return bucket[name](...args);
+    };
+  return { get: count('get'), head: count('head'), put: count('put'), list: count('list'), delete: count('delete') };
+}
+
+/** The ref store REF_BACKEND names, over the counted bucket (r2) or the ledger object with its calls counted (do). */
+function refStoreFor(env, cfg, bucket, log) {
+  if (cfg.refBackend === 'r2') return r2RefStore(bucket, cfg.createOnlyForm);
+  const store = doRefStore(budgetStub(env));
+  const count =
+    (fn) =>
+    async (...args) => {
+      log.ops = (log.ops ?? 0) + 1;
+      try {
+        return await fn(...args);
+      } catch (err) {
+        throw new HttpError(503, 'ref store unavailable', { cause: String(err) });
+      }
+    };
+  return { kind: 'do', get: count(store.get), swap: count(store.swap) };
+}
+
+/** Whether a ref PUT's body asks for a restore (decides the right before the body is fully checked). */
+function restoreRequested(text) {
+  try {
+    const v = JSON.parse(text);
+    return !!v && typeof v === 'object' && !Array.isArray(v) && 'restore_of' in v;
+  } catch {
+    return false;
+  }
+}
+
+async function handleRefGet(env, cfg, route, log, nowMs) {
+  const verdict = await ledger(env, log, (b) =>
+    b.reserve({ nowMs, cost: { classA: 0, classB: 1, bytes: 0 }, ceilings: cfg.ceilings, priority: log.priority }),
+  );
+  refusedByBudget(verdict);
+  const store = refStoreFor(env, cfg, countedBucket(env.STATE, log), log);
+  let cur;
+  try {
+    cur = await store.get(route.lane);
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    throw new HttpError(503, 'store read failed', { cause: String(err) });
+  }
+  if (!cur) return json(404, { error: 'no ref', lane: route.lane }, log.rid);
+  return new Response(cur.text, {
+    status: 200,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store, no-transform',
+      etag: httpEtag(cur.etag),
+      'x-feed-state-etag': httpEtag(cur.etag),
+      'x-request-id': log.rid,
+    },
+  });
+}
+
+async function handleRefPut(request, env, cfg, route, claims, text, log, nowMs) {
+  const pre = preconditionOf(request.headers);
+  const ref = parseRefBody(text, route.lane, { workflow: log.workflow, runId: claims.run_id, runAttempt: claims.run_attempt });
+  const len = new TextEncoder().encode(text).byteLength;
+  log.seq = ref.seq;
+  log.bytes = len;
+  if (ref.restore_of) log.restore_of = ref.restore_of.seq;
+  // Stored: the new reflog entry, and on a create the ref object too; written: three bodies at most (repair, swap, entry).
+  // The worst case of each class: Class A the repair (a create: the reflog listing), the swap and the entry; Class B
+  // the GET, the HEAD and, when the swap itself refuses, the re-GET for the 412 body (it replaces the entry's PUT).
+  const metaBytes = len * (pre.create ? 2 : 1);
+  const verdict = await ledger(env, log, (b) =>
+    b.reserve({ nowMs, cost: { classA: 3, classB: 3, bytes: 0, metaBytes, extraWritten: 3 * len - metaBytes }, ceilings: cfg.ceilings, priority: log.priority }),
+  );
+  refusedByBudget(verdict);
+  const bucket = countedBucket(env.STATE, log);
+  let result;
+  try {
+    result = await putRef({ store: refStoreFor(env, cfg, bucket, log), bucket, lane: route.lane, pre, text, ref, form: cfg.createOnlyForm });
+  } catch (err) {
+    if (err instanceof RefError) {
+      await ledger(env, log, (b) => b.refundRef({ nowMs, metaBytes, conflict: err.status === 412 })).catch(() => {});
+      throw err;
+    }
+    if (err instanceof HttpError) throw err;
+    // A bucket error after the reservation: whether anything was stored is unknown, so the reservation stays (high).
+    throw new HttpError(503, 'store write failed', { cause: String(err) });
+  }
+  log.reflog = `${result.reflog.previous}/${result.reflog.entry}`;
+  if (result.reflog.entry === 'exists') {
+    // The ref moved (so 200, with the alarm in the body: the client fails the run, kind integrity), but the reflog
+    // entry of its seq names another write. Counted in the ledger, so health raises it; the log line names it.
+    log.error = `the reflog slot of seq ${ref.seq} was already taken`;
+    await ledger(env, log, (b) => b.reflogCollision({ nowMs })).catch(() => {});
+  }
+  const etag = httpEtag(result.etag);
+  return json(200, { lane: route.lane, seq: ref.seq, generation: ref.generation, etag, reflog: result.reflog }, log.rid, { etag, 'x-feed-state-etag': etag });
+}
+
+async function handleReflog(url, env, cfg, route, log, nowMs) {
+  const int = (name, dflt, min, max) => {
+    const raw = url.searchParams.get(name);
+    if (raw == null) return dflt;
+    if (!/^[0-9]{1,13}$/.test(raw) || Number(raw) < min || Number(raw) > max) throw new HttpError(400, `${name} must be an integer ${min}..${max}`);
+    return Number(raw);
+  };
+  const after = int('after', 0, 0, 999_999_999_999);
+  const limit = int('limit', MAX_REFLOG_PAGE, 1, MAX_REFLOG_PAGE);
+  const verdict = await ledger(env, log, (b) =>
+    b.reserve({ nowMs, cost: { classA: 1, classB: 0, bytes: 0 }, ceilings: cfg.ceilings, priority: log.priority }),
+  );
+  refusedByBudget(verdict);
+  let page;
+  try {
+    page = await reflogPage(countedBucket(env.STATE, log), route.lane, after, limit);
+  } catch (err) {
+    throw new HttpError(503, 'store list failed', { cause: String(err) });
+  }
+  log.n = page.entries.length;
+  return json(200, page, log.rid);
+}
+
+async function handleProbe(request, env, cfg, route, log, nowMs) {
+  const body = await readJson(request, MAX_PROBE_BODY);
+  log.probe = String(body.op ?? '');
+  const verdict = await ledger(env, log, (b) =>
+    b.reserve({ nowMs, cost: { classA: 2, classB: 1, bytes: 0, metaBytes: 64 }, ceilings: cfg.ceilings, priority: log.priority }),
+  );
+  refusedByBudget(verdict);
+  return json(200, await probe(countedBucket(env.STATE, log), route.lane, body, { create_only: cfg.createOnlyForm, ref_backend: cfg.refBackend }), log.rid);
+}
+
+/** The priority lane of a caller (budget.js): the home repository's feed workflows are critical. */
+function priorityOf(claims, workflow, homeId) {
+  return String(claims.repository_id ?? '') === String(homeId) && CRITICAL_WORKFLOWS.includes(workflow) ? 'critical' : 'background';
+}
+
 /**
- * The request handler. deps (tests): keyStore, cache (Cache API or null), now() → epoch ms, log(line).
+ * The request handler. deps (tests): keyStore, cache (Cache API or null), now() → epoch ms, log(line), policy (the
+ * (repository_id, workflow) pairs, auth.js DEFAULT_POLICY).
  */
-export function createHandler({ keyStore, cache = null, now = Date.now, log: writeLog = (l) => console.log(l) } = {}) {
+export function createHandler({ keyStore, cache = null, now = Date.now, log: writeLog = (l) => console.log(l), policy = DEFAULT_POLICY } = {}) {
   const keys = keyStore ?? createKeyStore({ cache, now });
   return async function handle(request, env, ctx) {
     const started = now();
@@ -327,35 +548,61 @@ export function createHandler({ keyStore, cache = null, now = Date.now, log: wri
       writeLog(JSON.stringify(log));
     };
     let response;
+    let route = null;
     try {
       const cfg = configFrom(env);
-      const route = routeOf(request.method, url.pathname);
+      route = routeOf(request.method, url.pathname, cfg.staging);
       log.route = route.name;
       if (route.sha) log.sha = route.sha;
+      if (route.lane) log.lane = route.lane;
       const token = bearerToken(request);
       const claims = await verifyToken(token, {
         audience: cfg.audience,
-        repositoryId: cfg.repositoryId,
+        repositoryIds: knownRepositories(cfg.repositoryId, policy),
         keyStore: keys,
         cacheKey: `${url.origin}/.jwks-cache/github-actions`,
         nowMs: now(),
       });
       log.run_id = claims.run_id ?? null;
       log.run_attempt = claims.run_attempt ?? null;
-      log.workflow = authorize(claims, route.right, { allowAnyRef: cfg.allowAnyRef, staging: cfg.staging });
-      if ((route.right === 'write' || route.right === 'gc') && !protocolOk(request, cfg.minProtocol)) {
-        throw new HttpError(426, `${PROTOCOL_HEADER} must be ≥ ${cfg.minProtocol}`, { min_protocol: cfg.minProtocol });
+      if (String(claims.repository_id) !== cfg.repositoryId) log.repository_id = String(claims.repository_id);
+      // A ref PUT is a restore when its body says so: the right (and so the pairs) depends on the body, read first
+      // (at most 4 KiB, after the token is verified).
+      let refText = null;
+      if (route.name === 'refPut') {
+        refText = await readText(request, MAX_REF_BYTES);
+        if (restoreRequested(refText)) route = { ...route, right: 'restore' };
+      }
+      log.workflow = authorize(claims, route.right, {
+        repositoryId: cfg.repositoryId,
+        allowAnyRef: cfg.allowAnyRef,
+        staging: cfg.staging,
+        lane: route.lane ?? null,
+        policy,
+      });
+      log.priority = priorityOf(claims, log.workflow, cfg.repositoryId);
+      const min = protocolFor(route.right, cfg);
+      if (min != null && !protocolOk(request, min)) {
+        throw new HttpError(426, `${PROTOCOL_HEADER} must be ≥ ${min}`, { min_protocol: min });
       }
       const nowMs = now();
       if (route.name === 'put') response = await handlePut(request, env, cfg, route, log, nowMs);
       else if (route.name === 'batchGet') response = await handleBatchGet(request, env, cfg, ctx, log, nowMs, started, emit);
       else if (route.name === 'gc') response = await handleGc(request, env, cfg, log, nowMs);
-      else response = json(200, await ledger(env, (b) => b.snapshot({ nowMs, ceilings: cfg.ceilings })), rid);
+      else if (route.name === 'refGet') response = await handleRefGet(env, cfg, route, log, nowMs);
+      else if (route.name === 'refPut') response = await handleRefPut(request, env, cfg, route, claims, refText, log, nowMs);
+      else if (route.name === 'reflog') response = await handleReflog(url, env, cfg, route, log, nowMs);
+      else if (route.name === 'probe') response = await handleProbe(request, env, cfg, route, log, nowMs);
+      else response = json(200, await ledger(env, log, (b) => b.snapshot({ nowMs, ceilings: cfg.ceilings })), rid);
     } catch (err) {
       if (err instanceof AuthError) {
         log.error = err.reason;
         const error = { 401: 'unauthenticated', 403: 'forbidden', 503: 'unavailable' }[err.status];
         response = json(err.status, { error, reason: err.reason }, rid, err.status === 503 ? { 'retry-after': '30' } : {});
+      } else if (err instanceof RefError) {
+        log.error = err.message;
+        const etag = err.status === 412 && err.extra.etag ? { etag: err.extra.etag, 'x-feed-state-etag': err.extra.etag } : {};
+        response = json(err.status, { error: err.message, ...err.extra }, rid, etag);
       } else if (err instanceof HttpError) {
         log.error = err.message;
         if (err.extra.cause) log.cause = err.extra.cause;
@@ -366,6 +613,10 @@ export function createHandler({ keyStore, cache = null, now = Date.now, log: wri
         log.error = `internal: ${String(err)}`;
         response = json(500, { error: 'internal error' }, rid);
       }
+    }
+    if (route?.lane) {
+      response.headers.set('x-feed-state-store-ops', String(log.ops ?? 0));
+      response.headers.set('x-feed-state-ledger-calls', String(log.ledger ?? 0));
     }
     if (!log.deferred) emit(response.status, started);
     return response;

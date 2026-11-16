@@ -80,7 +80,9 @@ const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,60}$/;
 /** Today's hours in the silent and frozen lines (the aggregate already publishes them in hours). */
 const hours = (x) => (isNum(x) ? Math.round(x) : '?');
 const mb = (b) => (b / 1e6).toFixed(1);
-const iso = (ms) => (isNum(ms) ? new Date(ms).toISOString() : '?');
+/** A number Date can format: toISOString throws a RangeError beyond ±8.64e15 ms (a malformed published value). */
+const isTime = (v) => isNum(v) && Math.abs(v) <= 8.64e15;
+const iso = (ms) => (isTime(ms) ? new Date(ms).toISOString() : '?');
 
 // ---------------------------------------------------------------------------------------------------------
 // Manifests: feed:freshness
@@ -361,7 +363,8 @@ export function evaluateSources(status, refMs, { nowMs } = {}) {
 /**
  * feed:size from the data branch's recursive tree listing (GitHub API): a status/history day file
  * (YYYY-MM-DD.ndjson) over 5 MB, any other file over 45 MB (strict). Unreadable (null, no tree array): unjudged. A
- * truncated listing is judged as far as it goes, with a note.
+ * truncated listing is judged as far as it goes, with a note: a file over the line is filed, but with none found it
+ * leaves feed:size unjudged (an open finding is not resolved on a partial listing).
  */
 export function evaluateSizes(tree) {
   const { dayFileBytes, fileBytes } = RULES['feed:size'].limits;
@@ -386,7 +389,7 @@ export function evaluateSizes(tree) {
   // A truncated listing (over 100,000 entries or 7 MB) may miss a file: said, never guessed.
   if (tree.truncated) notes.push('the data tree listing was truncated, so some files were not judged');
   const over = blobs.filter((e) => e.size > limitOf(e.path)).sort((a, b) => b.size - a.size || (a.path < b.path ? -1 : 1));
-  if (over.length === 0) return { findings: [], unjudged: [], notes };
+  if (over.length === 0) return { findings: [], unjudged: tree.truncated ? ['feed:size'] : [], notes };
   const shown = over.slice(0, 3).map((e) => `${e.path}: ${mb(e.size)} MB, over ${mb(limitOf(e.path))} MB (${e.path.startsWith('status/history/') ? 'the run log, rewritten by every aggregate commit' : 'a file on the data branch'})`);
   const more = over.length > shown.length ? `, +${over.length - shown.length} more` : '';
   return {
@@ -435,7 +438,8 @@ export function statsPointerOf(json) {
   return isObject(json) && isObject(json.stats) && typeof json.stats.path === 'string' ? { path: json.stats.path, headSeq: isNum(json.stats.head_seq) ? json.stats.head_seq : null } : null;
 }
 
-const dayKey = (ms) => new Date(ms).toISOString().slice(0, 10);
+/** YYYY-MM-DD of a time, or null when Date cannot format it. */
+const dayKey = (ms) => (isTime(ms) ? new Date(ms).toISOString().slice(0, 10) : null);
 
 /**
  * The statistics (derive's side; APIs.md, Statistics):
@@ -472,7 +476,10 @@ export function evaluateStats({ nowMs, v1Ok, pointer, config, index }) {
     const expected = dayKey(Date.parse(`${dayKey(nowMs)}T00:00:00Z`) - (frozenAfterDays + 1) * DAY);
     const floor = dayKey(Date.parse(`${expected}T00:00:00Z`) - lagDays * DAY);
     const through = typeof idx.through === 'string' ? idx.through : null;
-    if (through === null || through < floor) {
+    if (floor === null) {
+      unjudged.push('feed:stats-through');
+      notes.push(`stats: the run's clock (${String(nowMs)}) is not a time; feed:stats-through not judged`);
+    } else if (through === null || through < floor) {
       findings.push(makeFinding('feed:stats:through', { text: `the statistics year and area files run through ${through ?? 'nothing yet'}, the last frozen day is ${expected}: stats.yml has not caught up (its runs, or a gate failure)` }));
     }
   }

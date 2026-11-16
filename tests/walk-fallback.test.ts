@@ -167,3 +167,14 @@ test('walk-fallback: a refused dispatch turns the run red; an unknown walk or a 
   assert.equal(await run({ env: { SCHEDULE: '29 * * * *', GITHUB_REPOSITORY: 'x/y' }, nowMs: NOW, fetchImpl: gh.fetchImpl, ...quiet }), 3);
   assert.equal(gh.calls.length, 0);
 });
+
+test('walk-fallback: a network error on the dispatch is a red run with an ::error::, not an unhandled rejection', async () => {
+  const gh = fakeGitHub(new Date(NOW - 200 * MIN).toISOString());
+  const fetchImpl: FetchImpl = async (url, init) => {
+    if ((init?.method ?? 'GET') === 'POST') throw new TypeError('fetch failed');
+    return gh.fetchImpl(url, init);
+  };
+  const notes: string[] = [];
+  assert.equal(await run({ env: env({ SCHEDULE: '29 * * * *' }), nowMs: NOW, fetchImpl, ...quiet, annotate: (l) => notes.push(l) }), 1);
+  assert.deepEqual(notes, ['::error::walk-fallback: dispatching history.yml failed: fetch failed']);
+});

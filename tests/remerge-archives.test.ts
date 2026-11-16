@@ -196,6 +196,22 @@ test('archive re-merge: newest first, a new asset beside the old one, the remedi
   assert.equal(currentEdition(remediation, '2024-06-12')!.edition, 1);
 });
 
+test('remerge-commit: an archive entry or a pending month without sha256 is dropped, never applied or thrown on', () => {
+  const entry = (period: string, sha256?: string) => ({ period, tag: `archive-${period.slice(0, 4)}`, asset: `events-${period}.tar.zst`, ...(sha256 ? { sha256 } : {}), days: [] });
+  const archives = { list: [entry('2024-05'), entry('2024-06', 'aaa')] };
+  const pending = {
+    months: [
+      { period: '2024-05', base_sha256: 'bbb', entry: entry('2024-05', 'ccc'), remediation_editions: [] },
+      { period: '2024-06', entry: entry('2024-06', 'ddd'), remediation_editions: [] },
+    ],
+    unused: [],
+  };
+  const res = applyPending(archives as never, { editions: [], raw: [] } as never, pending as never);
+  assert.deepEqual(res.applied, []);
+  assert.deepEqual(res.dropped, ['2024-05: archive entry or pending month has no sha256', '2024-06: archive entry or pending month has no sha256']);
+  assert.equal(archives.list[1]!.asset, 'events-2024-06.tar.zst', 'unchanged');
+});
+
 test('archive re-merge: a lost commit is adopted by checksum on the next run (no second upload); a stale merged asset becomes unused', { skip: !hasZstd && 'zstd not installed' }, () => {
   const w = world();
   const first = silently(() => runRemergeArchives(w.ctx(), { max: 1 }));

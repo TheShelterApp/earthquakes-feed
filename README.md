@@ -371,7 +371,8 @@ minutes (one that was cancelled or skipped does not count). One health run runs 
   or a findings file it cannot write, turns its job red.
   - `feed` ([`scripts/feed-health.mjs`](scripts/feed-health.mjs)): the live `v1` and `v2` manifests, `v1/status.json`,
     the files on `data`, the repository size, the walks' blocked markers and the writer queue (a GitHub read that fails
-    is `watcher:feed-github`; a truncated listing of the `data` tree is a warning).
+    is `watcher:feed-github`; a truncated listing of the `data` tree is a warning, and leaves `feed:size` as it was when
+    it shows no file over the line).
   - `alerts` ([`scripts/alerts-watchdog.mjs`](scripts/alerts-watchdog.mjs)): The Shelter's alert pipeline, from the
     alerts-gateway's public `https://data.theshelter.app/alerts/status.json`, the USGS `4.5_hour` canary and, with the
     `CF_ANALYTICS_TOKEN` secret, the account's daily usage (only account totals are logged, and an API error is

@@ -1,0 +1,92 @@
+# The feed's state Worker: the content-addressed blob store of the event map (state/README.md).
+# Deploy ONLY from main, with `bash state/deploy.sh` (production) or `bash state/deploy.sh --env staging`: the script
+# refuses any other commit or a dirty tree, checks the Cloudflare login, and tags the version with the main commit.
+# Never `wrangler deploy` by hand: the 5-minute aggregate run reads and writes the event map through this Worker.
+#
+# The top level is PRODUCTION; [env.staging] repeats every binding and var (wrangler never inherits vars, R2 buckets or
+# Durable Object bindings into an environment) with the staging names. Both are only reachable on their custom domain:
+# no workers.dev route and no preview URLs, so the zone's rules always apply in front of the Worker.
+name = "earthquakes-feed-state"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+workers_dev = false
+preview_urls = false
+routes = [{ pattern = "feed-state.theshelter.app", custom_domain = true }]
+
+# Workers Logs keep the one JSON line per request (src/worker.js) for 3 days: about 1,500 lines a day against the
+# account's free 200,000. Full sampling: a refused or failed store call must leave a trace.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[vars]
+ENVIRONMENT = "production"
+# The numeric id of TheShelterApp/earthquakes-feed (gh api repos/TheShelterApp/earthquakes-feed -q .id). It survives a
+# rename or a transfer of the repository; the token's repository_id claim must equal it.
+REPOSITORY_ID = "1289538519"
+# The `aud` the jobs request (core.getIDToken / ACTIONS_ID_TOKEN_REQUEST_URL&audience=...): one per environment, so a
+# token minted for staging is refused here and the other way round.
+AUDIENCE = "earthquakes-feed-state"
+# "0": only refs/heads/main may call production (src/worker.js refuses "1" with ENVIRONMENT production).
+ALLOW_ANY_REF = "0"
+# The lowest x-feed-state-protocol a write or a GC call may send; bumped with every incompatible layout change, so an old
+# run re-run from the Actions UI cannot write the old layout.
+MIN_PROTOCOL = "1"
+# Hard daily ceilings (src/budget.js): 429 {"error":"budget"} above them, so the store stays inside the R2 free tier
+# (10 GB-month, 1M Class A and 10M Class B a month, shared with the platform's ~0.4 GB) whatever a client does.
+# 20,000 Class A a day is at most 620k in a 31-day month; 200,000 Class B at most 6.2M. The feed's own use is about
+# 1-2 % of each; staging's ceilings (a tenth) add to these and the sum still fits.
+CLASS_A_PER_DAY = "20000"
+CLASS_B_PER_DAY = "200000"
+BYTES_WRITTEN_PER_DAY = "1073741824"
+STORED_BYTES_MAX = "6442450944"
+
+[[r2_buckets]]
+binding = "STATE"
+bucket_name = "earthquakes-feed-state"
+
+# The budget ledger (src/budget.js): one SQLite-backed Durable Object (the only kind on the Workers Free plan).
+[[durable_objects.bindings]]
+name = "BUDGET"
+class_name = "BudgetLedger"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BudgetLedger"]
+
+[env.staging]
+name = "earthquakes-feed-state-staging"
+workers_dev = false
+preview_urls = false
+routes = [{ pattern = "feed-state-staging.theshelter.app", custom_domain = true }]
+
+[env.staging.observability]
+enabled = true
+head_sampling_rate = 1
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+REPOSITORY_ID = "1289538519"
+AUDIENCE = "earthquakes-feed-state-staging"
+# "1": the rehearsal workflow (state-rehearsal.yml, synthetic data only) runs from any branch.
+ALLOW_ANY_REF = "1"
+MIN_PROTOCOL = "1"
+# The R2 free tier is per ACCOUNT, so staging's ceilings add to production's: a tenth of production's, which keeps the
+# sum inside the free tier (22,000 Class A a day = 682k in 31 days < 1M; 220,000 Class B = 6.82M < 10M; 6.25 GiB stored).
+# Staging holds synthetic data only.
+CLASS_A_PER_DAY = "2000"
+CLASS_B_PER_DAY = "20000"
+BYTES_WRITTEN_PER_DAY = "268435456"
+STORED_BYTES_MAX = "268435456"
+
+[[env.staging.r2_buckets]]
+binding = "STATE"
+bucket_name = "earthquakes-feed-state-staging"
+
+[[env.staging.durable_objects.bindings]]
+name = "BUDGET"
+class_name = "BudgetLedger"
+
+[[env.staging.migrations]]
+tag = "v1"
+new_sqlite_classes = ["BudgetLedger"]

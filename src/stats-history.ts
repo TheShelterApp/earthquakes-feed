@@ -1066,17 +1066,22 @@ export async function runStatsHistory(o: RunOptions): Promise<RunResult> {
     if (check.gate === 'fail' || check.gate === 'error') {
       // Keep the previous files and their ledger entry; a gate failure is not retried on the same inputs. A gate error
       // (ComCat's count failed: an outage) says nothing about the year: it is retried on the next run and deferred, not
-      // blocked (a longer outage stops `through` and shows as feed:stats-through).
-      log(`::warning::stats: ${y}: ComCat gate ${check.gate}: ${check.message ?? ''}; the previous files stay${check.gate === 'error' ? ', retried on the next run' : ''}`);
+      // blocked (a longer outage stops `through` and shows as feed:stats-through). An outage never clears a standing
+      // gate failure: the fail verdict stays, so the year keeps alarming below; on the very inputs that failed (a run
+      // that named the year) it is not retried either, so it is not deferred.
+      const keepFail = check.gate === 'error' && prev?.check?.gate === 'fail';
+      const stands = check.gate === 'error' && prev?.failed_digest === plan.digest;
+      const suffix = check.gate !== 'error' ? '' : stands ? ', the earlier gate failure on these inputs stands' : ', retried on the next run';
+      log(`::warning::stats: ${y}: ComCat gate ${check.gate}: ${check.message ?? ''}; the previous files stay${suffix}`);
       state.years[key] = {
         ...(prev ?? { inputs_digest: '', through: plan.through, complete: plan.complete, remerged_in_memory: false, inputs }),
-        check,
+        check: keepFail ? prev.check! : check,
         ...(check.gate === 'fail' ? { failed_digest: plan.digest } : {}),
       };
       delete state.years[key]!.error;
       reports.push({ ...rep, result: check.gate === 'fail' ? 'gate-failed' : 'error' });
       if (check.gate === 'fail') blocked.push(`stats ${y}: ComCat gate fail: ${check.message ?? ''}`);
-      else deferred.push(`stats ${y}: ComCat gate error: ${check.message ?? ''}`);
+      else if (!stands) deferred.push(`stats ${y}: ComCat gate error: ${check.message ?? ''}`);
       continue;
     }
     writes.set(areaPath(y), built.areaBody);

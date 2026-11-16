@@ -558,6 +558,43 @@ test('runStatsHistory: a ComCat outage (gate error) keeps the previous files and
   assert.deepEqual([back.blocked, back.deferred], [[], []]);
 });
 
+test('runStatsHistory: a ComCat outage never clears a standing gate failure', async () => {
+  const t = Date.parse('2024-06-11T05:00:00Z');
+  const io = fakeIo(new Map([['archive-2024-06/events-2024-06.tar.zst', new Map([['11.ndjson', ndjson([feat(t, 6.2)])]])]]));
+  const first = await run2024({ state: emptyState(1), io, comcat: counter(1, 1, 2024) });
+  const g = await run2024({ state: first.state, io, comcat: counter(50, 1, 2024), forced: new Set([2024]) });
+  assert.equal(g.state.years['2024']!.check!.gate, 'fail');
+  const down: ComcatCount = async () => {
+    throw new Error('HTTP 503');
+  };
+  // Changed inputs (a remediation lands) meet an outage: the fail verdict stays and keeps alarming; the year is deferred
+  // and rebuilt once ComCat answers.
+  const changed = { ...g.state, years: { ...g.state.years, '2024': { ...g.state.years['2024']!, inputs_digest: SHA('0'), failed_digest: SHA('0') } } };
+  const lines: string[] = [];
+  const a = await run2024({ state: changed, io, comcat: down, log: (m) => void lines.push(m) });
+  assert.equal(a.reports.find((x) => x.year === 2024)?.result, 'error');
+  assert.equal(a.state.years['2024']!.check!.gate, 'fail', 'the standing failure is kept');
+  assert.equal(a.state.years['2024']!.failed_digest, SHA('0'));
+  assert.ok(a.blocked.some((b) => b.startsWith('stats 2024: ComCat gate failed')), a.blocked.join('\n'));
+  assert.ok(a.deferred.some((d) => d.startsWith('stats 2024: ComCat gate error')));
+  assert.ok(lines.some((l) => /^::warning::stats: 2024: ComCat gate error: .*retried on the next run$/.test(l)), lines.join('\n'));
+  const a2 = await run2024({ state: a.state, io, comcat: counter(1, 1, 2024) });
+  assert.equal(a2.reports.find((x) => x.year === 2024)?.result, 'built');
+  assert.equal(a2.blocked.length, 0);
+  // A run that names the year on the very inputs that failed meets an outage: the failure stands, it alarms on this run
+  // and the next, and nothing claims a retry.
+  const lines2: string[] = [];
+  const b = await run2024({ state: g.state, io, comcat: down, forced: new Set([2024]), log: (m) => void lines2.push(m) });
+  assert.equal(b.state.years['2024']!.check!.gate, 'fail');
+  assert.ok(b.blocked.some((x) => x.startsWith('stats 2024: ComCat gate failed')), b.blocked.join('\n'));
+  assert.deepEqual(b.deferred, []);
+  const warn = lines2.find((l) => l.startsWith('::warning::stats: 2024: ComCat gate error'));
+  assert.ok(warn && !warn.includes('retried on the next run') && warn.endsWith('the earlier gate failure on these inputs stands'), warn);
+  const b2 = await run2024({ state: b.state, io, comcat: counter(1, 1, 2024) });
+  assert.equal(b2.reports.find((x) => x.year === 2024), undefined, 'the failed digest is not retried');
+  assert.ok(b2.blocked.some((x) => x.startsWith('stats 2024: ComCat gate failed')), 'and keeps alarming');
+});
+
 test('runStatsHistory: early January keeps the year files of the last year with frozen days and the two before it', async () => {
   const io = fakeIo(new Map());
   const first = await run2024({ state: emptyState(1), io, comcat: counter(0, 0) });

@@ -524,7 +524,8 @@ day tables.
   nothing blocked uploads a marker with only a `#` line, which resolves the board entry on the next health run. A
   ComCat count that fails (an outage: gate `error`) is no verdict on the year: it keeps its previous files, is retried
   on the next run and is listed under *Deferred* in the run's report, not in the marker (an outage of days stops
-  `through` and shows as `feed:stats-through`). A dispatch's `years` naming a year with nothing to build (after the
+  `through` and shows as `feed:stats-through`). An outage never clears a standing gate failure: the year keeps its
+  `fail` verdict and stays in the marker; on the inputs that failed it is not deferred, since it is not retried. A dispatch's `years` naming a year with nothing to build (after the
   year of `through`, or with no input on any day) gets a `::warning::STATS_YEARS` line.
 - **Ledger** `knowledge/stats/state.json` on `data` (derive reads `through` and each file's `sha256` from it):
   `{version, builder, through, generated, run_id, years: {Y: {inputs_digest, through, complete, area: {bytes, sha256,

@@ -114,7 +114,7 @@ for (let i = failedDerive ? 2 : 1; i < derives.length; i++) {
   const prev = readJson<{ generated: number; head_seq: number }>('manifest.json')!;
   const nodes = [...loadEventMap(dir, { sinceDays: EVENT_MAP_HORIZON_DAYS, nowMs }).values()];
   const previous = previousWindowLines({ root: dir, days: window, record, prev, snapshot, compare: true });
-  const fromBaseline = silentChangesAgainst(previous.lines, nodes, window, prev.head_seq);
+  const fromBaseline = silentChangesAgainst(previous.lines, nodes, window, prev.head_seq, previous.covered);
   const fromPartitions = detectSilentChanges(dir, nodes, window, prev.head_seq);
 
   totals.runs++;

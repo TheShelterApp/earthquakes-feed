@@ -64,7 +64,7 @@ function main(): void {
       snapshot: readBaselineSnapshot(process.env.LIVE_BASELINE_DIR),
       compare: true,
     });
-    const fromBaseline = silentChangesAgainst(previous.lines, allNodes, window, prevHead);
+    const fromBaseline = silentChangesAgainst(previous.lines, allNodes, window, prevHead, previous.covered);
     // Phase 1 (until the unfrozen partitions leave `data`): the committed partitions' check beside it. The union is
     // kept: an extra entry only repeats a feature in a delta, a missing one would lose a change for a client.
     const fromPartitions = detectSilentChanges(DATA_DIR, allNodes, window, prevHead);

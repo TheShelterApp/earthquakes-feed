@@ -124,7 +124,7 @@ function check(root: string, snapDir: string | undefined, nowMs: number) {
   const previous = previousWindowLines({ root, days, record: readBaselineRecord(root), prev, snapshot: readBaselineSnapshot(snapDir), compare: true });
   return {
     previous,
-    fromBaseline: silentChangesAgainst(previous.lines, nodes, days, prev.head_seq),
+    fromBaseline: silentChangesAgainst(previous.lines, nodes, days, prev.head_seq, previous.covered),
     fromPartitions: detectSilentChanges(root, nodes, days, prev.head_seq),
   };
 }
@@ -225,6 +225,67 @@ test('after a derive that failed, the changed days fall back to the committed pa
     cleanup();
   }
 });
+
+/** Onboarding (onboard.ts) after an aggregate run that appended no line: a new event stamped with the unchanged head. */
+function onboardWithUnchangedHead(w: World, nowMs: number, timeMs: number): EventNode {
+  const r = new Resolver(w.map, prio, cfg, nowMs);
+  const res = r.ingest(obs('geofon', 'gfz-onboard', timeMs, { lat: -40.5, lon: -72.25, mag: 4.2 }), iso(nowMs));
+  assert.equal(res.changed, true, 'setup: a new event');
+  assert.equal(res.node.aliases.length, 1, 'setup: joined no other event');
+  res.node.lastSeq = w.seq;
+  res.node.firstSeenSeq = w.seq;
+  return res.node;
+}
+
+test('an event onboarding adds with the previous head is a silent change on a covered day, not on an uncovered one', () => {
+  const { w, root, snap, cleanup } = setup();
+  try {
+    saveEventMap(root, w.map);
+    deriveRun(root, T0, w.seq);
+    snapshot(root, snap, T0 + 2 * 60_000);
+    const added = onboardWithUnchangedHead(w, T0 + 3 * 60_000, T0 - 2 * DAY - 5 * H);
+    const day = eventDayKey(added.eventTimeMs);
+    saveEventMap(root, w.map);
+    const nowMs = T0 + 4 * 60_000;
+
+    // The previous lines of its day are known (the snapshot, and the committed partition): a delta must carry it.
+    const a = check(root, snap, nowMs);
+    assert.ok(a.previous.covered.has(day));
+    assert.deepEqual(a.fromBaseline, [added.feedId]);
+    assert.deepEqual(a.fromPartitions, a.fromBaseline);
+
+    // No snapshot and no committed partition of that day: nothing is known of it, so none of its events is named
+    // (every one of them would otherwise go into every delta).
+    unlinkSync(dayPartitionFile(root, day));
+    const b = check(root, undefined, nowMs);
+    assert.ok(!b.previous.covered.has(day));
+    assert.ok(b.previous.covered.has(eventDayKey(T0)), 'the other days stay covered');
+    assert.deepEqual(b.fromBaseline, []);
+    assert.deepEqual(b.fromPartitions, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('silentChangesAgainst: a node missing from the previous lines counts only on a covered day', () => {
+  const w = world();
+  const added = onboardWithUnchangedHead(w, T0, T0 - DAY);
+  const day = eventDayKey(added.eventTimeMs);
+  const nodes = [...w.map.values()];
+  const window = liveWindowDays(T0);
+  // A head below its stamp: not silent (a delta carries it by seq).
+  assert.deepEqual(silentChangesAgainst(new Map(), [added], window, w.seq - 1, new Set([day])), []);
+  assert.deepEqual(silentChangesAgainst(new Map(), [added], window, w.seq, new Set([day])), [added.feedId]);
+  assert.deepEqual(silentChangesAgainst(new Map(), [added], window, w.seq), [], 'no covered days given: as before');
+  assert.deepEqual(silentChangesAgainst(new Map(), [added], window, w.seq, new Set([eventDayKey(T0)])), []);
+  // The other events of the covered day, present in the previous lines and unchanged, are not named.
+  const sameDay = nodes.filter((n) => eventDayKey(n.eventTimeMs) === day && n !== added);
+  assert.ok(sameDay.length > 0, 'setup: another event that day');
+  const lines = new Map(sameDay.map((n) => [n.feedId, readLine(n)]));
+  assert.deepEqual(silentChangesAgainst(lines, [...sameDay, added], window, w.seq, new Set([day])), [added.feedId]);
+});
+
+const readLine = (n: EventNode): string => dayPartitionText([n], eventDayKey(n.eventTimeMs), NO_PARTITION_FORMAT).trimEnd();
 
 test('the record is used only with the manifest of its own run, and only with a snapshot', () => {
   const { w, root, snap, target, cleanup } = setup();

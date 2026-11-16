@@ -164,10 +164,12 @@ How to use it: keep the features of the days you fetched and the `head_seq` you 
 
 Why a delta is exact: `from_seq` for a window W is the largest `ingest_seq` among the events last changed at least W
 ago; sequence numbers grow with ingest time, so everything changed later is above it, and the delta is by definition
-every window event above it. One kind of change moves no seq: a revision of a provider row that does not represent its
+every window event above it. Two kinds of change move no seq: a revision of a provider row that does not represent its
 event can still change the event's compact feature through the fill-only fields (`updated`, `author`, `magAuthor`,
-`tsunami`, ...). derive compares each window event's line with the one the previous run committed and keeps such an
-event for a day in `knowledge/index/live_silent.json` with the previous run's head (`head_before`); every delta whose
+`tsunami`, ...); and the onboarding of a newly added source (README) can add an event to a window day with the head of a run
+that appended nothing, which is the previous derive's. derive compares each window event's line with the one the
+previous run committed (an event with no line counts only on a day whose previous lines are known whole) and keeps such
+an event for a day in `knowledge/index/live_silent.json` with the previous run's head (`head_before`); every delta whose
 `from_seq` is at most `head_before` carries it. Events that leave the window and retired markers that stop being
 published after 48 h are not changes: the first is your time filter, the second repeats a removal you already applied.
 Replayed over the 566 real derive commits of 2026-10-04 03:04 → 10-06 02:57 UTC (246 such changes detected), a client

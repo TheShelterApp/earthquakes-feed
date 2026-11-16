@@ -64,6 +64,9 @@ export interface PreviousLines {
   fromSnapshot: string[];
   /** Window days read from the committed partitions (no record, no snapshot, or a sha256 mismatch). */
   fromPartitions: string[];
+  /** Window days whose previous lines are known whole (live-sync.ts silentChangesAgainst): every snapshot day (its
+   *  recorded sha256 matched, a recorded "no partition" included) and every committed-partition day with a file. */
+  covered: Set<string>;
   /** Snapshot days whose committed partition differs from the snapshot (phase 1 check; none expected). */
   partitionDiffers: string[];
   /** Why the record was not used, when it was not. */
@@ -179,7 +182,7 @@ export function previousWindowLines(opts: {
     const f = dayPartitionFile(root, day);
     return existsSync(f) ? readFileSync(f, 'utf8') : null;
   };
-  const out: PreviousLines = { lines: new Map(), fromSnapshot: [], fromPartitions: [], partitionDiffers: [], recordUnused };
+  const out: PreviousLines = { lines: new Map(), fromSnapshot: [], fromPartitions: [], covered: new Set(), partitionDiffers: [], recordUnused };
   for (const day of new Set(opts.days)) {
     const recorded = usable ? usable.days[day] : undefined;
     let text: string | null;
@@ -187,10 +190,12 @@ export function previousWindowLines(opts: {
     if (snap !== undefined && fingerprint(snap) === recorded) {
       text = snap;
       out.fromSnapshot.push(day);
+      out.covered.add(day);
       if (opts.compare && committed(day) !== snap) out.partitionDiffers.push(day);
     } else {
       text = committed(day);
       out.fromPartitions.push(day);
+      if (text != null) out.covered.add(day);
     }
     if (text != null) addPartitionLines(out.lines, text);
   }

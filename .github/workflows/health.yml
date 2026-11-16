@@ -112,6 +112,9 @@ jobs:
           # GitHub's own API only (the scripts hard-code the host): the run, the repository's size, the data tree, the
           # walk markers, the writer queue. A read that fails (or no token) is the finding watcher:feed-github.
           GH_TOKEN: ${{ github.token }}
+          # The state store's switch (repository variable, storage phase 3a; APIs.md "Repository size"): unset, the
+          # store is off and feed:state-shadow, feed:state-gc, feed:state-backup and feed:state-budget are notes only.
+          FEED_STATE_BACKEND: ${{ vars.FEED_STATE_BACKEND }}
         run: node scripts/feed-health.mjs --findings findings/feed.json --samples samples/repo-size.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

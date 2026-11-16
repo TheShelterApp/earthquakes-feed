@@ -26,9 +26,12 @@ import { BATCH_MAX, GC_MAX_KEEP, backendFromEnv, type GcPage, type StateBackend 
  *
  * Dry run: a dispatch's `dry_run` input (default true); the scheduled run follows STATE_GC_SCHEDULED.
  *
- * Skipped (no call to the store, a hold): a current generation that names no blob (before the first persist, or an
- * empty map), or a keep set outside the Worker's 1..10,000: the Worker would refuse the call (400), and there is
- * nothing to check the keep set against. The run still completes and writes its marker (`skipped`).
+ * Skipped (no call to the store, a hold): no generation on `data` yet or one that names no blob (before the first
+ * persist, or an empty map), or a keep set outside the Worker's 1..10,000: the Worker would refuse the call (400), and
+ * there is nothing to check the keep set against. The run still completes and writes its marker (`skipped`).
+ *
+ * The store off (FEED_STATE_BACKEND, the repository variable, unset: before the phase-3a rollout turns it on): nothing
+ * is read or called; the run completes and writes its marker with `off: true`.
  *
  *   GH_TOKEN=… FEED_STATE_BACKEND=worker STATE_GC_DRY_RUN=1 npx --no-install tsx src/state-gc.ts
  */
@@ -83,7 +86,10 @@ const blobsOf = (g: Generation): string[] => Object.values(g.days).map((e) => e.
 export async function planKeep(src: GcSources, nowMs: number): Promise<KeepPlan> {
   const today = dayKey(nowMs);
   const currentText = await src.generationAt('data');
-  if (currentText == null) throw new Error(`state GC: the data branch has no ${GENERATION_PATH}: nothing to collect against`);
+  if (currentText == null) {
+    // Before the first persist: nothing to collect against, nothing read further (a skip, its marker written).
+    return { keep: [], current: [], windowFrom: today, boundaries: [], holdReason: `the data branch has no ${GENERATION_PATH} yet (before the first persist): GC is skipped` };
+  }
   const current = [...new Set(blobsOf(parseGeneration(currentText)))].sort();
   const backup = await src.backupMarker();
   let holdReason: string | null = null;
@@ -254,11 +260,17 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     return 3;
   }
   const backend = backendFromEnv(env);
-  if (!backend) {
-    console.error('::error::state GC: FEED_STATE_BACKEND is not set');
-    return 3;
-  }
   const nowMs = Date.now();
+  if (!backend) {
+    // The store is off (the repository variable FEED_STATE_BACKEND unset): a completed run that did nothing.
+    const summary = 'the state store is off (FEED_STATE_BACKEND unset): nothing collected';
+    console.log(`state GC: ${summary}`);
+    if (env.STATE_GC_MARKER_DIR) {
+      mkdirSync(env.STATE_GC_MARKER_DIR, { recursive: true });
+      writeFileSync(join(env.STATE_GC_MARKER_DIR, 'state-gc.json'), `${JSON.stringify({ ok: true, off: true, at: new Date(nowMs).toISOString(), run_id: env.GITHUB_RUN_ID, skipped: summary }, null, 2)}\n`);
+    }
+    return 0;
+  }
   const plan = await planKeep(githubSources(token), nowMs);
   const dryRun = dryRunOf(env.STATE_GC_DRY_RUN) || plan.holdReason != null;
   if (plan.holdReason) console.log(`::warning title=State GC::${plan.holdReason}`);

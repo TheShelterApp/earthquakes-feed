@@ -72,7 +72,8 @@ const TOKEN = 'test-token-not-a-secret';
 const OIDC_URL = 'https://token.actions.example/req?api-version=2.0';
 const OIDC_REQUEST = 'oidc-request-bearer';
 const OIDC_TOKEN = 'eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJlYXJ0aHF1YWtlcy1mZWVkLXN0YXRlIn0.sig';
-const ENV = { GH_TOKEN: TOKEN, GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: '4242', ACTIONS_ID_TOKEN_REQUEST_URL: OIDC_URL, ACTIONS_ID_TOKEN_REQUEST_TOKEN: OIDC_REQUEST };
+// The state store on (the repository variable health.yml passes), as in production after the phase-3a rollout.
+const ENV = { GH_TOKEN: TOKEN, GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: '4242', ACTIONS_ID_TOKEN_REQUEST_URL: OIDC_URL, ACTIONS_ID_TOKEN_REQUEST_TOKEN: OIDC_REQUEST, FEED_STATE_BACKEND: 'worker' };
 const ISO = (ms: number): string => new Date(ms).toISOString();
 
 /** The fixture as of `genMs`, with `patch` applied to a clone. */
@@ -1086,7 +1087,7 @@ test('main: no GH_TOKEN (a local run): the GitHub parts are unjudged, nothing is
   const c = clock();
   const w = world();
   const logs: string[] = [];
-  const code = await main({ readFile: switchesOff, argv: [], env: {}, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep, log: (l) => logs.push(l) });
+  const code = await main({ readFile: switchesOff, argv: [], env: { FEED_STATE_BACKEND: 'worker' }, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep, log: (l) => logs.push(l) });
   assert.equal(code, 0);
   assert.equal(w.calls.filter((x) => x.url.startsWith(GITHUB_API)).length, 0);
   const printed = logs.find((l) => l.startsWith('{'))!;
@@ -1114,7 +1115,7 @@ test('main: in Actions, no GH_TOKEN or a failed created_at read is watcher:feed-
     return { doc, logs };
   };
   // GH_TOKEN dropped from the feed job: every GitHub part unjudged, and the watcher names the cause once.
-  const noToken = (await findingsOf({ GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: '4242' })).doc;
+  const noToken = (await findingsOf({ GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: '4242', FEED_STATE_BACKEND: 'worker' })).doc;
   assert.deepEqual(noToken.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue', 'feed:state-shadow', 'feed:state-gc', 'feed:state-backup', 'feed:repo-growth', 'feed:state-budget']);
   assert.deepEqual(noToken.findings.map((f) => [f.key, f.members]), [
     ['watcher:feed-state', undefined],
@@ -1341,6 +1342,14 @@ test('feed:state-gc and feed:state-backup: a GC older than 3 days or none is P2;
   assert.deepEqual(backup('2026-10-20').findings.map((f) => [f.key, f.severity]), [['feed:state-backup', 'P2']]);
   assert.deepEqual(backup('2026-10-14').findings.map((f) => [f.key, f.severity]), [['feed:state-backup', 'P1']]);
   assert.deepEqual([backup(null).findings, backup(null).unjudged], [[], []]);
+  // A marker that names no day (no generation yet, or the store off at its run) is aged by its own date on the same
+  // lines: later runs that fail write no marker, so it must not mute the row for the artifact's 90 days.
+  const nullMarker = (ageMs: number, off = false) => evaluateStateBackup({ ok: true, marker: { createdAtMs: NOW - ageMs, runId: 1, json: { ok: true, newest: null, first_missing: null, ...(off ? { off: true } : {}) } } }, NOW);
+  assert.deepEqual(nullMarker(30 * HOUR).findings, []);
+  assert.match(nullMarker(30 * HOUR, true).notes.join(), /the state store was off at its run/);
+  assert.deepEqual(nullMarker(40 * HOUR).findings.map((f) => [f.key, f.severity, f.sinceMs]), [['feed:state-backup', 'P2', NOW - 40 * HOUR + 36 * HOUR]]);
+  assert.deepEqual(nullMarker(8 * DAY).findings.map((f) => [f.key, f.severity]), [['feed:state-backup', 'P1']]);
+  assert.match(nullMarker(8 * DAY).findings[0]!.text, /names no backed-up day \(no generation before a midnight yet\) and no run has completed since/);
   assert.match(evaluateStateBackup({ ok: true, marker: null }, NOW).findings[0]!.text, /^no completed state backup on record/);
   assert.deepEqual(evaluateStateBackup({ ok: false, message: 'x' }, NOW).unjudged, ['feed:state-backup']);
 });
@@ -1399,6 +1408,20 @@ test('main --samples: the next sample series is written about once a day; a fail
   assert.deepEqual(JSON.parse(fresh['s.json']!), { samples: [{ atMs: NOW, kb: 6_100_000 }] });
   const broken = await run([`${API_REPO}/actions/artifacts?name=repo-size-samples&per_page=10`, () => json({ message: 'boom' }, 500)]);
   assert.equal(broken['s.json'], undefined);
+});
+
+test('collect: the state store off (FEED_STATE_BACKEND unset) reads no state marker and no budget and files no state row', async () => {
+  const c = clock();
+  const w = world();
+  const { FEED_STATE_BACKEND: _on, ...offEnv } = ENV;
+  const inputs = await collect({ readFile: switchesOff, env: offEnv, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep });
+  assert.equal(inputs.stateOff, true);
+  assert.deepEqual([inputs.stateShadow, inputs.stateGc, inputs.stateBackup, inputs.stateBudget], [null, null, null, null]);
+  assert.equal(w.calls.filter((x) => /actions\/artifacts\?name=state-|\/v1\/budget|token\.actions|audience=/.test(x.url)).length, 0, 'nothing of the store asked');
+  const r = evaluateFeed(inputs);
+  assert.deepEqual(r.findings.filter((f) => /state/.test(f.key)), []);
+  assert.deepEqual(r.unjudged.filter((k) => /state/.test(k)), [], 'judged clean: an open entry from before is resolved');
+  assert.match(r.notes.join(), /state store off \(FEED_STATE_BACKEND unset\)/);
 });
 
 test('collect: a state step\'s mismatch in the newest aggregate marker reaches the board as feed:state-shadow', async () => {

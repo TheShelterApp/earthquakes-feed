@@ -14,6 +14,7 @@ import {
   compressBackup,
   dayAssets,
   decompressBackup,
+  main as backupMain,
   readTar,
   runBackup,
   verifyBackup,
@@ -21,7 +22,7 @@ import {
   type BackupIo,
   type ReleaseAsset,
 } from '../src/state-backup.js';
-import { GC_DAILY_DAYS, GC_MAX_WINDOW_DAYS, STATE_GC_SCHEDULED, collect, dryRunOf, planKeep, type GcSources } from '../src/state-gc.js';
+import { GC_DAILY_DAYS, GC_MAX_WINDOW_DAYS, STATE_GC_SCHEDULED, collect, dryRunOf, main as gcMain, planKeep, type GcSources } from '../src/state-gc.js';
 import { rehearse } from '../src/state-rehearsal.js';
 import { FsBackend, casKey, sha256Hex, type GcRequest, type StateBackend } from '../src/state-store.js';
 
@@ -89,9 +90,13 @@ test('GC keep set: the current generation, every daily generation of the last 31
   const empty = await planKeep(history(gens, genWith({}), { newest: dayKey(NOW), first_missing: null }).src, NOW);
   assert.deepEqual(empty.current, []);
   assert.match(empty.holdReason!, /^the current generation names no blob: .*GC is skipped$/);
-  // No current generation, or an unreadable one: no keep set at all.
-  const none: GcSources = { ...history(gens, head, null).src, generationAt: async () => null };
-  await assert.rejects(planKeep(none, NOW), /has no knowledge\/index\/generation\.json/);
+  // No current generation yet (before the first persist): skipped, nothing else read, the run writes its marker.
+  const noneAsked = history(gens, head, null);
+  const none = await planKeep({ ...noneAsked.src, generationAt: async () => null }, NOW);
+  assert.deepEqual([none.keep, none.current, none.boundaries], [[], [], []]);
+  assert.match(none.holdReason!, /has no knowledge\/index\/generation\.json yet .*GC is skipped/);
+  assert.deepEqual(noneAsked.asked, []);
+  // An unreadable current generation: no keep set at all.
   const bad: GcSources = { ...history(gens, head, null).src, generationAt: async () => serializeGeneration(head).replace('"format": 1', '"format": 2') };
   await assert.rejects(planKeep(bad, NOW), /format 2/);
   assert.equal(STATE_GC_SCHEDULED, 'dry-run', 'phase 3a: the scheduled GC lists and deletes nothing');
@@ -296,4 +301,32 @@ test('restore: scripts/state-restore.ts verifies a backup asset, unpacks it and 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('the store off (the repository variable FEED_STATE_BACKEND unset): GC and the backup complete, read nothing and write an off marker', async () => {
+  const out = mkdtempSync(join(tmpdir(), 'state-off-'));
+  const log = console.log;
+  console.log = () => {};
+  try {
+    // No GitHub call can happen: no fetch is reachable with this token, and gh is never run.
+    assert.equal(await gcMain({ GH_TOKEN: 'unused', STATE_GC_MARKER_DIR: out, GITHUB_RUN_ID: '7' }), 0);
+    const gc = JSON.parse(readFileSync(join(out, 'state-gc.json'), 'utf8')) as Record<string, unknown>;
+    assert.deepEqual([gc.ok, gc.off, gc.run_id], [true, true, '7']);
+    assert.equal(await backupMain({ FEED_STATE_BACKEND: '', STATE_BACKUP_MARKER_DIR: out }), 0);
+    const b = JSON.parse(readFileSync(join(out, 'state-backup.json'), 'utf8')) as Record<string, unknown>;
+    assert.deepEqual([b.ok, b.off, b.newest, b.first_missing], [true, true, null, null]);
+  } finally {
+    console.log = log;
+    rmSync(out, { recursive: true, force: true });
+  }
+});
+
+test('workflows: the store is switched on by the repository variable FEED_STATE_BACKEND (unset: off), never hard-coded on the production jobs', () => {
+  const wf = (f: string): string => readFileSync(fileURLToPath(new URL(`../.github/workflows/${f}`, import.meta.url)), 'utf8');
+  for (const f of ['aggregate.yml', 'derive.yml', 'state-gc.yml', 'state-backup.yml', 'health.yml']) {
+    const text = wf(f);
+    assert.match(text, /FEED_STATE_BACKEND: \$\{\{ vars\.FEED_STATE_BACKEND \}\}/, f);
+    assert.doesNotMatch(text, /FEED_STATE_BACKEND: worker/, f);
+  }
+  assert.equal(wf('aggregate.yml').match(/FEED_STATE_BACKEND: \$\{\{ vars\.FEED_STATE_BACKEND \}\}/g)!.length, 2, 'hydrate and persist');
 });

@@ -102,11 +102,13 @@ export interface FeedInputs {
   ids: string[];
   /** The statistics (providers/stats.json, the v1 pointer, the index); absent: not judged. */
   stats?: StatsInputs;
-  /** The state store's markers and budget (storage phase 3); absent: not judged. */
-  stateShadow?: StateShadowRead;
-  stateGc?: { ok: true; artifact: { id: number; createdAtMs: number; runId: number | null } | null } | { ok: false; message: string };
-  stateBackup?: { ok: true; marker: { createdAtMs: number; runId: number | null; json: unknown } | null } | { ok: false; message: string };
-  stateBudget?: StateBudgetRead;
+  /** The state store's markers and budget (storage phase 3); absent or null: not judged. */
+  stateShadow?: StateShadowRead | null;
+  stateGc?: { ok: true; artifact: { id: number; createdAtMs: number; runId: number | null } | null } | { ok: false; message: string } | null;
+  stateBackup?: { ok: true; marker: { createdAtMs: number; runId: number | null; json: unknown } | null } | { ok: false; message: string } | null;
+  stateBudget?: StateBudgetRead | null;
+  /** The store is off (FEED_STATE_BACKEND unset): the state inputs are absent and a note says so. */
+  stateOff?: boolean;
   /** The newest repo-size-samples document ({samples: [{atMs, kb}]}), null when there is none yet. */
   repoSamples?: { ok: true; json: unknown } | { ok: false; message: string };
   notes: string[];

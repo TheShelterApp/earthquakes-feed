@@ -92,7 +92,7 @@ jobs:
         timeout-minutes: 2
         env:
           DATA_DIR: .data
-          FEED_STATE_BACKEND: worker
+          FEED_STATE_BACKEND: ${{ vars.FEED_STATE_BACKEND }}
           FEED_STATE_URL: https://feed-state.theshelter.app
           FEED_STATE_AUDIENCE: earthquakes-feed-state
           FEED_STATE_MARKER_DIR: ${{ runner.temp }}/state-shadow

@@ -88,6 +88,9 @@ jobs:
         # event map (src/event-map-store.ts hydrate, mode shadow). Git is still the truth: a mismatch or a store error
         # is reported (the step summary, a ::warning::, and the marker the health workflow reads: feed:state-shadow),
         # never repaired here and never a reason to stop the feed. Before anything writes the checkout.
+        # FEED_STATE_BACKEND is the repository variable that switches the store on (`worker`) once the Worker is
+        # deployed and rehearsed (APIs.md, the phase-3a rollout); unset, both state steps report "off" (a note in
+        # health) and touch nothing, so merging this is inert until the owner turns it on.
         continue-on-error: true
         # 46 day blobs (about 12 MB) in two requests of at most 40. Phase 3a's policy (src/event-map-store.ts
         # SHADOW_RETRY_POLICY): 2 attempts of at most 15 s a request and a 30 s deadline over the whole step, so a
@@ -96,7 +99,7 @@ jobs:
         timeout-minutes: 2
         env:
           DATA_DIR: .data
-          FEED_STATE_BACKEND: worker
+          FEED_STATE_BACKEND: ${{ vars.FEED_STATE_BACKEND }}
           FEED_STATE_URL: https://feed-state.theshelter.app
           FEED_STATE_AUDIENCE: earthquakes-feed-state
           FEED_STATE_MARKER_DIR: ${{ runner.temp }}/state-shadow
@@ -142,7 +145,7 @@ jobs:
         timeout-minutes: 2
         env:
           DATA_DIR: .data
-          FEED_STATE_BACKEND: worker
+          FEED_STATE_BACKEND: ${{ vars.FEED_STATE_BACKEND }}
           FEED_STATE_URL: https://feed-state.theshelter.app
           FEED_STATE_AUDIENCE: earthquakes-feed-state
           FEED_STATE_MARKER_DIR: ${{ runner.temp }}/state-shadow

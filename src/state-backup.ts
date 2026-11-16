@@ -328,8 +328,19 @@ export async function runBackup(io: BackupIo, backend: StateBackend, opts: { now
 export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number> {
   const token = env.GH_TOKEN;
   const backend = backendFromEnv(env);
-  if (!token || !backend) {
-    console.error('::error::state backup: GH_TOKEN and FEED_STATE_BACKEND must be set');
+  if (!backend) {
+    // The store is off (the repository variable FEED_STATE_BACKEND unset): nothing to copy. The marker names no day,
+    // so health ages it by its own date (feed:state-backup) and GC reads it as no backup (a hold).
+    console.log('state backup: the state store is off (FEED_STATE_BACKEND unset): nothing copied');
+    if (env.STATE_BACKUP_MARKER_DIR) {
+      mkdirSync(env.STATE_BACKUP_MARKER_DIR, { recursive: true });
+      const marker = { ok: true, off: true, at: new Date().toISOString(), run_id: env.GITHUB_RUN_ID, newest: null, first_missing: null, uploaded: [], published: [] };
+      writeFileSync(join(env.STATE_BACKUP_MARKER_DIR, 'state-backup.json'), `${JSON.stringify(marker, null, 2)}\n`);
+    }
+    return 0;
+  }
+  if (!token) {
+    console.error('::error::state backup: GH_TOKEN must be set');
     return 3;
   }
   const work = mkdtempSync(join(tmpdir(), 'state-backup-'));

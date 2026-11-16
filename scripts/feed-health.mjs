@@ -711,7 +711,9 @@ export function evaluateStateGc(read, nowMs) {
 }
 
 /** feed:state-backup: the marker's `newest` day (the state at its 00:00 UTC) older than 36 h (P2) or 7 days (P1); no
- *  marker: P2. A marker without `newest` (no generation to copy yet, before phase 3a's first midnight): a note. */
+ *  marker: P2. A marker without `newest` (no generation to copy yet, or the store off at its run) is aged by its own
+ *  date on the same lines: a later run that fails writes no marker, so a null marker must not mute the row for the
+ *  artifact's 90 days. */
 export function evaluateStateBackup(read, nowMs) {
   const { p2AfterMs, p1AfterMs } = RULES['feed:state-backup'].limits;
   if (!read || !read.ok) return { findings: [], unjudged: ['feed:state-backup'], notes: [`state backup: marker unreadable (${oneLine(read ? read.message : 'not read', 200)})`] };
@@ -719,7 +721,21 @@ export function evaluateStateBackup(read, nowMs) {
     return { findings: [makeFinding('feed:state-backup', { text: 'no completed state backup on record: the state store has no off-Cloudflare copy (state-backup.yml; dispatch it)' })], unjudged: [], notes: [] };
   }
   const newest = isObject(read.marker.json) && typeof read.marker.json.newest === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(read.marker.json.newest) ? read.marker.json.newest : null;
-  if (!newest) return { findings: [], unjudged: [], notes: [`state backup: the marker of ${utcText(read.marker.createdAtMs)} names no backed-up day (no generation before a midnight yet)`] };
+  if (!newest) {
+    const why = isObject(read.marker.json) && read.marker.json.off === true ? 'the state store was off at its run' : 'no generation before a midnight yet';
+    const age = nowMs - read.marker.createdAtMs;
+    const notes = [`state backup: the marker of ${utcText(read.marker.createdAtMs)} names no backed-up day (${why})`];
+    if (age <= p2AfterMs) return { findings: [], unjudged: [], notes };
+    return {
+      findings: [makeFinding('feed:state-backup', {
+        severity: age > p1AfterMs ? 'P1' : 'P2',
+        sinceMs: read.marker.createdAtMs + p2AfterMs,
+        text: `the newest state-backup marker (${utcText(read.marker.createdAtMs)}, ${ageText(age)} old) names no backed-up day (${why}) and no run has completed since (lines ${ageText(p2AfterMs)} / ${ageText(p1AfterMs)}): state-backup.yml is not copying`,
+      })],
+      unjudged: [],
+      notes,
+    };
+  }
   const stateMs = Date.parse(`${newest}T00:00:00Z`);
   const age = nowMs - stateMs;
   const notes = [`state backup: newest daily state ${newest} (${ageText(age)} old), marker of ${utcText(read.marker.createdAtMs)}`];
@@ -923,7 +939,9 @@ export function evaluateFeed(inputs) {
   add(evaluateWriterQueue({ nowMs, writerQueue: wq, v1: inputs.v1, v2: inputs.v2 }));
   parts.push(`writer-queue=${wq && wq.ok ? `${wq.queue.filter((q) => isQueued(q.state)).length} queued` : 'unread'}`);
 
-  // The state store (storage phase 3); an input that is absent is not judged (as the statistics).
+  // The state store (storage phase 3); an input that is absent is not judged (as the statistics). The store off (the
+  // repository variable FEED_STATE_BACKEND unset, before the phase-3a rollout turns it on): nothing read, no finding.
+  if (inputs.stateOff) notes.push('state store off (FEED_STATE_BACKEND unset): feed:state-shadow, feed:state-gc, feed:state-backup and feed:state-budget not judged');
   if (inputs.stateShadow) add(evaluateStateShadow(inputs.stateShadow, nowMs));
   if (inputs.stateGc) add(evaluateStateGc(inputs.stateGc, nowMs));
   if (inputs.stateBackup) add(evaluateStateBackup(inputs.stateBackup, nowMs));
@@ -1113,7 +1131,10 @@ function collectGitHub({ env, fetchImpl, sleep, now }) {
   };
   const settle = (p) => p.catch((e) => ({ ok: false, message: errMsg(e) }));
   const sh = RULES['feed:state-shadow'].limits;
-  const stateShadow = settle(
+  // The store off (FEED_STATE_BACKEND unset): its markers are not read at all (collect drops them).
+  const stateOn = !!(env.FEED_STATE_BACKEND ?? '').trim();
+  const off = Promise.resolve(null);
+  const stateShadow = !stateOn ? off : settle(
     (async () => {
       const arts = (await listed(sh.artifact, sh.runs)).filter((a) => now() - a.createdAtMs < sh.holdMs);
       const markers = [];
@@ -1121,8 +1142,8 @@ function collectGitHub({ env, fetchImpl, sleep, now }) {
       return { ok: true, markers };
     })(),
   );
-  const stateGc = settle(listed(RULES['feed:state-gc'].limits.artifact, 1).then((a) => ({ ok: true, artifact: a[0] ?? null })));
-  const stateBackup = settle(
+  const stateGc = !stateOn ? off : settle(listed(RULES['feed:state-gc'].limits.artifact, 1).then((a) => ({ ok: true, artifact: a[0] ?? null })));
+  const stateBackup = !stateOn ? off : settle(
     (async () => {
       const [a] = await listed(RULES['feed:state-backup'].limits.artifact, 1);
       if (!a) return { ok: true, marker: null };
@@ -1189,6 +1210,8 @@ export async function collect({ env = process.env, fetchImpl = globalThis.fetch,
   const asManifest = (r, decode, name) => (r.ok ? decode(r.json) : { ok: false, message: `${name}/manifest.json: ${failText(r)}` });
 
   const gh = collectGitHub({ env, fetchImpl, sleep, now: clock });
+  // The state store's switch, the same repository variable the state jobs read (health.yml passes it).
+  const stateOff = !(env.FEED_STATE_BACKEND ?? '').trim();
   const [r1, r2, rs, queue] = await Promise.all([read(MANIFEST_V1_URL), read(MANIFEST_V2_URL), read(STATUS_V1_URL), gh.queue]);
   const queuedMs = queue.ms;
   let v1 = asManifest(r1, readManifestV1, 'v1');
@@ -1249,7 +1272,7 @@ export async function collect({ env = process.env, fetchImpl = globalThis.fetch,
     gh.stateGc,
     gh.stateBackup,
     gh.repoSamples,
-    readStateBudget({ env, fetchImpl, sleep }),
+    stateOff ? null : readStateBudget({ env, fetchImpl, sleep }),
   ]);
   return {
     nowMs: clock(),
@@ -1264,11 +1287,13 @@ export async function collect({ env = process.env, fetchImpl = globalThis.fetch,
     tree,
     walks,
     writerQueue,
-    stateShadow,
-    stateGc,
-    stateBackup,
+    // Off: the state inputs are absent (not judged, no watcher), whatever their reads said.
+    stateShadow: stateOff ? null : stateShadow,
+    stateGc: stateOff ? null : stateGc,
+    stateBackup: stateOff ? null : stateBackup,
     repoSamples,
     stateBudget,
+    stateOff,
     ids,
     stats,
     notes: [...gh.notes, ...notes],

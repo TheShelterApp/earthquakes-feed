@@ -220,6 +220,10 @@ top level of `wrangler.toml`) or `--env staging`, and tags the version `main <co
 caller's environment (a separate profile through `XDG_CONFIG_HOME` works unchanged). Deploy staging first and run
 `state-rehearsal.yml` against it before a production deploy that changes behaviour.
 
+The first deploy follows the phase-3a merge, which is inert until the repository variable `FEED_STATE_BACKEND` is set
+to `worker`: unset, the feed's jobs never call the Worker and health judges no state row. The order (staging, the
+rehearsal, production, the first GC and backup dispatches, then the variable) is APIs.md's phase-3a rollout.
+
 ## Rollback
 
 `npx wrangler deployments list -c state/wrangler.toml --env ""` (or `--env staging`) lists the versions OLDEST first,

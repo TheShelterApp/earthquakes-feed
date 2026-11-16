@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { geohashEncode } from '../src/geohash.js';
 import { appendChanges, mirrorChangeLog, nodeToChangeRecord, type ChangeRecord } from '../src/changes.js';
 import { enrichStatusV2, updateProviderHealth, type AggregateStatus } from '../src/status-v2.js';
@@ -130,4 +132,40 @@ test('enrichStatusV2 is additive: keeps every existing field and adds the v2 sha
   assert.equal(v2.providers.bmkg.observations, 0);
   assert.equal(v2.providers.bmkg.lagSeconds, 3600);
   assert.deepEqual(v2.providers.bmkg.error, { kind: 'http', message: 'HTTP 503', since: generatedMs - 3600_000 });
+});
+
+// 2026-11-15 audit, derive L1: derive.ts mirrors the day's change-log on every run that has one. A quiet run (nothing
+// appended) must still deploy v1/changes/<day>.ndjson, or the signed v2 manifest says `changes: null`.
+test('derive mirrors the day\'s change-log to Pages on a run that appends nothing', () => {
+  const root = mkdtempSync(join(tmpdir(), 'derive-quiet-'));
+  try {
+    const data = join(root, 'data');
+    const pub = join(root, 'public');
+    const tmp = join(root, 'tmp');
+    mkdirSync(join(data, 'changes'), { recursive: true });
+    mkdirSync(tmp);
+    // derive names the day from its own clock: seed the day at the spawn and the day two minutes later, so a UTC
+    // midnight while it runs cannot make the test flake.
+    const seeded = new Map<string, string>();
+    for (const ms of [Date.now(), Date.now() + 120_000]) {
+      const day = new Date(ms).toISOString().slice(0, 10);
+      const bytes = `{"seq":1,"day":"${day}"}\n`;
+      writeFileSync(join(data, 'changes', `${day}.ndjson`), bytes);
+      seeded.set(day, bytes);
+    }
+    const run = spawnSync(process.execPath, ['--import', 'tsx', 'src/derive.ts'], {
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
+      env: { ...process.env, DATA_DIR: data, PUBLIC_DIR: pub, RUNNER_TEMP: tmp },
+      encoding: 'utf8',
+    });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /changes appended=0 /);
+    const day = new Date((JSON.parse(readFileSync(join(data, 'manifest.json'), 'utf8')) as { generated: number }).generated)
+      .toISOString()
+      .slice(0, 10);
+    assert.ok(seeded.has(day), `derive's day ${day} was seeded`);
+    assert.equal(readFileSync(join(pub, 'v1', 'changes', `${day}.ndjson`), 'utf8'), seeded.get(day));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

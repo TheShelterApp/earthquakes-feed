@@ -227,7 +227,7 @@ HTML bulletin is read by a custom adapter (hypocentre parameters only).
   (2023-07-06) in July 2026 except ISC, whose walk is paused; a backfilled row is the
   source's solution when it was fetched, while the log holds each report as first seen
   since 2026-07-05 (`scripts/first-observations.ts`; [APIs.md](APIs.md#history-and-backfill)). A source that answers
-  for its recent past only (registry `retentionDays`; AFAD since late 2026: it answers its newest 1,000 events, about 12 days at its usual rate, and is asked for the last 7 whole days only, `retentionDays: 7`) is
+  for its recent past only (registry `retentionDays`; AFAD since late 2026: it answers its newest 1,000 events, about 12 days at its usual rate, and is asked for the last 7 whole days only, `retentionDays: 7`, and a window that a swarm has pushed out of those 1,000 fails instead) is
   never asked for an older day: backfill skips such windows with the reason `retention` and remediation builds the day
   without it (`not_fetched` in the edition), instead of recording its empty answer as filled
   ([APIs.md](APIs.md#turkey-afad)). `gh workflow run backfill.yml -f dry_run=true` (with `starttime`, `endtime`,

@@ -2123,7 +2123,12 @@ older than that is skipped with the reason `retention` (the run's log and the dr
 whose next window lies wholly before it is done with `stoppedBy: "retention"` in `knowledge/index/backfill.json`; a
 dispatched window that is still open there is closed), and a remediation day older than that is built without AFAD,
 its edition naming it in `not_fetched` (*Remediation editions*). Neither is a block on the health board: nothing more
-can be fetched. The live path asks AFAD for its last 2 days and is not affected. Since every backfill window lies
+can be fetched. A swarm can shorten the store below the 7 days (FEED-DI-2), so since 2026-11-16 every AFAD window query
+first asks the store over [window start, now] with `limit=1000`: when that answer holds 1,000 events and its oldest is
+more than 60 s after the window start, the window fails (`afad: its newest 1000 events, all it answers for, begin at
+…`) instead of reading as filled; backfill halves a walk's window or blocks on a dispatched one, as for any failure (on
+2026-11-16 the store began 2026-11-04 01:50:49 UTC, 12 days back). The live path asks AFAD for its last 2 days, with
+no such query, and is not affected. Since every backfill window lies
 before the live floor (the oldest `event_map` day, about 45 days back) and every queued refill day is archived, AFAD's
 history before the live floor can no longer be refilled from AFAD at all: what the archives and frozen partitions hold
 is all there is. The AFAD raw assets of the seam editions of 2026-06-28..30 (`raw-afad-2026-06-2{8,9}`,

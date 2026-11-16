@@ -278,13 +278,45 @@ export function parseAfad(list: unknown, providerId: string): RawObs[] {
 
 /** The AFAD query for [startMs, endMs]: the bounds are UTC, like `date` (fetchProviderWindow re-filters to the exact
  *  window afterward). Until 2026-10-01 they were padded by 4 h for a local-time reading of the API. */
-export function afadQueryUrl(base: string, startMs: number, endMs: number): string {
-  return `${base}?start=${fmt(startMs).replace(' ', '%20')}&end=${fmt(endMs).replace(' ', '%20')}&orderby=timedesc&limit=500`;
+export function afadQueryUrl(base: string, startMs: number, endMs: number, limit = 500): string {
+  return `${base}?start=${fmt(startMs).replace(' ', '%20')}&end=${fmt(endMs).replace(' ', '%20')}&orderby=timedesc&limit=${limit}`;
+}
+
+/** AFAD's event API answers from its newest 1,000 events only (SHLTR-146, registry `retentionDays`): measured 2026-11-14,
+ *  and again 2026-11-16 (a query of 2026-10-20 .. 11-16 with limit=2000 answered exactly 1,000 rows, from 2026-11-04
+ *  01:50:49 on, and one of 10-20 .. 11-06 answered 209 rows, all from that instant on). */
+export const AFAD_STORE_EVENTS = 1_000;
+
+/** Where AFAD's store begins, from the answer of a query over [window start, now] with limit=AFAD_STORE_EVENTS: the
+ *  oldest `date` when the answer holds AFAD_STORE_EVENTS rows (the store, or the limit, cut it: only [oldest, now] is
+ *  known in full), null when it holds fewer (every event since the window start is in the store). */
+export function afadStoreFloorMs(list: unknown): number | null {
+  const rows = Array.isArray(list) ? list : ((list as { eventList?: unknown[] } | null)?.eventList ?? []);
+  if (rows.length < AFAD_STORE_EVENTS) return null;
+  let floor: number | null = null;
+  for (const e of rows as Record<string, unknown>[]) {
+    const t = parseUtcMs(e?.['date'] as string | number | null);
+    if (t != null && (floor == null || t < floor)) floor = t;
+  }
+  return floor;
 }
 
 const afad: CustomAdapter = async (cfg, nowMs, window) => {
   const startMs = window ? window.startMs : nowMs - QUERY_LOOKBACK_MS;
   const endMs = window ? window.endMs : nowMs;
+  if (window) {
+    // FEED-DI-2: retentionDays (7) keeps backfill and remediation off the days AFAD's 1,000 events no longer reach at its
+    // usual rate (about 12 days), but a swarm shortens that to a day or two (the Sindirgi sequence of 2025-08 filled
+    // 500-row days). A window that starts before the store does answers only its part after it, which read as filled.
+    // One query over [window start, now] finds where the store begins; a window starting before it fails (backfill:
+    // counted and halved, a dispatched window a block; asked again until the retention edge passes it).
+    const nowWallMs = Math.max(Date.now(), endMs);
+    const floor = afadStoreFloorMs(JSON.parse(await getText(afadQueryUrl(cfg.base, startMs, nowWallMs, AFAD_STORE_EVENTS), { timeoutMs: 12_000, retries: 2 })) as unknown);
+    if (floor != null && floor > startMs + 60_000) {
+      const iso = (ms: number): string => new Date(ms).toISOString();
+      throw new Error(`${cfg.id}: its newest ${AFAD_STORE_EVENTS} events, all it answers for, begin at ${iso(floor)}, after the window start ${iso(startMs)}: the window cannot be answered in full (FEED-DI-2)`);
+    }
+  }
   return parseAfad(JSON.parse(await getText(afadQueryUrl(cfg.base, startMs, endMs), { timeoutMs: 12_000, retries: 2 })) as unknown, cfg.id);
 };
 

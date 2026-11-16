@@ -504,6 +504,13 @@ day tables.
   context, each read from its own input, the fixed `REMERGE_INGEST_TIME` — and counts the result. The ledger records
   `remerged_in_memory: true` for such a year; once the merged assets are published, their checksums change the digest
   and the year is rebuilt from them. The epoch the statistics count at is at least 1 whatever `REMERGE_EPOCH` says.
+- **Known gap across New Year (AFAD):** an event of AFAD rows only that the pre-2026-10-01 parser stored 3 h early
+  (*Turkey (AFAD)*) at 21:00–24:00 UTC on 31 December is re-timed into 1 January by the normalization, but stays in
+  31 December's input (a merged archive keeps an event in its stored day, `stats.off_day`; the in-memory re-merge reads
+  that day only as context of the next year). Neither year counts it: a year leaves out a row timed outside its days,
+  and the next year reads 31 December only as context. That is at most the AFAD-only events of three hours a year,
+  small Turkish quakes; it is documented rather than counted, since counting them would change how every year reads
+  its inputs (a builder bump and a rebuild of all years) for a handful of rows.
 - **Era B** (1973–1999, USGS ComCat M4.5+): rows under M4.5 and the filtered events are left out, so `min_mag: 4.5` and
   `m45 == total`. Compare a count across the `completeness` epochs on M4.5+ only: the number of contributing agencies
   grows from one (era B) to 17 (era A, 2000 → 2023-07-05), more with the archives (→ 2026-07-04) and about 40 live.

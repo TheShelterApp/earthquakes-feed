@@ -14,6 +14,23 @@ export const PUBLIC_DIR = process.env.PUBLIC_DIR ?? 'public';
 export const REGISTRY_PATH = process.env.REGISTRY_PATH ?? 'providers/registry.json';
 export const SCHEMA_DIR = process.env.SCHEMA_DIR ?? 'schema';
 
+/**
+ * A number from the environment: unset, empty or whitespace-only gives `def` (a blank workflow_dispatch input means
+ * the default, never 0); anything else must be a finite number of at least `min` (default 1), and an integer unless
+ * `integer` is false, or it throws an error naming the variable. `Number(process.env.X ?? def)` read an empty value as
+ * 0 and a typo as NaN, and a NaN limit compares false everywhere, so a cap such as HISTORY_MAX_UNITS became no cap.
+ */
+export function envNumber(name: string, def: number, opts: { min?: number; integer?: boolean } = {}, env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[name]?.trim();
+  if (!raw) return def;
+  const { min = 1, integer = true } = opts;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < min || (integer && !Number.isInteger(n))) {
+    throw new Error(`${name}=${JSON.stringify(env[name])} is not ${integer ? 'an integer' : 'a number'} >= ${min}`);
+  }
+  return n;
+}
+
 // --- dedup / identity (base windows held identical to the iOS/web clients) ---
 export const SPATIAL_KM = 10;
 export const TEMPORAL_MS = 60_000;
@@ -560,7 +577,7 @@ export const AUTHORITY_WINDOW = {
   great: { fromMag: 7.0, km: 300, maxDeltaMag: 1.5 },
 } as const;
 /** Archive months `remerge.yml` merges per run, newest first (src/remerge-archives.ts). */
-export const REMERGE_MONTHS_PER_RUN = Number(process.env.REMERGE_MONTHS_PER_RUN || 4);
+export const REMERGE_MONTHS_PER_RUN = envNumber('REMERGE_MONTHS_PER_RUN', 4);
 /** The widest pair-time window any merge gate accepts: two events whose rows' origin times are all further apart can
  *  never fold, so the offline re-merge (src/remerge.ts) skips such candidates before whyNotMerged (Resolver
  *  `pairPrefilterMs`). Every window, for tests/remerge.test.ts to keep this at or above each one:
@@ -600,7 +617,7 @@ export const CORRECTION_EPOCH = 3;
 /** Only events within this many days are kept in the in-memory dedup index. */
 export const HOT_WINDOW_DAYS = 7;
 /** aggregate loads only this many days of event_map shards (fast hot path). */
-export const LIVE_INDEX_DAYS = Number(process.env.LIVE_INDEX_DAYS ?? 10);
+export const LIVE_INDEX_DAYS = envNumber('LIVE_INDEX_DAYS', 10);
 /**
  * event_map shard length in UTC hours of event time (round 17, LANE G repository growth): an event-day's nodes are
  * written to `event_map/YYYY-MM-DD-HH.ndjson`, one file per EVENT_MAP_SHARD_HOURS hours starting at HH, and a run
@@ -617,14 +634,14 @@ export function parseShardHours(raw: string): number {
 }
 /** derive loads this many days (covers the 30-day month summary + revision tail);
  *  event_map shards older than this are pruned (their identity lives in frozen partitions). */
-export const EVENT_MAP_HORIZON_DAYS = Number(process.env.EVENT_MAP_HORIZON_DAYS ?? 45);
+export const EVENT_MAP_HORIZON_DAYS = envNumber('EVENT_MAP_HORIZON_DAYS', 45);
 
 // --- fetching ---
-export const FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS ?? 8000);
+export const FETCH_TIMEOUT_MS = envNumber('FETCH_TIMEOUT_MS', 8000);
 /** Backfill/onboarding tolerate slower nodes (hourly, not the 5-min hot path). */
-export const BACKFILL_FETCH_TIMEOUT_MS = Number(process.env.BACKFILL_FETCH_TIMEOUT_MS ?? 20000);
+export const BACKFILL_FETCH_TIMEOUT_MS = envNumber('BACKFILL_FETCH_TIMEOUT_MS', 20000);
 /** Each run asks providers for events in [now - lookback, now]; dedup absorbs overlap. */
-export const QUERY_LOOKBACK_MS = Number(process.env.QUERY_LOOKBACK_MS ?? 2 * 24 * 3600 * 1000);
+export const QUERY_LOOKBACK_MS = envNumber('QUERY_LOOKBACK_MS', 2 * 24 * 3600 * 1000);
 /** Providers whose `updatedafter` revision sweep may mint (PF-5a, src/sweep.ts). ComCat publishes
  *  many events days after their origin, once analysts release them, past the live query's
  *  lookback: 184 of 693 M ≥ 2.5 events with origins 2026-09-10..20 never reached the feed (a
@@ -896,7 +913,7 @@ export const ABSENCE_WATCH_PROVIDERS: readonly string[] = ['aec', 'mexico'];
 /** Watched sources whose file is their last N items rather than a time span (absence.ts). */
 export const ABSENCE_LAST_ITEMS_PROVIDERS: ReadonlySet<string> = new Set(['mexico']);
 export const ABSENCE_WATCH_DAYS = 10;
-export const FETCH_LIMIT = Number(process.env.FETCH_LIMIT ?? 5000);
+export const FETCH_LIMIT = envNumber('FETCH_LIMIT', 5000);
 
 // --- sweeps (src/sweep-cursor.ts, PF-5c) ---
 /** Sources whose `updatedafter` revision sweep runs every aggregate: the two FDSN nodes whose rows
@@ -913,7 +930,7 @@ export const DELETE_SWEEP_PROVIDERS: readonly string[] = ['usgs'];
  *  use the whole budget keeps the Aggregate step near 40 s and the job (about 100 s, most of it
  *  the data checkout) far inside its 5-minute timeout and the heartbeat's 5-minute interval.
  *  The live FDSN fetches keep FETCH_TIMEOUT_MS (or the source's own timeoutMs). */
-export const SWEEP_TIMEOUT_MS = Number(process.env.SWEEP_TIMEOUT_MS ?? 30_000);
+export const SWEEP_TIMEOUT_MS = envNumber('SWEEP_TIMEOUT_MS', 30_000);
 /** A sweep asks from this long before its cursor: an update can reach the provider's search index
  *  after the moment it is stamped with, and the runner's clock is not the provider's. Rows seen
  *  twice change nothing (an unchanged re-report is a no-op). */

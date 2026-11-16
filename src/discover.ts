@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { REGISTRY_PATH } from './config.js';
+import { REGISTRY_PATH, envNumber } from './config.js';
 import type { ProviderConfig } from './types.js';
 
 /**
@@ -11,7 +11,7 @@ import type { ProviderConfig } from './types.js';
  * (format quirks, timezone, license, reliability) and flips `active:true` in the registry.
  */
 const FDSN_REGISTRY = 'https://www.fdsn.org/ws/datacenters/1/query';
-const PROBE_TIMEOUT_MS = Number(process.env.PROBE_TIMEOUT_MS ?? 20_000);
+const PROBE_TIMEOUT_MS = envNumber('PROBE_TIMEOUT_MS', 20_000);
 const startISO = new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 19);
 
 /** Known FDSN event endpoints outside the datacenter registry — down when last checked; kept

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { relative, sep } from 'node:path';
-import { dataPaths } from './config.js';
+import { dataPaths, envNumber } from './config.js';
 import { dayStartMs } from './backfill-cursor.js';
 import { backfillCfg } from './backfill-cfg.js';
 import {
@@ -41,7 +41,7 @@ import type { EventNode, Head, RawObs } from './types.js';
 import { isoFromMs } from './util.js';
 
 const DAY = 86_400_000;
-const BACKFILL_TARGET_YEARS = Number(process.env.BACKFILL_TARGET_YEARS ?? 3);
+const BACKFILL_TARGET_YEARS = envNumber('BACKFILL_TARGET_YEARS', 3, { integer: false });
 
 type Cursor = BackfillCursorFile;
 

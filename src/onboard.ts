@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { FETCH_LIMIT, QUERY_LOOKBACK_MS, dataPaths } from './config.js';
+import { FETCH_LIMIT, QUERY_LOOKBACK_MS, dataPaths, envNumber } from './config.js';
 import { backfillCfg } from './backfill-cfg.js';
 import { eventDayKey, loadEventMap, saveEventMap } from './bitemporal.js';
 import { Resolver } from './dedup.js';
@@ -8,7 +8,7 @@ import { byIngestOrder, emptyTally, screen } from './quality.js';
 import type { Head, ProviderConfig } from './types.js';
 
 const DAY = 86_400_000;
-const ONBOARD_CHUNK_DAYS = Number(process.env.ONBOARD_CHUNK_DAYS ?? 7);
+const ONBOARD_CHUNK_DAYS = envNumber('ONBOARD_CHUNK_DAYS', 7);
 
 interface Pending {
   recentBackTo: string; // walks back from now-lookback toward liveDay

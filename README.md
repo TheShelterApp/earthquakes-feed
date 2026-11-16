@@ -328,6 +328,11 @@ DATA_DIR=.data PUBLIC_DIR=public npm run derive  # summaries + day files + parti
 DATA_DIR=.data PUBLIC_DIR=public npm run validate
 ```
 
+The numeric settings read from the environment (`FETCH_TIMEOUT_MS`, `LIVE_INDEX_DAYS`, and the workflow_dispatch
+inputs such as `max_units`, `months`, `max_days` and `max_years`) take their default when unset or blank; any other
+value must be a whole number of at least 1 (`REMERGE_EPOCH_OVERRIDE` also takes 0, `BACKFILL_TARGET_YEARS` a fraction;
+`envNumber`, src/config.ts), or the run stops at once with an error naming the variable.
+
 ## Deploy (for a fork)
 
 1. **Bootstrap the data branch:** `bash scripts/bootstrap-data-branch.sh && git push -u origin data`

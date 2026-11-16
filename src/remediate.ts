@@ -8,7 +8,7 @@ import { gunzipSync, gzipSync } from 'node:zlib';
 import { type ArchiveRef, readArchivedDays } from './archive-io.js';
 import { backfillCfg } from './backfill-cfg.js';
 import { featureToNode } from './bitemporal.js';
-import { DATA_DIR, dataPaths } from './config.js';
+import { DATA_DIR, dataPaths, envNumber } from './config.js';
 import { DryRunStore, GitHubStore, type HistoryStore, LocalStore } from './history-store.js';
 import { FROZEN_AFTER_DAYS, frozenBefore as frozenBeforeAt } from './partitions.js';
 import { partitionBlobs } from './stats-history.js';
@@ -447,13 +447,13 @@ function readPartition(dataDir: string, day: string, oid: string): FrozenPartiti
 async function main(): Promise<void> {
   const out = process.env.REMEDIATION_OUT ?? 'remediation-out';
   const dryRun = process.env.REMEDIATION_DRY_RUN === '1';
-  const maxDays = Number(process.env.REMEDIATION_MAX_DAYS || 8);
+  const maxDays = envNumber('REMEDIATION_MAX_DAYS', 8);
   const refill = process.env.REMEDIATION_REFILL?.trim() || '';
   const lateMode = resolveLateMode(process.env.REMEDIATION_LATE_USGS);
   const lateRange = process.env.REMEDIATION_LATE_USGS_RANGE?.trim() || '';
   if (lateRange && lateMode === 'off') throw new Error('REMEDIATION_LATE_USGS_RANGE is given without REMEDIATION_LATE_USGS on or plan');
-  const lateMax = Number(process.env.REMEDIATION_LATE_MAX_DAYS || 40);
-  const deadlineMs = Number(process.env.REMEDIATION_DEADLINE_S || 1200) * 1000;
+  const lateMax = envNumber('REMEDIATION_LATE_MAX_DAYS', 40);
+  const deadlineMs = envNumber('REMEDIATION_DEADLINE_S', 1200) * 1000;
   const startedMs = Date.now();
   // A dispatch of the refresh does the queue and the refresh, not the saturated days.
   const lateDispatch = ['on', 'plan'].includes((process.env.REMEDIATION_LATE_USGS ?? '').trim());

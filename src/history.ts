@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readArchivedDays, type ArchiveRef } from './archive-io.js';
 import { featureToNode } from './bitemporal.js';
-import { DATA_DIR, REMERGE_EPOCH, REMERGE_INGEST_TIME, dataPaths } from './config.js';
+import { DATA_DIR, REMERGE_EPOCH, REMERGE_INGEST_TIME, dataPaths, envNumber } from './config.js';
 import { type ContextInput, type EditionMeta, type RawHeader, type RawInput, EDITION_KIND, RAW_KIND, buildEdition, parseRawText, rawFileText } from './history-build.js';
 import {
   FETCH_LIMIT_DEFAULT,
@@ -959,10 +959,13 @@ async function main(): Promise<void> {
     : undefined;
   if (onlySources && !dryRun) throw new Error('HISTORY_ONLY_SOURCES is for dry runs only (a production run walks every source of the era)');
   // Re-merge dry runs before the epoch is switched on (scripts/remerge-verify.ts --history reads the result).
-  const remergeEpoch = process.env.HISTORY_REMERGE_EPOCH?.trim() ? Number(process.env.HISTORY_REMERGE_EPOCH) : undefined;
+  const remergeEpoch = process.env.HISTORY_REMERGE_EPOCH?.trim() ? envNumber('HISTORY_REMERGE_EPOCH', 0) : undefined;
   const remergeOnly = process.env.HISTORY_REMERGE_ONLY?.trim() ? new Set(process.env.HISTORY_REMERGE_ONLY.split(',').map((x) => x.trim()).filter(Boolean)) : undefined;
   const remergeNoWait = process.env.HISTORY_REMERGE_NO_WAIT === '1';
-  const maxSeconds = process.env.HISTORY_MAX_SECONDS?.trim() ? Number(process.env.HISTORY_MAX_SECONDS) : cfg.maxSecondsPerRun;
+  const maxSeconds = envNumber('HISTORY_MAX_SECONDS', cfg.maxSecondsPerRun);
+  // A blank workflow_dispatch input means the config's number, never 0; a typo stops the run here, before any work,
+  // instead of reading as NaN, which no `done >= maxUnits` ever reaches (no unit limit).
+  const maxUnits = envNumber('HISTORY_MAX_UNITS', cfg.maxUnitsPerRun);
   if ((remergeEpoch != null || remergeOnly || remergeNoWait || maxSeconds !== cfg.maxSecondsPerRun) && !dryRun) {
     throw new Error('HISTORY_REMERGE_EPOCH, HISTORY_REMERGE_ONLY, HISTORY_REMERGE_NO_WAIT and HISTORY_MAX_SECONDS are for dry runs only');
   }
@@ -995,8 +998,7 @@ async function main(): Promise<void> {
   );
   let run: Awaited<ReturnType<typeof runWalk>>;
   try {
-    // An empty value (a blank workflow_dispatch input) means the config's number, never 0.
-    run = await runWalk(ctx, state, process.env.HISTORY_MAX_UNITS ? Number(process.env.HISTORY_MAX_UNITS) : cfg.maxUnitsPerRun);
+    run = await runWalk(ctx, state, maxUnits);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

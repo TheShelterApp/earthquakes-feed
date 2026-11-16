@@ -638,6 +638,9 @@ test('state GC: deletes only unreferenced blobs older than minAgeDays, capped at
   const d = (await dry.json()) as Record<string, unknown>;
   assert.equal(d.deleted, 0);
   assert.equal(d.wouldDelete, 2);
+  assert.equal(d.bytesDeleted, 0);
+  assert.equal(d.bytesWouldDelete, 2 * gz('old 1').byteLength, 'a dry run reports the bytes it would delete');
+  assert.equal(d.listed, (d.kept as number) + (d.young as number) + (d.capped as number) + (d.foreign as number) + (d.wouldDelete as number));
   assert.equal(h.r2.objects.size, 8, 'a dry run deletes nothing');
 
   const res = await h.call('POST', '/v1/gc', { auth: gcAuth(), body: { ...body, dryRun: false } });
@@ -652,6 +655,7 @@ test('state GC: deletes only unreferenced blobs older than minAgeDays, capped at
   assert.ok(left.includes('cas/notes.txt') && left.includes(`cas/sha256/zz/${old[0]}`), 'keys outside the CAS layout are never deleted');
   const gone = old.filter((s) => !h.r2.objects.has(blobKey(s)));
   assert.equal(r.bytesDeleted, gone.length * gz('old 1').byteLength);
+  assert.deepEqual([r.wouldDelete, r.bytesWouldDelete], [r.deleted, r.bytesDeleted], 'a real page deletes what it selects');
   // A blob re-PUT today (uploaded refreshed) is young again, whatever the keep set says.
   const lastOld = old.find((s) => h.r2.objects.has(blobKey(s)))!;
   assert.equal((await h.call('PUT', `/v1/cas/sha256/${lastOld}`, { body: h.r2.objects.get(blobKey(lastOld))!.bytes })).status, 200);

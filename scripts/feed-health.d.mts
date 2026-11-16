@@ -129,6 +129,7 @@ export function evaluateStateShadow(read: StateShadowRead | undefined, nowMs: nu
 export function evaluateStateGc(read: FeedInputs['stateGc'], nowMs: number): Judged;
 /** feed:state-backup: the newest daily state over 36 h old (P2) or 7 days (P1); no backup on record: P2. */
 export function evaluateStateBackup(read: FeedInputs['stateBackup'], nowMs: number): Judged;
+/** Each ceiling's used share from GET /v1/budget ({used, stored_bytes, ceilings}, snake_case), the highest first. */
 export function budgetShares(json: unknown): Array<{ key: string; used: number; cap: number; share: number }> | null;
 /** feed:state-budget (P2): a ceiling over 70 % used. */
 export function evaluateStateBudget(read: StateBudgetRead | undefined): Judged;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { mkdtempSync, rmSync, utimesSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -18,6 +18,9 @@ import {
   githubOidcTokenSource,
   jwtExpiryMs,
   parseBatchFrames,
+  parseBudget,
+  parseGcPage,
+  retryAfterMs,
   sha256Hex,
   type GcRequest,
 } from '../src/state-store.js';
@@ -39,9 +42,22 @@ interface Seen {
   body: Buffer;
 }
 
-/** A fake state Worker: R2 as a Map, every route of the contract, and hooks to break it on purpose. */
+/** GET /v1/budget as state/src/budget.js snapshot() answers it. */
+const BUDGET = {
+  day: '2026-11-16',
+  used: { class_a: 10, class_b: 300, bytes_written: 4_000_000, requests: 320, refused: 0 },
+  stored_bytes: 2_000_000_000,
+  stored_seeded_at: '2026-11-16T03:00:00.000Z',
+  gc_pass_open: false,
+  ceilings: { class_a: 20_000, class_b: 200_000, bytes_written: 1_073_741_824, stored_bytes: 6_442_450_944 },
+};
+const DAY_MS = 86_400_000;
+
+/** A fake state Worker: R2 as a Map, every route of the contract (GC with the Worker's checks and answer,
+ *  state/src/worker.js and cas.js), and hooks to break it on purpose. */
 function fakeWorker(hooks: { before?: (req: Seen, res: ServerResponse) => boolean; frame?: (shas: string[], store: Map<string, Buffer>) => Buffer } = {}) {
   const store = new Map<string, Buffer>();
+  const uploaded = new Map<string, number>();
   const seen: Seen[] = [];
   const server = createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -60,8 +76,9 @@ function fakeWorker(hooks: { before?: (req: Seen, res: ServerResponse) => boolea
       if (req.method === 'PUT' && put) {
         if (req.headers['content-length'] == null) return json(411, { error: 'length required' });
         if (Number(req.headers['content-length']) > 25 * 1024 * 1024) return json(413, { error: 'too large' });
-        if (sha256Hex(s.body) !== put[1]) return json(400, { error: 'checksum' });
+        if (sha256Hex(s.body) !== put[1]) return json(400, { error: 'checksum mismatch: the body is not the blob its sha256 names', retryable: false });
         store.set(put[1]!, s.body);
+        uploaded.set(put[1]!, Date.now());
         return json(200, { key: casKey(put[1]!), size: s.body.length, uploaded: new Date().toISOString() });
       }
       if (req.method === 'POST' && req.url === '/v1/cas:batchGet') {
@@ -73,17 +90,44 @@ function fakeWorker(hooks: { before?: (req: Seen, res: ServerResponse) => boolea
       }
       if (req.method === 'POST' && req.url === '/v1/gc') {
         const r = JSON.parse(s.body.toString('utf8')) as GcRequest;
+        if (!Array.isArray(r.keep) || r.keep.length < 1 || r.keep.length > 10_000) return json(400, { error: 'keep must hold 1..10000 shas' });
+        if (r.cursor === null && (!Array.isArray(r.current) || r.current.length < 1 || r.current.length > 40)) return json(400, { error: 'current must hold 1..40 shas' });
         if (r.current.some((c) => !r.keep.includes(c) || !store.has(c))) return json(409, { error: 'current not kept or missing' });
-        let deleted = 0;
-        for (const k of [...store.keys()]) if (!r.keep.includes(k) && deleted < r.maxDeletes) (deleted++, r.dryRun || store.delete(k));
-        return json(200, { listed: store.size, deleted, bytesDeleted: 0, kept: store.size - deleted, cursor: null });
+        const cutoff = Date.now() - r.minAgeDays * DAY_MS;
+        let kept = 0;
+        let young = 0;
+        let capped = 0;
+        const doomed: string[] = [];
+        let bytes = 0;
+        for (const k of [...store.keys()].sort()) {
+          if (r.keep.includes(k)) kept++;
+          else if (!(uploaded.get(k)! < cutoff)) young++;
+          else if (doomed.length >= r.maxDeletes) capped++;
+          else (doomed.push(k), (bytes += store.get(k)!.length));
+        }
+        const listed = store.size;
+        if (!r.dryRun) for (const k of doomed) store.delete(k);
+        return json(200, {
+          listed,
+          deleted: r.dryRun ? 0 : doomed.length,
+          wouldDelete: doomed.length,
+          bytesDeleted: r.dryRun ? 0 : bytes,
+          bytesWouldDelete: bytes,
+          kept,
+          young,
+          capped,
+          foreign: 0,
+          cursor: null,
+          dryRun: r.dryRun,
+        });
       }
-      if (req.method === 'GET' && req.url === '/v1/budget') return json(200, { day: '2026-11-16', counters: { classA: 10 }, ceilings: { classA: 20000 } });
+      if (req.method === 'GET' && req.url === '/v1/budget') return json(200, BUDGET);
       json(404, { error: 'no route' });
     });
   });
   return {
     store,
+    uploaded,
     seen,
     start: () => new Promise<string>((resolve) => server.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${(server.address() as { port: number }).port}`))),
     stop: () => new Promise<void>((resolve) => server.close(() => resolve())),
@@ -116,7 +160,7 @@ test('state client: PUT then batchGet round trip; every request carries the toke
     assert.equal(p.headers['transfer-encoding'], undefined);
     const g = w.seen.find((s) => s.url === '/v1/cas:batchGet')!;
     assert.deepEqual(JSON.parse(g.body.toString('utf8')), { shas: [a.hex, b.hex] });
-    assert.deepEqual(await be.budget(), { day: '2026-11-16', counters: { classA: 10 }, ceilings: { classA: 20000 } });
+    assert.deepEqual(await be.budget(), BUDGET);
   } finally {
     await w.stop();
   }
@@ -169,7 +213,7 @@ test('state client: the framing is checked to the byte (trailer, lengths, sha256
   assert.equal(kind(Buffer.from('HELLO\n')), 'integrity');
 });
 
-test('state client: 5xx, a non-budget 429 and a cut stream are retried (at most 4 attempts); 4xx and the budget never', async () => {
+test('state client: 5xx, a non-budget 429 and a cut stream are retried (at most 4 attempts); 4xx, the budget and a 500 misconfigured never; only a checksum 400 is integrity', async () => {
   let failures = 0;
   const w = fakeWorker({
     before: (s, res) => {
@@ -209,7 +253,10 @@ test('state client: 5xx, a non-budget 429 and a cut stream are retried (at most 
     [426, 'protocol', 'protocol'],
     [429, 'budget', 'budget'],
     [409, 'refused', 'refused'],
-    [400, 'checksum', 'integrity'],
+    [400, 'checksum mismatch: the body is not the blob its sha256 names', 'integrity'],
+    [400, 'empty body', 'client'],
+    [400, 'body is not a JSON object', 'client'],
+    [500, 'misconfigured: REPOSITORY_ID', 'config'],
   ] as const) {
     const f = status(code, error);
     const b = await f.start();
@@ -298,37 +345,150 @@ test('state client: FEED_STATE_BACKEND selects the backend; the Worker URL must 
   assert.throws(() => backendFromEnv({ FEED_STATE_BACKEND: 'worker', FEED_STATE_URL: 'http://feed-state.theshelter.app' }), /https only/);
 });
 
-test('directory backend: the Worker\'s checks and GC rules (keep, current, age, cap, pages)', async () => {
+test('directory backend: the Worker\'s checks and GC rules (keep, current, age, cap) and its answer', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'state-fs-'));
   try {
     let now = Date.parse('2026-11-16T00:00:00Z');
     const be = new FsBackend(dir, () => now);
     const blobs = Array.from({ length: 5 }, (_, i) => blob(`day ${i}`));
     for (const x of blobs) await be.put(x.hex, x.bytes);
-    await assert.rejects(be.put(blobs[0]!.hex, blobs[1]!.bytes), (e: unknown) => e instanceof StateStoreError && e.status === 400);
+    await assert.rejects(be.put(blobs[0]!.hex, blobs[1]!.bytes), (e: unknown) => e instanceof StateStoreError && e.status === 400 && e.kind === 'integrity');
     // Age: three blobs uploaded 40 days ago, two now.
     const old = (Date.parse('2026-10-07T00:00:00Z')) / 1000;
     for (const x of blobs.slice(0, 3)) utimesSync(join(dir, ...casKey(x.hex).split('/')), old, old);
     const keep = [blobs[0]!.hex, blobs[4]!.hex];
-    await assert.rejects(be.gc({ keep, current: [blobs[1]!.hex], cursor: null, minAgeDays: 30, maxDeletes: 10, dryRun: true }), /not in keep/);
+    const req = { keep, current: [blobs[0]!.hex], cursor: null, minAgeDays: 30, maxDeletes: 10, dryRun: true };
+    await assert.rejects(be.gc({ ...req, current: [blobs[1]!.hex] }), (e: unknown) => e instanceof StateStoreError && e.kind === 'refused' && /not in keep/.test(e.message));
     const missing = blob('gone');
-    await assert.rejects(be.gc({ keep: [...keep, missing.hex], current: [missing.hex], cursor: null, minAgeDays: 30, maxDeletes: 10, dryRun: true }), /missing/);
-    const dry = await be.gc({ keep, current: [blobs[0]!.hex], cursor: null, minAgeDays: 30, maxDeletes: 10, dryRun: true });
-    assert.deepEqual([dry.listed, dry.deleted, dry.kept, dry.cursor], [5, 2, 3, null]);
+    await assert.rejects(be.gc({ ...req, keep: [...keep, missing.hex], current: [missing.hex] }), /missing/);
+    // The Worker's limits (400): keep 1..10,000, current 1..40 on the first page and none later, minAgeDays ≥ 14.
+    const client400 = (e: unknown): boolean => e instanceof StateStoreError && e.kind === 'client' && e.status === 400;
+    await assert.rejects(be.gc({ ...req, keep: [], current: [] }), client400);
+    await assert.rejects(be.gc({ ...req, current: [] }), client400);
+    await assert.rejects(be.gc({ ...req, cursor: 'x', current: [blobs[0]!.hex] }), client400);
+    await assert.rejects(be.gc({ ...req, minAgeDays: 7 }), (e: unknown) => client400(e) && /minAgeDays/.test(String(e)));
+    await assert.rejects(be.gc({ ...req, maxDeletes: 1001 }), client400);
+    // A foreign key under cas/ is listed and never touched.
+    writeFileSync(join(dir, 'cas', 'notes.txt'), 'x');
+    utimesSync(join(dir, 'cas', 'notes.txt'), old, old);
+    const dry = await be.gc(req);
+    assert.deepEqual(dry, { listed: 6, deleted: 0, bytesDeleted: 0, wouldDelete: 2, bytesWouldDelete: blobs[1]!.bytes.length + blobs[2]!.bytes.length, kept: 2, young: 1, capped: 0, foreign: 1, cursor: null, dryRun: true });
     assert.equal((await getBlobs(be, blobs.map((x) => x.hex))).size, 5, 'a dry run deletes nothing');
-    const capped = await be.gc({ keep, current: [], cursor: null, minAgeDays: 30, maxDeletes: 1, dryRun: false });
-    assert.equal(capped.deleted, 1);
-    const rest = await be.gc({ keep, current: [], cursor: null, minAgeDays: 30, maxDeletes: 10, dryRun: false });
-    assert.equal(rest.deleted, 1);
+    const capped = await be.gc({ ...req, maxDeletes: 1, dryRun: false });
+    assert.deepEqual([capped.deleted, capped.wouldDelete, capped.capped, capped.bytesDeleted === capped.bytesWouldDelete], [1, 1, 1, true]);
+    const rest = await be.gc({ ...req, dryRun: false });
+    assert.deepEqual([rest.deleted, rest.capped], [1, 0]);
     assert.equal((await getBlobs(be, keep)).size, 2);
     await assert.rejects(be.batchGet([blobs[1]!.hex]), /missing/);
+    assert.ok(existsSync(join(dir, 'cas', 'notes.txt')), 'a foreign key stays');
     // A re-PUT refreshes the age: a blob that comes back into use is not collected.
+    const anchor = blob('anchor');
+    await be.put(anchor.hex, anchor.bytes);
     now += 40 * 86_400_000;
     await be.put(blobs[4]!.hex, blobs[4]!.bytes);
-    const after = await be.gc({ keep: [], current: [], cursor: null, minAgeDays: 30, maxDeletes: 10, dryRun: true });
-    assert.equal(after.deleted, 2, 'blobs 0 and 3 (80 and 40 days old); blob 4 was written again just now');
-    await assert.rejects(be.gc({ keep: [], current: [], cursor: null, minAgeDays: 7, maxDeletes: 10, dryRun: true }), /minAgeDays/);
+    const after = await be.gc({ ...req, keep: [anchor.hex], current: [anchor.hex] });
+    assert.deepEqual([after.wouldDelete, after.young, after.kept], [2, 1, 1], 'blobs 0 and 3 (80 and 40 days old); blob 4 was written again just now');
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('state client: GC over the Worker: the request checked before it is sent, a dry run reads wouldDelete and its bytes', async () => {
+  const w = fakeWorker();
+  const base = await w.start();
+  try {
+    const be = new WorkerBackend({ baseUrl: base, ...quick });
+    const blobs = Array.from({ length: 4 }, (_, i) => blob(`gc ${i}`));
+    for (const x of blobs) await be.put(x.hex, x.bytes);
+    for (const x of blobs.slice(0, 3)) w.uploaded.set(x.hex, Date.now() - 40 * DAY_MS);
+    const req = { keep: [blobs[0]!.hex], current: [blobs[0]!.hex], cursor: null, minAgeDays: 30, maxDeletes: 600, dryRun: true };
+    const sent = w.seen.length;
+    await assert.rejects(be.gc({ ...req, keep: [], current: [] }), (e: unknown) => e instanceof StateStoreError && e.kind === 'client' && /keep must hold 1\.\.10000/.test(e.message));
+    await assert.rejects(be.gc({ ...req, current: [] }), /current must hold 1\.\.40/);
+    assert.equal(w.seen.length, sent, 'a request the Worker would refuse is never sent');
+    const dry = await be.gc(req);
+    const two = blobs[1]!.bytes.length + blobs[2]!.bytes.length;
+    assert.deepEqual(dry, { listed: 4, deleted: 0, bytesDeleted: 0, wouldDelete: 2, bytesWouldDelete: two, kept: 1, young: 1, capped: 0, foreign: 0, cursor: null, dryRun: true });
+    assert.equal(w.store.size, 4);
+    const real = await be.gc({ ...req, dryRun: false });
+    assert.deepEqual([real.deleted, real.bytesDeleted, real.wouldDelete], [2, two, 2]);
+    assert.equal(w.store.size, 2);
+  } finally {
+    await w.stop();
+  }
+});
+
+test('state client: a GC or budget answer that is not the Worker\'s shape is an integrity failure', () => {
+  const page = { listed: 5, deleted: 0, bytesDeleted: 0, wouldDelete: 2, bytesWouldDelete: 9, kept: 1, young: 1, capped: 1, foreign: 0, cursor: null, dryRun: true };
+  assert.deepEqual(parseGcPage(page, true), page);
+  const kind = (f: () => unknown): string => {
+    try {
+      f();
+      return 'ok';
+    } catch (e) {
+      return (e as StateStoreError).kind;
+    }
+  };
+  assert.equal(kind(() => parseGcPage({ listed: 5, deleted: 2, bytesDeleted: 0, kept: 3, cursor: null }, true)), 'integrity', 'the old answer without wouldDelete');
+  assert.equal(kind(() => parseGcPage({ ...page, deleted: 2 }, true)), 'integrity', 'a dry run that deleted');
+  assert.equal(kind(() => parseGcPage({ ...page, listed: 6 }, true)), 'integrity', 'listed is not the sum of its classes');
+  assert.equal(kind(() => parseGcPage(page, false)), 'integrity', 'a dry-run answer to a deleting call');
+  assert.equal(kind(() => parseGcPage({ ...page, dryRun: false }, false)), 'integrity', 'a real page that deleted less than it selected');
+  assert.equal(kind(() => parseGcPage({ ...page, dryRun: false, deleted: 2, bytesDeleted: 9 }, false)), 'ok');
+  assert.deepEqual(parseBudget(BUDGET), BUDGET);
+  assert.equal(kind(() => parseBudget({ day: '2026-11-16', counters: { classA: 10 }, ceilings: { classA: 20000 } })), 'integrity', 'the old camelCase shape');
+  assert.equal(kind(() => parseBudget({ ...BUDGET, stored_bytes: undefined })), 'integrity');
+  assert.equal(kind(() => parseBudget({ ...BUDGET, ceilings: { ...BUDGET.ceilings, class_a: 0 } })), 'integrity');
+});
+
+test('state client: Retry-After up to 60 s is honoured within the retry budget; a longer one ends the retries', async () => {
+  assert.equal(retryAfterMs('30'), 30_000);
+  assert.equal(retryAfterMs(null), null);
+  assert.equal(retryAfterMs('soon'), null);
+  assert.equal(retryAfterMs(new Date(Date.parse('2026-11-16T00:00:45Z')).toUTCString(), Date.parse('2026-11-16T00:00:00Z')), 45_000);
+  const answering = (status: number, retryAfter: string | null, failures: number) => {
+    let n = 0;
+    return fakeWorker({
+      before: (s, res) => {
+        if (s.method !== 'GET' || n++ >= failures) return false;
+        res.writeHead(status, { 'content-type': 'application/json', ...(retryAfter ? { 'retry-after': retryAfter } : {}) });
+        res.end(JSON.stringify({ error: 'unavailable' }));
+        return true;
+      },
+    });
+  };
+  // The Worker's 503 when no GitHub signing key can be had: Retry-After 30, waited exactly.
+  const a = answering(503, '30', 2);
+  const ba = await a.start();
+  try {
+    const sleeps: number[] = [];
+    const be = new WorkerBackend({ baseUrl: ba, ...quick, sleep: async (ms) => void sleeps.push(ms) });
+    assert.deepEqual(await be.budget(), BUDGET);
+    assert.deepEqual(sleeps, [30_000, 30_000]);
+  } finally {
+    await a.stop();
+  }
+  // With a retry budget of 60 s, a third wait of 30 s (90 s in all) is not made.
+  const b = answering(503, '30', 3);
+  const bb = await b.start();
+  try {
+    const sleeps: number[] = [];
+    const be = new WorkerBackend({ baseUrl: bb, ...quick, retryBudgetMs: 60_000, sleep: async (ms) => void sleeps.push(ms) });
+    await assert.rejects(be.budget(), (e: unknown) => e instanceof StateStoreError && e.kind === 'transport' && e.retryable && /after 3 attempts: the next wait of 30 s would pass the retry budget of 60 s/.test(e.message));
+    assert.deepEqual(sleeps, [30_000, 30_000]);
+    assert.equal(b.seen.length, 3);
+  } finally {
+    await b.stop();
+  }
+  // A zone rate limit asking for 120 s: not waited for.
+  const c = answering(429, '120', 1);
+  const bc = await c.start();
+  try {
+    const sleeps: number[] = [];
+    const be = new WorkerBackend({ baseUrl: bc, ...quick, sleep: async (ms) => void sleeps.push(ms) });
+    await assert.rejects(be.budget(), /after 1 attempt: the store asks to retry after 120 s, over 60 s/);
+    assert.deepEqual([sleeps, c.seen.length], [[], 1]);
+  } finally {
+    await c.stop();
   }
 });

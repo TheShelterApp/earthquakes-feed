@@ -6,9 +6,9 @@ import { pathToFileURL } from 'node:url';
 import { saveEventMap } from './bitemporal.js';
 import { dataPaths } from './config.js';
 import { hydrate, persist, readGeneration } from './event-map-store.js';
-import { collect, GC_MIN_AGE_DAYS } from './state-gc.js';
+import { collect, gcCounts, GC_MIN_AGE_DAYS } from './state-gc.js';
 import { backupMembers, compressBackup, decompressBackup, readTar, verifyBackup, writeTar } from './state-backup.js';
-import { backendFromEnv, casKey, getBlobs, type StateBackend } from './state-store.js';
+import { backendFromEnv, budgetLine, casKey, getBlobs, type StateBackend } from './state-store.js';
 import type { EventNode } from './types.js';
 
 /**
@@ -111,9 +111,10 @@ export async function rehearse(backend: StateBackend, opts: { nowMs?: number; lo
     step(`restore: a backup archive of the generation verified and its ${Object.keys(restored.generation.days).length} blob(s) PUT again`);
     const current = Object.values(readGeneration(a)!.generation.days).map((e) => e.blob).sort();
     const gc = await collect(backend, { keep: current, current, windowFrom: '', boundaries: [], holdReason: null }, { dryRun: true });
-    step(`GC dry run (keep = the current generation, min age ${GC_MIN_AGE_DAYS} days): ${gc.pages} page(s), ${gc.listed} listed, would delete ${gc.deleted}`);
+    if (gc.skipped || gc.deleted !== 0) throw new Error(`GC dry run: ${gc.skipped ?? `deleted ${gc.deleted}`}`);
+    step(`GC dry run (keep = the current generation, min age ${GC_MIN_AGE_DAYS} days): ${gc.pages} page(s), ${gcCounts(gc)}`);
     const budget = await backend.budget();
-    step(`budget: ${JSON.stringify(budget).slice(0, 300)}`);
+    step(`budget: ${budget ? budgetLine(budget) : `none (${backend.label} keeps no budget)`}`);
     return steps;
   } finally {
     rmSync(a, { recursive: true, force: true });

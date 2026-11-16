@@ -735,12 +735,14 @@ export function evaluateStateBackup(read, nowMs) {
   };
 }
 
-/** The used share of each ceiling the budget answer names: `counters` and `ceilings` objects with the same keys. */
+/** The used share of each ceiling the state Worker's GET /v1/budget names (state/src/budget.js snapshot): `ceilings`
+ *  {class_a, class_b, bytes_written, stored_bytes} against today's `used` counters, `stored_bytes` against the
+ *  top-level stored estimate. */
 export function budgetShares(json) {
-  if (!isObject(json) || !isObject(json.counters) || !isObject(json.ceilings)) return null;
+  if (!isObject(json) || !isObject(json.used) || !isObject(json.ceilings)) return null;
   const out = [];
   for (const [k, cap] of Object.entries(json.ceilings)) {
-    const used = json.counters[k];
+    const used = k === 'stored_bytes' ? json.stored_bytes : json.used[k];
     if (isNum(cap) && cap > 0 && isNum(used) && used >= 0) out.push({ key: k, used, cap, share: used / cap });
   }
   return out.length ? out.sort((a, b) => b.share - a.share) : null;
@@ -751,7 +753,7 @@ export function evaluateStateBudget(read) {
   const { share } = RULES['feed:state-budget'].limits;
   if (!read || !read.ok) return { findings: [], unjudged: ['feed:state-budget'], notes: [`state budget: ${read ? oneLine(read.message, 200) : 'not read'}`] };
   const shares = budgetShares(read.json);
-  if (!shares) return { findings: [], unjudged: ['feed:state-budget'], notes: ['state budget: the answer has no counters and ceilings'] };
+  if (!shares) return { findings: [], unjudged: ['feed:state-budget'], notes: ['state budget: the answer has no used counters and ceilings'] };
   const fmt = (x) => `${x.key} ${Math.round(x.share * 100)} % (${x.used} of ${x.cap})`;
   const notes = [`state budget${isObject(read.json) && typeof read.json.day === 'string' ? ` ${read.json.day}` : ''}: ${shares.map(fmt).join(', ')}`];
   const over = shares.filter((x) => x.share > share);

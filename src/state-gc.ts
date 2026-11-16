@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { REPO } from './config.js';
 import { parseGeneration, type Generation } from './event-map-store.js';
-import { BATCH_MAX, backendFromEnv, type GcPage, type StateBackend } from './state-store.js';
+import { BATCH_MAX, GC_MAX_KEEP, backendFromEnv, type GcPage, type StateBackend } from './state-store.js';
 
 /**
  * The state store's garbage collection (state-gc.yml; storage phase 3, APIs.md "Repository size"). Every aggregate run
@@ -25,6 +25,10 @@ import { BATCH_MAX, backendFromEnv, type GcPage, type StateBackend } from './sta
  * than every generation it needs.
  *
  * Dry run: a dispatch's `dry_run` input (default true); the scheduled run follows STATE_GC_SCHEDULED.
+ *
+ * Skipped (no call to the store, a hold): a current generation that names no blob (before the first persist, or an
+ * empty map), or a keep set outside the Worker's 1..10,000: the Worker would refuse the call (400), and there is
+ * nothing to check the keep set against. The run still completes and writes its marker (`skipped`).
  *
  *   GH_TOKEN=… FEED_STATE_BACKEND=worker STATE_GC_DRY_RUN=1 npx --no-install tsx src/state-gc.ts
  */
@@ -103,16 +107,46 @@ export async function planKeep(src: GcSources, nowMs: number): Promise<KeepPlan>
     for (const b of blobs) keep.add(b);
     boundaries.push({ day, commit, blobs: blobs.length });
   }
-  return { keep: [...keep].sort(), current, windowFrom, boundaries, holdReason };
+  const sorted = [...keep].sort();
+  const skip = gcSkipReason({ keep: sorted, current });
+  if (skip) holdReason ??= `${skip}: GC is skipped`;
+  return { keep: sorted, current, windowFrom, boundaries, holdReason };
 }
 
 export interface GcResult {
   dryRun: boolean;
+  /** Why no call was made (gcSkipReason), or null. */
+  skipped: string | null;
   pages: number;
   listed: number;
+  /** Deleted (0 in a dry run). */
   deleted: number;
   bytesDeleted: number;
+  /** Selected by the rules: deleted, or in a dry run what would have been. */
+  wouldDelete: number;
+  bytesWouldDelete: number;
+  /** In the keep set. */
   kept: number;
+  /** Not kept but younger than GC_MIN_AGE_DAYS. */
+  young: number;
+  /** Deletable but over GC_MAX_DELETES on their page (the next run takes them). */
+  capped: number;
+  /** Keys outside the CAS layout (never deleted). */
+  foreign: number;
+}
+
+/** Why `plan` cannot go to the store at all (module comment), or null. */
+export function gcSkipReason(plan: Pick<KeepPlan, 'keep' | 'current'>): string | null {
+  if (plan.current.length === 0) return 'the current generation names no blob: nothing to check the keep set against';
+  if (plan.keep.length > GC_MAX_KEEP) return `the keep set holds ${plan.keep.length} blobs, over the store's ${GC_MAX_KEEP} a call`;
+  return null;
+}
+
+/** One line of counts (a page's or a run's). */
+export function gcCounts(r: Omit<GcPage, 'cursor'>): string {
+  const mb = (b: number): string => (b / 1e6).toFixed(1);
+  const action = r.dryRun ? `would delete ${r.wouldDelete} (${mb(r.bytesWouldDelete)} MB)` : `deleted ${r.deleted} (${mb(r.bytesDeleted)} MB)`;
+  return `listed ${r.listed}, ${action}, kept ${r.kept} (in keep), ${r.young} young, ${r.capped} capped, ${r.foreign} foreign`;
 }
 
 /**
@@ -122,21 +156,22 @@ export interface GcResult {
  */
 export async function collect(backend: StateBackend, plan: KeepPlan, opts: { dryRun: boolean; log?: (l: string) => void }): Promise<GcResult> {
   const log = opts.log ?? (() => {});
+  const out: GcResult = { dryRun: opts.dryRun, skipped: gcSkipReason(plan), pages: 0, listed: 0, deleted: 0, bytesDeleted: 0, wouldDelete: 0, bytesWouldDelete: 0, kept: 0, young: 0, capped: 0, foreign: 0 };
+  if (out.skipped) {
+    log(`state GC skipped: ${out.skipped}`);
+    return out;
+  }
   const chunks: string[][] = [];
   for (let i = 0; i < plan.current.length; i += BATCH_MAX) chunks.push(plan.current.slice(i, i + BATCH_MAX));
   const base = { keep: plan.keep, minAgeDays: GC_MIN_AGE_DAYS, maxDeletes: GC_MAX_DELETES };
   for (const chunk of chunks.slice(0, -1)) await backend.gc({ ...base, current: chunk, cursor: null, dryRun: true });
-  const out: GcResult = { dryRun: opts.dryRun, pages: 0, listed: 0, deleted: 0, bytesDeleted: 0, kept: 0 };
   let cursor: string | null = null;
   do {
     if (out.pages >= GC_MAX_PAGES) throw new Error(`state GC: more than ${GC_MAX_PAGES} listing pages: stopping (is the bucket growing unbounded?)`);
     const page: GcPage = await backend.gc({ ...base, current: out.pages === 0 ? (chunks.at(-1) ?? []) : [], cursor, dryRun: opts.dryRun });
     out.pages++;
-    out.listed += page.listed;
-    out.deleted += page.deleted;
-    out.bytesDeleted += page.bytesDeleted;
-    out.kept += page.kept;
-    log(`state GC page ${out.pages}: listed ${page.listed}, ${opts.dryRun ? 'would delete' : 'deleted'} ${page.deleted} (${(page.bytesDeleted / 1e6).toFixed(1)} MB), kept ${page.kept}`);
+    for (const k of ['listed', 'deleted', 'bytesDeleted', 'wouldDelete', 'bytesWouldDelete', 'kept', 'young', 'capped', 'foreign'] as const) out[k] += page[k];
+    log(`state GC page ${out.pages}: ${gcCounts(page)}`);
     cursor = page.cursor;
   } while (cursor);
   return out;
@@ -233,7 +268,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
       `min age ${GC_MIN_AGE_DAYS} days, at most ${GC_MAX_DELETES} deletions a page${dryRun ? ', DRY RUN' : ''} (${backend.label})`,
   );
   const r = await collect(backend, plan, { dryRun, log: (l) => console.log(l) });
-  const summary = `${r.pages} page(s), ${r.listed} blob(s) listed, ${r.dryRun ? 'would delete' : 'deleted'} ${r.deleted} (${(r.bytesDeleted / 1e6).toFixed(1)} MB), kept ${r.kept}`;
+  const summary = r.skipped ? `skipped: ${r.skipped}` : `${r.pages} page(s): ${gcCounts(r)}`;
+  if (r.skipped && !plan.holdReason?.startsWith(r.skipped)) console.log(`::warning title=State GC::${r.skipped}`);
   console.log(`state GC: ${summary}`);
   const out = env.STATE_GC_MARKER_DIR;
   if (out) {

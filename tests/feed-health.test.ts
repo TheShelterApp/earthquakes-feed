@@ -899,7 +899,7 @@ function stateWorld(o: { shadow?: Record<string, unknown>; gcAgoMs?: number | nu
     // A week ago the repository was 50 MB smaller: about 7 MB a day, under the 10 MB line.
     [`${API_REPO}/actions/artifacts/904/zip`, () => zipJson({ 'repo-size': { samples: [{ atMs: NOW - 7 * DAY, kb: 6_050_000 }, { atMs: NOW - 2 * HOUR, kb: 6_099_000 }] } })],
     [`${OIDC_URL}&audience=earthquakes-feed-state`, () => json({ value: OIDC_TOKEN })],
-    ['https://feed-state.theshelter.app/v1/budget', () => json({ day: '2026-10-22', counters: { classA: 120, classB: 9_000 }, ceilings: { classA: 20_000, classB: 200_000 } })],
+    ['https://feed-state.theshelter.app/v1/budget', () => json({ day: '2026-10-22', used: { class_a: 120, class_b: 9_000, bytes_written: 4e6, requests: 900, refused: 0 }, stored_bytes: 2e9, stored_seeded_at: null, gc_pass_open: false, ceilings: { class_a: 20_000, class_b: 200_000, bytes_written: 2 ** 30, stored_bytes: 6 * 2 ** 30 } })],
   ];
 }
 
@@ -1345,11 +1345,26 @@ test('feed:state-gc and feed:state-backup: a GC older than 3 days or none is P2;
   assert.deepEqual(evaluateStateBackup({ ok: false, message: 'x' }, NOW).unjudged, ['feed:state-backup']);
 });
 
-test('feed:state-budget: a ceiling over 70 % is P2; an answer without counters and ceilings is unjudged', () => {
-  const r = evaluateStateBudget({ ok: true, json: { day: '2026-10-22', counters: { classA: 15_000, classB: 1_000, storedBytes: 1e9 }, ceilings: { classA: 20_000, classB: 200_000, storedBytes: 6 * 2 ** 30 } } });
-  assert.deepEqual(r.findings.map((f) => [f.key, f.severity, f.members]), [['feed:state-budget', 'P2', ['classA']]]);
-  assert.match(r.findings[0]!.text, /classA 75 % \(15000 of 20000\)/);
-  assert.deepEqual(evaluateStateBudget({ ok: true, json: { counters: { classA: 1 }, ceilings: { classA: 20_000 } } }).findings, []);
+test('feed:state-budget: a ceiling over 70 % is P2 (the Worker\'s snapshot shape); an answer without used counters and ceilings is unjudged', () => {
+  // The answer exactly as state/src/budget.js snapshot() writes it.
+  const snap = (used: { class_a: number; class_b: number; bytes_written: number }, stored: number) => ({
+    day: '2026-10-22',
+    used: { ...used, requests: 400, refused: 0 },
+    stored_bytes: stored,
+    stored_seeded_at: '2026-10-21T03:00:00.000Z',
+    gc_pass_open: false,
+    ceilings: { class_a: 20_000, class_b: 200_000, bytes_written: 2 ** 30, stored_bytes: 6 * 2 ** 30 },
+  });
+  const r = evaluateStateBudget({ ok: true, json: snap({ class_a: 15_000, class_b: 1_000, bytes_written: 1e6 }, 1e9) });
+  assert.deepEqual(r.unjudged, []);
+  assert.deepEqual(r.findings.map((f) => [f.key, f.severity, f.members]), [['feed:state-budget', 'P2', ['class_a']]]);
+  assert.match(r.findings[0]!.text, /class_a 75 % \(15000 of 20000\)/);
+  const full = evaluateStateBudget({ ok: true, json: snap({ class_a: 1, class_b: 1, bytes_written: 1 }, 5 * 2 ** 30) });
+  assert.deepEqual(full.findings.map((f) => f.members), [['stored_bytes']], 'stored bytes are judged against the top-level estimate');
+  const calm = evaluateStateBudget({ ok: true, json: snap({ class_a: 1, class_b: 1, bytes_written: 1 }, 1) });
+  assert.deepEqual([calm.findings, calm.unjudged], [[], []]);
+  assert.match(calm.notes[0]!, /^state budget 2026-10-22: /);
+  assert.deepEqual(evaluateStateBudget({ ok: true, json: { counters: { classA: 1 }, ceilings: { classA: 20_000 } } }).unjudged, ['feed:state-budget'], 'the old shape is not read');
   assert.deepEqual(evaluateStateBudget({ ok: true, json: { a: 1 } }).unjudged, ['feed:state-budget']);
 });
 

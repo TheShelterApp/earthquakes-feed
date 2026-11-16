@@ -1726,13 +1726,19 @@ to the ref.
   - `POST /v1/cas:batchGet` `{"shas": [...]}` (1–40): a framed 200 stream. Each blob is `BLOB <hex> <length>\n`, its
     bytes and `\n`; a missing one is `MISSING <hex>\n`; the stream ends with `END <count>\n`. The client fails closed
     on a `MISSING`, a missing trailer, or any length or sha256 mismatch.
-  - `POST /v1/gc` `{keep, current, cursor, minAgeDays, maxDeletes, dryRun}`: one listing page; 409 unless `current` ⊆
-    `keep` and every `current` blob exists.
-  - `GET /v1/budget`: today's counters and ceilings.
-  - The other statuses are 401 (a token), 403 (a workflow the route does not allow), 426 (a protocol too old) and 429
-    `{"error":"budget"}` (a free-tier ceiling). The client (`src/state-store.ts`) retries network errors, 5xx and any
-    other 429, at most 4 attempts with jittered backoff and a 20 s timeout each; it never retries another 4xx or the
-    budget. It mints a fresh OIDC token unless the cached one has more than 60 s left. `FsBackend` is the same
+  - `POST /v1/gc` `{keep, current, cursor, minAgeDays, maxDeletes, dryRun}`: one listing page; `keep` 1–10,000 blobs,
+    `current` 1–40 on the first page and none later (400 otherwise: the client checks before sending, and `state-gc`
+    skips a run whose current generation names no blob, as a hold); 409 unless `current` ⊆ `keep` and every `current`
+    blob exists. The answer counts every listed key once (`kept` in keep, `young`, `capped`, `foreign`,
+    `wouldDelete` with `bytesWouldDelete`); `deleted` / `bytesDeleted` are what the call removed, 0 in a dry run.
+  - `GET /v1/budget`: `{day, used: {class_a, class_b, bytes_written, requests, refused}, stored_bytes,
+    stored_seeded_at, gc_pass_open, ceilings: {class_a, class_b, bytes_written, stored_bytes}}`.
+  - The other statuses are 400 (`checksum mismatch` on a PUT is an integrity failure; any other 400 a client bug),
+    401 (a token), 403 (a workflow the route does not allow), 426 (a protocol too old), 429 `{"error":"budget"}` (a
+    free-tier ceiling) and 500 `misconfigured` (a deploy error). The client (`src/state-store.ts`) retries network
+    errors, any other 5xx and any other 429, at most 4 attempts with jittered backoff (or the answer's Retry-After when
+    it is at most 60 s; a longer one ends the retries) and at most 90 s of waiting in all, a 20 s timeout each; it
+    never retries a 4xx, the budget or a 500 `misconfigured`. It mints a fresh OIDC token unless the cached one has more than 60 s left. `FsBackend` is the same
     contract on a directory (tests, `scripts/phase3/dryrun.sh`, a disaster replay).
 - *The generation* (format 1) is canonical text: one day per line in ascending order, `{"sha256", "bytes", "nodes",
   "blob", "blob_bytes"}` (the NDJSON's sha256, size and node count; the gzip's sha256 and size), plus `head_seq` and

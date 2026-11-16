@@ -81,12 +81,14 @@ that are not in `keep` and whose `uploaded` is older than `minAgeDays`, at most 
 exactly `cas/sha256/<first 2>/<64 hex>` is never deleted. Answer 200:
 
 ```
-{"listed": n, "deleted": n, "wouldDelete": n, "bytesDeleted": n, "kept": n, "young": n, "capped": n, "foreign": n,
- "cursor": "<cursor>" | null, "dryRun": bool}
+{"listed": n, "deleted": n, "bytesDeleted": n, "wouldDelete": n, "bytesWouldDelete": n, "kept": n, "young": n,
+ "capped": n, "foreign": n, "cursor": "<cursor>" | null, "dryRun": bool}
 ```
 
 `kept` = in keep, `young` = not old enough, `capped` = deletable but over `maxDeletes` (left for the next pass),
-`foreign` = not a CAS key, `wouldDelete` = what was (or, in a dry run, would have been) deleted. The client loops while
+`foreign` = not a CAS key, `wouldDelete` / `bytesWouldDelete` = what the rules select: what was deleted or, in a dry
+run, what would have been; `deleted` / `bytesDeleted` = what this call removed (0 in a dry run). Every listed key is
+counted once: `listed` = `kept` + `young` + `capped` + `foreign` + `wouldDelete`. The client loops while
 `cursor` is not null. GC runs inside the writer group (`state-gc.yml`, `earthquakes-feed-writer`), so no aggregate PUT
 can refresh a blob between a page's listing and its delete.
 
@@ -106,8 +108,10 @@ can refresh a blob between a page's listing and its delete.
 client never retries a budget 429; a zone rate-limit 429 is `text/plain` with `Retry-After` and is retried after it);
 503 `{"error": "budget ledger unavailable"}` (retryable: an unmetered request is never let through); 404 for any other
 path, 405 (with `Allow`) for another method on a known path; 500 `{"error": "misconfigured: …"}` when a var is missing
-or malformed (a deploy error). The client retries at most 4 times with jittered backoff on 5xx, network errors and a
-non-budget 429, never on another 4xx.
+or malformed (a deploy error, never retried). Only a PUT's 400 `checksum mismatch` is an integrity failure for the
+client; any other 400 is a request it should not have sent. The client tries at most 4 times on another 5xx, network
+errors and a non-budget 429, after the answer's `Retry-After` when it is at most 60 s (a longer one ends the retries),
+otherwise after a jittered backoff, at most 90 s of waiting a request; never on another 4xx.
 
 ## Authentication and policy
 

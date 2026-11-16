@@ -85,6 +85,10 @@ test('GC keep set: the current generation, every daily generation of the last 31
   assert.match((await planKeep(history(gens, head, null).src, NOW)).holdReason!, /no state-backup marker/);
   const far = await planKeep(history(gens, head, { newest: null, first_missing: dayKey(NOW - 200 * DAY_MS) }).src, NOW);
   assert.match(far.holdReason!, new RegExp(`more than ${GC_MAX_WINDOW_DAYS} days`));
+  // A current generation that names no blob: a hold (the Worker refuses an empty `current`), GC is skipped.
+  const empty = await planKeep(history(gens, genWith({}), { newest: dayKey(NOW), first_missing: null }).src, NOW);
+  assert.deepEqual(empty.current, []);
+  assert.match(empty.holdReason!, /^the current generation names no blob: .*GC is skipped$/);
   // No current generation, or an unreadable one: no keep set at all.
   const none: GcSources = { ...history(gens, head, null).src, generationAt: async () => null };
   await assert.rejects(planKeep(none, NOW), /has no knowledge\/index\/generation\.json/);
@@ -107,14 +111,22 @@ test('GC paging: the current generation goes out 40 blobs a call, a dry run dele
     for (const x of [...current, ...orphans.slice(0, 3)]) utimesSync(join(dir, ...casKey(x.hex).split('/')), old, old);
     const plan = { keep: current.map((x) => x.hex).sort(), current: current.map((x) => x.hex).sort(), windowFrom: '', boundaries: [], holdReason: null };
     const dry = await collect(be, plan, { dryRun: true });
-    assert.deepEqual([dry.deleted, dry.listed, dry.pages], [3, 51, 1]);
+    assert.deepEqual([dry.deleted, dry.wouldDelete, dry.listed, dry.kept, dry.young, dry.capped, dry.foreign, dry.pages, dry.skipped], [0, 3, 51, 46, 2, 0, 0, 1, null]);
+    assert.equal(dry.bytesWouldDelete, orphans.slice(0, 3).reduce((n, x) => n + x.bytes.length, 0));
     assert.deepEqual(calls.map((c) => [c.current.length, c.dryRun, c.cursor]), [[40, true, null], [6, true, null]]);
     calls.length = 0;
     const real = await collect(be, plan, { dryRun: false });
-    assert.equal(real.deleted, 3);
+    assert.deepEqual([real.deleted, real.wouldDelete, real.bytesDeleted], [3, 3, dry.bytesWouldDelete]);
     assert.deepEqual(calls.map((c) => [c.current.length, c.dryRun]), [[40, true], [6, false]], 'the verification chunk never deletes');
     for (const x of current) assert.ok(existsSync(join(dir, ...casKey(x.hex).split('/'))));
     assert.ok(existsSync(join(dir, ...casKey(orphans[4]!.hex).split('/'))), 'a young orphan stays (min age 30 days)');
+    // An empty current generation (before the first persist): no call at all, a hold the marker records.
+    calls.length = 0;
+    const empty = await collect(be, { ...plan, current: [] }, { dryRun: false });
+    assert.deepEqual([empty.skipped, empty.pages, calls.length], ['the current generation names no blob: nothing to check the keep set against', 0, 0]);
+    const huge = await collect(be, { ...plan, keep: Array.from({ length: 10_001 }, (_, i) => sha256Hex(String(i))) }, { dryRun: true });
+    assert.match(huge.skipped!, /10001 blobs, over the store's 10000/);
+    assert.equal(calls.length, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

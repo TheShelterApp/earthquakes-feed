@@ -110,7 +110,10 @@ export async function keepHash(keep) {
 /**
  * One GC page: list ≤ 1000 keys under cas/ from cursor, delete (unless dryRun) the CAS blobs that are not in keep and
  * were uploaded more than minAgeDays ago, at most maxDeletes of them. Keys that are not CAS blob keys are never touched.
- * Returns {listed, deleted, wouldDelete, bytesDeleted, kept, young, capped, foreign, keptBytes, cursor}.
+ * Returns {listed, deleted, wouldDelete, bytesDeleted, bytesWouldDelete, kept, young, capped, foreign, keptBytes,
+ * cursor}: `wouldDelete`/`bytesWouldDelete` are what the rules select (deleted, or in a dry run what would be), while
+ * `deleted`/`bytesDeleted` are what this call removed (0 in a dry run). Every listed key is counted exactly once in
+ * kept, young, capped, foreign or wouldDelete.
  */
 export async function gcPage(bucket, { keep, cursor, minAgeDays, maxDeletes, dryRun, nowMs }) {
   const keepSet = new Set(keep);
@@ -150,6 +153,7 @@ export async function gcPage(bucket, { keep, cursor, minAgeDays, maxDeletes, dry
     deleted: dryRun ? 0 : doomed.length,
     wouldDelete: doomed.length,
     bytesDeleted: dryRun ? 0 : doomedBytes,
+    bytesWouldDelete: doomedBytes,
     kept,
     young,
     capped,

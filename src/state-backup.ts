@@ -362,9 +362,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   const token = env.GH_TOKEN;
   const backend = backendFromEnv(env);
   if (!backend) {
-    // The store is off (the repository variable FEED_STATE_BACKEND unset): nothing to copy. The marker names no day,
+    // The store is off (FEED_STATE_BACKEND off or unset): nothing to copy. The marker names no day,
     // so health ages it by its own date (feed:state-backup) and GC reads it as no backup (a hold).
-    console.log('state backup: the state store is off (FEED_STATE_BACKEND unset): nothing copied');
+    console.log('state backup: the state store is off (FEED_STATE_BACKEND off): nothing copied');
     if (env.STATE_BACKUP_MARKER_DIR) {
       mkdirSync(env.STATE_BACKUP_MARKER_DIR, { recursive: true });
       const marker = { ok: true, off: true, at: new Date().toISOString(), run_id: env.GITHUB_RUN_ID, newest: null, first_missing: null, uploaded: [], published: [] };

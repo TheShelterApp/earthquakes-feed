@@ -93,6 +93,16 @@ const iso = (ms) => (isTime(ms) ? new Date(ms).toISOString() : '?');
 // Manifests: feed:freshness
 
 /** The fetch settings of a manifest or status.json read (RULES['feed:freshness:unreachable'].limits). */
+/**
+ * Whether the state store is on for this run: health.yml passes `${{ vars.FEED_STATE_BACKEND || 'worker' }}` like the
+ * state jobs, so it is on unless the repository variable is `off` (the phase-3a kill switch; src/state-store.ts
+ * stateBackendSetting reads it the same way).
+ */
+export function stateBackendOn(env) {
+  const raw = (env.FEED_STATE_BACKEND ?? '').trim();
+  return raw !== '' && raw !== 'off';
+}
+
 function manifestFetchOptions() {
   const { attempts, retryDelayMs, timeoutMs } = RULES['feed:freshness:unreachable'].limits;
   return { attempts, backoffMs: Array.from({ length: Math.max(1, attempts - 1) }, () => retryDelayMs), timeoutMs };
@@ -962,8 +972,8 @@ export function evaluateFeed(inputs) {
   parts.push(`writer-queue=${wq && wq.ok ? `${wq.queue.filter((q) => isQueued(q.state)).length} queued` : 'unread'}`);
 
   // The state store (storage phase 3); an input that is absent is not judged (as the statistics). The store off (the
-  // repository variable FEED_STATE_BACKEND unset, before the phase-3a rollout turns it on): nothing read, no finding.
-  if (inputs.stateOff) notes.push('state store off (FEED_STATE_BACKEND unset): feed:state-shadow, feed:state-gc, feed:state-backup and feed:state-budget not judged');
+  // FEED_STATE_BACKEND off: the repository variable set to `off`, phase 3a's kill switch): nothing read, no finding.
+  if (inputs.stateOff) notes.push('state store off (FEED_STATE_BACKEND off): feed:state-shadow, feed:state-gc, feed:state-backup and feed:state-budget not judged');
   if (inputs.stateShadow) add(evaluateStateShadow(inputs.stateShadow, nowMs));
   if (inputs.stateGc) add(evaluateStateGc(inputs.stateGc, nowMs));
   if (inputs.stateBackup) add(evaluateStateBackup(inputs.stateBackup, nowMs));
@@ -1162,8 +1172,8 @@ function collectGitHub({ env, fetchImpl, sleep, now }) {
   };
   const settle = (p) => p.catch((e) => ({ ok: false, message: errMsg(e) }));
   const sh = RULES['feed:state-shadow'].limits;
-  // The store off (FEED_STATE_BACKEND unset): its markers are not read at all (collect drops them).
-  const stateOn = !!(env.FEED_STATE_BACKEND ?? '').trim();
+  // The store off (FEED_STATE_BACKEND off): its markers are not read at all (collect drops them).
+  const stateOn = stateBackendOn(env);
   const off = Promise.resolve(null);
   const stateShadow = !stateOn ? off : settle(
     (async () => {
@@ -1242,7 +1252,7 @@ export async function collect({ env = process.env, fetchImpl = globalThis.fetch,
 
   const gh = collectGitHub({ env, fetchImpl, sleep, now: clock });
   // The state store's switch, the same repository variable the state jobs read (health.yml passes it).
-  const stateOff = !(env.FEED_STATE_BACKEND ?? '').trim();
+  const stateOff = !stateBackendOn(env);
   const [r1, r2, rs, queue] = await Promise.all([read(MANIFEST_V1_URL), read(MANIFEST_V2_URL), read(STATUS_V1_URL), gh.queue]);
   const queuedMs = queue.ms;
   let v1 = asManifest(r1, readManifestV1, 'v1');

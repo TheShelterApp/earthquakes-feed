@@ -1794,24 +1794,27 @@ aggregate steps are `continue-on-error`: a mismatch or a store error is reported
 the markers of the artifact `state-shadow`) and never stops the feed (`feed:state-shadow`, P2). The hour shards stay
 in git; the repository grows as in phase 2 (the budget table above) plus the generation document's one-line diffs.
 
-**The phase-3a rollout: the merge is inert until the store is switched on.** The production jobs read the store's
-switch from the repository variable `FEED_STATE_BACKEND` (aggregate's two state steps, derive.yml's hydrate,
-`state-gc.yml`, `state-backup.yml` and health's feed job). Unset, every state step reports `off` and touches nothing,
+**The phase-3a rollout: PR #155 merged inert, a second commit switched the store on.** The production jobs read the
+store's switch as `${{ vars.FEED_STATE_BACKEND || 'worker' }}` (aggregate's two state steps, derive.yml's hydrate,
+`state-gc.yml`, `state-backup.yml` and health's feed job): on by default since that commit, and the repository variable
+`FEED_STATE_BACKEND=off` is phase 3a's kill switch (no commit needed). Off (as in #155 itself, where the jobs read the
+variable alone), every state step reports `off` and touches nothing,
 GC and the backup complete with an `off` marker, and health judges none of `feed:state-shadow`, `feed:state-gc`,
 `feed:state-backup` and `feed:state-budget` (a note). The Worker deploys only from `main` (`state/deploy.sh`), and
 `state-rehearsal.yml` can be dispatched only once its file is on the default branch, so, in order:
-1. Merge, the variable unset.
+1. Merge #155 (the store off: the jobs read the unset variable).
 2. The owner setup of state/README.md (bucket, zone rules); deploy staging (`state/deploy.sh --env staging`),
    dispatch `state-rehearsal.yml`, check it green.
 3. Deploy production (`state/deploy.sh`) and run the checks of state/README.md "Verify".
-4. Dispatch `state-backup.yml` and `state-gc.yml` once while the variable is still unset: each writes its `off`
+4. Dispatch `state-backup.yml` and `state-gc.yml` once while the store is still off: each writes its `off`
    marker, so health has a run on record when it starts judging (a backup marker that names no day is aged by its own
    date on the 36 h / 7 d lines, GC's by the 3-day line) instead of filing "none on record".
-5. `gh variable set FEED_STATE_BACKEND --body worker`. The next aggregate run persists all 46 days, the one after
+5. Merge the switch commit (`|| 'worker'`). The next aggregate run persists all 46 days, the one after
    compares them (its shadow hydrate).
 6. After that first persist, dispatch `state-backup.yml` and `state-gc.yml` (`dry_run`, the default) and check both
    green; the scheduled runs (00:41 and 03:23 UTC) take over.
-Switching the store off again in phase 3a is deleting the variable; from phase 3b the store is required.
+Switching the store off again in phase 3a is `gh variable set FEED_STATE_BACKEND --body off`; from phase 3b the store
+is required (3b removes the kill switch).
 
 Rehearsed on the event map of `origin/data` 1f12e4461c8 (2026-11-16 05:53 UTC; `git archive` of the directory, a
 directory store):

@@ -625,7 +625,7 @@ export function ensureIgnoreLines(root: string): boolean {
 export interface StateMarker {
   step: 'hydrate' | 'persist';
   ok: boolean;
-  /** No store configured (FEED_STATE_BACKEND unset). */
+  /** No store configured (FEED_STATE_BACKEND off). */
   off?: boolean;
   mode?: HydrateMode;
   at: string;
@@ -737,7 +737,7 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
     return authoritative ? 1 : 0;
   }
   if (!backend) {
-    report({ step: cmd, ok: true, off: true, ...common, summary: 'state store off (FEED_STATE_BACKEND unset): nothing read or written' }, env);
+    report({ step: cmd, ok: true, off: true, ...common, summary: 'state store off (FEED_STATE_BACKEND off): nothing read or written' }, env);
     if (authoritative) {
       console.error('::error::the state store is required once it is authoritative (phase 3b)');
       return 1;

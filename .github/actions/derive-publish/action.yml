@@ -82,6 +82,19 @@ runs:
           git checkout -- .
           git clean -fdq
         fi
+    - name: State hydrate (phase 3b)
+      # Storage phase 3b only (src/event-map-store.ts hydrate --3b-only; in phase 3a git holds the event map and this
+      # step does nothing): the event map from the generation the checkout's commit names, every day already identical
+      # on disk kept, any other fetched and verified, so a push retry's rebase that removed the ignored day files cannot
+      # leave derive with fewer days (it would refuse to read them as empty). Fails closed. The calling job holds
+      # id-token: write.
+      shell: bash
+      env:
+        DATA_DIR: .data
+        FEED_STATE_BACKEND: worker
+        FEED_STATE_URL: https://feed-state.theshelter.app
+        FEED_STATE_AUDIENCE: earthquakes-feed-state
+      run: npx --no-install tsx src/event-map-store.ts hydrate --3b-only
     - name: Derive views
       shell: bash
       env:

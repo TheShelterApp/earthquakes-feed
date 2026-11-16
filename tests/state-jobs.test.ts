@@ -246,10 +246,11 @@ test('rehearsal: the whole client path (persist, shadow and authoritative hydrat
   const dir = mkdtempSync(join(tmpdir(), 'state-rehearsal-'));
   try {
     const steps = await rehearse(new FsBackend(dir), { nodesPerDay: 20 });
-    assert.equal(steps.length, 6);
+    assert.equal(steps.length, 7);
     assert.match(steps[0]!, /^persist: 3 day blob\(s\) uploaded/);
     assert.match(steps[3]!, /byte for byte/);
-    assert.match(steps[4]!, /would delete 0/);
+    assert.match(steps[4]!, /^restore: a backup archive of the generation verified and its 3 blob\(s\) PUT again/);
+    assert.match(steps[5]!, /would delete 0/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -73,7 +73,7 @@ store persist "$AGG_MS" persist
 need_ok persist persist
 # aggregate.yml's own pathspecs (each only when present: a synthetic data branch may lack status/).
 git -C "$W" add -- $(for p in knowledge status status.json .gitignore; do [ -e "$W/$p" ] && echo "$p"; done)
-DATA_DIR=$W tsx "$AGG_MS" src/event-map-store.ts assert-staged
+DATA_DIR=$W tsx "$AGG_MS" src/event-map-store.ts stage
 shards=$(git -C "$W" diff --cached --name-only --diff-filter=AM -- knowledge/index/event_map | grep -E '/[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}\.ndjson$' || true)
 if [ -n "$shards" ]; then echo "FAIL: hour shard(s) staged after the layout move: $shards"; exit 1; fi
 git -C "$W" commit -q -m "$(git -C "$W" log -1 --format=%s "$AGG") (phase 3a dry run)" || echo "no aggregate changes"

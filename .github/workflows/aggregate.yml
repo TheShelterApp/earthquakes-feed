@@ -160,9 +160,10 @@ jobs:
           git config user.name  "earthquakes-feed-bot"
           git config user.email "bot@users.noreply.github.com"
           git add knowledge status status.json .gitignore
-          # Storage phase 3b's check (src/event-map-store.ts assertEventMapNotStaged): with EVENT_MAP_IN_GIT=0 no
-          # event-map day file may be staged (a lost .gitignore line would re-track 78 MB silently). Off in phase 3a.
-          ( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/event-map-store.ts assert-staged )
+          # Storage phase 3b (src/event-map-store.ts `stage`; nothing while EVENT_MAP_IN_GIT=1, phase 3a): the transition
+          # (every tracked event-map day file leaves the index, the sentinel and the .gitignore lines are staged), then
+          # the check that no event-map path but the sentinel is staged (a lost .gitignore line would re-track 78 MB).
+          ( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/event-map-store.ts stage )
           git commit -m "aggregate: seq=$(node -e "process.stdout.write(String(require('./knowledge/index/head.json').seq))") @ $(date -u +%FT%TZ)" \
             || { echo 'no changes'; exit 0; }
           # Fail-loud push loop: a swallowed rebase conflict here silently loses data (H3). Five attempts with a 5 s

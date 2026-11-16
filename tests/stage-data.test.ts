@@ -344,7 +344,7 @@ test('wiring: exactly the state store\'s jobs hold id-token: write, at job level
 
 test('wiring: every commit that stages knowledge carries the phase-3b event-map check (off while EVENT_MAP_IN_GIT=1)', () => {
   const read = (rel: string): string => readFileSync(here(`../${rel}`), 'utf8');
-  const hook = '( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/event-map-store.ts assert-staged )';
+  const hook = '( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/event-map-store.ts stage )';
   let explicit = 0;
   for (const file of workflowFiles()) {
     const body = read(file).replace(/^\s*#.*$/gm, '');

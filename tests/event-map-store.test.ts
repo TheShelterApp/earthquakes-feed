@@ -11,6 +11,7 @@ import {
   IGNORE_LINES,
   PersistRefused,
   SENTINEL_FILE,
+  SENTINEL_TEXT,
   assertEventMapNotStaged,
   emptyGeneration,
   ensureIgnoreLines,
@@ -23,6 +24,7 @@ import {
   pruneGeneration,
   readGeneration,
   serializeGeneration,
+  untrackEventMap,
   writeGeneration,
   type Generation,
 } from '../src/event-map-store.js';
@@ -298,6 +300,7 @@ test('authoritative hydrate (phase 3b): exactly the generation\'s days, the sent
     writeFileSync(join(emDir, SENTINEL_FILE), 'phase 3b sentinel: not JSON\n');
     const rep = await hydrate(r, be, { mode: 'authoritative' });
     assert.deepEqual(rep.written, ['2026-11-14', '2026-11-15']);
+    assert.deepEqual(rep.fetched, ['2026-11-14'], 'a day already identical on disk is not fetched');
     assert.deepEqual(readdirSync(emDir).sort(), [SENTINEL_FILE, ...Object.keys(want)].sort());
     for (const [f, text] of Object.entries(want)) assert.equal(readFileSync(join(emDir, f), 'utf8'), text, f);
     assert.deepEqual([...loadEventMap(r).keys()], ['efd_a', 'efd_b', 'efd_c']);
@@ -374,6 +377,10 @@ test('the steps: markers for the health workflow; the store off, a mismatch or a
     assert.equal(await main(['persist'], env({ FEED_STATE_BACKEND: `fs:${dir}` })), 1);
     assert.equal(marker('persist').error_kind, 'refused');
     assert.equal(await main(['nonsense'], env({})), 3);
+    // The phase-3b-only steps (derive-publish, first-solutions) and the commit step's transition do nothing in 3a.
+    rmSync(markers, { recursive: true, force: true });
+    assert.equal(await main(['hydrate', '--3b-only'], env({ FEED_STATE_BACKEND: `fs:${dir}` })), 0);
+    assert.equal(existsSync(join(markers, 'hydrate.json')), false);
   } finally {
     console.log = log;
     rmSync(r, { recursive: true, force: true });
@@ -389,5 +396,36 @@ test('the data-branch bootstrap and reset scripts write the canonical empty gene
     const printed = /^printf '(.*)' > knowledge\/index\/generation\.json$/.exec(line)![1]!.replace(/\\n/g, '\n');
     assert.equal(printed, serializeGeneration(emptyGeneration()), f);
     assert.doesNotMatch(text, /event_map\.ndjson/, f);
+  }
+});
+
+test('the phase-3b transition (untrack, off while EVENT_MAP_IN_GIT=1): the day files leave the index and stay on disk, the sentinel and the ignore lines are staged', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const r = dataRoot();
+  try {
+    const git = (args: string[]): string => execFileSync('git', ['-C', r, ...args], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'x', GIT_AUTHOR_EMAIL: 'x@x', GIT_COMMITTER_NAME: 'x', GIT_COMMITTER_EMAIL: 'x@x', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } });
+    git(['init', '-q']);
+    writeFileSync(join(r, '.gitignore'), 'node_modules/\n');
+    git(['add', '-A']);
+    git(['commit', '-q', '-m', 'seed']);
+    assert.equal(untrackEventMap(r, git, {}), null, 'phase 3a: nothing happens');
+    assert.deepEqual(untrackEventMap(r, git, { EVENT_MAP_IN_GIT: '0' }), ['knowledge/index/event_map/2026-11-14.ndjson', 'knowledge/index/event_map/2026-11-15.ndjson']);
+    assert.equal(readFileSync(join(dataPaths(r).eventMapDir, SENTINEL_FILE), 'utf8'), SENTINEL_TEXT);
+    assert.throws(() => JSON.parse(SENTINEL_TEXT), 'code before phase 3a throws on it');
+    git(['add', 'knowledge']);
+    assert.deepEqual(assertEventMapNotStaged(git, { EVENT_MAP_IN_GIT: '0' }), { checked: true, problems: [] });
+    assert.deepEqual(git(['diff', '--cached', '--name-status']).trim().split('\n').sort(), [
+      'A\tknowledge/index/event_map/0000-00-00.ndjson',
+      'D\tknowledge/index/event_map/2026-11-14.ndjson',
+      'D\tknowledge/index/event_map/2026-11-15.ndjson',
+      'M\t.gitignore',
+    ]);
+    assert.ok(existsSync(join(dataPaths(r).eventMapDir, '2026-11-15.ndjson')), 'the files stay on disk');
+    git(['commit', '-q', '-m', 'phase 3b']);
+    assert.deepEqual(untrackEventMap(r, git, { EVENT_MAP_IN_GIT: '0' }), [], 'idempotent');
+    assert.equal(git(['status', '--porcelain']), '');
+    assert.deepEqual([...loadEventMap(r).keys()], ['efd_a', 'efd_b', 'efd_c'], 'the sentinel is no day');
+  } finally {
+    rmSync(r, { recursive: true, force: true });
   }
 });

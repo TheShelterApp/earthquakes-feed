@@ -41,7 +41,7 @@ import { StateStoreError, backendFromEnv, getBlobs, isSha256Hex, sha256Hex, type
  * live pipeline's first day, which backfill fills strictly before and archive never reaches) throws when it has no
  * source. A file named `0000-00-00*` is the phase-3b sentinel and skipped by every reader here.
  *
- *   DATA_DIR=.data FEED_STATE_BACKEND=worker npx --no-install tsx src/event-map-store.ts hydrate|persist|layout|assert-staged|floor
+ *   DATA_DIR=.data FEED_STATE_BACKEND=worker npx --no-install tsx src/event-map-store.ts hydrate|persist|layout|stage|untrack|assert-staged|floor
  */
 
 export const GENERATION_FORMAT = 1;
@@ -420,6 +420,8 @@ export interface HydrateReport {
   mismatches: string[];
   /** authoritative: the days written. */
   written: string[];
+  /** The days whose blobs were fetched (authoritative: only those not already identical on disk). */
+  fetched: string[];
   headSeq: number | null;
 }
 
@@ -458,7 +460,7 @@ export async function fetchGenerationDays(backend: StateBackend, g: Generation):
 export async function hydrate(root: string, backend: StateBackend, opts: { mode: HydrateMode; env?: NodeJS.ProcessEnv }): Promise<HydrateReport> {
   const env = opts.env ?? process.env;
   const gen = readGeneration(root);
-  const report: HydrateReport = { mode: opts.mode, noGeneration: !gen, days: 0, blobBytes: 0, mismatches: [], written: [], headSeq: gen?.generation.head_seq ?? null };
+  const report: HydrateReport = { mode: opts.mode, noGeneration: !gen, days: 0, blobBytes: 0, mismatches: [], written: [], fetched: [], headSeq: gen?.generation.head_seq ?? null };
   const dir = dataPaths(root).eventMapDir;
   if (!gen) {
     if (opts.mode === 'authoritative' && env.EVENT_MAP_BOOTSTRAP !== '1') {
@@ -470,29 +472,46 @@ export async function hydrate(root: string, backend: StateBackend, opts: { mode:
   const g = gen.generation;
   const head = headSeqOf(root);
   if (g.head_seq > head) throw new Error(`hydrate: the generation was written at seq ${g.head_seq}, head.json is at ${head}: a generation ahead of its commit`);
-  const texts = await fetchGenerationDays(backend, g);
-  report.days = texts.size;
-  report.blobBytes = Object.values(g.days).reduce((n, e) => n + e.blob_bytes, 0);
-  if (opts.mode === 'shadow') {
+  if (opts.mode === 'authoritative') {
+    // A day whose files on disk already canonicalize to the entry's sha256 is that content: it is rewritten from disk,
+    // not fetched (derive-publish's hydrate after the aggregate commit then fetches only what a rebase removed).
     const files = eventMapFiles(root);
-    for (const [day, e] of Object.entries(g.days).sort(([a], [b]) => (a < b ? -1 : 1))) {
+    const have = new Map<string, string>();
+    for (const [day, e] of Object.entries(g.days)) {
       const names = files.get(day);
-      if (!names) {
-        report.mismatches.push(`${day}: in the generation, not in the checkout`);
-        continue;
-      }
-      const sha = sha256Hex(readCanonicalDay(root, names).text);
-      if (sha !== e.sha256) report.mismatches.push(`${day}: the store's day (sha256 ${e.sha256.slice(0, 12)}) differs from the checkout's (${sha.slice(0, 12)})`);
+      if (!names) continue;
+      const c = readCanonicalDay(root, names);
+      if (c.nodes === e.nodes && Buffer.byteLength(c.text) === e.bytes && sha256Hex(c.text) === e.sha256) have.set(day, c.text);
     }
-    for (const day of files.keys()) if (!g.days[day]) report.mismatches.push(`${day}: in the checkout, not in the generation`);
+    const missing: Generation = { ...g, days: Object.fromEntries(Object.entries(g.days).filter(([d]) => !have.has(d))) };
+    const fetched = Object.keys(missing.days).length ? await fetchGenerationDays(backend, missing) : new Map<string, string>();
+    report.days = Object.keys(g.days).length;
+    report.blobBytes = Object.values(missing.days).reduce((n, e) => n + e.blob_bytes, 0);
+    report.fetched = [...fetched.keys()];
+    mkdirSync(dir, { recursive: true });
+    for (const f of readdirSync(dir)) if (!isSentinelName(f)) rmSync(join(dir, f), { recursive: true, force: true });
+    for (const day of Object.keys(g.days).sort()) {
+      writeFileSync(join(dir, dayFileName(day)), have.get(day) ?? fetched.get(day)!);
+      report.written.push(day);
+    }
     return report;
   }
-  mkdirSync(dir, { recursive: true });
-  for (const f of readdirSync(dir)) if (!isSentinelName(f)) rmSync(join(dir, f), { recursive: true, force: true });
-  for (const [day, text] of texts) {
-    writeFileSync(join(dir, dayFileName(day)), text);
-    report.written.push(day);
+  const texts = await fetchGenerationDays(backend, g);
+  report.days = texts.size;
+  report.fetched = [...texts.keys()];
+  report.blobBytes = Object.values(g.days).reduce((n, e) => n + e.blob_bytes, 0);
+  // shadow: every blob fetched and verified (the store is what is under test), then compared, the checkout untouched.
+  const files = eventMapFiles(root);
+  for (const [day, e] of Object.entries(g.days).sort(([a], [b]) => (a < b ? -1 : 1))) {
+    const names = files.get(day);
+    if (!names) {
+      report.mismatches.push(`${day}: in the generation, not in the checkout`);
+      continue;
+    }
+    const sha = sha256Hex(readCanonicalDay(root, names).text);
+    if (sha !== e.sha256) report.mismatches.push(`${day}: the store's day (sha256 ${e.sha256.slice(0, 12)}) differs from the checkout's (${sha.slice(0, 12)})`);
   }
+  for (const day of files.keys()) if (!g.days[day]) report.mismatches.push(`${day}: in the checkout, not in the generation`);
   return report;
 }
 
@@ -538,6 +557,30 @@ export function assertEventMapNotStaged(git: (args: string[]) => string, env: No
 
 /** The `.gitignore` lines of phase 3b: the day files are not tracked, the sentinel is. */
 export const IGNORE_LINES = [`${EVENT_MAP_PATH}/*`, `!${EVENT_MAP_PATH}/${SENTINEL_FILE}`] as const;
+
+/** The sentinel's one line: not JSON on purpose, so code from before phase 3a that reads it throws instead of taking
+ *  an untracked event map as empty, and its live floor (the oldest name) becomes 0000-00-00 (backfill writes nothing). */
+export const SENTINEL_TEXT = 'phase 3b sentinel: the event map lives in the state store (knowledge/index/generation.json); this line is not JSON on purpose\n';
+
+/**
+ * The phase-3b transition, in the aggregate commit step before its `git add` (EVENT_MAP_IN_GIT=0 only; a no-op while
+ * git tracks the event map): the ignore lines, the tracked sentinel, and every other tracked event-map path out of the
+ * index (`git rm --cached`: the files stay on disk). Idempotent: after the transition commit nothing is tracked but the
+ * sentinel and it changes nothing. Returns the paths it untracked.
+ */
+export function untrackEventMap(root: string, git: (args: string[]) => string, env: NodeJS.ProcessEnv = process.env): string[] | null {
+  if (eventMapInGit(env)) return null;
+  ensureIgnoreLines(root);
+  const sentinel = join(dataPaths(root).eventMapDir, SENTINEL_FILE);
+  if (!existsSync(sentinel) || readFileSync(sentinel, 'utf8') !== SENTINEL_TEXT) {
+    mkdirSync(dirname(sentinel), { recursive: true });
+    writeFileSync(sentinel, SENTINEL_TEXT);
+  }
+  const tracked = git(['ls-files', '-z', '--', EVENT_MAP_PATH, EVENT_MAP_LEGACY_PATH]).split('\0').filter((p) => p && p !== `${EVENT_MAP_PATH}/${SENTINEL_FILE}`);
+  if (tracked.length) git(['rm', '-q', '--cached', '--', ...tracked]);
+  git(['add', '-f', '--', `${EVENT_MAP_PATH}/${SENTINEL_FILE}`, '.gitignore']);
+  return tracked;
+}
 
 /** Phase 3b: add the ignore lines to the data checkout's .gitignore when missing (aggregate stages .gitignore). */
 export function ensureIgnoreLines(root: string): boolean {
@@ -607,14 +650,38 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
     console.log(`event map live floor: ${f.day} (from the ${f.source})`);
     return 0;
   }
+  if (cmd === 'untrack') {
+    const r = untrackEventMap(root, (args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 1 << 26 }), env);
+    console.log(r == null ? 'event map: still tracked by git (EVENT_MAP_IN_GIT=1, phase 3a)' : `event map: ${r.length} path(s) untracked; the sentinel and the ignore lines staged`);
+    return 0;
+  }
+  if (cmd === 'stage') {
+    // aggregate.yml's commit step, after its `git add`: the phase-3b transition (untrack) and the staging check; both do
+    // nothing while git tracks the event map (phase 3a).
+    const git = (args: string[]): string => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 1 << 26 });
+    const untracked = untrackEventMap(root, git, env);
+    const r = assertEventMapNotStaged(git, env);
+    console.log(
+      untracked == null
+        ? 'event map staging: not checked (EVENT_MAP_IN_GIT=1: git tracks the event map in phase 3a)'
+        : `event map staging: ${untracked.length ? `${untracked.length} path(s) untracked (the phase-3b transition), ` : ''}no event-map path but the sentinel staged (checked: ${r.checked})`,
+    );
+    return 0;
+  }
   if (cmd === 'assert-staged') {
     const r = assertEventMapNotStaged((args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 1 << 26 }), env);
     console.log(r.checked ? 'event map staging: no event-map path but the sentinel staged (EVENT_MAP_IN_GIT=0)' : 'event map staging: not checked (EVENT_MAP_IN_GIT=1: git tracks the event map in phase 3a)');
     return 0;
   }
   if (cmd !== 'hydrate' && cmd !== 'persist') {
-    console.error('usage: event-map-store.ts hydrate [--mode shadow|authoritative] | persist | layout | floor | assert-staged');
+    console.error('usage: event-map-store.ts hydrate [--mode shadow|authoritative] [--3b-only] | persist | layout | floor | stage | untrack | assert-staged');
     return 3;
+  }
+  // The steps that exist for phase 3b only (derive-publish's re-hydrate after the push, first-solutions' hydrate): in
+  // phase 3a the checkout holds the event map and they do nothing.
+  if (argv.includes('--3b-only') && !authoritative) {
+    console.log(`state ${cmd}: phase 3a (git holds the event map): nothing to do`);
+    return 0;
   }
   let backend: StateBackend | null;
   try {
@@ -641,7 +708,7 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
         ? `no generation.json in the checkout yet (before the first persist): nothing to ${mode === 'shadow' ? 'compare' : 'hydrate'}`
         : mode === 'shadow'
           ? `${r.days} day(s), ${(r.blobBytes / 1e6).toFixed(1)} MB of blobs from ${backend.label} in ${ms} ms, verified; ${r.mismatches.length ? `${r.mismatches.length} MISMATCH(ES) with the checkout` : 'identical to the checkout'} (generation at seq ${r.headSeq})`
-          : `${r.written.length} day(s) written from ${backend.label} in ${ms} ms (generation at seq ${r.headSeq})`;
+          : `${r.written.length} day(s) written, ${r.fetched.length} fetched from ${backend.label} (the rest already identical on disk) in ${ms} ms (generation at seq ${r.headSeq})`;
       report({ step: 'hydrate', ok: r.mismatches.length === 0, mode, ...common, summary, mismatches: r.mismatches }, env);
       return 0;
     } catch (e) {

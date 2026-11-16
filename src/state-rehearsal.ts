@@ -7,7 +7,8 @@ import { saveEventMap } from './bitemporal.js';
 import { dataPaths } from './config.js';
 import { hydrate, persist, readGeneration } from './event-map-store.js';
 import { collect, GC_MIN_AGE_DAYS } from './state-gc.js';
-import { backendFromEnv, type StateBackend } from './state-store.js';
+import { backupMembers, compressBackup, decompressBackup, readTar, verifyBackup, writeTar } from './state-backup.js';
+import { backendFromEnv, casKey, getBlobs, type StateBackend } from './state-store.js';
 import type { EventNode } from './types.js';
 
 /**
@@ -16,8 +17,9 @@ import type { EventNode } from './types.js';
  * earthquakes-feed-state-staging, which admits any branch of this repository) on synthetic data only: staging never
  * reads production's state. A temporary data root with a synthetic event map of REHEARSAL_DAYS days (feed ids unique
  * to the run, so every blob is new) is persisted, shadow-hydrated (no mismatch), changed and persisted again (one
- * upload), hydrated authoritatively into a second root (the same bytes), then GC runs as a dry run with the current
- * generation as its keep set, and the budget is read. Any failure exits 1.
+ * upload), hydrated authoritatively into a second root (the same bytes), restored from a backup archive of its
+ * generation (scripts/state-restore.ts's path), then GC runs as a dry run with the current generation as its keep set,
+ * and the budget is read. Any failure exits 1.
  *
  *   FEED_STATE_BACKEND=worker FEED_STATE_URL=https://feed-state-staging.theshelter.app \
  *   FEED_STATE_AUDIENCE=earthquakes-feed-state-staging npx --no-install tsx src/state-rehearsal.ts
@@ -99,6 +101,14 @@ export async function rehearse(backend: StateBackend, opts: { nowMs?: number; lo
       if (!readFileSync(join(dirA, f)).equals(readFileSync(join(dirB, f)))) throw new Error(`authoritative hydrate: ${f} differs`);
     }
     step(`authoritative hydrate into a second root: ${h2.written.length} day file(s), byte for byte the first root's`);
+    // The restore path (scripts/state-restore.ts) on the same synthetic state: the daily backup archive of the
+    // generation, built, verified, and its blobs PUT again (the same keys: a restore into a store that kept them).
+    const genText = readFileSync(dataPaths(a).generation, 'utf8');
+    const blobs = await getBlobs(backend, Object.values(readGeneration(a)!.generation.days).map((e) => e.blob));
+    const archive = readTar(decompressBackup(compressBackup(writeTar(backupMembers('0'.repeat(40), genText, new Map(), blobs)))));
+    const restored = verifyBackup(archive);
+    for (const e of Object.values(restored.generation.days)) await backend.put(e.blob, archive.get(casKey(e.blob))!);
+    step(`restore: a backup archive of the generation verified and its ${Object.keys(restored.generation.days).length} blob(s) PUT again`);
     const current = Object.values(readGeneration(a)!.generation.days).map((e) => e.blob).sort();
     const gc = await collect(backend, { keep: current, current, windowFrom: '', boundaries: [], holdReason: null }, { dryRun: true });
     step(`GC dry run (keep = the current generation, min age ${GC_MIN_AGE_DAYS} days): ${gc.pages} page(s), ${gc.listed} listed, would delete ${gc.deleted}`);

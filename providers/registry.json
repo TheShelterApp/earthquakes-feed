@@ -395,7 +395,7 @@
       "adapter": "fdsn",
       "parse": "text",
       "queryFormat": "text",
-      "base": "http://ws.ipgp.fr/fdsnws/event/1/query",
+      "base": "https://ws.ipgp.fr/fdsnws/event/1/query",
       "supportsTimeRange": true,
       "refreshSeconds": 300,
       "license": "CC-BY-4.0",
@@ -412,7 +412,7 @@
       "adapter": "fdsn",
       "parse": "text",
       "queryFormat": "text",
-      "base": "http://www.moho.iag.usp.br/fdsnws/event/1/query",
+      "base": "https://www.moho.iag.usp.br/fdsnws/event/1/query",
       "supportsTimeRange": true,
       "refreshSeconds": 600,
       "activityBudgetHours": 72,
@@ -478,7 +478,8 @@
       "license": "SSN-UNAM",
       "attribution": "Servicio Sismológico Nacional (SSN), UNAM, Mexico",
       "doi": "10.21766/SSNMX/EC/MX",
-      "contact": "http://www.ssn.unam.mx"
+      "contact": "http://www.ssn.unam.mx",
+      "notes": "Cleartext HTTP: www.ssn.unam.mx refuses connections on port 443 (checked 2026-11-16, FEED-PROV-L4). A public catalogue: a tampered row would stand against the other agencies' solutions of the same event in the dedup."
     },
     {
       "id": "ipma",
@@ -546,7 +547,7 @@
       "adapter": "custom",
       "parse": "custom",
       "queryFormat": "rss",
-      "base": "http://www.earthquakes.bgs.ac.uk/feeds/MhSeismology.xml",
+      "base": "https://www.earthquakes.bgs.ac.uk/feeds/MhSeismology.xml",
       "supportsTimeRange": false,
       "refreshSeconds": 600,
       "frozenBudgetHours": 216,
@@ -733,7 +734,7 @@
       "attribution": "Kandilli Observatory and Earthquake Research Institute (KOERI/RETMC), Boğaziçi University — non-commercial use with citation",
       "doi": null,
       "contact": "http://www.koeri.boun.edu.tr",
-      "notes": "lasteq.asp English quick determinations, times in UTC. NON-COMMERCIAL license — flagged for governance review; hypocenter parameters carried as facts with per-record license."
+      "notes": "lasteq.asp English quick determinations, times in UTC. Cleartext HTTP: www.koeri.boun.edu.tr does not answer on port 443 (every address timed out, checked 2026-11-16, FEED-PROV-L4); a public catalogue: a tampered row would stand against the other agencies' solutions of the same event in the dedup. NON-COMMERCIAL license — flagged for governance review; hypocenter parameters carried as facts with per-record license."
     },
     {
       "id": "phivolcs",

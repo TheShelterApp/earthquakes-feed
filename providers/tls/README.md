@@ -61,3 +61,11 @@ echo | openssl s_client -connect eq.tmd.go.th:443 -servername eq.tmd.go.th 2>/de
 openssl verify -no-CAfile -no-CApath -CAfile /tmp/node-roots.pem -untrusted providers/tls/<name>.crt \
   -purpose sslserver -verify_hostname eq.tmd.go.th /tmp/leaf.pem
 ```
+
+**Cleartext sources (FEED-PROV-L4).** Every active source is fetched over https except two, which have no https
+service: SSN (`mexico`, www.ssn.unam.mx refuses port 443) and KOERI (`koeri`, www.koeri.boun.edu.tr does not answer on
+it), both checked 2026-11-16 and noted in their registry entries. They are public catalogues: a tampered row would stand
+against the other agencies' solutions of the same event in the dedup. IPGP, USP and BGS moved to https that day, each
+after the https answer matched the http one byte for byte with a chain Node's own root store verifies (no pin needed):
+`node -e 'fetch(url).then(r => console.log(r.status))'` with the Node of `.nvmrc`, not curl, which reads the system's
+roots. `tests/tls-pins.test.ts` keeps the list of cleartext sources to those two.

@@ -470,7 +470,12 @@ async function handleRefPut(request, env, cfg, route, claims, text, log, nowMs) 
     throw new HttpError(503, 'store write failed', { cause: String(err) });
   }
   log.reflog = `${result.reflog.previous}/${result.reflog.entry}`;
-  if (result.reflog.entry === 'exists') log.error = `the reflog slot of seq ${ref.seq} was already taken`;
+  if (result.reflog.entry === 'exists') {
+    // The ref moved (so 200, with the alarm in the body: the client fails the run, kind integrity), but the reflog
+    // entry of its seq names another write. Counted in the ledger, so health raises it; the log line names it.
+    log.error = `the reflog slot of seq ${ref.seq} was already taken`;
+    await ledger(env, log, (b) => b.reflogCollision({ nowMs })).catch(() => {});
+  }
   const etag = httpEtag(result.etag);
   return json(200, { lane: route.lane, seq: ref.seq, generation: ref.generation, etag, reflog: result.reflog }, log.rid, { etag });
 }

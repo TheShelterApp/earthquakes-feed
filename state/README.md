@@ -155,10 +155,12 @@ Answers: 200 `{"lane", "seq", "generation", "etag", "reflog": {"previous": "none
 "created"|"exists"}}` with the new `ETag`; 412 `{"error", "current": <ref>|null, "etag", "at": "read"|"swap"}` (`at`:
 which check refused; the client fails closed, it never rebases); 409, 400, 428, 426 as above. `entry: "exists"` means the
 swap happened but the new seq's reflog slot was already taken: two writers of one seq (the CAS was not atomic) or an
-entry left by a lost ref, logged as an error and treated by the client as an integrity failure. At most **5 store
+entry left by a lost ref. The answer stays 200 (the ref did move), the Worker logs an error and counts it in the day's
+`reflog_collisions` (health: `feed:state-budget` member `reflog`, P1), and the client's `putRef` throws
+`ReflogCollision` (kind `integrity`, never retried), so the run fails loudly instead of writing on. At most **5 store
 operations** per PUT whatever happens (GET, HEAD, repair, swap, entry; a refused swap re-GETs instead of writing the
 entry); every ref route answers `x-feed-state-store-ops` and `x-feed-state-ledger-calls` (one reservation, plus a
-refund on a 412 or 409), which the rehearsal checks. Cost reserved (the worst case): 3 Class A, 3 Class B (GET, HEAD,
+refund on a 412 or 409, or the collision count), which the rehearsal checks. Cost reserved (the worst case): 3 Class A, 3 Class B (GET, HEAD,
 and the re-GET of a swap refused at the store), three bodies written; the stored
 estimate gains the entry (and the ref object on a create), which a 412 or 409 gives back.
 
@@ -311,8 +313,8 @@ caller's workflow:
 | background | every other caller: GC, backup, history, first-solutions, stats, health, the rehearsal, a peer repository | 60 % of any ceiling |
 
 So the last 35 % of every ceiling is the feed's alone. `GET /v1/budget` never reserves (health can always read it). The
-day row counts `refused` and, apart, `refused_critical` (health: P1) and `ref_conflicts` (412s on ref PUTs, for 4.3's
-`feed:state-ref-conflict`); the snapshot also carries `meta_bytes` and `lanes` ({critical: 0.95, background: 0.6}).
+day row counts `refused` and, apart, `refused_critical` (health: P1), `ref_conflicts` (412s on ref PUTs, for 4.3's
+`feed:state-ref-conflict`) and `reflog_collisions` (ref swaps onto a taken reflog slot; health: P1); the snapshot also carries `meta_bytes` and `lanes` ({critical: 0.95, background: 0.6}).
 
 The two environments together stay inside the account's free tier with room for the platform's own R2 use. The stored
 estimate is raised by every PUT (an overwrite counts again: it errs high), lowered by what GC deletes, refunded when R2

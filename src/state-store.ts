@@ -149,7 +149,7 @@ export interface GcPage {
 /** GET /v1/budget (state/src/budget.js snapshot). The protocol-2 fields (4.0) are absent from an older Worker. */
 export interface StateBudget {
   day: string;
-  used: { class_a: number; class_b: number; bytes_written: number; requests: number; refused: number; refused_critical?: number; ref_conflicts?: number };
+  used: { class_a: number; class_b: number; bytes_written: number; requests: number; refused: number; refused_critical?: number; ref_conflicts?: number; reflog_collisions?: number };
   stored_bytes: number;
   /** Ref and reflog bytes inside stored_bytes. */
   meta_bytes?: number;
@@ -317,14 +317,14 @@ export function parseBudget(j: unknown): StateBudget {
   if (!isCount(j.stored_bytes)) bad('no stored_bytes');
   if (!(j.stored_seeded_at === null || typeof j.stored_seeded_at === 'string')) bad('stored_seeded_at');
   if (typeof j.gc_pass_open !== 'boolean') bad('gc_pass_open');
-  for (const k of ['refused_critical', 'ref_conflicts']) if (used[k] !== undefined && !isCount(used[k])) bad(`used.${k}`);
+  for (const k of ['refused_critical', 'ref_conflicts', 'reflog_collisions']) if (used[k] !== undefined && !isCount(used[k])) bad(`used.${k}`);
   if (j.meta_bytes !== undefined && !isCount(j.meta_bytes)) bad('meta_bytes');
   const lanes = obj(j.lanes) && typeof j.lanes.critical === 'number' && typeof j.lanes.background === 'number' ? { critical: j.lanes.critical, background: j.lanes.background } : undefined;
   const n = (o: Record<string, unknown>, k: string): number => o[k] as number;
   const opt = (o: Record<string, unknown>, k: string): Record<string, number> => (o[k] === undefined ? {} : { [k]: o[k] as number });
   return {
     day: j.day as string,
-    used: { class_a: n(used, 'class_a'), class_b: n(used, 'class_b'), bytes_written: n(used, 'bytes_written'), requests: n(used, 'requests'), refused: n(used, 'refused'), ...opt(used, 'refused_critical'), ...opt(used, 'ref_conflicts') },
+    used: { class_a: n(used, 'class_a'), class_b: n(used, 'class_b'), bytes_written: n(used, 'bytes_written'), requests: n(used, 'requests'), refused: n(used, 'refused'), ...opt(used, 'refused_critical'), ...opt(used, 'ref_conflicts'), ...opt(used, 'reflog_collisions') },
     stored_bytes: j.stored_bytes as number,
     ...opt(j, 'meta_bytes'),
     ...(lanes ? { lanes } : {}),
@@ -420,7 +420,8 @@ export interface RefSwap {
   generation: string;
   etag: string;
   /** previous: whether the replaced ref's reflog entry was there ('present'), had to be written ('repaired'), or there
-   *  was none ('none'); entry: the new seq's entry 'created', or 'exists' (its slot was taken: an integrity alarm). */
+   *  was none ('none'); entry: the new seq's entry 'created', or 'exists' (its slot was taken: putRef then throws
+   *  ReflogCollision, so a RefSwap a caller holds never says 'exists'). */
   reflog: { previous: 'none' | 'present' | 'repaired'; entry: 'created' | 'exists' };
   /** The bucket and ref-store operations the Worker made (x-feed-state-store-ops; null when the backend has none). */
   storeOps: number | null;
@@ -449,7 +450,8 @@ export interface ReflogPage {
 /** The ref routes (protocol 2). Both backends implement them; neither is used by the production pipeline in 4.0. */
 export interface StateRefs {
   getRef(lane: string): Promise<RefRead | null>;
-  /** One attempt, never retried blindly (a CAS): 412 throws RefConflict, an unknown outcome a retryable error. */
+  /** One attempt, never retried blindly (a CAS): 412 throws RefConflict, an unknown outcome a retryable error, a swap
+   *  onto a taken reflog slot ReflogCollision (kind integrity). */
   putRef(lane: string, ref: StateRef, pre: RefPrecondition): Promise<RefSwap>;
   reflog(lane: string, opts?: { after?: number; limit?: number }): Promise<ReflogPage>;
 }
@@ -465,6 +467,31 @@ export class RefConflict extends StateStoreError {
     super(message, 'conflict', 412);
     this.name = 'RefConflict';
   }
+}
+
+/**
+ * A swap that happened onto a reflog slot already taken (the Worker's 200 with `reflog.entry: "exists"`): the ref moved,
+ * but the reflog's entry for its seq names another write (a second winner of the seq, so the CAS was not atomic, or an
+ * entry left by a lost ref). The GC root set and the restore index would miss the live generation, so the run fails
+ * loudly (kind integrity, never retried) instead of writing on; the Worker counted it (reflog_collisions, health P1).
+ * `swap` is the answer, for the rehearsal's race check.
+ */
+export class ReflogCollision extends StateStoreError {
+  constructor(
+    message: string,
+    readonly swap: RefSwap,
+  ) {
+    super(message, 'integrity', 200);
+    this.name = 'ReflogCollision';
+  }
+}
+
+/** Fail closed on a taken reflog slot (both backends' putRef). */
+function checkReflogSlot(swap: RefSwap): RefSwap {
+  if (swap.reflog.entry === 'exists') {
+    throw new ReflogCollision(`ref ${swap.lane}: swapped to seq ${swap.seq}, but its reflog slot was already taken (another write of that seq): integrity failure, see state/README.md`, swap);
+  }
+  return swap;
 }
 
 /** JSON with every object's keys sorted, no whitespace: the one serialization of a ref (the Worker refuses others). */
@@ -993,7 +1020,8 @@ export class WorkerBackend implements StateBackend, StateRefs {
 
   /**
    * One PUT, never retried here (a CAS: swapRef decides after an unknown outcome). 412 → RefConflict with the current
-   * ref; a 404 answer (the lane is unknown to the Worker) is kind client.
+   * ref; a 200 whose new seq's reflog slot was already taken → ReflogCollision (kind integrity); a 404 answer (the lane
+   * is unknown to the Worker) is kind client.
    */
   async putRef(lane: string, ref: StateRef, pre: RefPrecondition): Promise<RefSwap> {
     if (!isLane(lane, { rehearsal: true }) || ref.lane !== lane) throw new StateStoreError(`ref: not a lane, or the ref is another lane's: ${lane.slice(0, 80)}`, 'client');
@@ -1022,7 +1050,7 @@ export class WorkerBackend implements StateBackend, StateRefs {
         if (j.lane !== lane || j.seq !== ref.seq || j.generation !== ref.generation || typeof j.etag !== 'string' || !j.reflog) {
           throw new StateStoreError(`ref ${lane}: the store answered ${JSON.stringify(j).slice(0, 200)}`, 'integrity');
         }
-        return { lane, seq: ref.seq, generation: ref.generation, etag: j.etag, reflog: j.reflog, storeOps: num('x-feed-state-store-ops'), ledgerCalls: num('x-feed-state-ledger-calls') };
+        return checkReflogSlot({ lane, seq: ref.seq, generation: ref.generation, etag: j.etag, reflog: j.reflog, storeOps: num('x-feed-state-store-ops'), ledgerCalls: num('x-feed-state-ledger-calls') });
       },
       { protocol: REF_PROTOCOL, headers, accept: [412], attempts: 1 },
     );
@@ -1224,7 +1252,7 @@ export class FsBackend implements StateBackend, StateRefs {
     writeFileSync(`${f}.tmp-${process.pid}`, text);
     renameSync(`${f}.tmp-${process.pid}`, f);
     const entry = createOnly(this.reflogFile(lane, ref.seq), text) ? 'created' : 'exists';
-    return { lane, seq: ref.seq, generation: ref.generation, etag: `"${sha256Hex(text).slice(0, 32)}"`, reflog: { previous, entry }, storeOps: null, ledgerCalls: null };
+    return checkReflogSlot({ lane, seq: ref.seq, generation: ref.generation, etag: `"${sha256Hex(text).slice(0, 32)}"`, reflog: { previous, entry }, storeOps: null, ledgerCalls: null });
   }
 
   async reflog(lane: string, opts: { after?: number; limit?: number } = {}): Promise<ReflogPage> {

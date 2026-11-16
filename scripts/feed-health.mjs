@@ -797,7 +797,8 @@ export function budgetShares(json) {
 }
 
 /** feed:state-budget: any ceiling over `share` (0.6, the background lane's line) or this Worker's requests over
- *  requestsPerDay: P2; any refusal on the critical lane today: P1. Unreadable: unjudged. */
+ *  requestsPerDay: P2; any refusal on the critical lane today, or any reflog collision (a ref swapped onto a reflog
+ *  slot already taken: the client failed that run, kind integrity): P1. Unreadable: unjudged. */
 export function evaluateStateBudget(read) {
   const { share, requestsPerDay } = RULES['feed:state-budget'].limits;
   if (!read || !read.ok) return { findings: [], unjudged: ['feed:state-budget'], notes: [`state budget: ${read ? oneLine(read.message, 200) : 'not read'}`] };
@@ -809,17 +810,20 @@ export function evaluateStateBudget(read) {
   const used = read.json.used;
   const requests = isNum(used.requests) ? used.requests : 0;
   const critical = isNum(used.refused_critical) ? used.refused_critical : 0;
+  const collisions = isNum(used.reflog_collisions) ? used.reflog_collisions : 0;
   const busy = requests > requestsPerDay;
-  if (!over.length && !busy && critical === 0) return { findings: [], unjudged: [], notes };
+  if (!over.length && !busy && critical === 0 && collisions === 0) return { findings: [], unjudged: [], notes };
   const parts = [];
   if (over.length) parts.push(`the state store is at ${over.map(fmt).join(', ')} of its daily free-tier ceilings (line ${Math.round(share * 100)} %, where background jobs are refused)`);
   if (busy) parts.push(`the state Worker served ${requests} requests today (line ${requestsPerDay}; the account's 100,000 Workers requests a day are shared with the platform)`);
   if (critical > 0) parts.push(`${critical} request(s) of the feed itself (aggregate, derive, restore: the critical lane, refused only above 95 %) were refused today`);
+  if (collisions > 0) parts.push(`${collisions} ref swap(s) today found their seq's reflog slot already taken (an integrity alarm: a non-atomic compare-and-swap or an entry left by a lost ref; the Worker log names the lane and seq)`);
+  const spend = over.length || busy || critical > 0;
   return {
     findings: [makeFinding('feed:state-budget', {
-      severity: critical > 0 ? 'P1' : 'P2',
-      members: [...over.map((x) => x.key), ...(busy ? ['requests'] : []), ...(critical > 0 ? ['critical'] : [])],
-      text: `${parts.join('; ')}: at a ceiling the store refuses until 00:00 UTC; see what spends them (state/README.md)`,
+      severity: critical > 0 || collisions > 0 ? 'P1' : 'P2',
+      members: [...over.map((x) => x.key), ...(busy ? ['requests'] : []), ...(critical > 0 ? ['critical'] : []), ...(collisions > 0 ? ['reflog'] : [])],
+      text: `${parts.join('; ')}${spend ? ': at a ceiling the store refuses until 00:00 UTC; see what spends them' : ''} (state/README.md)`,
     })],
     unjudged: [],
     notes,

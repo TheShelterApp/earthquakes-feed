@@ -493,6 +493,8 @@ export const RULES = Object.freeze({
     // above 95 %, so `share` is the background line: the row opens when background jobs start being refused. P1 when
     // the critical lane was refused today (used.refused_critical: the feed itself), and a member `requests` when this
     // Worker served more than requestsPerDay (the account's 100,000 Workers requests a day are shared with the platform).
+    // The same snapshot carries used.reflog_collisions (protocol 2: a ref swapped onto a taken reflog slot, an
+    // integrity alarm the Worker's log alone would not raise): member `reflog`, P1, until 4.3 gives the refs their own rows.
     board: 'feed', class: 'capacity', severity: 'P2', key: 'feed:state-budget', check: 'gh-capacity',
     limits: { url: 'https://feed-state.theshelter.app/v1/budget', audience: 'earthquakes-feed-state', share: 0.6, requestsPerDay: 10_000 },
   }),

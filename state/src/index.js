@@ -2,7 +2,7 @@
 // Object class. Only this module imports `cloudflare:workers`, so worker.js, auth.js, cas.js, refs.js and budget.js stay
 // importable by the Node tests (tests/state-worker.test.ts, tests/state-refs.test.ts), as in heartbeat/src/index.js.
 import { DurableObject } from 'cloudflare:workers';
-import { gcBegin, gcEnd, migrate, refundRef, refundStored, reserve, snapshot } from './budget.js';
+import { gcBegin, gcEnd, migrate, reflogCollision, refundRef, refundStored, reserve, snapshot } from './budget.js';
 import { REFS_SCHEMA, refGetSql, refSwapSql } from './refs.js';
 
 export { default } from './worker.js';
@@ -27,6 +27,10 @@ export class BudgetLedger extends DurableObject {
 
   refundRef(args) {
     refundRef(this.ctx.storage.sql, args);
+  }
+
+  reflogCollision(args) {
+    reflogCollision(this.ctx.storage.sql, args);
   }
 
   gcBegin(args) {

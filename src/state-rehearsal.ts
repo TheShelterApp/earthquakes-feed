@@ -11,6 +11,7 @@ import { backupMembers, compressBackup, decompressBackup, readTar, verifyBackup,
 import { gzipSync } from 'node:zlib';
 import {
   RefConflict,
+  ReflogCollision,
   StateStoreError,
   WorkerBackend,
   backendFromEnv,
@@ -271,7 +272,8 @@ export async function rehearseRefs(opts: RefRehearsalOptions): Promise<Observati
     const gens = [await generation(), await generation()];
     const pair = gens.map((g, i) => make(laneA, cur!.ref, g, `race-${round}-${i + 1}`));
     const res = await Promise.all(pair.map((r) => settled(be.putRef(laneA, r, { etag: cur!.etag }))));
-    const wins = res.flatMap((r, i) => (r.ok ? [{ swap: r.value, ref: pair[i]! }] : []));
+    // A ReflogCollision is a win too (the ref moved) onto a taken reflog slot: the client failed it closed.
+    const wins = res.flatMap((r, i) => (r.ok ? [{ swap: r.value, ref: pair[i]! }] : r.error instanceof ReflogCollision ? [{ swap: r.error.swap, ref: pair[i]! }] : []));
     const lost = res.filter((r) => !r.ok && r.error instanceof RefConflict);
     for (const w of wins) {
       track(w.swap);

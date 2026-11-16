@@ -1449,6 +1449,9 @@ test('feed:state-budget: a refusal on the critical lane is P1; this Worker over 
   const critical = evaluateStateBudget({ ok: true, json: snap({ refused: 3, refused_critical: 1 }) });
   assert.deepEqual(critical.findings.map((f) => [f.key, f.severity, f.members]), [['feed:state-budget', 'P1', ['critical']]]);
   assert.match(critical.findings[0]!.text, /1 request\(s\) of the feed itself/);
+  const collided = evaluateStateBudget({ ok: true, json: snap({ reflog_collisions: 1 }) });
+  assert.deepEqual(collided.findings.map((f) => [f.severity, f.members]), [['P1', ['reflog']]]);
+  assert.match(collided.findings[0]!.text, /reflog slot already taken/);
   const busy = evaluateStateBudget({ ok: true, json: snap({ requests: 12_000, class_a: 13_000 }) });
   assert.deepEqual(busy.findings.map((f) => [f.severity, f.members]), [['P2', ['class_a', 'requests']]]);
   // A protocol-1 Worker (no refused_critical) is judged as before.

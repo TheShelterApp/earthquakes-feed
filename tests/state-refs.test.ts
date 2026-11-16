@@ -7,7 +7,7 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { test } from 'node:test';
 import { gzipSync } from 'node:zlib';
 import { DEFAULT_POLICY, HOME, LANE_POLICY, RESTORE_PAIR, authorize, createKeyStore, knownRepositories, type Policy } from '../state/src/auth.js';
-import { SCHEMA, gcBegin, gcEnd, migrate, refundRef, refundStored, reserve, snapshot, type Sql } from '../state/src/budget.js';
+import { SCHEMA, gcBegin, gcEnd, migrate, reflogCollision, refundRef, refundStored, reserve, snapshot, type Sql } from '../state/src/budget.js';
 import { blobKey } from '../state/src/cas.js';
 import { REFS_SCHEMA, canonicalJson as workerCanonical, parseRefBody, refGetSql, refSwapSql, reflogKey } from '../state/src/refs.js';
 import { createHandler, type Env } from '../state/src/worker.js';
@@ -15,6 +15,7 @@ import { RACE_ROUNDS, observationsMarkdown, rehearseRefs } from '../src/state-re
 import {
   FsBackend,
   RefConflict,
+  ReflogCollision,
   StateStoreError,
   WorkerBackend,
   canonicalJson,
@@ -25,6 +26,7 @@ import {
   swapRef,
   writerFromEnv,
   writerId,
+  type RefSwap,
   type StateRef,
 } from '../src/state-store.js';
 
@@ -180,6 +182,7 @@ function fakeLedger() {
     reserve: async (a: Parameters<typeof reserve>[1]) => clone(reserve(sql, clone(a))),
     refundStored: async (b: number, at?: number) => refundStored(sql, b, at),
     refundRef: async (a: Parameters<typeof refundRef>[1]) => refundRef(sql, clone(a)),
+    reflogCollision: async (a: Parameters<typeof reflogCollision>[1]) => reflogCollision(sql, clone(a)),
     gcBegin: async (a: Parameters<typeof gcBegin>[1]) => clone(gcBegin(sql, clone(a))),
     gcEnd: async (a: Parameters<typeof gcEnd>[1]) => gcEnd(sql, clone(a)),
     snapshot: async (a: Parameters<typeof snapshot>[1]) => clone(snapshot(sql, clone(a))),
@@ -347,9 +350,20 @@ test('state refs: a non-atomic conditional put lets both racers win; the reflog 
   await be.putRef('main', refFor('main', null, h.blob('g0'), h.writer(agg, 'b')), { create: true });
   const cur = (await be.getRef('main'))!;
   const pair = [0, 1].map((i) => refFor('main', cur.ref, h.blob(`x${i}`), h.writer(agg, `race-${i}`)));
-  const res = await Promise.all(pair.map((r) => be.putRef('main', r, { etag: cur.etag })));
-  assert.deepEqual(res.map((r) => r.reflog.entry).sort(), ['created', 'exists'], 'the second winner finds its seq slot taken');
+  const res = await Promise.allSettled(pair.map((r) => be.putRef('main', r, { etag: cur.etag })));
+  // Both swapped; the second winner finds its seq slot taken and fails closed (kind integrity), never a plain success.
+  const ok = res.filter((r) => r.status === 'fulfilled');
+  const collided = res.flatMap((r) => (r.status === 'rejected' ? [r.reason] : []));
+  assert.equal(ok.length, 1);
+  assert.equal((ok[0] as PromiseFulfilledResult<RefSwap>).value.reflog.entry, 'created');
+  assert.ok(collided[0] instanceof ReflogCollision && collided[0].kind === 'integrity' && collided[0].swap.reflog.entry === 'exists');
   assert.ok(h.logs.some((l) => /the reflog slot of seq 2 was already taken/.test(l)));
+  // swapRef never turns it into a success; the ledger counted it, so health raises it.
+  const cur2 = (await be.getRef('main'))!;
+  h.r2.objects.set(reflogKey('main', 3), { bytes: new Uint8Array([1]), uploaded: new Date(T0), etag: 'x' });
+  await assert.rejects(swapRef(be, 'main', refFor('main', cur2.ref, h.blob('x2'), h.writer(agg, 'next')), { etag: cur2.etag }), ReflogCollision);
+  const b = await h.client({ workflow: 'health.yml' }).budget();
+  assert.equal(b.used.reflog_collisions, 2);
 });
 
 test('state refs: the successor rules, the precondition, the generation blob, canonical bodies, the writer and the protocol', async () => {

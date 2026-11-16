@@ -768,7 +768,7 @@ test('state budget: each ceiling refuses with 429 {"error":"budget"} before the 
   const snap = (await (await h.call('GET', '/v1/budget')).json()) as Record<string, unknown>;
   assert.deepEqual(snap, {
     day: '2026-11-17',
-    used: { class_a: 1, class_b: 0, bytes_written: b3.byteLength, requests: 1, refused: 0, refused_critical: 0, ref_conflicts: 0 },
+    used: { class_a: 1, class_b: 0, bytes_written: b3.byteLength, requests: 1, refused: 0, refused_critical: 0, ref_conflicts: 0, reflog_collisions: 0 },
     stored_bytes: 3 * b3.byteLength,
     meta_bytes: 0,
     lanes: { critical: 0.95, background: 0.6 },

@@ -71,6 +71,7 @@ export const SCHEMA = [
 export const ADDED_COLUMNS = [
   ['days', 'refused_critical', 'INTEGER NOT NULL DEFAULT 0'],
   ['days', 'ref_conflicts', 'INTEGER NOT NULL DEFAULT 0'],
+  ['days', 'reflog_collisions', 'INTEGER NOT NULL DEFAULT 0'],
   ['store', 'meta_bytes', 'INTEGER NOT NULL DEFAULT 0'],
 ];
 
@@ -120,7 +121,7 @@ export function utcDay(nowMs) {
 
 function dayRow(sql, day) {
   const rows = sql
-    .exec('SELECT class_a, class_b, bytes_written, requests, refused, refused_critical, ref_conflicts FROM days WHERE day = ?', day)
+    .exec('SELECT class_a, class_b, bytes_written, requests, refused, refused_critical, ref_conflicts, reflog_collisions FROM days WHERE day = ?', day)
     .toArray();
   const r = rows[0];
   return r
@@ -132,8 +133,9 @@ function dayRow(sql, day) {
         refused: Number(r.refused),
         refused_critical: Number(r.refused_critical),
         ref_conflicts: Number(r.ref_conflicts),
+        reflog_collisions: Number(r.reflog_collisions),
       }
-    : { class_a: 0, class_b: 0, bytes_written: 0, requests: 0, refused: 0, refused_critical: 0, ref_conflicts: 0 };
+    : { class_a: 0, class_b: 0, bytes_written: 0, requests: 0, refused: 0, refused_critical: 0, ref_conflicts: 0, reflog_collisions: 0 };
 }
 
 function storeRow(sql) {
@@ -238,6 +240,20 @@ export function refundRef(sql, { nowMs, metaBytes, conflict }) {
 }
 
 /**
+ * Count one reflog collision of the day: a ref PUT whose swap happened but whose new seq's reflog slot was already
+ * taken (refs.js `entry: 'exists'`: a non-atomic CAS, or an entry left by a lost ref). The client fails that run
+ * (kind integrity), and feed-health raises any collision of the day (feed:state-budget, member `reflog`, P1), because
+ * the Worker's log line alone reaches no one.
+ */
+export function reflogCollision(sql, { nowMs }) {
+  sql.exec(
+    `INSERT INTO days (day, reflog_collisions) VALUES (?, 1)
+     ON CONFLICT (day) DO UPDATE SET reflog_collisions = reflog_collisions + 1`,
+    utcDay(nowMs),
+  );
+}
+
+/**
  * Give back stored bytes a reservation added for a PUT that did not store anything (R2 refused it). `reservedMs` is
  * the reservation's nowMs: a PUT reserved before the open GC pass began was never counted in that pass's
  * put_since_pass (gcBegin zeroed it), so its refund must not eat a later PUT's bytes there (the estimate would read low).
@@ -295,7 +311,7 @@ export function gcEnd(sql, { nowMs, cursor, nextCursor, keepHash, keptBytes, del
   }
 }
 
-/** Today's counters (with the critical lane's refusals and the ref conflicts), the stored estimate, the lanes' shares
+/** Today's counters (with the critical lane's refusals, the ref conflicts and the reflog collisions), the stored estimate, the lanes' shares
  *  and the ceilings (GET /v1/budget, read by feed-health). */
 export function snapshot(sql, { nowMs, ceilings }) {
   const day = utcDay(nowMs);

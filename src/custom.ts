@@ -1087,18 +1087,27 @@ const koeri: CustomAdapter = async (cfg) =>
   parseKoeri(await getText(cfg.base, { timeoutMs: 12_000, retries: 2 }), cfg.id);
 
 // --- Philippines: PHIVOLCS. Hand-authored HTML whose data rows link to per-event
-//     bulletins; the bulletin FILENAME encodes the origin time in UTC (YYYY_MMDD_HHMM),
-//     used for both the timestamp and the dedup id (trailing _B1/_B2F = a bulletin
-//     revision of the same event). Cells: [PST datetime] [lat°N] [lon°E] [depth km]
+//     bulletins; the bulletin FILENAME stamps the origin time in UTC, used for both the
+//     timestamp and the dedup id (trailing _B1/_B2F = a bulletin revision of the same
+//     event, under the same stamp). Cells: [PST datetime] [lat°N] [lon°E] [depth km]
 //     [mag] [place]. magType lives only in the sub-bulletins, so it is left null. ---
+/** PHIVOLCS's bulletin stamp, `YYYY_MMDD_HHMM` or, for most bulletins since about 2026-10-29, `YYYY_MMDD_HHMMSS`; the
+ *  id is the stamp as the file gives it. Until 2026-11-16 only the minute form was read, so every bulletin with seconds
+ *  was skipped: the page of 2026-11-16 listed 957 events of 2026-10-31 .. 11-16, 900 of them with seconds, and the feed
+ *  held 3 to 11 PHIVOLCS events a day from 2026-10-30 against about 50 to 80 before. Two events of one minute also folded
+ *  into one (FEED-PROV-L1): that page held 20 such minutes, each two events with their own bulletins, 16 to 1,675 km
+ *  apart. The seconds keep those apart; two rows of one stamp still fold (a revision listed twice; B1 and B3F of
+ *  2026_1105_180243 share the stamp). Minute-stamped bulletins keep their minute ids, so two of them in one minute still
+ *  fold: the page gives nothing finer, and a suffix by row order or place would change an event's id when a later event
+ *  is listed beside it. */
 export function parsePhivolcs(html: string, providerId: string): RawObs[] {
   const out: RawObs[] = [];
   const seen = new Set<string>();
   for (const row of html.split(/<tr[ >]/i)) {
-    const href = /href="([^"]*_Earthquake_Information[^"]*?(\d{4})_(\d{4})_(\d{4})_[^"]*\.html)"/i.exec(row);
+    const href = /href="([^"]*_Earthquake_Information[^"]*?(\d{4})_(\d{4})_(\d{4})(\d{2})?_[^"]*\.html)"/i.exec(row);
     if (!href) continue;
-    const [, file, yyyy, mmdd, hhmm] = href;
-    const id = `${yyyy}_${mmdd}_${hhmm}`; // UTC origin-minute; folds B1/B2 revisions
+    const [, file, yyyy, mmdd, hhmm, ss] = href;
+    const id = `${yyyy}_${mmdd}_${hhmm}${ss ?? ''}`; // the UTC origin stamp; folds B1/B2 revisions
     if (seen.has(id)) continue;
     const tds = [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map((m) =>
       htmlDecode(m[1]!.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim(),
@@ -1106,7 +1115,7 @@ export function parsePhivolcs(html: string, providerId: string): RawObs[] {
     if (tds.length < 6) continue;
     const lat = num(tds[1]);
     const lon = num(tds[2]);
-    const t = parseUtcMs(`${yyyy}-${mmdd!.slice(0, 2)}-${mmdd!.slice(2)}T${hhmm!.slice(0, 2)}:${hhmm!.slice(2)}:00Z`);
+    const t = parseUtcMs(`${yyyy}-${mmdd!.slice(0, 2)}-${mmdd!.slice(2)}T${hhmm!.slice(0, 2)}:${hhmm!.slice(2)}:${ss ?? '00'}Z`);
     if (lat == null || lon == null || t == null) continue;
     seen.add(id);
     out.push({

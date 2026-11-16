@@ -190,6 +190,30 @@ test('PHIVOLCS: UTC from bulletin filename; backslash href; B1/B2 fold to one id
   assert.match(o[0]!.place ?? '', /Babuyan/);
 });
 
+test('PHIVOLCS: stamps with seconds are read, and two events of one minute keep apart (FEED-PROV-L1)', () => {
+  const row = (bulletin: string, local: string, lat: string, lon: string, mag: string) =>
+    `<tr><td><a href="2026_Earthquake_Information\\November\\${bulletin}.html">${local}</a></td>` +
+    `<td>${lat}</td><td>${lon}</td><td>027</td><td>${mag}</td><td>somewhere</td></tr>`;
+  // From the page of 2026-11-16: two events of 14:50 UTC on 11-15 (1,244 km apart), one bulletin
+  // of 17:16 with seconds and one without, and an event whose B1 and B3F share their stamp.
+  const html = '<table>' +
+    row('2026_1115_171636_B1F', '16 November 2026 - 01:16 AM', '05.38', '125.26', '1.5') +
+    row('2026_1115_1716_B1', '16 November 2026 - 01:16 AM', '17.96', '120.58', '1.9') +
+    row('2026_1115_145055_B1', '15 November 2026 - 10:50 PM', '09.68', '126.29', '1.6') +
+    row('2026_1115_145034_B1', '15 November 2026 - 10:50 PM', '19.95', '121.69', '2.1') +
+    row('2026_1105_180243_B3F', '06 November 2026 - 02:02 AM', '11.32', '124.56', '4.2') +
+    row('2026_1105_180243_B1', '06 November 2026 - 02:02 AM', '11.32', '124.58', '3.6') +
+    '</table>';
+  const o = parsePhivolcs(html, 'phivolcs');
+  assert.deepEqual(o.map((r) => r.providerEventId), ['2026_1115_171636', '2026_1115_1716', '2026_1115_145055', '2026_1115_145034', '2026_1105_180243']);
+  assert.deepEqual(o.map((r) => new Date(r.eventTimeMs).toISOString()), [
+    '2026-11-15T17:16:36.000Z', '2026-11-15T17:16:00.000Z', '2026-11-15T14:50:55.000Z', '2026-11-15T14:50:34.000Z', '2026-11-05T18:02:43.000Z',
+  ]);
+  const rev = o[4]!;
+  assert.equal(rev.mag, 4.2, 'the first row of a stamp (the newest bulletin, listed first) wins');
+  assert.equal(rev.fields['bulletin'], '2026_1105_180243_B3F.html');
+});
+
 test('GeoJSON: features missing coordinates or time are skipped', () => {
   const body = JSON.stringify({
     features: [

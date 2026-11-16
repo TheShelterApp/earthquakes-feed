@@ -1973,7 +1973,7 @@ of the moment and seldom follows a revision; it follows CSN's), and EMSC replace
 its own solution later (most of KOERI's and AFAD's): such a copy counts only while it is within
 those limits of the agency's row. Where KOERI gives both ML and Mw the feed's row carries the Mw
 while EMSC copies the ML, so those copies do not count. Not on the list: BMKG (its public lists
-carry another solution), PHIVOLCS and JMA (their lists give the origin to the minute), GFZ,
+carry another solution), PHIVOLCS and JMA (their lists gave the origin to the minute when this was measured), GFZ,
 ReNaSS, ETHZ, NOA, IMO (too many copies differ from every version the feed saw), GSRAS (not
 KAGSR's solution), CN (the feed's NRCan rows carry no magnitude) and the agencies with fewer than 50
 copies (IPMA, IGP, GA, CWA, IPGP's observatories, BGS, USP, KNMI, AEC). The US networks the feed reads only through ComCat count against ComCat's row whose own

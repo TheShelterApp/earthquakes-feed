@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -204,21 +204,88 @@ test('the CLI stages DATA_DIR with the clock it reads after derive, and says wha
   }
 });
 
-test('wiring: derive-publish, backfill and archive stage through src/stage-data.ts; no workflow stages events/ itself', () => {
+/** The workflow files of the repository: every .github/workflows/*.yml and .github/actions/<name>/action.yml. */
+function workflowFiles(): string[] {
+  const out: string[] = [];
+  for (const f of readdirSync(here('../.github/workflows'))) if (/\.ya?ml$/.test(f)) out.push(`.github/workflows/${f}`);
+  for (const d of readdirSync(here('../.github/actions'))) {
+    for (const f of ['action.yml', 'action.yaml']) if (existsSync(here(`../.github/actions/${d}/${f}`))) out.push(`.github/actions/${d}/${f}`);
+  }
+  return out.sort();
+}
+
+/** What is wrong with the `git add` / `git commit` lines of a workflow `text` that does not stage through stage-data.ts:
+ *  each `git add` must name explicit pathspecs (a `"$var"` resolved from a `var=value` line of the file), none of them
+ *  the whole checkout (`.`, `:/`, a bare `-A`) or a day partition (`events...`); `-A` is allowed only before such
+ *  pathspecs (stats.yml stages its removals); `git commit -a` is never allowed. */
+function stagingProblems(text: string): string[] {
+  const body = text.replace(/^\s*#.*$/gm, '');
+  const vars = new Map([...body.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)=([^\s;]+)\s*$/gm)].map((m) => [m[1]!, m[2]!.replace(/^["']|["']$/g, '')]));
+  const out: string[] = [];
+  for (const m of body.matchAll(/\bgit add\b([^\n;&|)]*)/g)) {
+    const args = m[1]!.trim().split(/\s+/).filter(Boolean);
+    const specs: string[] = [];
+    for (const a of args) {
+      if (a === '-A' || a === '--') continue;
+      if (a.startsWith('-')) out.push(`${m[0].trim()}: option ${a}`);
+      else {
+        const v = /^"?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"?$/.exec(a);
+        const spec = v ? vars.get(v[1]!) : a.replace(/^["']|["']$/g, '');
+        if (spec == null) out.push(`${m[0].trim()}: ${a} is not set in the file`);
+        else specs.push(spec);
+      }
+    }
+    if (!specs.length) out.push(`${m[0].trim()}: no pathspec (the whole checkout)`);
+    for (const p of specs) if (/^(\.|\.\/|:\/|\*|:\(.*)$/.test(p) || /^(\.\/)?events(\/|$)/.test(p) || p.includes('*')) out.push(`${m[0].trim()}: pathspec ${p}`);
+  }
+  for (const m of body.matchAll(/\bgit commit\b([^\n]*)/g)) if (/(^|\s)(-a\w*|--all)(\s|$)/.test(m[1]!)) out.push(`${m[0].trim()}: commit -a`);
+  return out;
+}
+
+test('stagingProblems: explicit non-events pathspecs pass; the whole checkout, a day partition, an unknown variable or commit -a fail', () => {
+  assert.deepEqual(stagingProblems('git add knowledge status status.json .gitignore\ngit commit -m x'), []);
+  assert.deepEqual(stagingProblems('git add -A v1/stats knowledge/stats'), []);
+  assert.deepEqual(stagingProblems('dir=knowledge/first_solutions\ngit add "$dir"'), []);
+  assert.deepEqual(stagingProblems('# git add -A\ngit add knowledge/index/remediation.json'), [], 'comments do not count');
+  assert.equal(stagingProblems('git add -A').length, 1);
+  assert.equal(stagingProblems('git add .').length, 1);
+  assert.equal(stagingProblems('git add :/').length, 1);
+  assert.equal(stagingProblems('git add events knowledge').length, 1);
+  assert.equal(stagingProblems('git add -A events/2026/11').length, 1);
+  assert.equal(stagingProblems('dir=events\ngit add "$dir"').length, 1);
+  assert.equal(stagingProblems('git add "$where"').length, 2, 'unset variable: unknown and so no pathspec');
+  assert.equal(stagingProblems('git add -u knowledge').length, 1);
+  assert.equal(stagingProblems('git add knowledge\ngit commit -am x').length, 1);
+});
+
+test('wiring: derive-publish, backfill and archive stage through src/stage-data.ts; no other workflow or action stages events/ or the whole checkout', () => {
   const read = (rel: string): string => readFileSync(here(`../${rel}`), 'utf8');
-  for (const [file, specs] of [
+  const writers = new Map([
     ['.github/actions/derive-publish/action.yml', '.'],
     ['.github/workflows/backfill.yml', '.'],
     ['.github/workflows/archive.yml', 'events knowledge status changes'],
-  ] as const) {
+  ]);
+  const files = workflowFiles();
+  for (const f of [...writers.keys(), '.github/workflows/stats.yml', '.github/workflows/remerge.yml', '.github/workflows/aggregate.yml']) {
+    assert.ok(files.includes(f), `the glob finds ${f}`);
+  }
+  const committers: string[] = [];
+  for (const file of files) {
     const text = read(file);
-    const call = `( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/stage-data.ts ${specs} )`;
-    assert.ok(text.includes(call), `${file}: ${call}`);
-    assert.ok(text.indexOf(call) < text.indexOf('git commit'), `${file}: staged before the commit`);
-    assert.doesNotMatch(text.replace(/^\s*#.*$/gm, ''), /\bgit add\b/, `${file}: no git add of its own`);
+    const body = text.replace(/^\s*#.*$/gm, '');
+    if (/\bgit commit\b/.test(body)) committers.push(file);
+    const specs = writers.get(file);
+    if (specs != null) {
+      const call = `( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/stage-data.ts ${specs} )`;
+      assert.ok(body.includes(call), `${file}: ${call}`);
+      assert.ok(body.indexOf(call) < body.indexOf('git commit'), `${file}: staged before the commit`);
+      assert.doesNotMatch(body, /\bgit add\b/, `${file}: no git add of its own`);
+      assert.doesNotMatch(body, /\bgit commit\b[^\n]*(\s-a\w*|--all)\b/, `${file}: no commit -a`);
+    } else {
+      assert.doesNotMatch(body, /src\/stage-data\.ts/, `${file}: stage-data is wired only in the writers of day partitions`);
+      assert.deepEqual(stagingProblems(text), [], file);
+    }
   }
-  for (const f of ['aggregate.yml', 'history.yml', 'first-solutions.yml', 'remediate.yml', 'derive.yml']) {
-    const text = read(`.github/workflows/${f}`).replace(/^\s*#.*$/gm, '');
-    for (const m of text.matchAll(/\bgit add\b([^\n]*)/g)) assert.doesNotMatch(m[1]!, /(^|\s)(-A|\.|events\S*)(\s|$)/, `${f}: ${m[0]}`);
-  }
+  // Every workflow that commits to data is checked above (a new one is covered by the glob).
+  assert.ok(committers.length >= 9, `committers: ${committers.join(', ')}`);
 });

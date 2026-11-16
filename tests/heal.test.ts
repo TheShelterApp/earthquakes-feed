@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { featureToNode } from '../src/bitemporal.js';
-import { HEAL_EPOCH, HOT_WINDOW_DAYS } from '../src/config.js';
+import { HEAL_EPOCH, HOT_WINDOW_DAYS, dataPaths } from '../src/config.js';
+import { correctedEpoch } from '../src/correction.js';
 import { Resolver } from '../src/dedup.js';
 import { healedEpoch, runFeedSideSteps, writeHealMarker } from '../src/heal.js';
 import { LogBuffer } from '../src/oplog.js';
@@ -167,6 +168,31 @@ test('runFeedSideSteps with the heal due: logs, then writes the marker; the mark
     }
     writeHealMarker(root, { ...res.heal!, epoch: 0 });
     assert.equal(healedEpoch(root), 0, 'a lower epoch on the branch means a heal is due again');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a damaged heal or correction marker stops the run with an error naming the file; a missing one reads as 0', () => {
+  const root = mkdtempSync(join(tmpdir(), 'efd-marker-'));
+  try {
+    const paths = dataPaths(root);
+    const markers: Array<[string, (r: string) => number, string]> = [
+      [paths.healMarker, healedEpoch, 'knowledge/index/heal.json'],
+      [paths.correctionMarker, correctedEpoch, 'knowledge/index/correction.json'],
+    ];
+    for (const [f, read, rel] of markers) {
+      assert.equal(read(root), 0, `${rel}: never run`);
+      mkdirSync(dirname(f), { recursive: true });
+      // A torn write, a string epoch, a null body and a fractional epoch are all damaged: reading any of them as 0
+      // would run the one-time step again over data that already had it.
+      for (const body of ['{"epoch": 2', '{"epoch":"2"}', 'null', '[]', '{"epoch":1.5}', '{}']) {
+        writeFileSync(f, body);
+        assert.throws(() => read(root), (err: Error) => err.message.startsWith(`${rel} `) && /restore it from git history/.test(err.message), `${rel}: ${body}`);
+      }
+      writeFileSync(f, '{"epoch":3}\n');
+      assert.equal(read(root), 3);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

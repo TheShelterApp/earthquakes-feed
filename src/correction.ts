@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { eventDayKey, readObservations } from './bitemporal.js';
 import { CORRECTION_EPOCH, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS, dataPaths } from './config.js';
@@ -7,6 +7,7 @@ import { Resolver, rowAsReport } from './dedup.js';
 import { rereadFdsnTextRow } from './fdsn.js';
 import type { LogBuffer } from './oplog.js';
 import type { EventNode, Observation, ProviderConfig, ProvenanceRow, RawObs } from './types.js';
+import { readMarkerEpoch } from './util.js';
 
 /** knowledge/index/correction.json — which one-time correction the data branch has had (config CORRECTION_EPOCH).
  *  Written by aggregate in the same commit as the correction's log lines, like heal.json: a run whose push fails
@@ -94,12 +95,9 @@ export const ROWS_LOG_MARGIN_DAYS = 2;
 /** The label of the op:correction lines of the fold passes (LogBuffer.recordFolds). */
 export const CORRECTION_FOLD_LABEL = `correction epoch ${CORRECTION_EPOCH}`;
 
-/** The epoch the data branch has been corrected to; 0 when it never was. */
+/** The epoch the data branch has been corrected to; 0 when it never was. A damaged marker throws (readMarkerEpoch). */
 export function correctedEpoch(root: string): number {
-  const f = dataPaths(root).correctionMarker;
-  if (!existsSync(f)) return 0;
-  const m = JSON.parse(readFileSync(f, 'utf8')) as Partial<CorrectionMarker>;
-  return typeof m.epoch === 'number' ? m.epoch : 0;
+  return readMarkerEpoch(root, dataPaths(root).correctionMarker);
 }
 
 export function writeCorrectionMarker(root: string, marker: CorrectionMarker): void {

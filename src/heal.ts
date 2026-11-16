@@ -1,10 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { HEAL_EPOCH, HEAL_MAX_FOLDS_PER_RUN, dataPaths } from './config.js';
 import { HELD_REASON, type IngestResult, type MergeRecord, type Resolver } from './dedup.js';
 import type { LogBuffer } from './oplog.js';
 import { byIngestOrder } from './quality.js';
 import type { EventNode, RawObs } from './types.js';
+import { readMarkerEpoch } from './util.js';
 
 /** knowledge/index/heal.json — which one-time heal the data branch has had (config HEAL_EPOCH).
  *  Written by aggregate in the same commit as the heal's log lines, so the heal and its marker
@@ -23,12 +24,9 @@ export interface HealMarker {
   survivors: number;
 }
 
-/** The epoch the data branch has been healed to; 0 when it never was. */
+/** The epoch the data branch has been healed to; 0 when it never was. A damaged marker throws (readMarkerEpoch). */
 export function healedEpoch(root: string): number {
-  const f = dataPaths(root).healMarker;
-  if (!existsSync(f)) return 0;
-  const m = JSON.parse(readFileSync(f, 'utf8')) as Partial<HealMarker>;
-  return typeof m.epoch === 'number' ? m.epoch : 0;
+  return readMarkerEpoch(root, dataPaths(root).healMarker);
 }
 
 export function writeHealMarker(root: string, marker: HealMarker): void {

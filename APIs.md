@@ -571,7 +571,11 @@ query and `includedeleted` delete query in that run, with where the sweep stands
 `updatedafter` it asked from), `pages`, `through` (its cursor after the run: the moment the last
 complete sweep was sent, so a sweep that did not complete keeps the previous one and the next run
 asks for the same window again), `epoch` (the catch-up epoch recorded with that cursor) and
-`catch_up: true` on the one-time catch-up run. `sweeps.epoch` is the current catch-up epoch.
+`catch_up: true` on the one-time catch-up run. `sweeps.epoch` is the current catch-up epoch. The cursors live in
+`knowledge/index/sweeps.json`; a torn or unreadable file reads as no cursors with a warning, so that run's sweeps catch
+up again and it writes a valid file. A damaged heal or correction marker (`knowledge/index/heal.json`,
+`correction.json`) stops the run instead, with an error naming the file: reading it as never run would repeat the
+one-time step.
 `comcat_twins_withdrawn` counts the AEC rows a ComCat delete withdrew in that run,
 `twin_withheld` the AEC reports held back beside another source's event, and `absent.aec`
 (`count`, the first 20 `ids`) the live AEC ids younger than 10 days that AEC's file no longer

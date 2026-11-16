@@ -318,7 +318,10 @@ function laneCtx(days: Record<string, string>, get: (url: string) => HttpAnswer,
 const geonetBody = fixture('geonet-history-2026p685142.json');
 
 test('lane: one-event source — ids in code-point order, resumes at the pending offset, stops at the deadline', async () => {
-  assert.deepEqual(idsInPartition([partitionLine('geonet', ['b', 'a']), partitionLine('usgs', ['x']), partitionLine('geonet', ['a', 'c'])].join('\n'), 'geonet'), ['a', 'b', 'c']);
+  assert.deepEqual(idsInPartition([partitionLine('geonet', ['b', 'a']), partitionLine('usgs', ['x']), partitionLine('geonet', ['a', 'c'])].join('\n'), 'geonet'), { ids: ['a', 'b', 'c'], bad: 0 });
+  // One corrupt line of the provider is skipped and counted, not thrown: a throw stopped the lane on that day every run.
+  const torn = partitionLine('geonet', ['d']).slice(0, -3);
+  assert.deepEqual(idsInPartition([partitionLine('geonet', ['b']), torn, partitionLine('geonet', ['a'])].join('\n'), 'geonet'), { ids: ['a', 'b'], bad: 1 });
   const days = { '2026-07-04': [partitionLine('geonet', ['g3', 'g1', 'g2'])].join('\n') };
   const cur: SourceCursor = { ...newSourceCursor(), pending: { day: '2026-07-04', offset: 1 } };
   const ctx = laneCtx(days, () => ({ status: 200, body: geonetBody, retryAfterMs: null }), {});
@@ -337,6 +340,24 @@ test('lane: one-event source — ids in code-point order, resumes at the pending
   assert.equal(cur.pending, undefined);
   assert.equal(res.records.length, 1);
   assert.equal(res.records[0]!.versions.length, 29);
+});
+
+test('lane: a corrupt partition line is skipped with a warning; the day finishes and the lane moves on', async () => {
+  const days = { '2026-07-04': [partitionLine('geonet', ['g1']), partitionLine('geonet', ['g2']).slice(0, -3)].join('\n') };
+  const cur = newSourceCursor();
+  const logged: string[] = [];
+  const log = console.log;
+  console.log = (m: string) => void logged.push(m);
+  let res: Awaited<ReturnType<typeof runLane>>;
+  try {
+    res = await runLane(source('geonet'), cur, laneCtx(days, () => ({ status: 200, body: geonetBody, retryAfterMs: null }), {}));
+  } finally {
+    console.log = log;
+  }
+  assert.equal(res.error, null);
+  assert.equal(res.records.length, 1, 'g1 is collected');
+  assert.deepEqual(cur.done, [['2026-07-01', '2026-07-04']]);
+  assert.deepEqual(logged.filter((m) => m.startsWith('::warning::')), ['::warning::first-solutions geonet: partition 2026-07-04: 1 unreadable line(s) skipped']);
 });
 
 test('lane: a failed request keeps the day pending at that report; a streak of missing answers is dropped and stops', async () => {

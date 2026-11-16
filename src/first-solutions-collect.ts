@@ -160,15 +160,24 @@ export async function fetchPolitely(url: string, src: Pick<HistorySource, 'timeo
   return { kind: 'fail', error: lastError || 'no answer', attempts: RETRY_PAUSES_MS.length + 1 };
 }
 
-/** The native ids of one provider's reports in one event-day partition, deduplicated, in code-point order. */
-export function idsInPartition(text: string, provider: string): string[] {
+/** The native ids of one provider's reports in one event-day partition, deduplicated, in code-point order, and how
+ *  many of the provider's lines were not JSON (`bad`). A bad line is skipped, not thrown: one corrupt line would
+ *  otherwise stop the lane on that day in every run. */
+export function idsInPartition(text: string, provider: string): { ids: string[]; bad: number } {
   const ids = new Set<string>();
+  let bad = 0;
   for (const line of text.split('\n')) {
     if (!line.trim() || !line.includes(`"${provider}"`)) continue;
-    const f = JSON.parse(line) as { properties?: { feed?: { provenance?: Array<{ provider: string; native_id: string }> } } };
-    for (const r of f.properties?.feed?.provenance ?? []) if (r.provider === provider && r.native_id) ids.add(r.native_id);
+    let f: { properties?: { feed?: { provenance?: Array<{ provider: string; native_id: string }> } } } | null;
+    try {
+      f = JSON.parse(line);
+    } catch {
+      bad++;
+      continue;
+    }
+    for (const r of f?.properties?.feed?.provenance ?? []) if (r.provider === provider && r.native_id) ids.add(r.native_id);
   }
-  return [...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return { ids: [...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)), bad };
 }
 
 interface ArchiveEntry {
@@ -408,7 +417,9 @@ export async function runLane(src: HistorySource, cur: SourceCursor, ctx: LaneCo
     }
     let ids: string[];
     try {
-      ids = idsInPartition(await ctx.partitions.dayText(day), src.provider);
+      const read = idsInPartition(await ctx.partitions.dayText(day), src.provider);
+      ids = read.ids;
+      if (read.bad) console.log(`::warning::first-solutions ${src.provider}: partition ${day}: ${read.bad} unreadable line(s) skipped`);
     } catch (err) {
       out.error = `partition ${day}: ${err instanceof Error ? err.message : String(err)}`;
       break;

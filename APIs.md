@@ -1924,7 +1924,8 @@ the deep pilot era's 157,212 ComCat events, 2022-07-01 to 2023-07-06, as its edi
 day and a half, GeoNet's 22,000 about 13 hours, and the day sources (1–10 s per answer, about six months of days a run) six to eight
 hourly runs each; then each run
 takes the newly frozen day (about 400 ComCat requests). Failures: three retries per request (2, 8, 30 s, Retry-After
-honoured); a lane that still fails stops for the run and resumes there; 50 answers in a row without the event stop a
+honoured); a lane that still fails stops for the run and resumes there; a corrupt line of the day partition the lane
+reads its ids from is skipped with a warning, not a stop; 50 answers in a row without the event stop a
 lane (its streak is asked again); a day source's day answered with 204 or 404 is checked against the last day the node
 had content for: content there now means the node is up and the day's reports are recorded as missing at once (USP
 answered 204 for 2026-08-25, whose one report it no longer lists); with no such day yet, or with that day empty too (a

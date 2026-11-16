@@ -442,6 +442,8 @@ export async function stillAnswersRows(
   } catch (e) {
     return { ok: false, error: `could not read ${newerRaw.asset} to check it (${e instanceof Error ? e.message : String(e)})`, requests: 0 };
   }
+  // The caller asks only for a raw the index counts rows in; an asset that disagrees has no row to probe around.
+  if (!rows.length) return { ok: false, error: `${newerRaw.asset} holds no rows to check against`, requests: 0 };
   const picks = [...new Set([0, Math.floor((rows.length - 1) / 2), rows.length - 1])].slice(0, PROBE_ROWS).map((i) => rows[i]!);
   let requests = 0;
   for (const r of picks) {
@@ -492,7 +494,7 @@ export async function fetchUnits(ctx: Ctx, maxUnits: number, onMonthComplete?: (
     const host = new URL(p.base).host;
     const pace = paces.get(host) ?? paces.set(host, { lastEndMs: -Infinity }).get(host)!;
     const fetchOptions = (minMagnitude: number | null): FetchRangeOptions => ({
-      limit: ctx.cfg.pageLimits[u.source] ?? FETCH_LIMIT_DEFAULT,
+      limit: ctx.cfg.pageLimits?.[u.source] ?? FETCH_LIMIT_DEFAULT,
       minMagnitude,
       spacingMs: ctx.cfg.requestSpacingMs,
       timeoutMs: Math.max(ctx.cfg.timeoutMs, p.timeoutMs ?? 0),

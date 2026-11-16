@@ -1771,7 +1771,9 @@ frozen days not archived yet (late ComCat):
   exactly the rows the source answered) in the Release `remediation-YYYY`. Editions built since 2026-11-08 carry
   `review_status` on their lines where the event's rows give one; the editions of 2026-10-04 do not and keep their
   bytes. All assets are immutable; a later remediation of the same day is the next edition, built from the archive
-  and every raw asset of the day. Each upload is read back and its checksum compared;
+  and every raw asset of the day. Each upload is read back and its checksum compared; a day whose upload or read
+  throws is a failed day (the run goes on, writes the index with what every other day uploaded, then ends red; after 3
+  such days in a row it starts no further day);
 - an edition replaces ONE archived day while its neighbours stay as archived, so it holds the archived day's events by
   feed id plus the events the remediation minted. An AFAD event re-read across midnight keeps the day its archive gave
   it (its time may then lie up to 3 h into the next day; `stats.off_day`), the AFAD re-read and its folds stay among

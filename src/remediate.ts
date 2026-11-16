@@ -129,6 +129,36 @@ function uploadVerified(store: HistoryStore, tag: string, file: string, sum: str
   rmSync(back, { force: true });
 }
 
+/** Days in a row that throw before a run stops starting new ones (a gh outage would otherwise fail every day left). */
+export const MAX_CONSECUTIVE_DAY_ERRORS = 3;
+
+/**
+ * Runs `run` for each day in order. A day that throws (an upload that reads back wrong, a gh error, an indexed asset
+ * that does not match) goes to `onError` with `<day>: <message>` and the loop moves on, so the index the run writes at the
+ * end keeps every entry the earlier days, and the throwing day up to its throw, pushed: their assets are already on the
+ * Release. After `maxConsecutive` throws in a row no further day starts; those days are returned (asked again next
+ * run). A day that does not throw ends the streak.
+ */
+export async function forEachDayGuarded(
+  days: readonly string[],
+  run: (day: string) => Promise<void>,
+  onError: (day: string, failure: string) => void,
+  maxConsecutive = MAX_CONSECUTIVE_DAY_ERRORS,
+): Promise<string[]> {
+  let streak = 0;
+  for (let i = 0; i < days.length; i++) {
+    const day = days[i]!;
+    try {
+      await run(day);
+      streak = 0;
+    } catch (err) {
+      onError(day, `${day}: ${err instanceof Error ? err.message : String(err)}`);
+      if (++streak >= maxConsecutive) return days.slice(i + 1);
+    }
+  }
+  return [];
+}
+
 /** `bootstrap-2026-07-05` or a comma list; every id must be an active source with a time-range backfill. */
 export function resolveProviders(spec: string, registry: readonly ProviderConfig[]): string[] {
   const ids = spec.split(',').map((x) => x.trim()).filter(Boolean).flatMap((x) => (x === 'bootstrap-2026-07-05' ? [...BOOTSTRAP_2026_07_05] : [x]));
@@ -523,8 +553,18 @@ async function main(): Promise<void> {
   // The archived days of this run and their neighbours, read once (one download per month, read only).
   const ctxAll = new Set(runDays.flatMap((d) => [dayShift(d, -1), d, dayShift(d, 1)]));
   const arch = readArchivedDays(archives, ctxAll);
+  // A day that throws is a failed day, not a lost run: the index still records what every day uploaded, and the run
+  // turns red only after writing it (the workflow commits an index a red run wrote).
+  const threw: string[] = [];
+  const dayThrew = (extra?: (failure: string) => void) => (day: string, failure: string): void => {
+    threw.push(failure);
+    report.failed.push(failure);
+    extra?.(failure);
+    console.log(`::warning::remediate: ${failure}`);
+    report.days.push({ day, edition: null, raws: [], stats: null, failed: [failure] });
+  };
   try {
-    for (const day of runDays) {
+    const unrun = await forEachDayGuarded(runDays, async (day) => {
       const r = await remediateDay(day, byDay.get(day) ?? [], idx, { store, registry, fetchWindow: fetchProviderWindow, archives, arch, work, nowMs, seqMarker: head.seq, spacingMs: SPACING_MS });
       report.failed.push(...r.failed);
       for (const n of r.notFetched) {
@@ -537,6 +577,10 @@ async function main(): Promise<void> {
       }
       for (const m of r.failed) console.log(`::warning::remediate: ${m}`);
       report.days.push({ day, edition: r.edition?.asset ?? null, raws: r.raws.map((x) => x.asset), stats: r.edition?.stats ?? null, failed: r.failed });
+    }, dayThrew());
+    if (unrun.length) {
+      report.pending += unrun.length;
+      console.log(`::warning::remediate: ${MAX_CONSECUTIVE_DAY_ERRORS} days in a row threw; ${unrun.length} day(s) left for the next run`);
     }
 
     // The late-ComCat refresh (SHLTR-150): the frozen, unarchived days of the last 45 (or the dispatched range), oldest
@@ -554,10 +598,10 @@ async function main(): Promise<void> {
         (report.late_usgs.stale.length ? `; edition older than its rewritten partition: ${report.late_usgs.stale.join(', ')}` : ''));
       const partitions = new Map<string, FrozenPartition>();
       const lateArch = readArchivedDays(archives, new Set(lateDays.flatMap((d) => [dayShift(d, -1), dayShift(d, 1)]).filter((d) => archivedDays.has(d))));
-      for (const day of lateDays) {
+      const lateUnrun = await forEachDayGuarded(lateDays, async (day) => {
         if (Date.now() - startedMs > deadlineMs || report.late_usgs.built.length >= lateMax) {
           report.late_usgs.not_reached.push(day);
-          continue;
+          return;
         }
         for (const d of [dayShift(day, -1), day, dayShift(day, 1)]) {
           const oid = blobs.get(d);
@@ -586,6 +630,10 @@ async function main(): Promise<void> {
           if (r.late) console.log(`remediate: ${day} unchanged: ${lateLine(r.late)}`);
         }
         report.days.push({ day, edition: r.edition?.asset ?? null, raws: r.raws.map((x) => x.asset), stats: r.edition?.stats ?? null, failed: r.failed });
+      }, dayThrew((failure) => report.late_usgs.failed.push(failure)));
+      if (lateUnrun.length) {
+        report.late_usgs.not_reached.push(...lateUnrun);
+        console.log(`::warning::remediate: late ComCat: ${MAX_CONSECUTIVE_DAY_ERRORS} days in a row threw; ${lateUnrun.length} day(s) left for the next run`);
       }
       const L = report.late_usgs;
       console.log(`remediate: late ComCat (${lateMode}): ${L.checked.length} day(s) checked, ${L.built.length} edition(s) built, ${L.planned.length} would be built, ${L.unchanged} unchanged, ${L.failed.length} failure(s), ${L.not_reached.length} not reached (next run)`);
@@ -607,6 +655,10 @@ async function main(): Promise<void> {
   if (dry) {
     console.log(`::warning title=remediate dry run::${dry}`);
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `**${dry}**\n`);
+  }
+  if (threw.length) {
+    console.log(`::error title=remediate::${threw.length} day(s) threw (the index keeps what was uploaded): ${threw.join('; ')}`);
+    process.exitCode = 1;
   }
 }
 

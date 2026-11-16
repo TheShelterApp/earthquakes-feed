@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DATA_DIR, EVENT_MAP_HORIZON_DAYS, JSDELIVR_BASE, PUBLIC_DIR, REPO, SCHEMA_VERSION, dataPaths } from './config.js';
 import { loadState, pruneEventMapShards, writeIfChanged } from './bitemporal.js';
@@ -19,7 +19,7 @@ import type { EventNode } from './types.js';
 import { eventDayKey } from './bitemporal.js';
 import { isoFromMs } from './util.js';
 import { enrichStatusV2, updateProviderHealth, type AggregateStatus, type ProviderHealth } from './status-v2.js';
-import { appendChanges } from './changes.js';
+import { appendChanges, mirrorChangeLog } from './changes.js';
 import { FRESHNESS_EXPECTED_INTERVAL_SECONDS, FRESHNESS_STALE_AFTER_SECONDS } from './freshness.js';
 import { pagesHeaders } from './pages-headers.js';
 import { detectSilentChanges, liveWindowDays, nextSilentLog, readSilentLog, silentChangesAgainst, writeLiveIndex, writeSilentLog } from './live-sync.js';
@@ -240,12 +240,9 @@ function main(): void {
   const cursor = existsSync(paths.changesCursor) ? (JSON.parse(readFileSync(paths.changesCursor, 'utf8')) as { seq: number }).seq : 0;
   const changesFile = join(paths.changesDir, `${changesDay}.ndjson`);
   const changed = appendChanges(changesFile, allNodes, cursor);
-  if (changed.appended > 0) {
-    writeIfChanged(paths.changesCursor, JSON.stringify({ seq: changed.cursor, day: changesDay }) + '\n');
-    // Mirror the day's change-log to Pages/R2 for hot tailing (Range from the last byte).
-    mkdirSync(join(publicV1, 'changes'), { recursive: true });
-    writeFileSync(join(publicV1, 'changes', `${changesDay}.ndjson`), readFileSync(changesFile));
-  }
+  if (changed.appended > 0) writeIfChanged(paths.changesCursor, JSON.stringify({ seq: changed.cursor, day: changesDay }) + '\n');
+  // Mirror the day's change-log to Pages/R2 on every run that has one, appended to or not (mirrorChangeLog).
+  mirrorChangeLog(changesFile, publicV1, changesDay);
   console.log(`derive: status v2 + changes appended=${changed.appended} (seq→${changed.cursor})`);
 
   const pruned = pruneEventMapShards(DATA_DIR, nowMs - EVENT_MAP_HORIZON_DAYS * 86_400_000);

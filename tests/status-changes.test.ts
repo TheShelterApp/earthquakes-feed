@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { geohashEncode } from '../src/geohash.js';
-import { appendChanges, nodeToChangeRecord, type ChangeRecord } from '../src/changes.js';
+import { appendChanges, mirrorChangeLog, nodeToChangeRecord, type ChangeRecord } from '../src/changes.js';
 import { enrichStatusV2, updateProviderHealth, type AggregateStatus } from '../src/status-v2.js';
 import type { EventNode, ProvenanceRow } from '../src/types.js';
 
@@ -70,6 +70,25 @@ test('appendChanges is append-only, cursor-driven and idempotent', () => {
     assert.equal(byId.get('a')!.rev, 2);
     assert.equal(byId.get('a')!.seq, 104);
     assert.equal(r2.firstSeq, 101, 'firstSeq of the whole file is preserved');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the change-log mirror is written on a run that appended nothing too (every deploy starts empty)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ch-mirror-'));
+  const file = join(dir, 'data', '2026-09-05.ndjson');
+  const publicV1 = join(dir, 'public', 'v1');
+  try {
+    assert.equal(mirrorChangeLog(file, publicV1, '2026-09-05'), false, 'no change-log of the day yet: no copy');
+    assert.equal(existsSync(join(publicV1, 'changes', '2026-09-05.ndjson')), false);
+    const nodes = [node({ feedId: 'a', lastSeq: 101 })];
+    assert.equal(appendChanges(file, nodes, 100).appended, 1);
+    // A later quiet run: nothing appended, a fresh public/ — the copy is still there, where sign-manifest looks for it
+    // (v1/changes/<day>.ndjson under PUBLIC_DIR), so the v2 manifest's `changes` is not null.
+    assert.equal(appendChanges(file, nodes, 101).appended, 0);
+    assert.equal(mirrorChangeLog(file, publicV1, '2026-09-05'), true);
+    assert.equal(readFileSync(join(dir, 'public', 'v1/changes/2026-09-05.ndjson'), 'utf8'), readFileSync(file, 'utf8'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

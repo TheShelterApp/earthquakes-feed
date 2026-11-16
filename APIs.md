@@ -1386,8 +1386,9 @@ a deliberate one-off, like a heal, not an automatic step.
 
 Two logs record the runs themselves, beside the observation log: the status history (every aggregate run's
 `status.json`, one line per run) and `changes/YYYY-MM-DD.ndjson` (derive's change log of each day; the current day's
-file is also served as `/v1/changes/<day>.ndjson`, compressed like the day partitions on Pages, always whole: a Range
-request gets the full body). The status history is written to `status/history/YYYY-MM-DD.ndjson`,
+file is also served as `/v1/changes/<day>.ndjson` from its first line on, by every deploy whether or not that run
+appended to it (before 2026-11-16 only by a run that did), compressed like the day partitions on Pages, always whole: a
+Range request gets the full body). The status history is written to `status/history/YYYY-MM-DD.ndjson`,
 one file per UTC day of the run's ingest time, since round 17 (2026-10-06); until then it was one file per month,
 `status/history/YYYY-MM.ndjson`, and `status/history/2026-10.ndjson` keeps October's lines from before the switch. Read
 a month's lines in write order: the month file first (where there is one), then the day files by date

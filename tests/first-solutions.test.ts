@@ -25,6 +25,7 @@ import {
   idsInPartition,
   reopenChangedDeepMonths,
   runLane,
+  unfrozenFromEventMap,
 } from '../src/first-solutions-collect.js';
 import {
   LOG_START_DAY,
@@ -674,4 +675,16 @@ test('firstSolutionsLimits: blank budget_minutes is 30 min; a typo, 0 or a fract
   assert.equal(firstSolutionsLimits({ FIRST_SOLUTIONS_MIN_INTERVAL_MS: '500' }).minIntervalMs, 1000, 'raised to 1 s, as before');
   assert.equal(firstSolutionsLimits({ FIRST_SOLUTIONS_MIN_INTERVAL_MS: '2500' }).minIntervalMs, 2500);
   assert.throws(() => firstSolutionsLimits({ FIRST_SOLUTIONS_MIN_INTERVAL_MS: 'x' }), /FIRST_SOLUTIONS_MIN_INTERVAL_MS/, 'garbage no longer turns pacing off');
+});
+
+// Storage phase 3: the event map is never read as empty. A data checkout without one (no day files, no generation)
+// fails the lane on the first day it asks for; that day is never recorded as collected for want of reports.
+test('lane: a missing event map stops the lane on its first unfrozen day instead of finishing the day empty', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'fs-no-map-'));
+  const unfrozen = unfrozenFromEventMap(root, Date.parse('2026-07-10T12:00:00Z'));
+  assert.throws(() => unfrozen.text('2026-07-04'), /refusing to read it as empty/);
+  const cur = newSourceCursor();
+  const res = await runLane(source('geonet'), cur, laneCtx({}, () => ({ status: 200, body: geonetBody, retryAfterMs: null }), { partitions: { dayText: async (d) => unfrozen.text(d) } }));
+  assert.match(res.error ?? '', /^partition 2026-07-04: event map: .*refusing to read it as empty/);
+  assert.deepEqual([res.daysDone, cur.done, res.requests], [[], [], 0]);
 });

@@ -381,3 +381,13 @@ test('the steps: markers for the health workflow; the store off, a mismatch or a
     rmSync(markers, { recursive: true, force: true });
   }
 });
+
+test('the data-branch bootstrap and reset scripts write the canonical empty generation, and no legacy event_map.ndjson', () => {
+  for (const f of ['scripts/bootstrap-data-branch.sh', 'scripts/reset-data-branch.sh']) {
+    const text = readFileSync(new URL(`../${f}`, import.meta.url), 'utf8');
+    const line = text.split('\n').find((l) => l.endsWith('> knowledge/index/generation.json'))!;
+    const printed = /^printf '(.*)' > knowledge\/index\/generation\.json$/.exec(line)![1]!.replace(/\\n/g, '\n');
+    assert.equal(printed, serializeGeneration(emptyGeneration()), f);
+    assert.doesNotMatch(text, /event_map\.ndjson/, f);
+  }
+});

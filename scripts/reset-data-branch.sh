@@ -36,7 +36,9 @@ EOF
 mkdir -p knowledge/observations knowledge/snapshots knowledge/index events status/history
 printf '{"seq":0,"ingest_time":""}\n' > knowledge/index/head.json
 printf '{}\n'                          > knowledge/index/watermarks.json
-: > knowledge/index/event_map.ndjson
+# An empty generation (storage phase 3, src/event-map-store.ts serializeGeneration): the explicit "no event-map day yet"
+# that lets the fail-closed readers start (loadEventMap and liveFloor never read a missing event map as empty or today).
+printf '{\n"format": 1,\n"head_seq": 0,\n"parent": null,\n"components": {"event_map": {"layout": "day", "node_schema": 1, "days": {\n}}}\n}\n' > knowledge/index/generation.json
 
 cat > README.md <<'EOF'
 # earthquakes-feed — `data` branch
@@ -45,7 +47,7 @@ Append-only serving branch (the historized feed). **Never force-push this branch
 Written by GitHub Actions (`aggregate` / `derive`). Code lives on `main`.
 
 - `knowledge/observations/…` — the append-only observation log (source of truth)
-- `knowledge/index/…`        — head cursor, event_map, watermarks, backfill cursor
+- `knowledge/index/…`        — head cursor, event_map, watermarks, backfill cursor, generation.json (the event map's state-store blobs)
 - `events/YYYY/MM/DD.ndjson` — event-time day partitions (plain NDJSON)
 - `manifest.json`            — catalog copy (canonical lives on Cloudflare Pages /v1/)
 EOF

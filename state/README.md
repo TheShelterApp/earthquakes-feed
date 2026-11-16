@@ -159,8 +159,8 @@ swap happened but the new seq's reflog slot was already taken: two writers of on
 entry left by a lost ref. The answer stays 200 (the ref did move), the Worker logs an error and counts it in the day's
 `reflog_collisions` (health: `feed:state-budget` member `reflog`, P1), and the client's `putRef` throws
 `ReflogCollision` (kind `integrity`, never retried), so the run fails loudly instead of writing on. At most **5 store
-operations** per PUT whatever happens (GET, HEAD, repair, swap, entry; a refused swap re-GETs instead of writing the
-entry); every ref route answers `x-feed-state-store-ops` and `x-feed-state-ledger-calls` (one reservation, plus a
+operations** per PUT whatever happens (GET, HEAD, repair, swap, entry; a create lists the reflog's tail instead of the
+repair; a refused swap re-GETs instead of writing the entry); every ref route answers `x-feed-state-store-ops` and `x-feed-state-ledger-calls` (one reservation, plus a
 refund on a 412 or 409, or the collision count), which the rehearsal checks. Cost reserved (the worst case): 3 Class A, 3 Class B (GET, HEAD,
 and the re-GET of a swap refused at the store), three bodies written; the stored
 estimate gains the entry (and the ref object on a create), which a 412 or 409 gives back.

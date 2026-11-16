@@ -1728,7 +1728,7 @@ Three kinds of days are incomplete for some sources although they are frozen:
   2025-04-01 and 2025-05-24. All but KAGSR 2025-07-30 got their editions on 2026-10-04 (dispatches named their days;
   the scheduled run then took the refill queue only). KAGSR 2025-07-30, measured read only on 2026-11-14: KAGSR's
   answer for the whole day holds 676 events (and one for 2025-07-29 .. 08-01, 1,004: KAGSR applies no 500-row cap; the
-  backfill's custom-source rule, an answer of 490 rows or more is an overflow, marked the day), the 24 hour windows of
+  backfill's custom-source rule, an answer of 490 rows or more in the window is an overflow, marked the day), the 24 hour windows of
   the day sum to the same 676 ids, and the archived day (`archive-2025-07`, `events-2025-07.e3.tar.zst`) holds 578 of
   them: 98 KAGSR events of the day are missing (60 with ids above the newest one archived: KAGSR added them after the
   backfill fetched the day in July 2026). Since SHLTR-151 such a day is a block on backfill's marker

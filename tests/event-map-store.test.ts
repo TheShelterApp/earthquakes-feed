@@ -15,6 +15,7 @@ import {
   assertEventMapNotStaged,
   emptyGeneration,
   ensureIgnoreLines,
+  eventMapFiles,
   eventMapInGit,
   eventMapStagingProblems,
   hydrate,
@@ -22,6 +23,7 @@ import {
   parseGeneration,
   persist,
   pruneGeneration,
+  readCanonicalDay,
   readGeneration,
   serializeGeneration,
   untrackEventMap,
@@ -63,6 +65,15 @@ function node(feedId: string, iso: string, lastSeq = 1): EventNode {
 }
 
 const mapOf = (...ns: EventNode[]): Map<string, EventNode> => new Map(ns.map((n) => [n.feedId, n]));
+
+// The checkouts below are in phase 3a's layout (saveEventMap's default while git tracks the event map: hour shards),
+// so every store path is exercised across layouts: a day's store bytes are canonicalDay of its files.
+/** The canonical NDJSON of `day` from the checkout's files of it, whatever their layout. */
+const dayText = (r: string, day: string): string => readCanonicalDay(r, eventMapFiles(r).get(day) ?? []).text;
+/** Remove every file of `day` from the checkout. */
+const rmDay = (r: string, day: string): void => {
+  for (const f of eventMapFiles(r).get(day) ?? []) rmSync(join(dataPaths(r).eventMapDir, f));
+};
 
 function dataRoot(seq = 10): string {
   const r = mkdtempSync(join(tmpdir(), 'efd-em-store-'));
@@ -140,7 +151,8 @@ test('persist: every day uploaded once as gzip, the generation names the blobs; 
     assert.deepEqual([first.written, first.days, first.uploaded, first.headSeq], [true, 2, ['2026-11-14', '2026-11-15'], 10]);
     const g1 = readGeneration(r)!;
     assert.equal(g1.generation.parent, null);
-    const day = readFileSync(join(dataPaths(r).eventMapDir, '2026-11-15.ndjson'));
+    assert.deepEqual(eventMapFiles(r).get('2026-11-15'), ['2026-11-15-02.ndjson', '2026-11-15-03.ndjson'], 'phase 3a: hour shards on disk');
+    const day = Buffer.from(dayText(r, '2026-11-15'));
     const e = g1.generation.days['2026-11-15']!;
     assert.deepEqual([e.sha256, e.bytes, e.nodes], [sha256Hex(day), day.length, 2]);
     // Nothing changed: no PUT, no rewrite (the aggregate commit then carries no generation change).
@@ -174,7 +186,7 @@ test('persist never infers a removal from a missing file: a lost day throws; a d
     const be = new FsBackend(dir);
     await persist(r, be, { cutoffDay: CUTOFF });
     const before = readFileSync(dataPaths(r).generation, 'utf8');
-    rmSync(join(dataPaths(r).eventMapDir, '2026-11-14.ndjson'));
+    rmDay(r, '2026-11-14');
     await assert.rejects(persist(r, be, { cutoffDay: CUTOFF }), (e: unknown) => e instanceof PersistRefused && /lacks \(2026-11-14\)/.test(e.message));
     assert.equal(readFileSync(dataPaths(r).generation, 'utf8'), before, 'nothing written');
     // Below the horizon (derive pruned it): it leaves the generation.
@@ -248,7 +260,7 @@ test('shadow hydrate: verified blobs compared with the checkout; mismatches repo
     assert.match(diff.mismatches[0]!, /^2026-11-14: the store's day .* differs from the checkout's/);
     assert.equal(diff.mismatches[1], '2026-11-16: in the checkout, not in the generation');
     assert.deepEqual(readdirSync(dataPaths(r).eventMapDir).sort(), files);
-    assert.match(readFileSync(join(dataPaths(r).eventMapDir, '2026-11-14.ndjson'), 'utf8'), /checkout only/);
+    assert.match(dayText(r, '2026-11-14'), /checkout only/);
     // A generation ahead of its commit's head is refused.
     setSeq(r, 3);
     await assert.rejects(hydrate(r, be, { mode: 'shadow' }), /ahead of its commit/);
@@ -266,7 +278,7 @@ test('hydrate fails closed on a missing or corrupt blob; another gzip of the sam
     await persist(r, be, { cutoffDay: CUTOFF });
     const g = readGeneration(r)!.generation;
     // Another zlib (a Node upgrade) gzips the same day differently: a different blob, the same NDJSON entry.
-    const text = readFileSync(join(dataPaths(r).eventMapDir, '2026-11-15.ndjson'));
+    const text = Buffer.from(dayText(r, '2026-11-15'));
     const other = gzipSync(text, { level: 1 });
     assert.notEqual(sha256Hex(other), g.days['2026-11-15']!.blob);
     await be.put(sha256Hex(other), other);
@@ -292,15 +304,16 @@ test('authoritative hydrate (phase 3b): exactly the generation\'s days, the sent
   try {
     const be = new FsBackend(dir);
     await persist(r, be, { cutoffDay: CUTOFF });
-    const want = Object.fromEntries(readdirSync(dataPaths(r).eventMapDir).map((f) => [f, readFileSync(join(dataPaths(r).eventMapDir, f), 'utf8')]));
+    // The store's layout: one day file per day, each the canonical bytes of the day's hour shards.
+    const want = Object.fromEntries([...eventMapFiles(r).keys()].map((d) => [`${d}.ndjson`, dayText(r, d)]));
     // A checkout that lost a day and holds a stray one (a rebase, an old code's run): replaced wholesale.
     const emDir = dataPaths(r).eventMapDir;
-    rmSync(join(emDir, '2026-11-14.ndjson'));
+    rmDay(r, '2026-11-14');
     writeFileSync(join(emDir, '2026-11-13-05.ndjson'), JSON.stringify(node('efd_z', '2026-11-13T05:00:00Z')) + '\n');
     writeFileSync(join(emDir, SENTINEL_FILE), 'phase 3b sentinel: not JSON\n');
     const rep = await hydrate(r, be, { mode: 'authoritative' });
     assert.deepEqual(rep.written, ['2026-11-14', '2026-11-15']);
-    assert.deepEqual(rep.fetched, ['2026-11-14'], 'a day already identical on disk is not fetched');
+    assert.deepEqual(rep.fetched, ['2026-11-14'], 'a day already identical on disk (here in hour shards) is not fetched');
     assert.deepEqual(readdirSync(emDir).sort(), [SENTINEL_FILE, ...Object.keys(want)].sort());
     for (const [f, text] of Object.entries(want)) assert.equal(readFileSync(join(emDir, f), 'utf8'), text, f);
     assert.deepEqual([...loadEventMap(r).keys()], ['efd_a', 'efd_b', 'efd_c']);
@@ -373,7 +386,7 @@ test('the steps: markers for the health workflow; the store off, a mismatch or a
     assert.equal(await main(['persist'], env({ FEED_STATE_BACKEND: 'bogus' })), 0);
     assert.equal(marker('persist').error_kind, 'config');
     // A lost day is a refusal the run shows (exit 1; the step is continue-on-error in phase 3a).
-    rmSync(join(dataPaths(r).eventMapDir, '2026-11-15.ndjson'));
+    rmDay(r, '2026-11-15');
     assert.equal(await main(['persist'], env({ FEED_STATE_BACKEND: `fs:${dir}` })), 1);
     assert.equal(marker('persist').error_kind, 'refused');
     assert.equal(await main(['nonsense'], env({})), 3);
@@ -409,18 +422,19 @@ test('the phase-3b transition (untrack, off while EVENT_MAP_IN_GIT=1): the day f
     git(['add', '-A']);
     git(['commit', '-q', '-m', 'seed']);
     assert.equal(untrackEventMap(r, git, {}), null, 'phase 3a: nothing happens');
-    assert.deepEqual(untrackEventMap(r, git, { EVENT_MAP_IN_GIT: '0' }), ['knowledge/index/event_map/2026-11-14.ndjson', 'knowledge/index/event_map/2026-11-15.ndjson']);
+    // Phase 3a tracked hour shards; the transition untracks whatever is tracked.
+    const tracked = ['knowledge/index/event_map/2026-11-14-01.ndjson', 'knowledge/index/event_map/2026-11-15-02.ndjson', 'knowledge/index/event_map/2026-11-15-03.ndjson'];
+    assert.deepEqual(untrackEventMap(r, git, { EVENT_MAP_IN_GIT: '0' }), tracked);
     assert.equal(readFileSync(join(dataPaths(r).eventMapDir, SENTINEL_FILE), 'utf8'), SENTINEL_TEXT);
     assert.throws(() => JSON.parse(SENTINEL_TEXT), 'code before phase 3a throws on it');
     git(['add', 'knowledge']);
     assert.deepEqual(assertEventMapNotStaged(git, { EVENT_MAP_IN_GIT: '0' }), { checked: true, problems: [] });
     assert.deepEqual(git(['diff', '--cached', '--name-status']).trim().split('\n').sort(), [
       'A\tknowledge/index/event_map/0000-00-00.ndjson',
-      'D\tknowledge/index/event_map/2026-11-14.ndjson',
-      'D\tknowledge/index/event_map/2026-11-15.ndjson',
+      ...tracked.map((p) => `D\t${p}`),
       'M\t.gitignore',
     ]);
-    assert.ok(existsSync(join(dataPaths(r).eventMapDir, '2026-11-15.ndjson')), 'the files stay on disk');
+    assert.ok(existsSync(join(dataPaths(r).eventMapDir, '2026-11-15-02.ndjson')), 'the files stay on disk');
     git(['commit', '-q', '-m', 'phase 3b']);
     assert.deepEqual(untrackEventMap(r, git, { EVENT_MAP_IN_GIT: '0' }), [], 'idempotent');
     assert.equal(git(['status', '--porcelain']), '');

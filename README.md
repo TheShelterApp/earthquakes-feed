@@ -224,12 +224,13 @@ HTML bulletin is read by a custom adapter (hypocentre parameters only).
   gzip assets of the `logs-YYYY-MM` releases ([APIs.md](APIs.md#run-logs)). The `health`
   workflow logs the repository's size and files `feed:repo-size` above 8 GB (5.48 GB on 2026-10-04, 5.64 GB on
   2026-10-06, about 67 MB a day: GitHub keeps about one compressed copy of every large file a commit rewrites, see
-  [APIs.md](APIs.md#repository-size); `scripts/repo-growth/` measures it). `event_map` is one file per
-  event-day (`YYYY-MM-DD.ndjson`; round 17's hour shards are moved back by the first storage-phase-3 run) and pruned to
+  [APIs.md](APIs.md#repository-size); `scripts/repo-growth/` measures it). `event_map` is sharded by UTC
+  hour of each event-day (`YYYY-MM-DD-HH.ndjson`) while git tracks it, one file per event-day once it does not (storage
+  phase 3b; a day's store blob is the same canonical bytes either way) and pruned to
   a 45-day dedup horizon; identity older than that lives in the frozen day partitions. Storage phase 3 moves it out of
   git: its days live as content-addressed blobs in the state store (the `earthquakes-feed-state` Worker in front of one
   R2 bucket, GitHub OIDC, no static secret), named by `knowledge/index/generation.json`, which every aggregate and
-  derive commit carries ([APIs.md](APIs.md#repository-size), phase 3); in phase 3a git still tracks the day files and the
+  derive commit carries ([APIs.md](APIs.md#repository-size), phase 3); in phase 3a git still tracks the hour shards and the
   store is written and shadow-verified. Every source with a time-range query reached the target
   (2023-07-06) in July 2026 except ISC, whose walk is paused; a backfilled row is the
   source's solution when it was fetched, while the log holds each report as first seen

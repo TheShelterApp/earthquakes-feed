@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { saveEventMap } from './bitemporal.js';
 import { dataPaths } from './config.js';
-import { hydrate, persist, readGeneration } from './event-map-store.js';
+import { dayFileName, eventMapFiles, hydrate, persist, readCanonicalDay, readGeneration } from './event-map-store.js';
 import { collect, gcCounts, GC_MIN_AGE_DAYS } from './state-gc.js';
 import { backupMembers, compressBackup, decompressBackup, readTar, verifyBackup, writeTar } from './state-backup.js';
 import { backendFromEnv, budgetLine, casKey, getBlobs, type StateBackend } from './state-store.js';
@@ -95,12 +95,15 @@ export async function rehearse(backend: StateBackend, opts: { nowMs?: number; lo
     writeFileSync(dataPaths(b).generation, readFileSync(dataPaths(a).generation));
     writeFileSync(dataPaths(b).head, readFileSync(dataPaths(a).head));
     const h2 = await hydrate(b, backend, { mode: 'authoritative', env: {} });
-    const dirA = dataPaths(a).eventMapDir;
+    // The first root holds phase 3a's layout (saveEventMap's hour shards while git tracks the map), the second the
+    // store's (one file per day): each day of the second is byte for byte canonicalDay of the first's files of it.
     const dirB = dataPaths(b).eventMapDir;
-    for (const f of readdirSync(dirA)) {
-      if (!readFileSync(join(dirA, f)).equals(readFileSync(join(dirB, f)))) throw new Error(`authoritative hydrate: ${f} differs`);
+    const filesA = eventMapFiles(a);
+    if (readdirSync(dirB).length !== filesA.size) throw new Error(`authoritative hydrate: ${readdirSync(dirB).length} file(s), the first root has ${filesA.size} day(s)`);
+    for (const [day, names] of filesA) {
+      if (readCanonicalDay(a, names).text !== readFileSync(join(dirB, dayFileName(day)), 'utf8')) throw new Error(`authoritative hydrate: ${day} differs`);
     }
-    step(`authoritative hydrate into a second root: ${h2.written.length} day file(s), byte for byte the first root's`);
+    step(`authoritative hydrate into a second root: ${h2.written.length} day file(s), byte for byte the first root's days`);
     // The restore path (scripts/state-restore.ts) on the same synthetic state: the daily backup archive of the
     // generation, built, verified, and its blobs PUT again (the same keys: a restore into a store that kept them).
     const genText = readFileSync(dataPaths(a).generation, 'utf8');

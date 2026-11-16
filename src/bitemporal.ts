@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { EXTRA_CANON_KEYS, NULLABLE_STD_KEYS, mergeCanonical } from './canonical.js';
 import { reviewStatusOfNode, reviewStatusOfRow } from './review-status.js';
 import { GRID_CELL_DEG, SCHEMA_VERSION, dataPaths } from './config.js';
-import { dayFileName, eventMapFiles, readGeneration } from './event-map-store.js';
+import { dayFileName, eventMapFiles, eventMapShardHours, readGeneration } from './event-map-store.js';
 import { gridKey } from './geo.js';
 import type { EventNode, Extra, Head, Observation, ProvenanceRow, State, Watermarks } from './types.js';
 import { isoFromMs, round6 } from './util.js';
@@ -25,12 +25,24 @@ export function writeIfChanged(file: string, data: string): boolean {
 
 export const eventDayKey = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
-// --- event_map: one file per UTC event-day (fixes C1: no unbounded single file); its blobs in the state store from phase 3 ---
+// --- event_map: sharded by UTC event-day (fixes C1: no unbounded single file); its blobs in the state store from phase 3 ---
 
-/** The day file of `day` (`YYYY-MM-DD.ndjson`): the only layout saveEventMap writes since storage phase 3. The round-17
- *  hour shards (`YYYY-MM-DD-HH.ndjson`) are still read, merged into their day by name order (src/event-map-store.ts
- *  canonicalDay), and moved to day files by the first phase-3a aggregate run (moveToDayLayout). */
+/** The day file of `day` (`YYYY-MM-DD.ndjson`). */
 export const eventMapDayFile = dayFileName;
+
+/**
+ * The event-map file of a node of `day` at `eventTimeMs`: with `hours` 24 the day file, otherwise the shard of
+ * `hours` hours from HH (`YYYY-MM-DD-HH.ndjson`, round 17). saveEventMap writes hour shards (1) while git tracks the
+ * event map (phase 3a): an aggregate commit then rewrites ~70 KB shards instead of ~1.7 MB day files, which git keeps
+ * for ever. Once the store is authoritative and git no longer holds the files (phase 3b), it writes day files
+ * (src/event-map-store.ts eventMapShardHours). Either layout reads alike everywhere, and a day's store bytes are
+ * canonicalDay of its files, whatever their layout.
+ */
+export function eventMapShardName(day: string, eventTimeMs: number, hours: number): string {
+  if (hours >= 24) return eventMapDayFile(day);
+  const h = new Date(eventTimeMs).getUTCHours();
+  return `${day}-${String(h - (h % hours)).padStart(2, '0')}.ndjson`;
+}
 
 /** Load the event_map, optionally limited to the last `sinceDays` of event-days.
  *  Reads the day files (and any round-17 hour shards); falls back to the legacy monolithic file (migration). A feed id
@@ -106,16 +118,18 @@ export function loadEventMap(
   return map;
 }
 
-/** Persist the in-memory event_map as one file per event-day (byte-compare writes, lines in feed-id order). Only days
- *  present in `map` are (re)written, and each of those loses its other files (round-17 hour shards); other days'
- *  files are left untouched. With `opts.floorDay` (the first event-day the run loaded), a day below it is not
- *  rewritten from `map`: its nodes there are merged into its files on disk, upserted by feed id. Retires the legacy
- *  monolithic file once day files exist.
+/** Persist the in-memory event_map as shards of `opts.hours` hours of each event-day (default eventMapShardHours():
+ *  1 while git tracks the event map, 24, one file per day, from phase 3b; byte-compare writes, lines in feed-id order).
+ *  Only days present in `map` are (re)written, and each of those loses the files it no longer fills (an hour every node
+ *  left, or the other layout's files); other days' files are left untouched. With `opts.floorDay` (the first event-day
+ *  the run loaded), a day below it is not rewritten from `map`: its nodes there are merged into its files on disk,
+ *  upserted by feed id. Retires the legacy monolithic file once shards exist.
  *
- *  Storage phase 3: one file per day again (the round-17 hour shards cut what each commit rewrote in git; the store's
- *  blobs are per day, and from phase 3b git no longer holds the files at all). A day file is canonicalDay's bytes of
- *  the day, so its sha256 is the generation's entry after a hydrate. */
-export function saveEventMap(root: string, map: Map<string, EventNode>, opts: { floorDay?: string } = {}): void {
+ *  Whatever the layout, canonicalDay of a day's files is the day file's bytes, so the day's sha256 is the generation's
+ *  entry (src/event-map-store.ts). */
+export function saveEventMap(root: string, map: Map<string, EventNode>, opts: { floorDay?: string; hours?: number } = {}): void {
+  const hours = opts.hours ?? eventMapShardHours();
+  if (!Number.isInteger(hours) || hours < 1 || hours > 24 || 24 % hours !== 0) throw new Error(`event map shard hours ${hours}: a divisor of 24`);
   const p = dataPaths(root);
   const byDay = new Map<string, EventNode[]>();
   for (const node of map.values()) {
@@ -152,9 +166,13 @@ export function saveEventMap(root: string, map: Map<string, EventNode>, opts: { 
   }
   for (const [day, nodes] of byDay) {
     nodes.sort((a, b) => (a.feedId < b.feedId ? -1 : 1));
-    const name = eventMapDayFile(day);
-    writeIfChanged(join(p.eventMapDir, name), nodes.map((n) => JSON.stringify(n)).join('\n') + '\n');
-    for (const f of existing.get(day) ?? []) if (f !== name) rmSync(join(p.eventMapDir, f));
+    const files = new Map<string, string[]>();
+    for (const n of nodes) {
+      const f = eventMapShardName(day, n.eventTimeMs, hours);
+      (files.get(f) ?? files.set(f, []).get(f)!).push(JSON.stringify(n));
+    }
+    for (const [f, lines] of files) writeIfChanged(join(p.eventMapDir, f), lines.join('\n') + '\n');
+    for (const f of existing.get(day) ?? []) if (!files.has(f)) rmSync(join(p.eventMapDir, f));
   }
   if (existsSync(p.eventMapLegacy)) rmSync(p.eventMapLegacy);
 }

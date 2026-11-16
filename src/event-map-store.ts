@@ -31,10 +31,13 @@ import { StateStoreError, backendFromEnv, getBlobs, isSha256Hex, sha256Hex, type
  *   (`authoritative`, behind EVENT_MAP_STORE_AUTHORITATIVE): the directory is replaced by exactly the generation's days
  *   and any failure throws.
  *
- * The layout is one file per day since phase 3 (the round-17 hour shards and EVENT_MAP_SHARD_HOURS are gone): a day's
- * store bytes are canonicalDay of its files, byte for byte what saveEventMap writes, so a hydrated day hashes to its
- * entry. The first phase-3a aggregate run moves every day to a day file and removes every hour shard
- * (moveToDayLayout), so git sees the move in one commit.
+ * The layout on disk follows git (eventMapShardHours): while git tracks the event map (phase 3a) saveEventMap keeps
+ * writing round 17's hour shards, so each 5-minute commit still adds ~70 KB shards to the repository's history instead
+ * of ~1.7 MB day files (APIs.md "Repository size": day files would add about 7–22 MB a day for as long as the soak
+ * lasts, for ever); once git no longer holds the files (phase 3b) it writes one file per day. The knob
+ * EVENT_MAP_SHARD_HOURS is gone. A day's store bytes are canonicalDay of its files, whatever their layout: byte for
+ * byte the day file, so a hydrated day (always a day file) hashes to its entry. moveToDayLayout (aggregate, phase 3b
+ * only) moves any day still in shards to its day file.
  *
  * Absence never reads as empty or as today any more: loadEventMap throws when the generation lists a day the checkout
  * lacks, or when there is neither a map nor a generation (EVENT_MAP_BOOTSTRAP=1 starts an empty one); liveFloor (the
@@ -72,6 +75,15 @@ export function eventMapInGit(env: NodeJS.ProcessEnv = process.env): boolean {
   if (raw === '') return !EVENT_MAP_STORE_AUTHORITATIVE;
   if (raw !== '0' && raw !== '1') throw new Error(`EVENT_MAP_IN_GIT=${raw.slice(0, 20)}: 0 or 1`);
   return raw === '1';
+}
+
+/**
+ * The hours of event time one event-map file holds (src/bitemporal.ts saveEventMap): 1 (round 17's hour shards) while
+ * git tracks the event map, since git keeps every rewritten file for ever; 24 (one file per day, the store's blob
+ * layout) once it does not (phase 3b).
+ */
+export function eventMapShardHours(env: NodeJS.ProcessEnv = process.env): number {
+  return eventMapInGit(env) ? 1 : 24;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -251,9 +263,10 @@ export function readCanonicalDay(root: string, names: readonly string[]): Canoni
 }
 
 /**
- * The layout move: every day held in any other file than its day file (round-17 hour shards, or a mix after an old
- * code's run) is written as its canonical day file, and its other files removed. The first phase-3a aggregate run moves
- * all 46 days in its one commit; later runs find nothing to move. Returns the days moved.
+ * The layout move: every day held in any other file than its day file (hour shards, or a mix after an old code's run)
+ * is written as its canonical day file, and its other files removed. Aggregate runs it only once git no longer tracks
+ * the event map (phase 3b: the files never reach git; the authoritative hydrate already writes day files, so it
+ * usually finds nothing). Returns the days moved.
  */
 export function moveToDayLayout(root: string): string[] {
   const dir = dataPaths(root).eventMapDir;

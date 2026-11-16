@@ -5,13 +5,15 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { eventDayKey, loadEventMap, pruneEventMapShards, saveEventMap } from '../src/bitemporal.js';
 import { dataPaths } from '../src/config.js';
-import { SENTINEL_FILE, canonicalDay, emptyGeneration, liveFloor, moveToDayLayout, writeGeneration } from '../src/event-map-store.js';
+import { SENTINEL_FILE, canonicalDay, emptyGeneration, eventMapShardHours, liveFloor, moveToDayLayout, writeGeneration } from '../src/event-map-store.js';
 import type { EventNode } from '../src/types.js';
 
-// The event map's files. Round 17 (LANE G) wrote shards of one UTC hour of each event-day (`YYYY-MM-DD-HH.ndjson`);
-// storage phase 3 writes one file per event-day again (`YYYY-MM-DD.ndjson`, the store keeps one blob per day) and the
-// first phase-3a aggregate run moves every hour-sharded day to its day file. Every reader still takes the event-day
-// from the first 10 characters of a name and reads both layouts alike; absence never reads as an empty map.
+// The event map's files. Round 17 (LANE G) wrote shards of one UTC hour of each event-day (`YYYY-MM-DD-HH.ndjson`),
+// and saveEventMap keeps writing them while git tracks the event map (storage phase 3a: git keeps every rewritten file
+// for ever, and a shard is ~70 KB where a day is ~1.7 MB). Once git no longer holds the files (phase 3b) it writes one
+// file per event-day (`YYYY-MM-DD.ndjson`, the store's blob layout), and moveToDayLayout moves any day left in shards.
+// Every reader takes the event-day from the first 10 characters of a name and reads both layouts alike; a day's store
+// bytes are canonicalDay of its files in either; absence never reads as an empty map.
 
 const DAY = '2026-10-05';
 const at = (hhmm: string): number => Date.parse(`${DAY}T${hhmm}:00Z`);
@@ -58,10 +60,34 @@ function writeHourShards(r: string, nodes: EventNode[]): void {
   for (const [f, ns] of byFile) writeFileSync(join(dir, f), ns.sort((a, b) => (a.feedId < b.feedId ? -1 : 1)).map((n) => JSON.stringify(n)).join('\n') + '\n');
 }
 
-test('save: one file per event-day, lines in feed-id order; a later save rewrites only the changed days', () => {
+test('save in phase 3a (git tracks the map): hour shards, the day\'s canonical bytes unchanged; phase 3b: one file per day', () => {
+  assert.equal(eventMapShardHours({}), 1, 'phase 3a: EVENT_MAP_IN_GIT defaults to 1');
+  assert.equal(eventMapShardHours({ EVENT_MAP_IN_GIT: '0' }), 24, 'phase 3b');
+  const shards = root();
+  const days = root();
+  try {
+    const m = mapOf(node('efd_b', at('00:10')), node('efd_a', at('00:50')), node('efd_c', Date.parse('2026-10-06T13:00:00Z')), node('efd_d', at('23:59')));
+    saveEventMap(shards, m);
+    assert.deepEqual(files(shards), [`${DAY}-00.ndjson`, `${DAY}-23.ndjson`, '2026-10-06-13.ndjson']);
+    saveEventMap(days, m, { hours: 24 });
+    assert.deepEqual(files(days), [`${DAY}.ndjson`, '2026-10-06.ndjson']);
+    const dir = (r: string): string => dataPaths(r).eventMapDir;
+    const shardTexts = files(shards).filter((f) => f.startsWith(DAY)).map((f) => readFileSync(join(dir(shards), f), 'utf8'));
+    assert.equal(canonicalDay(shardTexts).text, readFileSync(join(dir(days), `${DAY}.ndjson`), 'utf8'), 'the same store bytes in either layout');
+    // A day saved in the other layout loses its old files.
+    saveEventMap(days, m);
+    assert.deepEqual(files(days), files(shards));
+    assert.throws(() => saveEventMap(days, m, { hours: 5 }), /a divisor of 24/);
+  } finally {
+    rmSync(shards, { recursive: true, force: true });
+    rmSync(days, { recursive: true, force: true });
+  }
+});
+
+test('save: lines in feed-id order; a later save rewrites only the changed days', () => {
   const r = root();
   try {
-    saveEventMap(r, mapOf(node('efd_b', at('00:10')), node('efd_a', at('00:50')), node('efd_c', Date.parse('2026-10-06T13:00:00Z')), node('efd_d', at('23:59'))));
+    saveEventMap(r, mapOf(node('efd_b', at('00:10')), node('efd_a', at('00:50')), node('efd_c', Date.parse('2026-10-06T13:00:00Z')), node('efd_d', at('23:59'))), { hours: 24 });
     assert.deepEqual(files(r), [`${DAY}.ndjson`, '2026-10-06.ndjson']);
     assert.deepEqual(ids(r, `${DAY}.ndjson`), ['efd_a', 'efd_b', 'efd_d']);
     // A read-only file would throw on a write: only 10-06 changes, so only 10-06 may be written.
@@ -70,7 +96,7 @@ test('save: one file per event-day, lines in feed-id order; a later save rewrite
     const m = loadEventMap(r);
     m.get('efd_c')!.place = 'revised';
     m.get('efd_c')!.lastSeq = 2;
-    saveEventMap(r, m);
+    saveEventMap(r, m, { hours: 24 });
     assert.match(readFileSync(join(dir, '2026-10-06.ndjson'), 'utf8'), /"place":"revised"/);
     chmodSync(join(dir, `${DAY}.ndjson`), 0o644);
     // The day file is canonicalDay's bytes of the day: what the store keeps.
@@ -81,7 +107,7 @@ test('save: one file per event-day, lines in feed-id order; a later save rewrite
   }
 });
 
-test('the layout move: a saved day leaves its hour shards; moveToDayLayout writes every other day as its canonical day file', () => {
+test('the layout move (phase 3b): a day saved as a day file leaves its hour shards; moveToDayLayout writes every other day as its canonical day file', () => {
   const r = root();
   try {
     const all = [node('efd_a', at('01:00')), node('efd_b', at('22:00')), node('efd_c', at('22:30')), node('efd_z', Date.parse('2026-10-04T12:00:00Z')), node('efd_y', Date.parse('2026-10-04T02:00:00Z'))];
@@ -92,7 +118,7 @@ test('the layout move: a saved day leaves its hour shards; moveToDayLayout write
     assert.equal(loaded.size, 5);
     loaded.delete('efd_z');
     loaded.delete('efd_y');
-    saveEventMap(r, loaded);
+    saveEventMap(r, loaded, { hours: 24 });
     assert.deepEqual(files(r), ['2026-10-04-02.ndjson', '2026-10-04-12.ndjson', `${DAY}.ndjson`]);
     // Then the move: 10-04 as one file, byte for byte what saveEventMap writes for it.
     assert.deepEqual(moveToDayLayout(r), ['2026-10-04']);
@@ -100,7 +126,7 @@ test('the layout move: a saved day leaves its hour shards; moveToDayLayout write
     const moved = readFileSync(join(dataPaths(r).eventMapDir, '2026-10-04.ndjson'), 'utf8');
     const other = root();
     try {
-      saveEventMap(other, mapOf(...all.filter((n) => eventDayKey(n.eventTimeMs) === '2026-10-04')));
+      saveEventMap(other, mapOf(...all.filter((n) => eventDayKey(n.eventTimeMs) === '2026-10-04')), { hours: 24 });
       assert.equal(moved, readFileSync(join(dataPaths(other).eventMapDir, '2026-10-04.ndjson'), 'utf8'));
     } finally {
       rmSync(other, { recursive: true, force: true });
@@ -162,7 +188,7 @@ test('prune removes every file of a day before the horizon, never the sentinel; 
     assert.equal(files(r).length, 4);
     assert.equal(liveFloor(r), '2026-08-01');
     assert.deepEqual(pruneEventMapShards(r, Date.parse('2026-08-21T00:00:00Z')), ['2026-08-01']);
-    assert.deepEqual(files(r), [SENTINEL_FILE, `${DAY}.ndjson`]);
+    assert.deepEqual(files(r), [SENTINEL_FILE, `${DAY}-03.ndjson`]);
     assert.equal(liveFloor(r), DAY);
     // The sentinel is no day: the loader skips it.
     assert.deepEqual([...loadEventMap(r).keys()], ['efd_c']);
@@ -185,7 +211,7 @@ test('the map iterates in the same order in either layout: day by day, feed ids 
       node('efd_0', Date.parse('2026-10-04T23:00:00Z')),
       node('efd_z', Date.parse('2026-10-06T00:30:00Z')),
     );
-    saveEventMap(day, m);
+    saveEventMap(day, m, { hours: 24 });
     writeHourShards(hours, [...m.values()]);
     assert.deepEqual(files(hours), [`2026-10-04-23.ndjson`, `${DAY}-01.ndjson`, `${DAY}-13.ndjson`, `2026-10-06-00.ndjson`]);
     const order = (r: string): string[] => [...loadEventMap(r).keys()];

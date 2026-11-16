@@ -10,9 +10,8 @@
 #  1. a fresh checkout (`git clean`), then the shadow hydrate (src/event-map-store.ts hydrate: the store's days against
 #     the checkout; nothing to compare before the first persist);
 #  2. the silent-change snapshot (src/live-baseline.ts);
-#  3. the given real aggregate commit's changes over its parent, as aggregate.yml stages them; these still carry
-#     production's round-17 hour shards, so the layout move runs next (`event-map-store.ts layout`, what aggregate.ts does
-#     after its save): the first cycle moves every hour-sharded day to its day file, in one commit;
+#  3. the given real aggregate commit's changes over its parent, as aggregate.yml stages them (production's hour shards:
+#     phase 3a keeps them in git, saveEventMap writes them while git tracks the event map; no layout move);
 #  4. persist (every day whose canonical bytes changed is gzipped into the store; generation.json written), the
 #     phase-3b staging check (off while EVENT_MAP_IN_GIT=1), the commit;
 #  5. with --inject-side-commit: a lockless job's commit (a new file under knowledge/first_solutions/) lands on the
@@ -21,10 +20,10 @@
 #  6. derive (its prune edits the generation locally), validate, stage-data, the derive commit (--fail-derive stops
 #     after the aggregate commit);
 #  7. a closing shadow hydrate that must find the store identical to the checkout, and with --authoritative-check a
-#     phase-3b hydrate of the committed generation into an empty directory that must give the checkout's day files
-#     byte for byte.
+#     phase-3b hydrate of the committed generation into an empty directory whose day files must be, byte for byte,
+#     canonicalDay of the checkout's files of each day.
 # Every marker lands in <out-dir>/<label>/markers. Fails on any mismatch, on a persist that did not succeed, or when a
-# commit stages an event-map hour shard after the move.
+# commit stages an event-map day file (phase 3a keeps the hour shards in git).
 #
 # Start the worktree at a production derive commit (a blobless clone of `data` is enough: git fetches what the cycle
 # reads); consecutive cycles replay consecutive aggregate commits (git log --first-parent origin/data) and reuse the
@@ -61,12 +60,11 @@ PARENT=$(git -C "$W" rev-parse HEAD)
 store hydrate-before "$SNAP_MS" hydrate
 DATA_DIR=$W LIVE_BASELINE_DIR=$SNAP LIVE_BASELINE_PAGES_BASE=${PAGES_BASE:-http://127.0.0.1:9/} tsx "$SNAP_MS" src/live-baseline.ts > "$OUT/snapshot.log" 2>&1 || true
 
-# 3. The aggregate commit's changes, then the layout move.
+# 3. The aggregate commit's changes (hour shards: no layout move in phase 3a).
 git -C "$W" diff --name-status --no-renames "$AGG^" "$AGG" > "$OUT/agg-paths.txt"
 while IFS=$'\t' read -r st path; do
   if [ "$st" = D ]; then git -C "$W" rm -q --ignore-unmatch -- "$path"; rm -f "$W/$path"; else git -C "$W" checkout "$AGG" -- "$path"; fi
 done < "$OUT/agg-paths.txt"
-DATA_DIR=$W tsx "$AGG_MS" src/event-map-store.ts layout | tee "$OUT/layout.log"
 
 # 4. persist, the staging check, the aggregate commit.
 store persist "$AGG_MS" persist
@@ -74,8 +72,8 @@ need_ok persist persist
 # aggregate.yml's own pathspecs (each only when present: a synthetic data branch may lack status/).
 git -C "$W" add -- $(for p in knowledge status status.json .gitignore; do [ -e "$W/$p" ] && echo "$p"; done)
 DATA_DIR=$W tsx "$AGG_MS" src/event-map-store.ts stage
-shards=$(git -C "$W" diff --cached --name-only --diff-filter=AM -- knowledge/index/event_map | grep -E '/[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}\.ndjson$' || true)
-if [ -n "$shards" ]; then echo "FAIL: hour shard(s) staged after the layout move: $shards"; exit 1; fi
+dayfiles=$(git -C "$W" diff --cached --name-only --diff-filter=AM -- knowledge/index/event_map | grep -E '/[0-9]{4}-[0-9]{2}-[0-9]{2}\.ndjson$' || true)
+if [ -n "$dayfiles" ]; then echo "FAIL: day file(s) staged in phase 3a (git keeps the hour shards): $dayfiles"; exit 1; fi
 git -C "$W" commit -q -m "$(git -C "$W" log -1 --format=%s "$AGG") (phase 3a dry run)" || echo "no aggregate changes"
 AGG_DONE=$(git -C "$W" rev-parse HEAD)
 echo "aggregate commit ${AGG_DONE:0:12}: $(git -C "$W" diff-tree -r --no-commit-id --name-only HEAD | wc -l | tr -d ' ') paths ($(git -C "$W" diff-tree -r --no-commit-id --name-only HEAD -- knowledge/index/event_map | wc -l | tr -d ' ') event-map, generation.json $(git -C "$W" diff-tree -r --no-commit-id --name-only HEAD -- knowledge/index/generation.json | wc -l | tr -d ' '))"
@@ -110,8 +108,16 @@ if [ -n "$AUTH" ]; then
   cp "$W/knowledge/index/generation.json" "$W/knowledge/index/head.json" "$R/knowledge/index/"
   DATA_DIR=$R FEED_STATE_MARKER_DIR=$OUT/markers/authoritative tsx $((DERIVE_MS + 6000)) src/event-map-store.ts hydrate --mode authoritative 2>&1 | tee "$OUT/authoritative.log"
   need_ok authoritative hydrate
-  if diff -r "$W/knowledge/index/event_map" "$R/knowledge/index/event_map" > "$OUT/authoritative.diff"; then
-    echo "authoritative hydrate: $(ls "$R/knowledge/index/event_map" | wc -l | tr -d ' ') day file(s), byte for byte the checkout's"
+  # The checkout holds hour shards, the hydrate day files: each day file must be canonicalDay of the day's shards.
+  if (cd "$FEED" && node --import tsx --input-type=module -e '
+    const [w, r] = process.argv.slice(1);
+    const { readFileSync, readdirSync } = await import("node:fs");
+    const { eventMapFiles, readCanonicalDay, dayFileName } = await import("./src/event-map-store.ts");
+    const days = eventMapFiles(w); const dir = r + "/knowledge/index/event_map"; const bad = [];
+    if (readdirSync(dir).length !== days.size) bad.push(`${readdirSync(dir).length} file(s) for ${days.size} day(s)`);
+    for (const [d, names] of days) if (readCanonicalDay(w, names).text !== readFileSync(`${dir}/${dayFileName(d)}`, "utf8")) bad.push(d);
+    if (bad.length) { console.error(bad.join("\n")); process.exit(1); }' "$W" "$R") 2> "$OUT/authoritative.diff"; then
+    echo "authoritative hydrate: $(ls "$R/knowledge/index/event_map" | wc -l | tr -d ' ') day file(s), byte for byte the checkout's days"
   else
     echo "FAIL: the authoritative hydrate differs from the checkout (see $OUT/authoritative.diff)"; exit 1
   fi

@@ -1529,8 +1529,8 @@ Round 17 (LANE G) changes what the commits rewrite, never what consumers read, a
   floor day back and passes that floor to `saveEventMap` (`floorDay`): a day below it that a revision moved a node onto
   (an `updatedafter` sweep reaches further back than the loaded window) is merged with its shards on disk, upserted by
   feed id, never rewritten from the run's nodes alone, which would drop the day's other events (2026-11-15 audit).
-  Storage phase 3 (below) returns to one file per day: the knob `EVENT_MAP_SHARD_HOURS` is gone, its rollback lever with
-  it, and the first phase-3a run moves every hour-sharded day back to its day file.
+  Storage phase 3 (below) keeps the hour shards for as long as git tracks the event map (phase 3a) and writes one file
+  per day once it does not (phase 3b); the knob `EVENT_MAP_SHARD_HOURS` is gone, its rollback lever with it.
 
 Both together replay to 45 MB a day on average over the eight days instead of 63 (23–42 % less a day, 28 % in all); at
 GitHub's 67 MB a day that is about 48 MB. What remains is about three quarters day partitions, which consumers read
@@ -1691,6 +1691,7 @@ in all; GitHub keeps 1.5–2 times a local pack). The budget, per phase, at GitH
 | | MB a day | 10 GB reached |
 |---|---|---|
 | phase 2 (today) | 14–15 | about 0.6 years |
+| phase 3a (the soak: git still tracks the event map, in hour shards) | 14–15, plus the generation document's one-line diffs | about 0.6 years |
 | phase 3 (the event map out of git) | 8–10.7 | about 0.8–1.1 years (2027-09 … 2028-01) |
 | phase 4 (the generation under a ref; about 1 commit a day) | 6.6–8.8 | about 1–1.3 years |
 | phase 4 + phase 5 (the rewrite fixes below) | 1.5–2 | about 4.4–5.8 years |
@@ -1747,11 +1748,15 @@ to the ref.
   `parent` (the sha256 of the previous document). The `parent` line changes on every write, so two writers that both
   rewrote it conflict in git instead of merging line by line. A reader refuses an unknown `format`, `layout` or
   `node_schema`, and any bytes that are not the canonical form.
-- *The layout*: one file per day again, `knowledge/index/event_map/YYYY-MM-DD.ndjson`. A day's store bytes are
-  `canonicalDay` of its files: every node once (a duplicate keeps the higher `lastSeq`, the later file on a tie), the
-  original JSON lines, in feed-id order, a trailing newline. That is byte for byte what `saveEventMap` writes. The
-  first phase-3a aggregate run moves every hour-sharded day to its day file (`moveToDayLayout`), so git sees the move
-  in one commit.
+- *The layout* follows git. While git tracks the event map (phase 3a) `saveEventMap` keeps round 17's hour shards,
+  `knowledge/index/event_map/YYYY-MM-DD-HH.ndjson`: a commit rewrites ~70 KB shards, where day files of ~1.7 MB would
+  add about 7–22 MB a day to the repository for as long as the soak lasts, for ever (round 17's replay: the event map's
+  share 13/20/32 MB a day with day files against 6/7.5/10 with hour shards). Once git no longer holds the files
+  (phase 3b) it writes one file per day, `YYYY-MM-DD.ndjson`, the store's layout (`eventMapShardHours`), and aggregate
+  moves any day left in shards (`moveToDayLayout`); the authoritative hydrate writes day files anyway, so nothing of
+  that reaches git. A day's store bytes are `canonicalDay` of its files, whatever their layout: every node once (a
+  duplicate keeps the higher `lastSeq`, the later file on a tie), the original JSON lines, in feed-id order, a
+  trailing newline, byte for byte the day file `saveEventMap` writes at 24 hours.
 - *aggregate* has three steps for the store:
   - The shadow hydrate (before the silent-change snapshot): every blob the generation names is fetched and checked
     (the gzip's sha256 by the client, the NDJSON's sha256, size and node count) and compared with the checkout's
@@ -1777,22 +1782,22 @@ to the ref.
   health's feed job. Each job-level block restates everything the job needs. The Worker's write list is aggregate (and
   state-rehearsal on staging). derive.yml never writes: its prune is local.
 
-**Phase 3a (this merge): dual write, shadow-verified.** Git still tracks the day files and stays the truth. The two
+**Phase 3a (this merge): dual write, shadow-verified.** Git still tracks the event map (its hour shards) and stays the truth. The two
 aggregate steps are `continue-on-error`: a mismatch or a store error is reported (the step summary, a `::warning::`,
-the markers of the artifact `state-shadow`) and never stops the feed (`feed:state-shadow`, P2). The layout move
-happens in the first run.
+the markers of the artifact `state-shadow`) and never stops the feed (`feed:state-shadow`, P2). The hour shards stay
+in git; the repository grows as in phase 2 (the budget table above) plus the generation document's one-line diffs.
 
 Rehearsed on the event map of `origin/data` 1f12e4461c8 (2026-11-16 05:53 UTC; `git archive` of the directory, a
 directory store):
-- the 1,086 hour shards moved to 46 day files in 1.0 s;
+- the 1,086 hour shards moved to 46 day files in 1.0 s (the phase-3b layout move);
 - the map read from either layout held the same 50,233 nodes in the same order, and `saveEventMap` of the hour-shard
-  map wrote 46 of 46 day files byte for byte as the move;
+  map wrote 46 of 46 day files byte for byte as the move: `canonicalDay` of each day's hour shards is its day file;
 - persist uploaded 46 blobs (12.1 MB) in 1.5 s;
 - the shadow hydrate verified all 46 against the checkout in 0.6 s;
 - an authoritative hydrate into an empty directory gave the 46 files byte for byte.
 
-`scripts/phase3/dryrun.sh` replays whole cycles (shadow hydrate, snapshot, a real aggregate commit's changes, the
-layout move, persist, the staging check, an injected lockless commit and its rebase, derive with its generation
+`scripts/phase3/dryrun.sh` replays whole cycles (shadow hydrate, snapshot, a real aggregate commit's changes, persist,
+the staging check (no day file staged: git keeps the hour shards), an injected lockless commit and its rebase, derive with its generation
 prune, validate, stage-data, a closing shadow hydrate and an authoritative one) on a local worktree of `data` with
 `FEED_STATE_BACKEND=fs:<dir>`.
 
@@ -1865,8 +1870,11 @@ Exit path: the bucket is plain S3 keys; `rclone` it to any S3 store and add an S
     - a persist failure fails the run;
     - `EVENT_MAP_IN_GIT` defaults to 0, and with it the commit step's `stage` makes the transition: the
       `.gitignore` lines `knowledge/index/event_map/*` and `!knowledge/index/event_map/0000-00-00.ndjson`,
-      `git rm --cached` of every day file (they stay on disk), and the tracked sentinel `0000-00-00.ndjson`;
-    - every later commit refuses a staged day file;
+      `git rm --cached` of every tracked event-map file (phase 3a's hour shards; they stay on disk), and the tracked
+      sentinel `0000-00-00.ndjson`;
+    - `saveEventMap` writes one file per day (`eventMapShardHours` is 24 once git no longer tracks the map) and
+      aggregate moves any day left in shards (`moveToDayLayout`): the layout move happens off git;
+    - every later commit refuses a staged event-map file;
     - derive-publish's hydrate after the push restores any day a push retry's rebase removed;
     - first-solutions' collect hydrates before it reads.
   - Remove `continue-on-error` from aggregate's and derive.yml's two state steps.

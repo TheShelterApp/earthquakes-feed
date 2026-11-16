@@ -2403,6 +2403,22 @@ depth, and one of four events mislocated by 185 km. Look again if the network st
 depths and creation times and lists quakes no agency has; then read its terms again (above). `DECLINED` also holds
 `map.geoshake.org`, the same service under the map's host name.
 
+**NIEP / INFP Romania (`eida-sc3.infp.ro`, issue #136), declined 2026-11-16.**
+
+- Where it comes from: not from the FDSN registry. NIEP's data centre entry there lists dataselect, station,
+  availability, wfcatalog and psd on `https://eida-sc3.infp.ro`, and no fdsnws-event. The event service is the curated
+  lead `http://eida-sc3.infp.ro/fdsnws/event/1/query` in src/discover.ts: an unadvertised SeisComP event service on
+  NIEP's EIDA waveform host.
+- Reachability: it answered 1 of 3 monthly probes (2026-11-01, over http, 3 events as text; whether it serves https is
+  unconfirmed) and timed out on 2026-11-16 together with every other infp.ro host.
+- Terms: no licence or terms of use found for the event service.
+- Coverage: NIEP's solutions already reach the feed through EMSC, which carries NIEP as the author: 6 of the 11 Romanian
+  events of 2026-11-01..15 on the `data` branch (the other five: EMSC 4, MCSM 1).
+
+Why not: no event or solution the feed lacks can be shown, the service is unadvertised and not reliably reachable, and
+its licence is unknown. Look again if NIEP registers an fdsnws-event service with stated terms. The curated lead stays
+in src/discover.ts, so removing the `DECLINED` entry brings the monthly probe back.
+
 ## Recipes
 
 ```js

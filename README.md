@@ -187,8 +187,9 @@ new sources are reviewed and enabled by hand, then **auto-backfilled** into hist
 
 Kazakhstan, Kyrgyzstan, Uzbekistan, Tajikistan, Turkmenistan, Belarus, Ukraine, and
 Pakistan have no open real-time earthquake API (KNDC is CTBTO-restricted; others publish
-only delayed waveforms); Iran (IRSC) geo-restricts to domestic IPs, and Romania (INFP) has no
-reachable event service. Those regions are covered via the global catalogs until an
+only delayed waveforms); Iran (IRSC) geo-restricts to domestic IPs, and Romania (INFP/NIEP) has no
+advertised, reliably reachable event service (its solutions arrive through EMSC; APIs.md, *Sources looked at and not
+added*). Those regions are covered via the global catalogs until an
 open, reachable source appears. The Philippines (PHIVOLCS) has no machine API either, but is a source: its public
 HTML bulletin is read by a custom adapter (hypocentre parameters only).
 

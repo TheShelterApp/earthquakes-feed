@@ -158,7 +158,8 @@ swap happened but the new seq's reflog slot was already taken: two writers of on
 entry left by a lost ref, logged as an error and treated by the client as an integrity failure. At most **5 store
 operations** per PUT whatever happens (GET, HEAD, repair, swap, entry; a refused swap re-GETs instead of writing the
 entry); every ref route answers `x-feed-state-store-ops` and `x-feed-state-ledger-calls` (one reservation, plus a
-refund on a 412 or 409), which the rehearsal checks. Cost: 3 Class A, 2 Class B, three bodies written; the stored
+refund on a 412 or 409), which the rehearsal checks. Cost reserved (the worst case): 3 Class A, 3 Class B (GET, HEAD,
+and the re-GET of a swap refused at the store), three bodies written; the stored
 estimate gains the entry (and the ref object on a create), which a 412 or 409 gives back.
 
 **`GET /v1/gen/<lane>?after=<seq>&limit=<1..1000>`** (reflog): one listing page, ascending:
@@ -296,7 +297,7 @@ row per UTC day, rows older than 40 days pruned) and is refused with 429 `{"erro
 | Ceiling (var) | Production | Staging | Counts |
 |---|---|---|---|
 | `CLASS_A_PER_DAY` | 20,000 (≤ 620k a month) | 2,000 | a PUT 1, a GC page 1 (its list), a ref PUT 3, a reflog page 1 |
-| `CLASS_B_PER_DAY` | 200,000 (≤ 6.2M a month) | 20,000 | a batchGet n (a missing blob too), a GC first page 1 per `current`, a ref GET 1, a ref PUT 2 |
+| `CLASS_B_PER_DAY` | 200,000 (≤ 6.2M a month) | 20,000 | a batchGet n (a missing blob too), a GC first page 1 per `current`, a ref GET 1, a ref PUT 3 |
 | `BYTES_WRITTEN_PER_DAY` | 1 GiB | 256 MiB | a PUT's `Content-Length`, a ref PUT three bodies |
 | `STORED_BYTES_MAX` | 6 GiB | 256 MiB | the running stored estimate, checked by every PUT and ref PUT |
 

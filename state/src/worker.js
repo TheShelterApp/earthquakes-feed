@@ -449,9 +449,11 @@ async function handleRefPut(request, env, cfg, route, claims, text, log, nowMs) 
   log.bytes = len;
   if (ref.restore_of) log.restore_of = ref.restore_of.seq;
   // Stored: the new reflog entry, and on a create the ref object too; written: three bodies at most (repair, swap, entry).
+  // The worst case of each class: Class A the repair (a create: the reflog listing), the swap and the entry; Class B
+  // the GET, the HEAD and, when the swap itself refuses, the re-GET for the 412 body (it replaces the entry's PUT).
   const metaBytes = len * (pre.create ? 2 : 1);
   const verdict = await ledger(env, log, (b) =>
-    b.reserve({ nowMs, cost: { classA: 3, classB: 2, bytes: 0, metaBytes, extraWritten: 3 * len - metaBytes }, ceilings: cfg.ceilings, priority: log.priority }),
+    b.reserve({ nowMs, cost: { classA: 3, classB: 3, bytes: 0, metaBytes, extraWritten: 3 * len - metaBytes }, ceilings: cfg.ceilings, priority: log.priority }),
   );
   refusedByBudget(verdict);
   const bucket = countedBucket(env.STATE, log);

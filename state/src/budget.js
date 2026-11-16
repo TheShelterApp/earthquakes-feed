@@ -4,9 +4,10 @@
 // Every authenticated route reserves its worst case here BEFORE it touches the bucket, and is refused (429
 // {"error":"budget"}) when the reservation would cross a ceiling:
 // - Class A (PutObject, ListObjects): a PUT is 1, a GC page is 1 (its list; DeleteObject is free); a ref PUT is 3 (the
-//   reflog repair, the swap, the reflog entry), a reflog page 1 (its list).
+//   reflog repair or, on a create, the reflog listing; the swap; the reflog entry), a reflog page 1 (its list).
 // - Class B (GetObject, HeadObject): a batchGet of n blobs is n (a missing blob still costs its GET), a GC first page
-//   HEADs every `current` blob; a ref GET is 1, a ref PUT 2 (the GET of the current ref, the HEAD of its generation).
+//   HEADs every `current` blob; a ref GET is 1, a ref PUT 3 (the GET of the current ref, the HEAD of its generation, and
+//   the re-GET for the 412 body when the swap itself is refused).
 // - Bytes written: a PUT's Content-Length; a ref PUT three times its body.
 // - Stored bytes: a running estimate of the bucket's size, refusing a PUT that would take it above the ceiling. It is
 //   raised by every PUT (an overwrite of an existing key counts again: the estimate errs high, never low), lowered by

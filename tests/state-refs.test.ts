@@ -291,6 +291,10 @@ for (const refBackend of ['r2', 'do'] as const) {
     }
     const log = await reflogAll(h.client({ workflow: 'state-backup.yml' }), 'main');
     assert.deepEqual(log.map((e) => e.seq), [1, 2, 3, 4, 5, 6]);
+    // The ledger reserved at least what the bucket did, the re-GET of every swap-time 412 included.
+    const b = await h.client({ workflow: 'health.yml' }).budget();
+    assert.ok(b.used.class_b >= h.r2.ops.get + h.r2.ops.head, `class B ${b.used.class_b} < ${h.r2.ops.get + h.r2.ops.head}`);
+    assert.ok(b.used.class_a >= h.r2.ops.put + h.r2.ops.list, `class A ${b.used.class_a} < ${h.r2.ops.put + h.r2.ops.list}`);
   });
 
   test(`state refs (${refBackend}): a create continues the reflog of a lane whose ref is gone (a backend switch, a lost ref)`, async () => {
@@ -637,9 +641,10 @@ test('state budget lanes: through the Worker, health (background) is refused bef
   const h = harness({ env: { CLASS_B_PER_DAY: '10' } });
   const agg = h.client({ workflow: 'aggregate.yml' });
   await agg.putRef('main', refFor('main', null, h.blob('g'), h.writer({ workflow: 'aggregate.yml' }, 'b')), { create: true });
-  // The PUT reserved 2 Class B; 4 reads by health reach 6 (60 %), the next is refused; aggregate goes on to 9 (95 %).
+  // The PUT reserved 3 Class B (its worst case: GET, HEAD, the re-GET of a swap-time 412); 3 reads by health reach 6
+  // (60 %), the next is refused; aggregate goes on to 9 (95 %).
   const health = h.client({ workflow: 'health.yml' });
-  for (let i = 0; i < 4; i++) assert.ok(await health.getRef('main'));
+  for (let i = 0; i < 3; i++) assert.ok(await health.getRef('main'));
   await assert.rejects(health.getRef('main'), (e: unknown) => e instanceof StateStoreError && e.kind === 'budget');
   for (let i = 0; i < 3; i++) assert.ok(await agg.getRef('main'));
   await assert.rejects(agg.getRef('main'), (e: unknown) => e instanceof StateStoreError && e.kind === 'budget');

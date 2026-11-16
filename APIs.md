@@ -1842,7 +1842,13 @@ prune, validate, stage-data, a closing shadow hydrate and an authoritative one) 
   complete. The state of day D is the generation at the last data commit before 00:00 UTC of D, that commit's
   cursors and every blob the generation names. It is one deterministic ustar (sorted members, mtime 0, uid/gid 0)
   compressed with zstd level 19, as the asset `state-D.tar.zst`. The job never uses `--clobber`: an incomplete asset
-  is followed by `.g2`. Every upload is checked against GitHub's sha256 digest, and the job catches up 25 days.
+  is followed by `.g2`. Every upload is checked against GitHub's sha256 digest. The job catches up 25 days, or back
+  to the first day its previous marker had not copied (at most 120 days, GC's window: GC keeps those days for it), so
+  a longer stall loses no daily state. A month it cannot publish (a tag ruleset, say) stays a draft and is retried; it
+  never costs the run its marker. Only a marker of a scheduled or dispatched `state-backup.yml` run on this
+  repository's `main` counts, for GC and for health alike: the repository is public, and a pull request's run (a
+  fork's included) can upload an artifact of any name. A marker that names no day (no generation yet, or the store
+  off) holds GC (nothing deleted) and is aged by its own date in health.
   `feed:state-backup` is P2 past 36 h and P1 past 7 days.
 - `state-rehearsal.yml` (dispatch, any branch, staging only, synthetic data only) runs the client's whole path:
   persist, a shadow and an authoritative hydrate, a restore from a backup archive, a GC dry run and the budget.

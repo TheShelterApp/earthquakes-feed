@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { constants as zlibConstants, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 import { REPO } from './config.js';
 import { parseGeneration, type Generation } from './event-map-store.js';
-import { GENERATION_PATH, githubSources } from './state-gc.js';
+import { GC_MAX_WINDOW_DAYS, GENERATION_PATH, githubSources, readBackupMarkerWithGh, type BackupMarker } from './state-gc.js';
 import { backendFromEnv, casKey, getBlobs, sha256Hex, type StateBackend } from './state-store.js';
 
 /**
@@ -24,9 +24,15 @@ import { backendFromEnv, casKey, getBlobs, sha256Hex, type StateBackend } from '
  * `uploaded`, or no digest) does not count, and the day is uploaded again as `state-D.g2.tar.zst` (`.g3`, …). Every
  * upload is checked against GitHub's sha256 digest of the asset before it counts.
  *
- * Catch-up: every day of the last BACKUP_CATCHUP_DAYS without a complete asset, oldest first; GC keeps the daily
- * generations back to the first day this backup has not copied (its marker, the artifact state-backup), so a stalled
- * backup loses nothing it can still catch up. A day before the first generation (before phase 3a) has nothing to copy.
+ * Catch-up: every day without a complete asset, oldest first, from BACKUP_CATCHUP_DAYS back, or further back to the
+ * first day the previous marker had not copied (its first_missing, else the day after its newest), at most
+ * GC_MAX_WINDOW_DAYS back. GC keeps the daily generations back to that same day (it reads the same marker), so a backup
+ * stalled for longer than BACKUP_CATCHUP_DAYS still copies every day GC kept for it. A previous marker that names no day
+ * (no generation yet, or the store off) widens the walk to GC_MAX_WINDOW_DAYS (GC holds everything then). A day before
+ * the first generation (before phase 3a) has nothing to copy.
+ *
+ * Publishing a finished month is best effort: a refusal (a tag ruleset, say) is reported and retried by the next run,
+ * and never costs the run its marker once every day is copied.
  *
  *   GH_TOKEN=… FEED_STATE_BACKEND=worker npx --no-install tsx src/state-backup.ts
  */
@@ -240,22 +246,41 @@ export interface BackupResult {
   noGeneration: string[];
   failed: { day: string; error: string }[];
   published: string[];
+  /** Finished months whose publication failed (retried by the next run; the marker is still written). */
+  publishFailed: { tag: string; error: string }[];
+  /** The first day this run looked at. */
+  from: string;
   /** The newest day with a complete asset, and the oldest day of the window with a generation but none. */
   newest: string | null;
   firstMissing: string | null;
 }
 
-/** Back up every day of the window [today - BACKUP_CATCHUP_DAYS, today] that has no complete asset yet. */
-export async function runBackup(io: BackupIo, backend: StateBackend, opts: { nowMs: number; workDir: string; log?: (l: string) => void }): Promise<BackupResult> {
+/** The first day a run backs up (module comment): BACKUP_CATCHUP_DAYS back, or the previous marker's first uncopied
+ *  day when that is older, never more than GC_MAX_WINDOW_DAYS back. */
+export function backupFrom(today: string, previous: BackupMarker | null | undefined): string {
+  const usual = addDays(today, -BACKUP_CATCHUP_DAYS);
+  const oldest = addDays(today, -GC_MAX_WINDOW_DAYS);
+  if (!previous) return usual;
+  const first = previous.first_missing ?? (previous.newest ? addDays(previous.newest, 1) : oldest);
+  return first < usual ? (first < oldest ? oldest : first) : usual;
+}
+
+/** Back up every day from backupFrom(today, opts.previous) to today that has no complete asset yet. */
+export async function runBackup(
+  io: BackupIo,
+  backend: StateBackend,
+  opts: { nowMs: number; workDir: string; log?: (l: string) => void; previous?: BackupMarker | null },
+): Promise<BackupResult> {
   const log = opts.log ?? (() => {});
   const today = dayKey(opts.nowMs);
-  const res: BackupResult = { uploaded: [], noGeneration: [], failed: [], published: [], newest: null, firstMissing: null };
+  const from = backupFrom(today, opts.previous);
+  const res: BackupResult = { uploaded: [], noGeneration: [], failed: [], published: [], publishFailed: [], from, newest: null, firstMissing: null };
   const assetsOf = new Map<string, ReleaseAsset[] | null>();
   const assets = (tag: string): ReleaseAsset[] | null => {
     if (!assetsOf.has(tag)) assetsOf.set(tag, io.assets(tag));
     return assetsOf.get(tag)!;
   };
-  for (let day = addDays(today, -BACKUP_CATCHUP_DAYS); day <= today; day = addDays(day, 1)) {
+  for (let day = from; day <= today; day = addDays(day, 1)) {
     const tag = releaseTag(day);
     const held = dayAssets(assets(tag) ?? [], day);
     if (held.complete) {
@@ -303,23 +328,31 @@ export async function runBackup(io: BackupIo, backend: StateBackend, opts: { now
   }
   // Publish each draft month that is over and complete: every day of it has a complete asset or no generation.
   const months = new Set<string>();
-  for (let day = addDays(today, -BACKUP_CATCHUP_DAYS - 31); day < `${today.slice(0, 7)}-01`; day = addDays(day, 1)) months.add(day.slice(0, 7));
+  for (let day = addDays(from, -31); day < `${today.slice(0, 7)}-01`; day = addDays(day, 1)) months.add(day.slice(0, 7));
   for (const month of [...months].sort()) {
     const tag = `state-${month}`;
-    if (io.isDraft(tag) !== true) continue;
-    let complete = true;
-    for (let day = `${month}-01`; day.startsWith(month); day = addDays(day, 1)) {
-      if (dayAssets(assets(tag) ?? [], day).complete) continue;
-      const commit = await io.commitBefore(`${day}T00:00:00Z`);
-      if (commit && (await io.fileAt(commit, GENERATION_PATH))) {
-        complete = false;
-        break;
+    try {
+      if (io.isDraft(tag) !== true) continue;
+      let complete = true;
+      for (let day = `${month}-01`; day.startsWith(month); day = addDays(day, 1)) {
+        if (dayAssets(assets(tag) ?? [], day).complete) continue;
+        const commit = await io.commitBefore(`${day}T00:00:00Z`);
+        if (commit && (await io.fileAt(commit, GENERATION_PATH))) {
+          complete = false;
+          break;
+        }
       }
-    }
-    if (complete) {
-      io.publish(tag);
-      res.published.push(tag);
-      log(`state backup: ${tag} is complete and published`);
+      if (complete) {
+        io.publish(tag);
+        res.published.push(tag);
+        log(`state backup: ${tag} is complete and published`);
+      }
+    } catch (e) {
+      // Every day's asset is already uploaded and verified: a month that cannot be published (yet) stays a draft, the
+      // next run tries again, and the run keeps its marker.
+      const error = e instanceof Error ? e.message : String(e);
+      res.publishFailed.push({ tag, error });
+      log(`::warning title=State backup::${tag} could not be published (it stays a draft; the next run tries again): ${error}`);
     }
   }
   return res;
@@ -346,16 +379,19 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   const work = mkdtempSync(join(tmpdir(), 'state-backup-'));
   try {
     const nowMs = Date.now();
-    const r = await runBackup(githubBackupIo(token), backend, { nowMs, workDir: work, log: (l) => console.log(l) });
+    // The previous marker (of a trusted run only): how far back the copying has to reach (backupFrom).
+    const previous = readBackupMarkerWithGh();
+    const r = await runBackup(githubBackupIo(token), backend, { nowMs, workDir: work, log: (l) => console.log(l), previous });
     const summary =
       `uploaded ${r.uploaded.length} day(s)${r.uploaded.length ? ` (${r.uploaded.join(', ')})` : ''}; newest ${r.newest ?? 'none'}` +
       `${r.noGeneration.length ? `; ${r.noGeneration.length} day(s) before the first generation` : ''}` +
-      `${r.published.length ? `; published ${r.published.join(', ')}` : ''}${r.failed.length ? `; FAILED ${r.failed.map((f) => f.day).join(', ')}` : ''}`;
+      `${r.published.length ? `; published ${r.published.join(', ')}` : ''}${r.publishFailed.length ? `; NOT PUBLISHED ${r.publishFailed.map((f) => f.tag).join(', ')}` : ''}` +
+      `${r.failed.length ? `; FAILED ${r.failed.map((f) => f.day).join(', ')}` : ''}; from ${r.from}`;
     console.log(`state backup: ${summary}`);
     if (env.GITHUB_STEP_SUMMARY) writeFileSync(env.GITHUB_STEP_SUMMARY, `### State backup\n\n${summary}\n`, { flag: 'a' });
     if (env.STATE_BACKUP_MARKER_DIR && !r.failed.length) {
       mkdirSync(env.STATE_BACKUP_MARKER_DIR, { recursive: true });
-      const marker = { ok: true, at: new Date(nowMs).toISOString(), run_id: env.GITHUB_RUN_ID, newest: r.newest, first_missing: r.firstMissing, uploaded: r.uploaded, published: r.published };
+      const marker = { ok: true, at: new Date(nowMs).toISOString(), run_id: env.GITHUB_RUN_ID, newest: r.newest, first_missing: r.firstMissing, uploaded: r.uploaded, published: r.published, publish_failed: r.publishFailed, from: r.from };
       writeFileSync(join(env.STATE_BACKUP_MARKER_DIR, 'state-backup.json'), `${JSON.stringify(marker, null, 2)}\n`);
     }
     return r.failed.length ? 1 : 0;

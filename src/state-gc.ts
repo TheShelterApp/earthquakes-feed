@@ -16,7 +16,10 @@ import { BATCH_MAX, GC_MAX_KEEP, backendFromEnv, type GcPage, type StateBackend 
  * - the generation at the last data commit before each of the last GC_DAILY_DAYS UTC midnights (one restorable state
  *   a day for a month; state-backup.yml copies the same daily generations to Releases, for ever);
  * - every daily generation since the first day state-backup has not yet copied (its marker, the artifact state-backup):
- *   a stalled backup never loses its sources. Without a readable marker nothing is deleted (a dry run).
+ *   a stalled backup never loses its sources. Without a readable marker, or with one that names no backed-up day (no
+ *   generation yet, or the store off at its run), nothing is deleted (a dry run). Only a marker of a scheduled or
+ *   dispatched state-backup.yml run on this repository's main counts (readBackupMarkerWithGh): the repository is public,
+ *   and a pull request's run can upload an artifact of any name.
  *
  * The Worker deletes only blobs older than minAgeDays (GC_MIN_AGE_DAYS: 30 days of intra-day versions stay
  * restorable), at most maxDeletes a listing page, and refuses (409) unless the current generation's blobs are in `keep`
@@ -95,7 +98,9 @@ export async function planKeep(src: GcSources, nowMs: number): Promise<KeepPlan>
   let holdReason: string | null = null;
   let windowFrom = addDays(today, -GC_DAILY_DAYS);
   if (!backup) holdReason = 'no state-backup marker could be read: nothing is deleted until the backup is known';
-  else {
+  else if (!backup.newest && !backup.first_missing) {
+    holdReason = 'the newest state-backup marker names no backed-up day (no generation yet, or the store off at its run): nothing is deleted until a backup has copied one';
+  } else {
     const firstUnbacked = backup.first_missing ?? (backup.newest ? addDays(backup.newest, 1) : null);
     if (firstUnbacked && firstUnbacked < windowFrom) windowFrom = firstUnbacked;
   }
@@ -209,17 +214,58 @@ async function ghGet(path: string, token: string, accept: string, fetchImpl: Fet
   throw new Error(`GitHub ${path}: ${last}`);
 }
 
-/** The newest state-backup marker artifact's JSON (gh run download), or null. */
-export function readBackupMarkerWithGh(repo: string = REPO): BackupMarker | null {
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/**
+ * The run ids behind the non-expired `name` artifacts of an artifacts listing, newest first, of runs on this
+ * repository's `main` only (workflow_run.head_branch main, head_repository_id = repository_id): a fork's pull request
+ * can upload an artifact named state-backup into this public repository's listing.
+ */
+export function mainArtifactRuns(listing: unknown, name: string): number[] {
+  const list = isObj(listing) && Array.isArray(listing.artifacts) ? listing.artifacts : [];
+  return list
+    .filter((a): a is Record<string, unknown> => isObj(a) && a.name === name && a.expired !== true && typeof a.created_at === 'string')
+    .filter((a) => {
+      const wr = a.workflow_run;
+      return isObj(wr) && typeof wr.id === 'number' && wr.head_branch === 'main' && typeof wr.repository_id === 'number' && wr.head_repository_id === wr.repository_id;
+    })
+    .sort((a, b) => Date.parse(String(b.created_at)) - Date.parse(String(a.created_at)))
+    .map((a) => (a.workflow_run as { id: number }).id);
+}
+
+/** Whether a workflow run (GET actions/runs/{id}) is `file` on this repository's main, by schedule or dispatch (a
+ *  pull_request run executes the PR's own workflow files, so its path proves nothing). */
+export function trustedRun(run: unknown, file: string): boolean {
+  if (!isObj(run) || run.head_branch !== 'main' || (run.event !== 'schedule' && run.event !== 'workflow_dispatch')) return false;
+  if (!isObj(run.repository) || !isObj(run.head_repository) || typeof run.repository.id !== 'number' || run.head_repository.id !== run.repository.id) return false;
+  return run.path === `.github/workflows/${file}`;
+}
+
+export interface MarkerGh {
+  /** gh api <path>, parsed. */
+  json(path: string): unknown;
+  /** The marker file of the run's state-backup artifact (gh run download). */
+  download(runId: number): string;
+}
+
+const ghMarker = (repo: string): MarkerGh => ({
+  json: (path) => JSON.parse(execFileSync('gh', ['api', path], { encoding: 'utf8', maxBuffer: 1 << 24 })) as unknown,
+  download: (runId) =>
+    execFileSync('bash', ['-c', `d=$(mktemp -d) && gh run download "$1" -R "$2" -n state-backup -D "$d" >/dev/null && cat "$d/state-backup.json"; s=$?; rm -rf "$d"; exit $s`, '_', String(runId), repo], { encoding: 'utf8' }),
+});
+
+/** The newest state-backup marker of a trusted run (mainArtifactRuns, then trustedRun on the newest few), or null
+ *  when none can be read. */
+export function readBackupMarkerWithGh(repo: string = REPO, io: MarkerGh = ghMarker(repo)): BackupMarker | null {
   try {
-    const id = execFileSync('gh', ['api', `repos/${repo}/actions/artifacts?name=state-backup&per_page=20`, '--jq', '[.artifacts[] | select(.expired | not)] | sort_by(.created_at) | last | .workflow_run.id // empty'], {
-      encoding: 'utf8',
-    }).trim();
-    if (!id) return null;
-    const json = execFileSync('bash', ['-c', `d=$(mktemp -d) && gh run download "$1" -R "$2" -n state-backup -D "$d" >/dev/null && cat "$d/state-backup.json"; s=$?; rm -rf "$d"; exit $s`, '_', id, repo], { encoding: 'utf8' });
-    const m = JSON.parse(json) as Partial<BackupMarker>;
-    const day = (v: unknown): string | null => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
-    return { newest: day(m.newest), first_missing: day(m.first_missing) };
+    const runs = mainArtifactRuns(io.json(`repos/${repo}/actions/artifacts?name=state-backup&per_page=30`), 'state-backup');
+    for (const id of runs.slice(0, 5)) {
+      if (!trustedRun(io.json(`repos/${repo}/actions/runs/${id}`), 'state-backup.yml')) continue;
+      const m = JSON.parse(io.download(id)) as Partial<BackupMarker>;
+      const day = (v: unknown): string | null => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+      return { newest: day(m.newest), first_missing: day(m.first_missing) };
+    }
+    return null;
   } catch {
     return null;
   }

@@ -333,7 +333,7 @@ test('wiring: exactly the state store\'s jobs hold id-token: write, at job level
     ['first-solutions.yml', 'collect', ['contents: write', 'actions: read', 'id-token: write']],
     ['health.yml', 'feed', ['contents: read', 'actions: read', 'id-token: write']],
     ['state-gc.yml', 'gc', ['contents: read', 'actions: read', 'id-token: write']],
-    ['state-backup.yml', 'backup', ['contents: write', 'id-token: write']],
+    ['state-backup.yml', 'backup', ['contents: write', 'actions: read', 'id-token: write']],
     ['state-rehearsal.yml', 'rehearse', ['contents: read', 'id-token: write']],
   ] as const) {
     const block = jobsOf(read(`.github/workflows/${file}`))[job]!;

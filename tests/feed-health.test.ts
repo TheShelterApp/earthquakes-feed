@@ -16,6 +16,7 @@ import {
   evaluateStats,
   evaluateRepoGrowth,
   evaluateStateBackup,
+  trustedRun,
   evaluateStateBudget,
   evaluateStateGc,
   evaluateStateShadow,
@@ -886,9 +887,22 @@ function world(over: Array<[string | RegExp, (url: string, n: number) => Respons
   ]);
 }
 
+const REPO_ID = 1_100_000_001;
+/** A workflow run as GET /repos/…/actions/runs/{id} answers it: a scheduled run of `file` on this repository's main. */
+const trustedRunJson = (id: number, file: string, over: Record<string, unknown> = {}) => ({
+  id,
+  path: `.github/workflows/${file}`,
+  event: 'schedule',
+  head_branch: 'main',
+  repository: { id: REPO_ID },
+  head_repository: { id: REPO_ID },
+  ...over,
+});
+
 /** Healthy state-store markers as GitHub lists and zips them. */
 function stateWorld(o: { shadow?: Record<string, unknown>; gcAgoMs?: number | null; backupNewest?: string | null } = {}): Array<[string | RegExp, (url: string, n: number) => Response]> {
-  const art = (id: number, name: string, agoMs: number) => ({ id, name, created_at: ISO(NOW - agoMs), expired: false, workflow_run: { id: id * 10 } });
+  const art = (id: number, name: string, agoMs: number) => ({ id, name, created_at: ISO(NOW - agoMs), expired: false, workflow_run: { id: id * 10, repository_id: REPO_ID, head_repository_id: REPO_ID, head_branch: 'main' } });
+  const run = (id: number, file: string) => [`${API_REPO}/actions/runs/${id}`, () => json(trustedRunJson(id, file))] as [string, () => Response];
   const zipJson = (files: Record<string, unknown>) => new Response(zipSync(Object.fromEntries(Object.entries(files).map(([k, v]) => [`${k}.json`, strToU8(JSON.stringify(v))]))));
   return [
     [`${API_REPO}/actions/artifacts?name=state-shadow&per_page=10`, () => json({ total_count: 1, artifacts: [art(901, 'state-shadow', 3 * MIN)] })],
@@ -899,6 +913,11 @@ function stateWorld(o: { shadow?: Record<string, unknown>; gcAgoMs?: number | nu
     [`${API_REPO}/actions/artifacts?name=repo-size-samples&per_page=10`, () => json({ artifacts: [art(904, 'repo-size-samples', 2 * HOUR)] })],
     // A week ago the repository was 50 MB smaller: about 7 MB a day, under the 10 MB line.
     [`${API_REPO}/actions/artifacts/904/zip`, () => zipJson({ 'repo-size': { samples: [{ atMs: NOW - 7 * DAY, kb: 6_050_000 }, { atMs: NOW - 2 * HOUR, kb: 6_099_000 }] } })],
+    // The runs behind them: scheduled runs of the expected workflow files on main.
+    run(9010, 'aggregate.yml'),
+    run(9020, 'state-gc.yml'),
+    run(9030, 'state-backup.yml'),
+    run(9040, 'health.yml'),
     [`${OIDC_URL}&audience=earthquakes-feed-state`, () => json({ value: OIDC_TOKEN })],
     ['https://feed-state.theshelter.app/v1/budget', () => json({ day: '2026-10-22', used: { class_a: 120, class_b: 9_000, bytes_written: 4e6, requests: 900, refused: 0 }, stored_bytes: 2e9, stored_seeded_at: null, gc_pass_open: false, ceilings: { class_a: 20_000, class_b: 200_000, bytes_written: 2 ** 30, stored_bytes: 6 * 2 ** 30 } })],
   ];
@@ -1329,7 +1348,43 @@ test('feed:state-shadow: a state step not ok in the newest markers of the last 2
   assert.deepEqual(off.findings, []);
   assert.match(off.notes.join(), /the store off in 2 step\(s\)/);
   assert.deepEqual(evaluateStateShadow({ ok: false, message: 'HTTP 500' }, NOW).unjudged, ['feed:state-shadow']);
-  assert.deepEqual(pickArtifacts({ artifacts: [{ id: 1, name: 'x', created_at: ISO(NOW - HOUR) }, { id: 2, name: 'x', created_at: ISO(NOW) }, { id: 3, name: 'x', created_at: ISO(NOW), expired: true }] }, 'x', 5).map((a) => a.id), [2, 1]);
+  const main = { repository_id: REPO_ID, head_repository_id: REPO_ID, head_branch: 'main' };
+  const a = (id: number, agoMs: number, wr: Record<string, unknown> | null = { id: id * 10, ...main }, extra: Record<string, unknown> = {}) => ({ id, name: 'x', created_at: ISO(NOW - agoMs), workflow_run: wr, ...extra });
+  assert.deepEqual(pickArtifacts({ artifacts: [a(1, HOUR), a(2, 0), a(3, 0, undefined, { expired: true })] }, 'x', 5).map((x) => x.id), [2, 1]);
+  // Artifact poisoning (a public repository: a pull request's run, a fork's included, uploads any name): only runs on
+  // this repository's main count, then trustedRun checks the run's workflow file and event.
+  const forged = [a(4, 0, { id: 40, repository_id: REPO_ID, head_repository_id: 999, head_branch: 'main' }), a(5, 0, { id: 50, ...main, head_branch: 'feature' }), a(6, 0, null), a(7, 0, { id: 70 })];
+  assert.deepEqual(pickArtifacts({ artifacts: [...forged, a(1, HOUR)] }, 'x', 5).map((x) => x.id), [1]);
+  const run = trustedRunJson(10, 'state-backup.yml');
+  assert.equal(trustedRun(run, ['state-backup.yml']), true);
+  assert.equal(trustedRun({ ...run, event: 'workflow_dispatch' }, ['state-backup.yml']), true);
+  assert.equal(trustedRun({ ...run, event: 'pull_request' }, ['state-backup.yml']), false, 'a PR run executes the PR\'s own workflow files');
+  assert.equal(trustedRun({ ...run, path: '.github/workflows/validate.yml' }, ['state-backup.yml']), false);
+  assert.equal(trustedRun({ ...run, head_branch: 'x' }, ['state-backup.yml']), false);
+  assert.equal(trustedRun({ ...run, head_repository: { id: 5 } }, ['state-backup.yml']), false);
+  assert.equal(trustedRun(null, ['state-backup.yml']), false);
+});
+
+test('collect: a state marker from an untrusted run (a pull request\'s, say) is passed over for the newest trusted one', async () => {
+  const c = clock();
+  const zipJson = (files: Record<string, unknown>) => new Response(zipSync(Object.fromEntries(Object.entries(files).map(([k, v]) => [`${k}.json`, strToU8(JSON.stringify(v))]))));
+  const wr = (id: number) => ({ id, repository_id: REPO_ID, head_repository_id: REPO_ID, head_branch: 'main' });
+  const w = world([
+    // A forged state-backup marker (newest today) from a pull_request run of a modified state-backup.yml, newer than
+    // the real one, which is 9 days behind.
+    [`${API_REPO}/actions/artifacts?name=state-backup&per_page=10`, () => json({ artifacts: [
+      { id: 950, name: 'state-backup', created_at: ISO(NOW - MIN), expired: false, workflow_run: wr(9500) },
+      { id: 903, name: 'state-backup', created_at: ISO(NOW - HOUR), expired: false, workflow_run: wr(9030) },
+    ] })],
+    [`${API_REPO}/actions/runs/9500`, () => json(trustedRunJson(9500, 'state-backup.yml', { event: 'pull_request' }))],
+    [`${API_REPO}/actions/artifacts/950/zip`, () => zipJson({ 'state-backup': { ok: true, newest: '2026-10-22' } })],
+    [`${API_REPO}/actions/artifacts/903/zip`, () => zipJson({ 'state-backup': { ok: true, newest: '2026-10-13' } })],
+  ]);
+  const inputs = await collect({ readFile: switchesOff, env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep });
+  assert.equal(inputs.stateBackup && inputs.stateBackup.ok && inputs.stateBackup.marker!.runId, 9030);
+  assert.equal(w.calls.filter((x) => x.url.endsWith('/artifacts/950/zip')).length, 0, 'the forged marker is never downloaded');
+  const r = evaluateFeed(inputs);
+  assert.deepEqual(r.findings.map((f) => [f.key, f.severity]), [['feed:state-backup', 'P1']]);
 });
 
 test('feed:state-gc and feed:state-backup: a GC older than 3 days or none is P2; the newest daily state past 36 h is P2, past 7 days P1', () => {

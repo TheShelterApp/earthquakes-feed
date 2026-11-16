@@ -462,25 +462,27 @@ export const RULES = Object.freeze({
     // `holdMs` reported a state step that did not succeed: the shadow hydrate found the store's event map differing
     // from the checkout's, or a store request failed (auth, budget, the Worker down), or persist failed (its generation
     // then stays as it was). Git is still the truth in phase 3a, so the feed is unaffected; phase 3b's gate needs 24 h
-    // without one. Read from the markers each run uploads (artifact state-shadow).
+    // without one. Read from the markers each run uploads (artifact state-shadow); only artifacts of scheduled or
+    // dispatched runs of `workflows` on main count (a pull request can upload an artifact of any name).
     board: 'feed', class: 'redundancy', severity: 'P2', key: 'feed:state-shadow', check: 'gh-redundancy',
-    limits: { artifact: 'state-shadow', runs: 3, holdMs: 2 * HOUR },
+    limits: { artifact: 'state-shadow', workflows: ['aggregate.yml', 'derive.yml'], runs: 3, holdMs: 2 * HOUR },
   }),
   'feed:state-gc': rule('feed:state-gc', {
     title: 'state store GC not running',
     // No successful state-gc.yml run (its artifact state-gc, uploaded only by a run that completed, dry or not) in
     // maxAgeMs, or none on record: the bucket grows by about 0.1 GB a day without it, toward the free tier's 10 GB.
     board: 'feed', class: 'capacity', severity: 'P2', key: 'feed:state-gc', check: 'gh-capacity',
-    limits: { artifact: 'state-gc', maxAgeMs: 3 * DAY },
+    limits: { artifact: 'state-gc', workflows: ['state-gc.yml'], maxAgeMs: 3 * DAY },
   }),
   'feed:state-backup': rule('feed:state-backup', {
     title: 'state store backup behind',
     // The newest daily state in a Release (state-backup.yml's marker `newest`: the state at 00:00 UTC of that day) is
-    // older than p2AfterMs: P2; older than p1AfterMs: P1 (GC keeps the sources of every day not yet copied, and the
-    // backup catches up 25 days, so a gap past a week is close to one that can no longer be closed). No successful
-    // backup on record: P2.
+    // older than p2AfterMs: P2; older than p1AfterMs: P1 (GC keeps the sources of every day not yet copied, at most 120
+    // days, and the backup catches up to the first day it has not copied; a week is far from that, but nothing else
+    // copies the state off Cloudflare). A marker that names no day is aged by its own date on the same lines. No
+    // successful backup on record: P2. Only markers of scheduled or dispatched runs of `workflows` on main count.
     board: 'feed', class: 'redundancy', severity: 'P2', key: 'feed:state-backup', check: 'gh-redundancy',
-    limits: { artifact: 'state-backup', p2AfterMs: 36 * HOUR, p1AfterMs: 7 * DAY },
+    limits: { artifact: 'state-backup', workflows: ['state-backup.yml'], p2AfterMs: 36 * HOUR, p1AfterMs: 7 * DAY },
   }),
   'feed:state-budget': rule('feed:state-budget', {
     title: 'state store near a free-tier ceiling',
@@ -496,7 +498,7 @@ export const RULES = Object.freeze({
     // feed job keeps): the growth from the newest sample at least minSpanMs old, in MB a day, over maxMbPerDay. GitHub
     // counts no rewrite back; 10 GB is about 3.2 GB away (APIs.md Repository size, the budget per storage phase).
     board: 'feed', class: 'capacity', severity: 'P3', key: 'feed:repo-growth',
-    limits: { artifact: 'repo-size-samples', sampleEveryMs: 20 * HOUR, minSpanMs: 6 * DAY, keepSamples: 40, maxMbPerDay: 10 },
+    limits: { artifact: 'repo-size-samples', workflows: ['health.yml'], sampleEveryMs: 20 * HOUR, minSpanMs: 6 * DAY, keepSamples: 40, maxMbPerDay: 10 },
   }),
   'walks': rule('walks', {
     title: 'maintenance walk blocked',

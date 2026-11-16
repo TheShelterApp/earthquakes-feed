@@ -644,18 +644,40 @@ export function readZipEntries(bytes) {
 // The state store (storage phase 3): feed:state-shadow, feed:state-gc, feed:state-backup, feed:state-budget,
 // feed:repo-growth
 
-/** The newest `n` non-expired artifacts named `name` of an artifacts listing, newest first. Throws on a body without a list. */
+/**
+ * The newest `n` non-expired artifacts named `name` of an artifacts listing, newest first, from a run on this
+ * repository's `main` only (workflow_run.head_branch main, head_repository_id = repository_id): this repository is
+ * public, and a pull request's run (a fork's included) can upload an artifact of any name. trustedRun checks the run
+ * itself. Throws on a body without a list.
+ */
 export function pickArtifacts(listing, name, n) {
   const list = isObject(listing) && Array.isArray(listing.artifacts) ? listing.artifacts : null;
   if (list === null) throw new Error('no artifacts list in the answer');
   const out = [];
   for (const a of list) {
     if (!isObject(a) || a.name !== name || a.expired === true || !isNum(a.id)) continue;
+    const wr = a.workflow_run;
+    if (!isObject(wr) || wr.head_branch !== 'main' || !isNum(wr.repository_id) || wr.head_repository_id !== wr.repository_id) continue;
     const createdAtMs = typeof a.created_at === 'string' ? Date.parse(a.created_at) : NaN;
     if (!Number.isFinite(createdAtMs)) continue;
     out.push({ id: a.id, createdAtMs, runId: isObject(a.workflow_run) && isNum(a.workflow_run.id) ? a.workflow_run.id : null });
   }
   return out.sort((a, b) => b.createdAtMs - a.createdAtMs).slice(0, n);
+}
+
+/** The events that can only come from this repository itself: a fork or a pull request can trigger neither. */
+const TRUSTED_EVENTS = new Set(['schedule', 'workflow_dispatch']);
+
+/**
+ * Whether a workflow run (GET /repos/…/actions/runs/{id}) may vouch for a state marker: one of `workflows` (file names
+ * under .github/workflows/), on `main` of this repository (not a fork's head), started by a schedule or a dispatch (a
+ * pull_request run executes the PR's own workflow files, so its path proves nothing).
+ */
+export function trustedRun(run, workflows) {
+  if (!isObject(run)) return false;
+  if (run.head_branch !== 'main' || !TRUSTED_EVENTS.has(run.event)) return false;
+  if (!isObject(run.repository) || !isObject(run.head_repository) || !isNum(run.repository.id) || run.head_repository.id !== run.repository.id) return false;
+  return typeof run.path === 'string' && workflows.some((w) => run.path === `.github/workflows/${w}`);
 }
 
 /**
@@ -744,7 +766,7 @@ export function evaluateStateBackup(read, nowMs) {
     findings: [makeFinding('feed:state-backup', {
       severity: age > p1AfterMs ? 'P1' : 'P2',
       sinceMs: stateMs + p2AfterMs,
-      text: `the newest daily state in a Release is ${newest}, ${ageText(age)} old (lines ${ageText(p2AfterMs)} / ${ageText(p1AfterMs)}): state-backup.yml is not copying; it catches up 25 days, GC keeps every day it has not copied`,
+      text: `the newest daily state in a Release is ${newest}, ${ageText(age)} old (lines ${ageText(p2AfterMs)} / ${ageText(p1AfterMs)}): state-backup.yml is not copying; it catches up to the first day it has not copied (at most 120 days), GC keeps every day it has not copied`,
     })],
     unjudged: [],
     notes,
@@ -1116,10 +1138,19 @@ function collectGitHub({ env, fetchImpl, sleep, now }) {
   const tree = gh(`/repos/${repo}/git/trees/data?recursive=1`, { timeoutMs: 60_000 }).then((r) => (r.ok ? { ok: true, json: r.json } : { ok: false, message: failText(r) }));
   const walks = Promise.all(workflows.map((workflow) => readWalk(workflow, { gh, token, repo, fetchImpl, sleep, nowMs: now() })));
   const zipOf = (id) => fetchBytes(`${GITHUB_API}/repos/${repo}/actions/artifacts/${id}/zip`, { headers: ghHeaders(token), fetchImpl, sleep });
-  const listed = async (name, n) => {
+  // Only artifacts of trusted runs (pickArtifacts, trustedRun): the newest candidates are checked in turn until `n` pass.
+  const listed = async (name, n, workflows) => {
     const r = await gh(`/repos/${repo}/actions/artifacts?name=${encodeURIComponent(name)}&per_page=${Math.max(10, n * 3)}`);
     if (!r.ok) throw new Error(`listing ${name}: ${failText(r)}`);
-    return pickArtifacts(r.json, name, n);
+    const out = [];
+    for (const a of pickArtifacts(r.json, name, n * 3)) {
+      if (out.length >= n) break;
+      if (a.runId == null) continue;
+      const run = await gh(`/repos/${repo}/actions/runs/${a.runId}`);
+      if (!run.ok) throw new Error(`the run of ${name} artifact ${a.id}: ${failText(run)}`);
+      if (trustedRun(run.json, workflows)) out.push(a);
+    }
+    return out;
   };
   /** The JSON files of an artifact's zip, by base name without .json. */
   const jsonFiles = async (a) => {
@@ -1136,16 +1167,16 @@ function collectGitHub({ env, fetchImpl, sleep, now }) {
   const off = Promise.resolve(null);
   const stateShadow = !stateOn ? off : settle(
     (async () => {
-      const arts = (await listed(sh.artifact, sh.runs)).filter((a) => now() - a.createdAtMs < sh.holdMs);
+      const arts = (await listed(sh.artifact, sh.runs, sh.workflows)).filter((a) => now() - a.createdAtMs < sh.holdMs);
       const markers = [];
       for (const a of arts) markers.push({ createdAtMs: a.createdAtMs, runId: a.runId, steps: await jsonFiles(a) });
       return { ok: true, markers };
     })(),
   );
-  const stateGc = !stateOn ? off : settle(listed(RULES['feed:state-gc'].limits.artifact, 1).then((a) => ({ ok: true, artifact: a[0] ?? null })));
+  const stateGc = !stateOn ? off : settle(listed(RULES['feed:state-gc'].limits.artifact, 1, RULES['feed:state-gc'].limits.workflows).then((a) => ({ ok: true, artifact: a[0] ?? null })));
   const stateBackup = !stateOn ? off : settle(
     (async () => {
-      const [a] = await listed(RULES['feed:state-backup'].limits.artifact, 1);
+      const [a] = await listed(RULES['feed:state-backup'].limits.artifact, 1, RULES['feed:state-backup'].limits.workflows);
       if (!a) return { ok: true, marker: null };
       const files = await jsonFiles(a);
       return { ok: true, marker: { createdAtMs: a.createdAtMs, runId: a.runId, json: files['state-backup'] ?? null } };
@@ -1153,7 +1184,7 @@ function collectGitHub({ env, fetchImpl, sleep, now }) {
   );
   const repoSamples = settle(
     (async () => {
-      const [a] = await listed(RULES['feed:repo-growth'].limits.artifact, 1);
+      const [a] = await listed(RULES['feed:repo-growth'].limits.artifact, 1, RULES['feed:repo-growth'].limits.workflows);
       if (!a) return { ok: true, json: null };
       return { ok: true, json: (await jsonFiles(a))['repo-size'] ?? null };
     })(),

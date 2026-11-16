@@ -25,11 +25,13 @@ permissions:
 jobs:
   backup:
     runs-on: ubuntu-24.04
-    # A day is about 12 MB of blobs; a catch-up of 25 days about 5 minutes.
+    # A day is about 12 MB of blobs; a catch-up of 25 days about 5 minutes, one after a longer stall (at most 120 days) more.
     timeout-minutes: 30
     permissions:
       # Draft Releases: GitHub lists drafts only to writers, and the job creates, uploads to and publishes them.
       contents: write
+      # The previous state-backup marker (its artifact and the run that made it): how far back the catch-up reaches.
+      actions: read
       # An OIDC token for the state Worker's POST /v1/cas:batchGet (it admits this workflow as a reader).
       id-token: write
     steps:

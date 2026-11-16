@@ -10,6 +10,7 @@ import { gzipSync } from 'node:zlib';
 import { emptyGeneration, serializeGeneration, type Generation } from '../src/event-map-store.js';
 import {
   BACKUP_CATCHUP_DAYS,
+  backupFrom,
   backupMembers,
   compressBackup,
   dayAssets,
@@ -22,7 +23,19 @@ import {
   type BackupIo,
   type ReleaseAsset,
 } from '../src/state-backup.js';
-import { GC_DAILY_DAYS, GC_MAX_WINDOW_DAYS, STATE_GC_SCHEDULED, collect, dryRunOf, main as gcMain, planKeep, type GcSources } from '../src/state-gc.js';
+import {
+  GC_DAILY_DAYS,
+  GC_MAX_WINDOW_DAYS,
+  STATE_GC_SCHEDULED,
+  collect,
+  dryRunOf,
+  main as gcMain,
+  mainArtifactRuns,
+  planKeep,
+  readBackupMarkerWithGh,
+  trustedRun,
+  type GcSources,
+} from '../src/state-gc.js';
 import { rehearse } from '../src/state-rehearsal.js';
 import { FsBackend, casKey, sha256Hex, type GcRequest, type StateBackend } from '../src/state-store.js';
 
@@ -84,6 +97,9 @@ test('GC keep set: the current generation, every daily generation of the last 31
   assert.ok(new Set(behind.keep).has(b(40).hex));
   // No marker, or a backup further behind than GC_MAX_WINDOW_DAYS: nothing is deleted.
   assert.match((await planKeep(history(gens, head, null).src, NOW)).holdReason!, /no state-backup marker/);
+  // A marker that names no backed-up day (written before the first generation, or with the store off): no backup is
+  // known, so nothing is deleted (later failed runs write no marker, so it can stay the newest for months).
+  assert.match((await planKeep(history(gens, head, { newest: null, first_missing: null }).src, NOW)).holdReason!, /names no backed-up day/);
   const far = await planKeep(history(gens, head, { newest: null, first_missing: dayKey(NOW - 200 * DAY_MS) }).src, NOW);
   assert.match(far.holdReason!, new RegExp(`more than ${GC_MAX_WINDOW_DAYS} days`));
   // A current generation that names no blob: a hold (the Worker refuses an empty `current`), GC is skipped.
@@ -329,4 +345,89 @@ test('workflows: the store is switched on by the repository variable FEED_STATE_
     assert.doesNotMatch(text, /FEED_STATE_BACKEND: worker/, f);
   }
   assert.equal(wf('aggregate.yml').match(/FEED_STATE_BACKEND: \$\{\{ vars\.FEED_STATE_BACKEND \}\}/g)!.length, 2, 'hydrate and persist');
+});
+
+test('backup: a stall longer than the 25-day catch-up is copied back to the previous marker\'s first uncopied day; a month that cannot be published keeps the run\'s marker', async () => {
+  // Where a run starts.
+  const today = dayKey(NOW);
+  assert.equal(backupFrom(today, null), dayKey(NOW - BACKUP_CATCHUP_DAYS * DAY_MS));
+  assert.equal(backupFrom(today, { newest: dayKey(NOW - 3 * DAY_MS), first_missing: null }), dayKey(NOW - BACKUP_CATCHUP_DAYS * DAY_MS));
+  assert.equal(backupFrom(today, { newest: dayKey(NOW - 41 * DAY_MS), first_missing: null }), dayKey(NOW - 40 * DAY_MS));
+  assert.equal(backupFrom(today, { newest: dayKey(NOW - 41 * DAY_MS), first_missing: dayKey(NOW - 50 * DAY_MS) }), dayKey(NOW - 50 * DAY_MS));
+  assert.equal(backupFrom(today, { newest: dayKey(NOW - 400 * DAY_MS), first_missing: null }), dayKey(NOW - GC_MAX_WINDOW_DAYS * DAY_MS), 'never past GC\'s window');
+  assert.equal(backupFrom(today, { newest: null, first_missing: null }), dayKey(NOW - GC_MAX_WINDOW_DAYS * DAY_MS), 'no day known: as far as GC holds');
+  const dir = mkdtempSync(join(tmpdir(), 'state-backup-stall-'));
+  const work = mkdtempSync(join(tmpdir(), 'state-backup-stall-w-'));
+  try {
+    const be = new FsBackend(dir, () => NOW);
+    const gens = new Map<string, Generation>();
+    for (let i = 0; i <= 60; i++) {
+      const d = dayKey(NOW - i * DAY_MS);
+      const x = blob(`state of ${d}`);
+      await be.put(x.hex, x.bytes);
+      gens.set(d, genWith({ [d]: x }));
+    }
+    const { src } = history(gens, gens.get(today)!, null);
+    const { io, rel } = releases(src);
+    // The backup stalled 40 days: its last good marker's newest is 41 days ago. GC kept every day since (planKeep).
+    const r = await runBackup(io, be, { nowMs: NOW, workDir: work, previous: { newest: dayKey(NOW - 41 * DAY_MS), first_missing: null } });
+    assert.equal(r.failed.length, 0, JSON.stringify(r.failed));
+    assert.equal(r.from, dayKey(NOW - 40 * DAY_MS));
+    assert.equal(r.uploaded.length, 41, 'days 40..0 back, not only the last 25');
+    assert.ok(rel.get(`state-${dayKey(NOW - 40 * DAY_MS).slice(0, 7)}`)!.assets.has(`state-${dayKey(NOW - 40 * DAY_MS)}.tar.zst`));
+    // A finished month that cannot be published (a tag ruleset, say): reported, every day still counted, no throw.
+    // (Phase 3a from 11-29: November is over and complete with its two days.)
+    const late = new Map([...gens].filter(([d]) => d >= '2026-11-29'));
+    const fresh = releases(history(late, late.get(today)!, null).src);
+    const refusing = (): void => {
+      throw new Error('HTTP 422: tag creation is restricted');
+    };
+    const p = await runBackup({ ...fresh.io, publish: refusing }, be, { nowMs: NOW, workDir: mkdtempSync(join(tmpdir(), 'state-backup-stall-w2-')) });
+    assert.equal(p.failed.length, 0);
+    assert.equal(p.newest, today);
+    assert.deepEqual(p.published, []);
+    assert.deepEqual(p.publishFailed.map((f) => f.tag), ['state-2026-11']);
+    assert.match(p.publishFailed[0]!.error, /tag creation is restricted/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('GC\'s backup marker comes only from a scheduled or dispatched state-backup.yml run on this repository\'s main (no artifact poisoning)', () => {
+  const REPO_ID = 42;
+  const wr = (id: number, over: Record<string, unknown> = {}) => ({ id, repository_id: REPO_ID, head_repository_id: REPO_ID, head_branch: 'main', ...over });
+  const art = (id: number, agoH: number, workflow_run: unknown, extra: Record<string, unknown> = {}) => ({ id, name: 'state-backup', expired: false, created_at: new Date(NOW - agoH * 3_600_000).toISOString(), workflow_run, ...extra });
+  const listing = {
+    artifacts: [
+      art(1, 1, wr(100, { head_repository_id: 7 })), // a fork's pull request
+      art(2, 2, wr(200, { head_branch: 'feature' })),
+      art(3, 3, wr(300)), // main, but a pull_request run of a modified state-backup.yml (its run says so)
+      art(4, 4, wr(400)), // the real one
+      art(5, 0, wr(500), { expired: true }),
+      art(6, 5, null),
+    ],
+  };
+  assert.deepEqual(mainArtifactRuns(listing, 'state-backup'), [300, 400]);
+  const run = (id: number, over: Record<string, unknown> = {}) => ({ id, path: '.github/workflows/state-backup.yml', event: 'schedule', head_branch: 'main', repository: { id: REPO_ID }, head_repository: { id: REPO_ID }, ...over });
+  assert.equal(trustedRun(run(1), 'state-backup.yml'), true);
+  assert.equal(trustedRun(run(1, { event: 'workflow_dispatch' }), 'state-backup.yml'), true);
+  assert.equal(trustedRun(run(1, { event: 'pull_request' }), 'state-backup.yml'), false);
+  assert.equal(trustedRun(run(1, { path: '.github/workflows/validate.yml' }), 'state-backup.yml'), false);
+  assert.equal(trustedRun(run(1, { head_repository: { id: 7 } }), 'state-backup.yml'), false);
+  const downloads: number[] = [];
+  const io = {
+    json: (path: string): unknown => {
+      if (path.includes('/artifacts?')) return listing;
+      const id = Number(/runs\/(\d+)$/.exec(path)![1]);
+      return id === 300 ? run(300, { event: 'pull_request' }) : run(id);
+    },
+    download: (id: number): string => {
+      downloads.push(id);
+      return JSON.stringify({ ok: true, newest: '2026-11-01', first_missing: null });
+    },
+  };
+  assert.deepEqual(readBackupMarkerWithGh('o/r', io), { newest: '2026-11-01', first_missing: null });
+  assert.deepEqual(downloads, [400], 'only the trusted run\'s marker is downloaded');
+  assert.equal(readBackupMarkerWithGh('o/r', { ...io, json: (p: string) => (p.includes('/artifacts?') ? { artifacts: [art(3, 3, wr(300))] } : run(300, { event: 'pull_request' })) }), null);
 });

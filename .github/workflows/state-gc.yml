@@ -1,0 +1,107 @@
+name: state-gc
+
+# The state store's garbage collection (storage phase 3; src/state-gc.ts, APIs.md "Repository size"). Every aggregate
+# run that changes an event-map day uploads a new content-addressed blob to the state store and nothing is overwritten,
+# so once a day this deletes the blobs that no generation it must keep names any more: the current generation, the
+# generation at each of the last 31 UTC midnights, and every day the backup (state-backup.yml) has not copied yet;
+# only blobs older than 30 days, at most 600 a listing page. Without a readable backup marker it deletes nothing.
+#
+# A writer: the job holds the earthquakes-feed-writer group (scripts/writer-queue.mjs WRITERS), so no aggregate can
+# persist, and so re-reference an old blob, between the keep set's read of the current generation and the deletes; the
+# Worker also refuses (409) unless the current generation's blobs are in the keep set and exist. It never commits.
+#
+# Dry run: a dispatch defaults to dry_run (every page listed, what would go counted, nothing deleted); the scheduled
+# run follows STATE_GC_SCHEDULED in src/state-gc.ts ('dry-run' for the first weeks of phase 3a).
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'List and count only, delete nothing'
+        type: boolean
+        default: true
+      force:
+        description: 'Join the writer queue even when 2 writer runs already wait (README.md "Writer group"): every aggregate run waits behind it'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Outside every group: the writer lock is taken by the job below, and only when this gate admits it (SHLTR-149;
+  # scripts/writer-queue.mjs, README.md "Writer group").
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # The repository's unfinished runs and their jobs (the writer queue).
+      actions: read
+    outputs:
+      admit: ${{ steps.gate.outputs.admit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .nvmrc
+            scripts/writer-queue.mjs
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Count the writer queue
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WRITER_WORKFLOW: state-gc.yml
+          FORCE: ${{ inputs.force && 'true' || '' }}
+          # A refused scheduled run is a warning: tomorrow's run collects the same blobs.
+          RETRIED: ${{ github.event_name == 'schedule' && 'true' || '' }}
+        run: node scripts/writer-queue.mjs gate
+
+  gc:
+    needs: gate
+    if: needs.gate.outputs.admit == 'true'
+    # The writer lock (aggregate.yml explains the group): no persist runs while the keep set is read and applied.
+    concurrency:
+      group: earthquakes-feed-writer
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-24.04
+    # About 70 GitHub reads (a commit and a generation per midnight) and one GC call per 1,000 objects.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # The newest state-backup marker artifact (how far the backup has copied).
+      actions: read
+      # An OIDC token for the state Worker's POST /v1/gc (it admits this workflow only).
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Collect unreferenced state blobs
+        env:
+          # GitHub's API only: the data commits at each midnight, their generation.json, the backup marker.
+          GH_TOKEN: ${{ github.token }}
+          FEED_STATE_BACKEND: worker
+          FEED_STATE_URL: https://feed-state.theshelter.app
+          FEED_STATE_AUDIENCE: earthquakes-feed-state
+          STATE_GC_DRY_RUN: ${{ github.event_name == 'schedule' && 'scheduled' || (inputs.dry_run && '1' || '') }}
+          STATE_GC_MARKER_DIR: state-gc-out
+        run: npx --no-install tsx src/state-gc.ts
+      # Only after a run that completed: the health workflow files feed:state-gc (P2) when the newest is 3 days old.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: state-gc
+          path: state-gc-out/state-gc.json
+          if-no-files-found: error
+          retention-days: 7

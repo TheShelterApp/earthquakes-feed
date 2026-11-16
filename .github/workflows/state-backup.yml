@@ -1,0 +1,59 @@
+name: state-backup
+
+# The state store's daily off-Cloudflare copy (storage phase 3; src/state-backup.ts, APIs.md "Repository size"). For
+# each UTC day D: the generation at the last `data` commit before 00:00 UTC of D, the cursors of that commit and every
+# blob the generation names, as one deterministic tar.zst, the asset state-D.tar.zst of the draft Release
+# state-YYYY-MM (published once the month is over and complete). Never --clobber; every upload checked against
+# GitHub's sha256 digest. It catches up every day of the last 25 without an asset (GC keeps their blobs: it keeps every
+# day this backup has not copied). GitHub does not count Release assets in the repository's size.
+#
+# Not a writer of `data`: it reads past commits through the API and writes Releases only, so it needs no writer lock.
+# After 00:00 UTC, so the day's state exists; any later run of the day finds it done.
+on:
+  schedule:
+    - cron: '41 0 * * *'
+  workflow_dispatch:
+
+# One run at a time: two runs would race for the same asset names (the second upload fails, nothing is overwritten).
+concurrency:
+  group: earthquakes-feed-state-backup
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-24.04
+    # A day is about 12 MB of blobs; a catch-up of 25 days about 5 minutes.
+    timeout-minutes: 30
+    permissions:
+      # Draft Releases: GitHub lists drafts only to writers, and the job creates, uploads to and publishes them.
+      contents: write
+      # An OIDC token for the state Worker's POST /v1/cas:batchGet (it admits this workflow as a reader).
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Back up the daily states
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FEED_STATE_BACKEND: worker
+          FEED_STATE_URL: https://feed-state.theshelter.app
+          FEED_STATE_AUDIENCE: earthquakes-feed-state
+          STATE_BACKUP_MARKER_DIR: state-backup-out
+        run: npx --no-install tsx src/state-backup.ts
+      # Only after a run with every day done: state-gc.yml reads the newest (how far the backup has copied; without it
+      # GC deletes nothing) and the health workflow files feed:state-backup (P2 past 36 h, P1 past 7 days).
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: state-backup
+          path: state-backup-out/state-backup.json
+          if-no-files-found: error
+          retention-days: 90

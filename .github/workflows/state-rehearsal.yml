@@ -1,0 +1,38 @@
+name: state-rehearsal
+
+# The state store's rehearsal against STAGING (storage phase 3; src/state-rehearsal.ts): the whole client path (PUT,
+# batchGet, the shadow and the authoritative hydrate, a GC dry run, the budget) on synthetic data, from any branch, so a
+# change to the client or to the Worker (state/, its staging environment) is rehearsed before it reaches main. Staging
+# (feed-state-staging.theshelter.app, audience earthquakes-feed-state-staging, its own bucket) admits any branch of
+# this repository; production admits main only. Staging never reads production's state.
+#
+#   gh workflow run state-rehearsal.yml -R TheShelterApp/earthquakes-feed --ref <branch>
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rehearse:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # An OIDC token for the staging state Worker.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Rehearse the state store client on staging
+        env:
+          FEED_STATE_BACKEND: worker
+          FEED_STATE_URL: https://feed-state-staging.theshelter.app
+          FEED_STATE_AUDIENCE: earthquakes-feed-state-staging
+        run: npx --no-install tsx src/state-rehearsal.ts

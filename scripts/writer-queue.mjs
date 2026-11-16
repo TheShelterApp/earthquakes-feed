@@ -59,6 +59,9 @@ export const WRITERS = Object.freeze({
   'backfill.yml': Object.freeze({ lockJob: 'backfill', gated: true }),
   'archive.yml': Object.freeze({ lockJob: 'archive', gated: true }),
   'derive.yml': Object.freeze({ lockJob: 'derive', gated: true }),
+  // Commits nothing: it holds the group so that no aggregate persists (re-referencing an old blob) while the state
+  // store's GC applies its keep set (storage phase 3, src/state-gc.ts).
+  'state-gc.yml': Object.freeze({ lockJob: 'gc', gated: true }),
 });
 /**
  * An unfinished run created longer ago than this is a ghost, not a queue: GitHub keeps a few runs `queued` or

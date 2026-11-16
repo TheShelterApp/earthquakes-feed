@@ -392,7 +392,7 @@ export interface StateRef {
   /** The sha256 of the generation blob (a CAS key). */
   generation: string;
   seq: number;
-  /** The generation this one replaced (null: the lane's first, or a bootstrap). */
+  /** The generation this one replaced (null: the lane's first ref, seq 1). */
   parent: string | null;
   head_seq: number;
   data_commit: string;
@@ -539,8 +539,10 @@ export function writerFromEnv(step: string, env: NodeJS.ProcessEnv = process.env
 }
 
 /**
- * The successor of `cur` (null: the lane's first ref, seq `firstSeq`): seq + 1, parent = cur's generation, head_seq
- * never below cur's. A restore names restore_of and must jump head_seq forward (the Worker checks both).
+ * The successor of `cur`: seq + 1, parent = cur's generation, head_seq never below cur's. `cur` null is a create: seq
+ * `firstSeq` (1) with `parent` (null) on a lane without a reflog; a create on a lane whose ref is gone but whose reflog
+ * is not (a REF_BACKEND switch, state/README.md) passes the last entry's seq + 1 and generation instead. A restore names
+ * restore_of and must jump head_seq forward (the Worker checks both).
  */
 export function nextRef(
   cur: StateRef | null,
@@ -561,12 +563,16 @@ export function nextRef(
   return ref;
 }
 
-/** The successor rules (state/src/refs.js checkSuccessor), for the directory backend. Throws kind refused (409). */
-function checkSuccessor(cur: StateRef | null, next: StateRef): void {
-  if (!cur) return;
+/** The successor rules (state/src/refs.js checkSuccessor), for the directory backend: `cur` null is a lane with
+ *  neither a ref nor a reflog (seq 1, parent null). Throws kind refused (409). */
+function checkSuccessor(cur: Pick<StateRef, 'seq' | 'generation' | 'head_seq'> | null, next: StateRef): void {
   const no = (why: string): never => {
     throw new StateStoreError(`ref ${next.lane}: ${why}`, 'refused', 409);
   };
+  if (!cur) {
+    if (next.seq !== 1 || next.parent !== null) no('the lane has no ref and no reflog: its first ref is seq 1 with parent null');
+    return;
+  }
   if (next.seq !== cur.seq + 1) no(`seq must be ${cur.seq + 1}`);
   if (next.parent !== cur.generation) no('parent must be the current generation');
   if (next.restore_of ? next.head_seq <= cur.head_seq : next.head_seq < cur.head_seq) no(next.restore_of ? 'a restore must jump head_seq forward' : 'head_seq must not go backwards');
@@ -1193,7 +1199,14 @@ export class FsBackend implements StateBackend, StateRefs {
     parseRef(text, lane);
     const cur = await this.getRef(lane);
     if ('create' in pre ? cur != null : cur?.etag !== pre.etag) throw new RefConflict(`ref ${lane}: 412`, cur);
-    checkSuccessor(cur?.ref ?? null, ref);
+    if (cur) checkSuccessor(cur.ref, ref);
+    else {
+      // A create continues the reflog the lane may still have (the Worker's checkCreate).
+      if (ref.restore_of) throw new StateStoreError(`ref ${lane}: a create cannot restore`, 'refused', 409);
+      const d = join(this.dir, 'gen', lane);
+      const last = existsSync(d) ? readdirSync(d).filter((n) => /^\d{12}$/.test(n)).sort().at(-1) : undefined;
+      checkSuccessor(last ? parseRef(readFileSync(join(d, last), 'utf8'), lane) : null, ref);
+    }
     if (!existsSync(this.file(ref.generation))) throw new StateStoreError(`ref ${lane}: the generation blob is missing from the store`, 'refused', 409);
     const createOnly = (f: string, body: string): boolean => {
       mkdirSync(dirname(f), { recursive: true });

@@ -292,7 +292,49 @@ for (const refBackend of ['r2', 'do'] as const) {
     const log = await reflogAll(h.client({ workflow: 'state-backup.yml' }), 'main');
     assert.deepEqual(log.map((e) => e.seq), [1, 2, 3, 4, 5, 6]);
   });
+
+  test(`state refs (${refBackend}): a create continues the reflog of a lane whose ref is gone (a backend switch, a lost ref)`, async () => {
+    const h = harness({ refBackend });
+    const agg: Who = { workflow: 'aggregate.yml' };
+    const be = h.client(agg);
+    const status = (p: Promise<unknown>) => p.then(() => 200, (e: StateStoreError) => e.status);
+    // An empty reflog: seq 1 with parent null only.
+    assert.equal(await status(be.putRef('main', refFor('main', null, h.blob('g0'), h.writer(agg, 'b'), { seq: 2 }), { create: true })), 409);
+    assert.equal(await status(be.putRef('main', refFor('main', null, h.blob('g0'), h.writer(agg, 'b'), { parent: sha256('x') }), { create: true })), 409);
+    let prev: StateRef | null = null;
+    let etag: string | null = null;
+    for (let i = 1; i <= 3; i++) {
+      const r = refFor('main', prev, h.blob(`g${i}`), h.writer(agg, `s${i}`));
+      etag = (await be.putRef('main', r, etag ? { etag } : { create: true })).etag;
+      prev = r;
+    }
+    // The ref goes (REF_BACKEND switched, or the object deleted by hand); the reflog stays in R2.
+    if (refBackend === 'r2') h.r2.objects.delete('refs/main');
+    else h.ledger.sql.exec('DELETE FROM refs WHERE lane = ?', 'main');
+    assert.equal(await be.getRef('main'), null);
+    const g = h.blob('g4');
+    const create = (extra: Partial<StateRef>) => status(be.putRef('main', refFor('main', null, g, h.writer(agg, 'c'), extra), { create: true }));
+    assert.equal(await create({}), 409, 'seq 1 again: its slot holds the first generation');
+    assert.equal(await create({ seq: 3, parent: prev!.parent }), 409, 'a seq whose slot is taken');
+    assert.equal(await create({ seq: 5, parent: prev!.generation }), 409, 'a gap');
+    assert.equal(await create({ seq: 4, parent: sha256('other') }), 409, 'not the last entry\'s generation');
+    assert.equal(await create({ seq: 4, parent: prev!.generation, head_seq: prev!.head_seq - 1 }), 409, 'head_seq backwards');
+    assert.equal(await create({ seq: 4, parent: prev!.generation, head_seq: prev!.head_seq + 9, restore_of: { seq: 1, generation: prev!.generation } }), 403, 'a feed writer never restores');
+    const r4 = refFor('main', null, g, h.writer(agg, 'c'), { seq: 4, parent: prev!.generation, head_seq: prev!.head_seq });
+    const s4 = await be.putRef('main', r4, { create: true });
+    assert.deepEqual(s4.reflog, { previous: 'none', entry: 'created' });
+    assert.ok(s4.storeOps! <= 5, `ops ${s4.storeOps}`);
+    assert.deepEqual((await reflogAll(h.client({ workflow: 'state-gc.yml' }), 'main')).map((e) => [e.seq, e.writer]).at(-1), [4, r4.writer]);
+  });
 }
+
+test('state refs: a create never restores, not even by the restore pair', async () => {
+  const h = harness({ staging: true });
+  const restorer: Who = { workflow: 'state-restore.yml', event: 'workflow_dispatch', environment: 'state-restore' };
+  const g = h.blob('g');
+  const r = refFor('main', null, g, h.writer(restorer, 'r'), { restore_of: { seq: 1, generation: g } });
+  await assert.rejects(h.client(restorer).putRef('main', r, { create: true }), (e: unknown) => e instanceof StateStoreError && e.status === 409 && /a create cannot restore/.test(e.message));
+});
 
 test('state refs: a non-atomic conditional put lets both racers win; the reflog slot then shows it', async () => {
   const h = harness({ atomic: false });
@@ -628,6 +670,11 @@ test('state refs (directory backend): the same rules, create-only reflog, repair
     assert.deepEqual(s2.reflog, { previous: 'repaired', entry: 'created' });
     assert.equal((await be.getRef('main'))!.etag, s2.etag);
     assert.deepEqual((await reflogAll(be, 'main')).map((e) => e.writer), [r1.writer, r2.writer]);
+    // A lost ref: a create continues the reflog (seq 3, parent r2's generation), never restarts it.
+    rmSync(join(dir, 'refs', 'main'));
+    await assert.rejects(be.putRef('main', refFor('main', null, await g('3'), w('c')), { create: true }), (e: unknown) => e instanceof StateStoreError && e.status === 409);
+    const r3 = refFor('main', null, await g('3'), w('c'), { seq: 3, parent: r2.generation, head_seq: r2.head_seq });
+    assert.deepEqual((await be.putRef('main', r3, { create: true })).reflog, { previous: 'none', entry: 'created' });
     // GC never sees refs or the reflog (it lists cas/ only).
     const page = await be.gc({ keep: [r2.generation], current: [r2.generation], cursor: null, minAgeDays: 14, maxDeletes: 10, dryRun: true });
     assert.equal(page.foreign, 0);

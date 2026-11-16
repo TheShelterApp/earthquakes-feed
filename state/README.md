@@ -139,7 +139,11 @@ version the writer read) or `If-None-Match: *` (the lane's first ref, the bootst
 1. checks the lane's pairs (below) and the body;
 2. GETs the current ref: a create on an existing lane, or an `If-Match` that is not its ETag (or no ref at all), is 412;
 3. requires the successor: `seq` = current + 1, `parent` = the current `generation`, `head_seq` ≥ the current one (a
-   restore: >), else 409 `{"error", "current_seq" | "current_generation" | "current_head_seq"}`;
+   restore: >), else 409 `{"error", "current_seq" | "current_generation" | "current_head_seq"}`. A create (no current
+   ref) is the successor of the lane's REFLOG instead, which outlives the ref (it stays in R2 under either backend):
+   an empty reflog takes `seq` 1 with `parent` null; otherwise `seq` = the last entry's seq + 1, `parent` = its
+   `generation`, `head_seq` ≥ its own, and never `restore_of` (409 otherwise, with `reflog_seq`). It lists the reflog's
+   tail (one Class A) in place of step 5, so a lost ref never restarts the chain on a taken slot;
 4. HEADs the generation blob `cas/sha256/…/<generation>`: absent is 409 (blobs first, then the ref, invariant 2);
 5. repairs the reflog entry of the CURRENT seq, create-only (a Worker that died between its swap and its reflog write
    left it missing; an entry that exists is never rewritten);
@@ -182,13 +186,28 @@ race rehearsal shows that `onlyIf` is not an atomic compare-and-swap on the bind
 `BudgetLedger` Durable Object (table `refs`, created by every version since 4.0 and empty while unused; one object whose
 methods run alone, so the check and the write are one SQLite transaction), its ETag the first 32 hex of the body's
 sha256. Same HTTP API, same reflog (in R2), same store-operation bound. Switching moves no ref: do it before any lane has
-a ref (4.0/4.1), or copy each lane's current ref (`GET`, then a bootstrap `If-None-Match: *` under the new backend from
-the runbook below) while no writer runs. Both are covered offline by `tests/state-refs.test.ts`.
+a ref (4.0/4.1), or carry each lane over while no writer runs (the lane's writers disabled, as in the bootstrap
+runbook below):
+
+1. Under the OLD backend, `GET /v1/refs/<lane>` (the current ref, seq N) and page `GET /v1/gen/<lane>` to its end: the
+   last entry must be seq N with the ref's `generation`. If entry N is missing (a Worker died after its swap), any PUT
+   of the lane repairs it; do one before switching.
+2. Switch `REF_BACKEND` and deploy; the lane now has no ref.
+3. Dispatch the lane's seeding step with a create (`If-None-Match: *`) of a NEW body: `seq` N + 1, `parent` and
+   `generation` both the old ref's `generation` (the same state, one step on), `head_seq` and `data_commit` the old
+   ref's, `written` now, and the calling run's `writer` (the Worker refuses a copy of the old bytes: its `writer` names
+   another run). The Worker checks it against the reflog's entry N (409 otherwise, `reflog_seq` naming what it found).
+4. `GET /v1/refs/<lane>` shows seq N + 1 by the seeding run, and the reflog's last entry is that ref; then re-enable the
+   writers.
+
+A switch back is the same steps the other way. Both backends, and a create after a lost ref, are covered offline by
+`tests/state-refs.test.ts`.
 
 ### Bootstrap of a lane (runbook)
 
-A lane's first ref is written once with `If-None-Match: *`. The Worker refuses a second create itself (its GET sees
-the ref), so only two creates that race could both pass if the binding ignored the create-only precondition. The
+A lane's first ref is written once with `If-None-Match: *` (seq 1, parent null). The Worker refuses a second create
+itself (its GET sees the ref), so only two creates that race could both pass if the binding ignored the create-only
+precondition. The
 rehearsal proves the precondition (`create-only` probe, two racing creates); if it shows R2 does not honour it, every
 lane is bootstrapped by this runbook instead of by a job: dispatch the lane's seeding step (4.1: the first shadow write;
 4.3: `scripts/phase4/seed.ts`) **only while the lane's writers cannot run** (the writer group idle for `main`, the

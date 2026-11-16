@@ -4,8 +4,9 @@
 // blob, cas.js) and its place in the chain:
 //   {"data_commit","format":1,"generation","head_seq","lane","parent","seq","written","writer"[,"restore_of"]}
 // The Worker swaps it only when the writer names the version it read (If-Match on the ETag; If-None-Match: * creates
-// the lane once, the bootstrap), and only to its direct successor: seq = current seq + 1, parent = the current
-// generation, head_seq never backwards (a restore must jump it forward). So two writers that read the same version can
+// the lane's ref when it has none, the bootstrap), and only to its direct successor: seq = current seq + 1, parent =
+// the current generation, head_seq never backwards (a restore must jump it forward); a create is the successor of the
+// reflog's last entry (seq 1 with parent null on an empty reflog), so the chain never restarts under a lost ref. So two writers that read the same version can
 // never both win: one gets 200, the other 412 with the current body, and fails closed (no automatic rebase).
 //
 // The reflog `gen/<lane>/<seq12>` holds a copy of every ref the lane ever had, written create-only right after the
@@ -17,8 +18,9 @@
 // Subrequests per ref PUT (the Free plan allows 50; R2 binding calls may count against the larger internal limit):
 //   1 GET refs/<lane>  2 HEAD the generation blob  3 PUT gen/<lane>/<cur.seq> create-only (the repair; refused when it
 //   exists, which is the normal case)  4 PUT refs/<lane> onlyIf etagMatches (or create-only)  5 PUT gen/<lane>/<seq>
-//   create-only. A swap refused at 4 re-GETs the ref for the 412 body instead of 5. At most 5 store operations
-//   whatever happens, counted per request (x-feed-state-store-ops) and proved on staging (state-rehearsal.yml).
+//   create-only. A create has no current seq to repair: it lists the reflog's tail instead of 3 (checkCreate). A swap
+//   refused at 4 re-GETs the ref for the 412 body instead of 5. At most 5 store operations whatever happens, counted
+//   per request (x-feed-state-store-ops) and proved on staging (state-rehearsal.yml).
 //
 // Where the ref lives: `REF_BACKEND = "r2"` (the bucket, an R2 object whose ETag R2 assigns and whose put honours
 // `onlyIf`) or `"do"`, the fallback if the staging race rehearsal shows that R2's conditional put is not an atomic
@@ -128,9 +130,16 @@ export function parseRefBody(text, lane, who) {
   return ref;
 }
 
-/** The successor rules against the current ref (null: the lane has none, only a create may follow). Throws 409. */
+/**
+ * The successor rules against the current ref. `cur` null is a lane with neither a ref nor a reflog entry: its first
+ * ref is seq 1 with parent null. A create on a lane that has a reflog is checked against the reflog's last entry
+ * instead (checkCreate). Throws 409.
+ */
 export function checkSuccessor(cur, next) {
-  if (!cur) return;
+  if (!cur) {
+    if (next.seq !== 1 || next.parent !== null) throw new RefError(409, 'the lane has no ref and no reflog: its first ref is seq 1 with parent null', { current_seq: 0 });
+    return;
+  }
   if (next.seq !== cur.seq + 1) throw new RefError(409, `seq must be ${cur.seq + 1} (the current seq + 1)`, { current_seq: cur.seq });
   if (next.parent !== cur.generation) throw new RefError(409, 'parent must be the current generation', { current_generation: cur.generation });
   if (next.restore_of ? next.head_seq <= cur.head_seq : next.head_seq < cur.head_seq) {
@@ -288,12 +297,48 @@ function conflict(cur, at) {
 }
 
 /**
+ * A create (If-None-Match: *, the lane has no ref) must continue the lane's reflog, which outlives the ref: the reflog
+ * stays in R2 under either REF_BACKEND, so after a backend switch, a switch back or a ref object lost by hand the lane
+ * still has a history, and a create that ignored it would take a seq whose slot names another generation (the GC root
+ * set and the restore index would then lose the live one) or, at MAX_SEQ, leave the lane unwritable. So: an empty
+ * reflog takes seq 1 with parent null; otherwise seq = the last entry's seq + 1, parent = its generation, head_seq not
+ * below its head_seq. A create never restores (a restore names the current ref it replaces).
+ *
+ * R2 lists ascending only, so the check lists from the entry before the one it needs: one page of at most 2 keys after
+ * gen/<lane>/<seq − 2> must be exactly gen/<lane>/<seq − 1> (none for seq 1). One Class A, only on the rare create path,
+ * which skips the repair, so a create stays at 5 store operations (GET, this list, HEAD, swap, entry). A reflog whose
+ * last entry lies below seq − 1 answers 409 without naming it: GET /v1/gen pages to it (the runbook does).
+ */
+async function checkCreate(bucket, lane, ref) {
+  if (ref.restore_of) throw new RefError(409, 'a create cannot restore: a restore replaces the current ref (If-Match)');
+  const prefix = `${REFLOG_PREFIX}${lane}/`;
+  const page = await bucket.list({ prefix, limit: 2, include: ['customMetadata'], ...(ref.seq > 2 ? { startAfter: reflogKey(lane, ref.seq - 2) } : {}) });
+  const keys = page.objects.filter((o) => /^\d{12}$/.test(o.key.slice(prefix.length)));
+  if (ref.seq === 1) {
+    if (keys.length) throw new RefError(409, 'the lane has a reflog: a create continues it (seq = its last seq + 1)', { reflog_first_seq: Number(keys[0].key.slice(prefix.length)) });
+    checkSuccessor(null, ref);
+    return;
+  }
+  const last = keys[0];
+  const lastSeq = last ? Number(last.key.slice(prefix.length)) : null;
+  if (lastSeq !== ref.seq - 1 || keys.length > 1) {
+    throw new RefError(409, `a create continues the lane's reflog: seq must be its last seq + 1 (gen/${lane}/${String(ref.seq - 1).padStart(SEQ_DIGITS, '0')} ${lastSeq === ref.seq - 1 ? 'is not the last entry' : 'is missing'})`, {
+      reflog_seq: lastSeq,
+      reflog_more: keys.length > 1,
+    });
+  }
+  const md = last.customMetadata ?? {};
+  if (!isSha(md.generation) || !/^\d{1,15}$/.test(md.head_seq ?? '')) throw new RefError(409, `the reflog entry of seq ${lastSeq} has no ref metadata: repair it by the runbook`);
+  checkSuccessor({ seq: lastSeq, generation: md.generation, head_seq: Number(md.head_seq) }, ref);
+}
+
+/**
  * PUT /v1/refs/<lane>: the six steps above over `store` (r2RefStore or doRefStore) and `bucket`. `ref` is the parsed
  * body, `text` its canonical bytes. Returns {etag, reflog: {previous: 'none' | 'present' | 'repaired', entry: 'created'
- * | 'exists'}}; throws RefError 412 (with the current body and its ETag), 409 (not the successor, or the generation
- * blob is missing; `at`: 'read' or 'swap', the check that refused). `entry: 'exists'` means the swap happened but the reflog slot of the new seq was already taken: a
- * second writer of the same seq (the CAS was not atomic) or an entry left by a lost ref; the client treats it as an
- * integrity failure, the log line names it.
+ * | 'exists'}}; throws RefError 412 (with the current body and its ETag; `at`: 'read' or 'swap', the check that
+ * refused), 409 (not the successor of the current ref, or of the reflog's last entry on a create; or the generation
+ * blob is missing). `entry: 'exists'` means the swap happened but the reflog slot of the new seq was already taken: a
+ * second writer of the same seq (the CAS was not atomic) or an entry left by a lost ref; the Worker logs it as an error.
  */
 export async function putRef({ store, bucket, lane, pre, text, ref }) {
   const cur = await store.get(lane);
@@ -305,8 +350,10 @@ export async function putRef({ store, bucket, lane, pre, text, ref }) {
     } catch {
       throw new RefError(409, 'the current ref is not JSON: repair it by the runbook');
     }
+    checkSuccessor(curRef, ref);
+  } else {
+    await checkCreate(bucket, lane, ref);
   }
-  checkSuccessor(curRef, ref);
   if (!(await bucket.head(blobKey(ref.generation)))) throw new RefError(409, 'the generation blob is missing from the store', { generation: ref.generation });
   let previous = 'none';
   if (curRef) previous = (await putCreateOnly(bucket, reflogKey(lane, curRef.seq), cur.text, curRef)) ? 'repaired' : 'present';

@@ -15,6 +15,18 @@ test('discover: a declined source is listed with its issue, and GeoShake is one'
   for (const d of DECLINED) assert.equal(d.host, d.host.toLowerCase(), 'hosts are compared in lower case');
 });
 
+test('discover: NIEP (issue #136) is declined, and its curated lead is never probed while it is', () => {
+  const n = DECLINED.find((d) => d.host === 'eida-sc3.infp.ro');
+  assert.ok(n, 'NIEP is declined');
+  assert.equal(n.issue, 136);
+  assert.match(n.why, /EMSC/, 'the reason names the path its solutions already take');
+  const curated = [{ dc: 'NIEP (Romania)', url: 'http://eida-sc3.infp.ro/fdsnws/event/1/query' }];
+  const declined = new Set(DECLINED.map((d) => d.host));
+  assert.equal(candidateServices([], curated, new Set(), declined).size, 0);
+  // Removing the entry brings the probe back.
+  assert.deepEqual([...candidateServices([], curated, new Set(), new Set()).keys()], ['eida-sc3.infp.ro']);
+});
+
 test('discover: the suggested entry claims no licence and names the operator, not the service', () => {
   const e = suggestedEntry({ dc: 'GeoShake Data Center', url: 'https://api.geoshake.org/fdsnws/event/1/query', fmt: 'text' });
   assert.equal(e['license'], 'unknown');

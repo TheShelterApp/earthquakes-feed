@@ -11,10 +11,12 @@ import {
   API_HEALTH_URL,
   API_RETRY,
   CONFIG_HEALTH_URL,
+  ENV_CONFIG_HEALTH_URLS,
   PLATFORM_KEYS,
   evaluateApiHealth,
   evaluateConfigBundle,
   evaluateConfigHealth,
+  evaluateEnvConfigBundle,
   main,
   parseArgs,
   plainExitCode,
@@ -27,6 +29,8 @@ import {
 const HEALTHY_STATUS = JSON.parse(readFileSync(new URL('./fixtures/alerts-status/healthy.json', import.meta.url), 'utf8')) as Record<string, unknown>;
 const API_OK = { ok: true, env: 'prod', dbAdapter: 'd1', dialect: 'sqlite', sessionKeySource: 'secret', providerTokenEnvelope: 'set', time: '2026-10-04T09:53:50.192Z' };
 const CONFIG_OK = { ok: true, source: 'kv', version: 50 };
+/** A non-prod /healthz answer (the live shape of 2026-11-16) whose bundle expires `leftMs` after NOW. */
+const envHealth = (leftMs: number, version = 77) => ({ ok: true, source: 'kv', version, expiresAt: new Date(NOW + leftMs).toISOString(), expired: false });
 const SEC = 1_000;
 const DAY = 86_400_000;
 const NOW = Date.parse('2026-10-22T12:00:00Z');
@@ -321,6 +325,86 @@ test('config v65/v66 replay (2026-10-19..11-11): gap, gap, then age P3 [age, gap
 });
 
 // ---------------------------------------------------------------------------------------------------------
+// config:bundle:<env>, the staging and dev bundles (2026-11-15 audit, FEED-PLATFORM-WATCHDOG)
+
+test('env config bundle: the rule covers staging and dev, P3 at most, on the prod ladder\'s first line', () => {
+  const r = RULES['config:bundle:env'];
+  const lim = r.limits as { envs: string[]; minLeftMs: number; expiresMs: number };
+  assert.deepEqual(lim.envs, Object.keys(ENV_CONFIG_HEALTH_URLS));
+  assert.deepEqual([r.severity, r.check, r.class, r.board, r.keyPrefix], ['P3', null, 'expiry', 'platform', 'config:bundle:']);
+  // 25 d left of a 30 d bundle is the prod config:bundle P3 line (5 d old).
+  const prod = RULES['config:bundle:age'].limits as { p3AgeMs: number; expiresMs: number };
+  assert.equal(lim.expiresMs, prod.expiresMs);
+  assert.equal(lim.expiresMs - lim.minLeftMs, prod.p3AgeMs);
+});
+
+test('env config bundle: fresh is clear; under 25 d left is P3 since the line; expired (the 503 body) is P3', () => {
+  const at = (body: unknown, status = 200): FetchResult =>
+    status === 200 ? ok(body) : { ok: false, kind: 'http', status, retryable: true, message: `HTTP ${status}`, body: JSON.stringify(body), attempts: 3 };
+  const fresh = evaluateEnvConfigBundle({ env: 'staging', health: at(envHealth(28 * DAY)), nowMs: NOW });
+  assert.deepEqual({ findings: fresh.findings, unjudged: fresh.unjudged, notes: fresh.notes }, { findings: [], unjudged: [], notes: [] });
+  assert.equal(fresh.summary, 'config_bundle_staging=v77 expires_in=28.0d');
+  assert.deepEqual(evaluateEnvConfigBundle({ env: 'dev', health: at(envHealth(25 * DAY)), nowMs: NOW }).findings, [], 'exactly on the line is clear');
+
+  const old = evaluateEnvConfigBundle({ env: 'staging', health: at(envHealth(d(24.9))), nowMs: NOW });
+  assert.equal(old.findings.length, 1);
+  const f = old.findings[0]!;
+  assert.deepEqual(
+    { key: f.key, rule: f.rule, board: f.board, severity: f.severity, class: f.class, check: f.check, sinceMs: f.sinceMs },
+    { key: 'config:bundle:staging', rule: 'config:bundle:env', board: 'platform', severity: 'P3', class: 'expiry', check: null, sinceMs: NOW + d(24.9) - 25 * DAY },
+  );
+  assert.match(f.text, /^the staging config bundle \(v77, served by config-staging\.theshelter\.app\) expires at 2026-11-16 09:36Z, in 24\.9 d: under the 25 d line \(a bundle lives 30 d\), so the staging config refresh has not run for over 5 d: rerun it for staging$/);
+  assert.deepEqual(old.unjudged, []);
+
+  // The config Worker answers 503 for an expired bundle, with the expiry in the body.
+  const expiredAt = NOW - 2 * DAY;
+  const gone = evaluateEnvConfigBundle({ env: 'dev', health: at({ ok: false, source: 'kv', version: 75, expiresAt: new Date(expiredAt).toISOString(), expired: true }, 503), nowMs: NOW });
+  assert.deepEqual(keySev(gone.findings), ['config:bundle:dev P3']);
+  assert.match(gone.findings[0]!.text, /^the dev config bundle \(v75, served by config-dev\.theshelter\.app\) EXPIRED at 2026-10-20 12:00Z: dev builds fall back to compiled defaults: /);
+  assert.equal(gone.summary, 'config_bundle_dev=v75 EXPIRED');
+  assert.equal(gone.findings[0]!.sinceMs, expiredAt - 25 * DAY);
+  // A 200 whose expiresAt has passed (clock skew, an edge copy) is expired too.
+  assert.deepEqual(keySev(evaluateEnvConfigBundle({ env: 'dev', health: at(envHealth(-60 * SEC)), nowMs: NOW }).findings), ['config:bundle:dev P3']);
+});
+
+test('env config bundle: no usable expiresAt is not judged, with a note naming the host', () => {
+  const cases: Array<[string, FetchResult, RegExp]> = [
+    ['down', { ok: false, kind: 'network', retryable: true, message: 'timed out after 15000 ms', attempts: 3 }, /^config-staging\.theshelter\.app\/healthz: timed out after 15000 ms after 3 attempt\(s\): the staging config bundle's age is not judged this run$/],
+    ['an older Worker', ok({ ok: true, source: 'kv', version: 77 }), /: the answer has no expiresAt: /],
+    ['an unparseable expiresAt', ok({ ok: true, version: 77, expiresAt: 'soon' }), /: the answer has no expiresAt: /],
+    ['no bundle resolvable', { ok: false, kind: 'http', status: 503, retryable: true, message: 'HTTP 503', body: '{"ok":false,"source":null,"version":null}', attempts: 3 }, /: HTTP 503 after 3 attempt\(s\): .*, no expiresAt: /],
+    ['an HTML error page', { ok: false, kind: 'http', status: 522, retryable: true, message: 'HTTP 522', body: '<html>timeout</html>', attempts: 3 }, /: HTTP 522 after 3 attempt\(s\): <html>timeout<\/html>: /],
+  ];
+  for (const [name, health, note] of cases) {
+    const v = evaluateEnvConfigBundle({ env: 'staging', health, nowMs: NOW });
+    assert.deepEqual(v.findings, [], name);
+    assert.deepEqual(v.unjudged, ['config:bundle:staging'], name);
+    assert.equal(v.notes.length, 1, name);
+    assert.match(v.notes[0]!, note, name);
+    assert.equal(v.summary, 'config_bundle_staging=unreadable', name);
+  }
+});
+
+test('main --findings: an old staging bundle and an expired dev bundle are P3 findings beside a healthy prod', async () => {
+  const { code, doc } = await runFindings({
+    ...healthyAnswers(),
+    [ENV_CONFIG_HEALTH_URLS.staging]: () => json(envHealth(20 * DAY)),
+    [ENV_CONFIG_HEALTH_URLS.dev]: () => json({ ok: false, source: 'kv', version: 75, expiresAt: new Date(NOW - DAY).toISOString(), expired: true }, 503),
+  });
+  assert.equal(code, 0);
+  assert.ok(doc);
+  assert.equal(parseFindingsDocument(doc).ok, true);
+  assert.deepEqual(keySev(doc.findings), ['config:bundle:staging P3', 'config:bundle:dev P3']);
+  assert.deepEqual(doc.unjudged, []);
+  assert.ok(doc.notes.includes('config bundle staging: config_bundle_staging=v77 expires_in=20.0d'), doc.notes.join('\n'));
+  // Plain mode: a warning, and no host is down.
+  const lines: string[] = [];
+  const plain = await main({ argv: [], env: {}, fetchImpl: route({ ...healthyAnswers(), [ENV_CONFIG_HEALTH_URLS.staging]: () => json(envHealth(20 * DAY)) }), now: () => NOW, log: (l) => lines.push(l), sleep: noSleep });
+  assert.equal(plain, 0);
+  assert.ok(lines.some((l) => l.startsWith('::warning title=Config bundle (P3)::the staging config bundle')), lines.join('\n'));
+});
+
+// ---------------------------------------------------------------------------------------------------------
 // Exit codes and arguments
 
 test('plainExitCode: 1 for a host down, else 3 for a watcher fault, else 0', () => {
@@ -335,13 +419,25 @@ test('plainExitCode: 1 for a host down, else 3 for a watcher fault, else 0', () 
 });
 
 test('parseArgs: defaults, every flag, and readable errors', () => {
-  assert.deepEqual(parseArgs([]), { apiUrl: API_HEALTH_URL, configUrl: CONFIG_HEALTH_URL, statusUrl: STATUS_URL, findingsPath: null });
-  assert.deepEqual(parseArgs(['--api-url', 'https://a.test/h', '--config-url', 'https://c.test/h', '--status-url', 'https://s.test/status.json', '--findings', 'findings/platform.json']), {
-    apiUrl: 'https://a.test/h',
-    configUrl: 'https://c.test/h',
-    statusUrl: 'https://s.test/status.json',
-    findingsPath: 'findings/platform.json',
+  assert.deepEqual(parseArgs([]), {
+    apiUrl: API_HEALTH_URL,
+    configUrl: CONFIG_HEALTH_URL,
+    statusUrl: STATUS_URL,
+    stagingConfigUrl: 'https://config-staging.theshelter.app/healthz',
+    devConfigUrl: 'https://config-dev.theshelter.app/healthz',
+    findingsPath: null,
   });
+  assert.deepEqual(
+    parseArgs(['--api-url', 'https://a.test/h', '--config-url', 'https://c.test/h', '--status-url', 'https://s.test/status.json', '--staging-config-url', 'https://cs.test/h', '--dev-config-url', 'https://cd.test/h', '--findings', 'findings/platform.json']),
+    {
+      apiUrl: 'https://a.test/h',
+      configUrl: 'https://c.test/h',
+      statusUrl: 'https://s.test/status.json',
+      stagingConfigUrl: 'https://cs.test/h',
+      devConfigUrl: 'https://cd.test/h',
+      findingsPath: 'findings/platform.json',
+    },
+  );
   assert.throws(() => parseArgs(['--nope']), /unknown argument "--nope"/);
   assert.throws(() => parseArgs(['--findings']), /--findings needs a value/);
   assert.throws(() => parseArgs(['--api-url', '--findings', 'x.json']), /--api-url needs a value/);
@@ -364,6 +460,8 @@ const healthyAnswers = (statusPatch: Record<string, unknown> = freshness(NOW, DA
   [API_HEALTH_URL]: () => json(API_OK),
   [CONFIG_HEALTH_URL]: () => json(CONFIG_OK),
   [STATUS_URL]: () => json(statusDoc(NOW, statusPatch)),
+  [ENV_CONFIG_HEALTH_URLS.staging]: () => json(envHealth(28 * DAY)),
+  [ENV_CONFIG_HEALTH_URLS.dev]: () => json(envHealth(27 * DAY, 75)),
 });
 
 /** Run main in --findings mode with an in-memory writer; returns the exit code, the parsed document and the log. */
@@ -400,6 +498,8 @@ test('main --findings: every host down still writes a valid document and exits 0
       [API_HEALTH_URL]: () => new Response('<html>Connection timed out</html>', { status: 522 }),
       [CONFIG_HEALTH_URL]: () => json({ ok: false, source: null, version: null }, 503),
       [STATUS_URL]: () => new Response('upstream error', { status: 502 }),
+      [ENV_CONFIG_HEALTH_URLS.staging]: () => new Response('upstream error', { status: 502 }),
+      [ENV_CONFIG_HEALTH_URLS.dev]: () => json({ ok: false, source: null, version: null }, 503),
     },
     { sleep: async (ms) => { sleeps.push(ms); } },
   );
@@ -407,12 +507,13 @@ test('main --findings: every host down still writes a valid document and exits 0
   assert.ok(doc);
   assert.equal(parseFindingsDocument(doc).ok, true);
   assert.deepEqual(keySev(doc.findings), ['platform:api P2', 'platform:config-worker P3']);
-  assert.deepEqual(doc.unjudged, ['platform:api:envelope', 'config:bundle']);
+  assert.deepEqual(doc.unjudged, ['platform:api:envelope', 'config:bundle', 'config:bundle:staging', 'config:bundle:dev']);
   assert.ok(doc.notes.some((n) => /status\.json is unreadable/.test(n)));
+  assert.ok(doc.notes.includes('config-dev.theshelter.app/healthz: HTTP 503 after 3 attempt(s): {"ok":false,"source":null,"version":null}, no expiresAt: the dev config bundle\'s age is not judged this run'), doc.notes.join('\n'));
   assert.ok(!lines.some((l) => l.startsWith('::')), 'findings are not annotated: reconcile prints them');
   assert.ok(lines.includes('not judged: config:bundle'));
-  // The API: 3 tries 30 s apart; config and status.json: the default 2 s and 5 s.
-  assert.deepEqual([...sleeps].sort((a, b) => a - b), [2_000, 2_000, 5_000, 5_000, 30_000, 30_000]);
+  // The API: 3 tries 30 s apart; config, status.json and the two non-prod config hosts: the default 2 s and 5 s.
+  assert.deepEqual([...sleeps].sort((a, b) => a - b), [2_000, 2_000, 2_000, 2_000, 5_000, 5_000, 5_000, 5_000, 30_000, 30_000]);
 });
 
 test('main: the API is tried 3 times over at least 60 s before platform:api', async () => {
@@ -501,7 +602,7 @@ test('main: a bad argument with --findings writes watcher:platform-watchdog (P3)
   assert.deepEqual({ key: f.key, rule: f.rule, severity: f.severity, class: f.class, board: f.board }, { key: 'watcher:platform-watchdog', rule: 'watcher', severity: 'P3', class: 'watcher', board: 'platform' });
   assert.match(f.text, /unknown argument "--max-age-sec"/);
   assert.deepEqual(doc.unjudged, [...PLATFORM_KEYS]);
-  assert.deepEqual(doc.unjudged, ['platform:api', 'platform:api:envelope', 'platform:config-worker', 'config:bundle']);
+  assert.deepEqual(doc.unjudged, ['platform:api', 'platform:api:envelope', 'platform:config-worker', 'config:bundle', 'config:bundle:*']);
   assert.ok(!lines.some((l) => l.startsWith('::')), 'the watcher finding is reconcile\'s to annotate');
   // The flag order does not matter.
   const again: Record<string, string> = {};

@@ -1515,7 +1515,10 @@ Round 17 (LANE G) changes what the commits rewrite, never what consumers read, a
   UTC); the Resolver's equal-distance tie-break follows that order. The code before round 17 reads hour shards in name
   order (hour, then feed id): the same nodes, another order, so the rollback is `EVENT_MAP_SHARD_HOURS=24` rather than
   a revert. Replayed alone, the event_map's share of the days to 10-04, 10-05 and 10-06 falls from 13, 20
-  and 32 MB to 6, 7.5 and 10.
+  and 32 MB to 6, 7.5 and 10. A save rewrites only the days the run's map holds. Aggregate loads the event_map from a
+  floor day back and passes that floor to `saveEventMap` (`floorDay`): a day below it that a revision moved a node onto
+  (an `updatedafter` sweep reaches further back than the loaded window) is merged with its shards on disk, upserted by
+  feed id, never rewritten from the run's nodes alone, which would drop the day's other events (2026-11-15 audit).
 
 Both together replay to 45 MB a day on average over the eight days instead of 63 (23–42 % less a day, 28 % in all); at
 GitHub's 67 MB a day that is about 48 MB. What remains is about three quarters day partitions, which consumers read
@@ -1723,7 +1726,9 @@ hour. A cron-started first-solutions run queued behind the Worker's and then hel
 across history's turn: 10 of the 48 Worker-started history runs waited 2.2–31 minutes (9 behind a cron-started or
 delayed first-solutions run, 1 behind a cron-started history run), and GitHub, which keeps one pending run or job per
 group, cancelled 3 cron-started runs while they waited. Replayed without those deliveries, the same 48 hours have no
-wait and no cancellation in the group. The fallback for a Worker outage is `walk-fallback.yml`
+wait and no cancellation in the group. Since the 2026-11-15 audit both sides of the group (history.yml's workflow-level
+group and the `collect` job's) set `queue: max`, so a run or job that waits for the group is kept until its turn, in
+arrival order, instead of being cancelled by the next one to arrive. The fallback for a Worker outage is `walk-fallback.yml`
 (`scripts/walk-fallback.mjs`): on its `:29` and `:50` crons it reads the walk's newest `workflow_dispatch` run and
 dispatches the walk as the Worker does only when that run is more than 2 h 5 min old (two missed ticks; the Worker
 missed 1 of 48 first-solutions ticks in those 48 hours, 10-06 19:48, and a single miss costs one hour of the walk). It
@@ -1848,6 +1853,9 @@ frozen days not archived yet (late ComCat):
   asked again by the scheduled run whatever its age, after the window's days so they keep the run's cap
   (`late_usgs.stale` in the report), and rebuilt on the current
   partition, so the edition never shadows the backfilled rows and the month's re-merge is not blocked at the roll.
+  The scheduled run comes from GitHub's cron alone (the heartbeat Worker does not dispatch `remediate`, `remerge` or
+  `stats`; README, *Cron-only workflows*): a late or dropped delivery delays a day's refresh and loses nothing, since
+  every day stays in the 12–45-day window for 33 daily runs.
 
 `knowledge/index/remediation.json` lists every raw asset (`provider`, `day`, `rows`, `requests`, `partial`,
 `sha256`, `reason`, …) and every edition (`day`, `edition`, `url`, `sha256`, `built_on`: the archive asset and its
@@ -2451,6 +2459,22 @@ magnitude (it would put an M4.8 into the summaries as 3.7 and break the magnitud
 depth, and one of four events mislocated by 185 km. Look again if the network starts publishing seismic magnitudes,
 depths and creation times and lists quakes no agency has; then read its terms again (above). `DECLINED` also holds
 `map.geoshake.org`, the same service under the map's host name.
+
+**NIEP / INFP Romania (`eida-sc3.infp.ro`, issue #136), declined 2026-11-16.**
+
+- Where it comes from: not from the FDSN registry. NIEP's data centre entry there lists dataselect, station,
+  availability, wfcatalog and psd on `https://eida-sc3.infp.ro`, and no fdsnws-event. The event service is the curated
+  lead `http://eida-sc3.infp.ro/fdsnws/event/1/query` in src/discover.ts: an unadvertised SeisComP event service on
+  NIEP's EIDA waveform host.
+- Reachability: it answered 1 of 3 monthly probes (2026-11-01, over http, 3 events as text; whether it serves https is
+  unconfirmed) and timed out on 2026-11-16 together with every other infp.ro host.
+- Terms: no licence or terms of use found for the event service.
+- Coverage: NIEP's solutions already reach the feed through EMSC, which carries NIEP as the author: 6 of the 11 Romanian
+  events of 2026-11-01..15 on the `data` branch (the other five: EMSC 4, MCSM 1).
+
+Why not: no event or solution the feed lacks can be shown, the service is unadvertised and not reliably reachable, and
+its licence is unknown. Look again if NIEP registers an fdsnws-event service with stated terms. The curated lead stays
+in src/discover.ts, so removing the `DECLINED` entry brings the monthly probe back.
 
 ## Recipes
 

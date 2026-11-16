@@ -7,8 +7,8 @@ import { join } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { JWKS_STALE_MS, JWKS_TTL_MS, REFETCH_MIN_MS, ROUTE_WORKFLOWS, createKeyStore, type JwksCache } from '../state/src/auth.js';
-import { KEEP_DAYS, SCHEMA, gcBegin, gcEnd, refundStored, reserve, snapshot, type Sql } from '../state/src/budget.js';
+import { JWKS_STALE_MS, JWKS_TTL_MS, REFETCH_MIN_MS, createKeyStore, workflowsFor, type JwksCache } from '../state/src/auth.js';
+import { KEEP_DAYS, gcBegin, gcEnd, migrate, refundStored, reserve, snapshot, type Sql } from '../state/src/budget.js';
 import { BLOB_METADATA, blobKey, shaOfKey } from '../state/src/cas.js';
 import { byteStream, createHandler, type Env } from '../state/src/worker.js';
 
@@ -141,8 +141,9 @@ function sqliteSql(): Sql {
     const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
     return { toArray: () => rows };
   };
-  for (const s of SCHEMA) exec(s);
-  return { exec };
+  const sql = { exec };
+  migrate(sql);
+  return sql;
 }
 
 /** The BudgetLedger Durable Object's RPC surface over node:sqlite (async, values cloned, as RPC does). */
@@ -214,6 +215,7 @@ function harness(opts: { staging?: boolean; env?: Partial<Env>; jwks?: () => Pro
     AUDIENCE: opts.staging ? 'earthquakes-feed-state-staging' : AUD,
     ALLOW_ANY_REF: opts.staging ? '1' : '0',
     MIN_PROTOCOL: '1',
+    REF_BACKEND: 'r2',
     ...CEILINGS,
     STATE: r2,
     BUDGET: budget.ns,
@@ -401,13 +403,13 @@ test('state auth: per-route allow-lists (read, write, gc, budget)', async () => 
   for (const route of ['read', 'write', 'gc', 'budget'] as const) {
     for (const w of workflows) {
       const status = await probe(route, w);
-      if (ROUTE_WORKFLOWS[route].includes(w)) assert.notEqual(status, 403, `${route} ${w}`);
+      if (workflowsFor(route).includes(w)) assert.notEqual(status, 403, `${route} ${w}`);
       else assert.equal(status, 403, `${route} ${w}`);
     }
   }
-  assert.deepEqual(ROUTE_WORKFLOWS.write, ['aggregate.yml']);
-  assert.deepEqual(ROUTE_WORKFLOWS.gc, ['state-gc.yml']);
-  assert.ok(!ROUTE_WORKFLOWS.read.includes('health.yml') && ROUTE_WORKFLOWS.budget.includes('health.yml'));
+  assert.deepEqual(workflowsFor('write'), ['aggregate.yml']);
+  assert.deepEqual(workflowsFor('gc'), ['state-gc.yml']);
+  assert.ok(!workflowsFor('read').includes('health.yml') && workflowsFor('budget').includes('health.yml'));
 });
 
 test('state auth: staging admits any branch and the rehearsal workflow, with its own audience', async () => {
@@ -730,7 +732,8 @@ test('state GC: pages by cursor; a later page must continue the open pass with t
 // --- Budget --------------------------------------------------------------------------------------------------------
 
 test('state budget: each ceiling refuses with 429 {"error":"budget"} before the bucket is touched', async () => {
-  const tight = { CLASS_A_PER_DAY: '2', CLASS_B_PER_DAY: '45', BYTES_WRITTEN_PER_DAY: '1000000', STORED_BYTES_MAX: '1000000' };
+  // aggregate.yml reserves on the critical lane: refused above 95 % of a ceiling (3 → 2.85 Class A, 48 → 45.6 Class B).
+  const tight = { CLASS_A_PER_DAY: '3', CLASS_B_PER_DAY: '48', BYTES_WRITTEN_PER_DAY: '1000000', STORED_BYTES_MAX: '1000000' };
   const h = harness({ env: tight });
   const blob = (s: string) => {
     const b = gz(s);
@@ -765,11 +768,13 @@ test('state budget: each ceiling refuses with 429 {"error":"budget"} before the 
   const snap = (await (await h.call('GET', '/v1/budget')).json()) as Record<string, unknown>;
   assert.deepEqual(snap, {
     day: '2026-11-17',
-    used: { class_a: 1, class_b: 0, bytes_written: b3.byteLength, requests: 1, refused: 0 },
+    used: { class_a: 1, class_b: 0, bytes_written: b3.byteLength, requests: 1, refused: 0, refused_critical: 0, ref_conflicts: 0 },
     stored_bytes: 3 * b3.byteLength,
+    meta_bytes: 0,
+    lanes: { critical: 0.95, background: 0.6 },
     stored_seeded_at: null,
     gc_pass_open: false,
-    ceilings: { class_a: 2, class_b: 45, bytes_written: 1000000, stored_bytes: 1000000 },
+    ceilings: { class_a: 3, class_b: 48, bytes_written: 1000000, stored_bytes: 1000000 },
   });
 });
 
@@ -864,7 +869,7 @@ test('state log: one JSON line per request with route, workflow, run, status and
 });
 
 test('state config: a missing or malformed var answers 500 for every request', async () => {
-  for (const env of [{ REPOSITORY_ID: '' }, { CLASS_B_PER_DAY: 'lots' }, { MIN_PROTOCOL: '0' }, { ENVIRONMENT: 'prod' }]) {
+  for (const env of [{ REPOSITORY_ID: '' }, { CLASS_B_PER_DAY: 'lots' }, { MIN_PROTOCOL: '0' }, { ENVIRONMENT: 'prod' }, { REF_BACKEND: 'kv' }]) {
     const h = harness({ env });
     assert.equal((await h.call('GET', '/v1/budget')).status, 500, JSON.stringify(env));
   }
@@ -897,12 +902,13 @@ test('state wrangler.toml: production and staging, custom domains only, R2 + SQL
   const p = vars(top);
   const s = vars(staging);
   assert.deepEqual(
-    { ENVIRONMENT: p.ENVIRONMENT, REPOSITORY_ID: p.REPOSITORY_ID, AUDIENCE: p.AUDIENCE, ALLOW_ANY_REF: p.ALLOW_ANY_REF, MIN_PROTOCOL: p.MIN_PROTOCOL },
-    { ENVIRONMENT: 'production', REPOSITORY_ID: '1289538519', AUDIENCE: 'earthquakes-feed-state', ALLOW_ANY_REF: '0', MIN_PROTOCOL: '1' },
+    { ENVIRONMENT: p.ENVIRONMENT, REPOSITORY_ID: p.REPOSITORY_ID, AUDIENCE: p.AUDIENCE, ALLOW_ANY_REF: p.ALLOW_ANY_REF, MIN_PROTOCOL: p.MIN_PROTOCOL, REF_BACKEND: p.REF_BACKEND },
+    { ENVIRONMENT: 'production', REPOSITORY_ID: '1289538519', AUDIENCE: 'earthquakes-feed-state', ALLOW_ANY_REF: '0', MIN_PROTOCOL: '1', REF_BACKEND: 'r2' },
   );
+  // Step 4.0 is additive: MIN_PROTOCOL stays 1 on both until 4.3's flip.
   assert.deepEqual(
-    { ENVIRONMENT: s.ENVIRONMENT, REPOSITORY_ID: s.REPOSITORY_ID, AUDIENCE: s.AUDIENCE, ALLOW_ANY_REF: s.ALLOW_ANY_REF },
-    { ENVIRONMENT: 'staging', REPOSITORY_ID: '1289538519', AUDIENCE: 'earthquakes-feed-state-staging', ALLOW_ANY_REF: '1' },
+    { ENVIRONMENT: s.ENVIRONMENT, REPOSITORY_ID: s.REPOSITORY_ID, AUDIENCE: s.AUDIENCE, ALLOW_ANY_REF: s.ALLOW_ANY_REF, MIN_PROTOCOL: s.MIN_PROTOCOL, REF_BACKEND: s.REF_BACKEND },
+    { ENVIRONMENT: 'staging', REPOSITORY_ID: '1289538519', AUDIENCE: 'earthquakes-feed-state-staging', ALLOW_ANY_REF: '1', MIN_PROTOCOL: '1', REF_BACKEND: 'r2' },
   );
   // Never pay: the R2 free tier is per account, so production's and staging's ceilings together stay inside it.
   const n = (v: string | undefined) => Number(v);

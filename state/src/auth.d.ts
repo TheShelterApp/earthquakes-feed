@@ -6,8 +6,38 @@ export const SKEW_S: number;
 export const JWKS_TTL_MS: number;
 export const JWKS_STALE_MS: number;
 export const REFETCH_MIN_MS: number;
-export const ROUTE_WORKFLOWS: Record<'read' | 'write' | 'gc' | 'budget', string[]>;
+/** One (repository_id, workflow) pair: repository HOME is the Worker's REPOSITORY_ID, else a numeric id string. */
+export interface Pair {
+  repository: string;
+  workflow: string;
+  environment?: string;
+  events?: readonly string[];
+}
+export type BlobRight = 'read' | 'write' | 'gc' | 'budget';
+export type LaneRight = 'ref-read' | 'ref-write' | 'reflog' | 'restore';
+export type Right = BlobRight | LaneRight | 'probe';
+export interface LaneRules {
+  read: readonly Pair[];
+  write: readonly Pair[];
+  reflog: readonly Pair[];
+  restore: readonly Pair[];
+}
+export interface Policy {
+  routes: Record<BlobRight, readonly Pair[]>;
+  lanes: Record<string, LaneRules>;
+  staging: readonly string[];
+}
+export const HOME: string;
+export const ROUTE_POLICY: Record<BlobRight, readonly Pair[]>;
+export const LANE_POLICY: Record<'main' | 'main-shadow' | 'first-solutions' | 'history', LaneRules>;
+export const LANES: readonly string[];
+export const REHEARSAL_LANE: RegExp;
+export const RESTORE_ENVIRONMENT: string;
+export const RESTORE_PAIR: Pair;
 export const STAGING_WORKFLOWS: string[];
+export const DEFAULT_POLICY: Policy;
+export function workflowsFor(right: BlobRight, policy?: Policy): string[];
+export function knownRepositories(homeId: string, policy?: Policy): string[];
 
 export class AuthError extends Error {
   constructor(status: 401 | 403 | 503, reason: string);
@@ -27,10 +57,10 @@ export function createKeyStore(deps?: { fetchJwks?: () => Promise<unknown>; cach
 export function bearerToken(request: Request): string;
 export function verifyToken(
   token: string,
-  opts: { audience: string; repositoryId: string; keyStore: KeyStore; cacheKey?: string; nowMs: number },
+  opts: { audience: string; repositoryIds: string[]; keyStore: KeyStore; cacheKey?: string; nowMs: number },
 ): Promise<Record<string, unknown>>;
 export function authorize(
   claims: Record<string, unknown>,
-  route: 'read' | 'write' | 'gc' | 'budget',
-  opts: { allowAnyRef: boolean; staging: boolean },
+  right: Right,
+  opts: { repositoryId: string; allowAnyRef: boolean; staging: boolean; lane?: string | null; policy?: Policy },
 ): string;

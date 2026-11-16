@@ -12,13 +12,15 @@
 // - the key comes from GitHub's JWKS at the hard-coded JWKS_URL (never discovered from the token or an issuer
 //   document), imported as RSASSA-PKCS1-v1_5 / SHA-256;
 // - iss, aud (the Worker's AUDIENCE: production and staging have different audiences, so a token minted for one is
-//   refused by the other), exp, nbf, iat, and repository_id (the numeric id survives a rename or a transfer of the
-//   repository; owner, repository and workflow NAMES are never matched in full, so a rename cannot lock the feed out).
+//   refused by the other), exp, nbf, iat, and repository_id: REPOSITORY_ID or a peer repository some pair names (the
+//   numeric id survives a rename or a transfer of the repository; owner, repository and workflow NAMES are never
+//   matched in full, so a rename cannot lock the feed out).
 //
-// Authorisation (403: a token from this repository, but not for this route):
+// Authorisation (403: a token of a known repository, but not for this route):
 // - ref_type branch, runner_environment github-hosted, event_name schedule or workflow_dispatch (no push, no
 //   pull_request: a PR's ref is refs/pull/N/merge anyway), ref refs/heads/main unless ALLOW_ANY_REF (staging only);
-// - workflow_ref must end with `/.github/workflows/<file>@<ref>` and <file> must be in the route's allow-list.
+// - workflow_ref must end with `/.github/workflows/<file>@<ref>`, and (repository_id, <file>) must be one of the
+//   right's pairs, with the pair's `environment` claim and events when it names them (the restore).
 //
 // JWKS cache: the imported keys live per isolate and the JWKS document in the Cache API (it works on the Worker's custom
 // domain) for JWKS_TTL_MS; an older copy is kept JWKS_STALE_MS and used when GitHub cannot be reached (stale-if-error,
@@ -36,20 +38,90 @@ const JWKS_FETCH_TIMEOUT_MS = 5_000;
 // A GitHub OIDC token is about 1.2 KB; anything far larger is refused before it is decoded.
 const MAX_TOKEN_CHARS = 8_192;
 
-/** The workflows each route admits (file names under .github/workflows of this repository). */
-export const ROUTE_WORKFLOWS = {
+// Who may call what: (repository_id, workflow) PAIRS, never bare workflow file names (storage phase 4.0). A second
+// repository (phase 5.3's new data repository, its own publish.yml) will be admitted by its own numeric id, and a
+// file name it shares with this repository (publish.yml, aggregate.yml) then matches nothing here: every pair names
+// the repository it belongs to. `repository: HOME` is the Worker's REPOSITORY_ID (this repository); a peer is a
+// numeric id string. A pair may also require the token's `environment` claim (a GitHub Environment, whose required
+// reviewers GitHub enforces before the job gets a token at all) and narrow the events.
+export const HOME = 'home';
+const pair = (workflow, extra = {}) => Object.freeze({ repository: HOME, workflow, ...extra });
+const pairs = (...workflows) => Object.freeze(workflows.map((w) => pair(w)));
+
+/** The workflows each blob route admits (protocol 1). */
+export const ROUTE_POLICY = Object.freeze({
   // Readers: the jobs that hydrate the event map (aggregate, derive), first-solutions' collect job, the backup and GC
   // jobs (the backup tars the blobs; GC reads nothing today but may verify a blob it keeps).
-  read: ['aggregate.yml', 'derive.yml', 'first-solutions.yml', 'state-backup.yml', 'state-gc.yml'],
+  read: pairs('aggregate.yml', 'derive.yml', 'first-solutions.yml', 'state-backup.yml', 'state-gc.yml'),
   // Writers: only the aggregate job persists the event map. derive.yml's prune is a pure local edit of the generation
   // document (it never uploads a blob), so it holds no write right; add a workflow here only when it calls persist.
-  write: ['aggregate.yml'],
-  gc: ['state-gc.yml'],
+  write: pairs('aggregate.yml'),
+  gc: pairs('state-gc.yml'),
   // Today's counters: every reader, plus the health watchdog (feed:state-budget). health holds no blob right.
-  budget: ['aggregate.yml', 'derive.yml', 'first-solutions.yml', 'state-backup.yml', 'state-gc.yml', 'health.yml'],
-};
-/** The rehearsal workflow (synthetic data only) is admitted on every route, and only on staging. */
+  budget: pairs('aggregate.yml', 'derive.yml', 'first-solutions.yml', 'state-backup.yml', 'state-gc.yml', 'health.yml'),
+});
+
+/**
+ * The restore pair: only state-restore.yml, only dispatched by hand, and only in a job of the GitHub Environment
+ * `state-restore` (required reviewer: the owner), whose token carries `environment: state-restore`. It is the one
+ * writer that may send `restore_of` (a ref PUT that jumps head_seq forward); it reads the ref and the reflog it
+ * restores from. The rehearsal workflow is never admitted here, not even on staging.
+ */
+export const RESTORE_ENVIRONMENT = 'state-restore';
+export const RESTORE_PAIR = pair('state-restore.yml', { environment: RESTORE_ENVIRONMENT, events: Object.freeze(['workflow_dispatch']) });
+
+/**
+ * The CAS refs (protocol 2, state/src/refs.js): one per writer lane, each with its own read, write and reflog
+ * pairs. In step 4.0 nothing in the production pipeline calls them (inert): 4.1 writes `main-shadow`, 4.3 makes `main`
+ * the truth, 4.5 moves first-solutions and history to their lanes. The lists are the end state of the design, so those
+ * steps need no Worker deploy for authorisation alone; a list only ever grants a lane, never a blob route.
+ * - read: the lane's writers and every job that hydrates from it (remediate's head.seq, stats and history read
+ *   refs/main from 4.2, health's reconciler compares ref and trailer);
+ * - write: under the writer lock for main (aggregate, derive, backfill, archive and state-gc), the lockless lanes'
+ *   own commit jobs;
+ * - reflog: GC and backup find their roots there, health checks it for gaps; the restore pair reads it everywhere.
+ */
+const MAIN_WRITERS = ['aggregate.yml', 'derive.yml', 'backfill.yml', 'archive.yml', 'state-gc.yml'];
+const MAINTENANCE = ['state-gc.yml', 'state-backup.yml', 'health.yml'];
+const lane = ({ read, write, restore }) =>
+  Object.freeze({
+    read: Object.freeze([...pairs(...new Set([...write, ...read, ...MAINTENANCE])), ...(restore ? [RESTORE_PAIR] : [])]),
+    write: pairs(...write),
+    reflog: Object.freeze([...pairs(...MAINTENANCE), ...(restore ? [RESTORE_PAIR] : [])]),
+    restore: Object.freeze(restore ? [RESTORE_PAIR] : []),
+  });
+export const LANE_POLICY = Object.freeze({
+  main: lane({ write: MAIN_WRITERS, read: ['remediate.yml', 'stats.yml', 'history.yml'], restore: true }),
+  // 4.1's shadow of main: written after each data push, compared at run start; never restored (it is rebuilt from git).
+  'main-shadow': lane({ write: ['aggregate.yml', 'derive.yml', 'backfill.yml', 'archive.yml'], read: [], restore: false }),
+  'first-solutions': lane({ write: ['first-solutions.yml'], read: ['derive.yml'], restore: true }),
+  history: lane({ write: ['history.yml', 'remerge.yml'], read: ['derive.yml', 'stats.yml'], restore: true }),
+});
+export const LANES = Object.freeze(Object.keys(LANE_POLICY));
+/** Staging only: a rehearsal lane per run (state-rehearsal.yml), so "create twice" always starts from no ref. */
+export const REHEARSAL_LANE = /^rehearsal-[a-z0-9][a-z0-9-]{0,47}$/;
+
+/** The rehearsal workflow (synthetic data only) is admitted on every route but restore, and only on staging. */
 export const STAGING_WORKFLOWS = ['state-rehearsal.yml'];
+
+/** The policy the Worker enforces (tests inject another, e.g. with a peer repository's pair). */
+export const DEFAULT_POLICY = Object.freeze({ routes: ROUTE_POLICY, lanes: LANE_POLICY, staging: STAGING_WORKFLOWS });
+
+/** The bare workflow names of HOME's pairs for a blob route (docs and tests). */
+export function workflowsFor(right, policy = DEFAULT_POLICY) {
+  return (policy.routes[right] ?? []).filter((p) => p.repository === HOME).map((p) => p.workflow);
+}
+
+/** Every repository id a token may come from: the Worker's own, plus each peer a pair names. */
+export function knownRepositories(homeId, policy = DEFAULT_POLICY) {
+  const ids = new Set([String(homeId)]);
+  const add = (list) => {
+    for (const p of list) if (p.repository !== HOME) ids.add(String(p.repository));
+  };
+  for (const list of Object.values(policy.routes)) add(list);
+  for (const l of Object.values(policy.lanes)) for (const list of Object.values(l)) add(list);
+  return [...ids];
+}
 
 export class AuthError extends Error {
   /** status 401 (not authenticated), 403 (authenticated, not allowed) or 503 (keys unavailable: retry). */
@@ -213,9 +285,9 @@ export function createKeyStore({ fetchJwks = fetchJwksFromGitHub, cache = null, 
 
 /**
  * Verify a token's signature and its identity claims. Returns the claims, or throws an AuthError (401, or 503 when no
- * signing key can be had). opts: {audience, repositoryId, keyStore, cacheKey, nowMs}.
+ * signing key can be had). opts: {audience, repositoryIds (knownRepositories), keyStore, cacheKey, nowMs}.
  */
-export async function verifyToken(token, { audience, repositoryId, keyStore, cacheKey, nowMs }) {
+export async function verifyToken(token, { audience, repositoryIds, keyStore, cacheKey, nowMs }) {
   const parts = token.split('.');
   if (parts.length !== 3) throw new AuthError(401, 'malformed token');
   const header = base64urlJson(parts[0]);
@@ -240,15 +312,36 @@ export async function verifyToken(token, { audience, repositoryId, keyStore, cac
   if (claims.iat != null && (typeof claims.iat !== 'number' || claims.iat > now + SKEW_S)) {
     throw new AuthError(401, 'issued in the future');
   }
-  if (String(claims.repository_id ?? '') !== String(repositoryId)) throw new AuthError(401, 'wrong repository');
+  if (!repositoryIds.map(String).includes(String(claims.repository_id ?? ''))) throw new AuthError(401, 'wrong repository');
   return claims;
 }
 
+/** Whether claims match one pair: its repository (HOME = homeId), workflow, environment and events. */
+function matches(p, claims, workflow, homeId) {
+  const repo = p.repository === HOME ? String(homeId) : String(p.repository);
+  if (String(claims.repository_id ?? '') !== repo || p.workflow !== workflow) return false;
+  if (p.environment != null && claims.environment !== p.environment) return false;
+  return !p.events || p.events.includes(claims.event_name);
+}
+
+/** The pairs a right admits: a blob route ('read' | 'write' | 'gc' | 'budget'), or a lane right ('ref-read' |
+ *  'ref-write' | 'reflog' | 'restore') of `lane`. A rehearsal lane has no production pairs (staging adds its own). */
+function pairsFor(right, lane, policy) {
+  if (right.startsWith('ref-') || right === 'reflog' || right === 'restore') {
+    const l = policy.lanes[lane];
+    if (!l) return [];
+    return { 'ref-read': l.read, 'ref-write': l.write, reflog: l.reflog, restore: l.restore }[right] ?? [];
+  }
+  return policy.routes[right] ?? [];
+}
+
 /**
- * Authorise verified claims for a route ('read' | 'write' | 'gc' | 'budget'). Returns the workflow file name, or throws
- * an AuthError(403). opts: {allowAnyRef, staging}.
+ * Authorise verified claims for a right: a blob route, a lane right with opts.lane, or 'probe' (staging's rehearsal
+ * probes). Returns the workflow file name, or throws an AuthError(403). opts: {repositoryId (the home id), allowAnyRef,
+ * staging, lane, policy}. On staging the rehearsal workflow of the home repository is admitted on every right but
+ * restore; a rehearsal lane admits nothing else.
  */
-export function authorize(claims, route, { allowAnyRef, staging }) {
+export function authorize(claims, right, { repositoryId, allowAnyRef, staging, lane = null, policy = DEFAULT_POLICY }) {
   if (claims.ref_type !== 'branch') throw new AuthError(403, 'ref_type not branch');
   if (claims.runner_environment !== 'github-hosted') throw new AuthError(403, 'runner not github-hosted');
   if (claims.event_name !== 'schedule' && claims.event_name !== 'workflow_dispatch') {
@@ -263,9 +356,11 @@ export function authorize(claims, route, { allowAnyRef, staging }) {
   const m = /\/\.github\/workflows\/([A-Za-z0-9._-]+\.ya?ml)$/.exec(wr.slice(0, -suffix.length));
   if (!m) throw new AuthError(403, 'workflow_ref not a workflow file');
   const workflow = m[1];
-  const allowed = ROUTE_WORKFLOWS[route] ?? [];
-  if (!(allowed.includes(workflow) || (staging && STAGING_WORKFLOWS.includes(workflow)))) {
-    throw new AuthError(403, `workflow ${workflow} not allowed on ${route}`);
+  const allowed = pairsFor(right, lane, policy);
+  const rehearsal =
+    staging && right !== 'restore' && String(claims.repository_id ?? '') === String(repositoryId) && policy.staging.includes(workflow);
+  if (!(allowed.some((p) => matches(p, claims, workflow, repositoryId)) || rehearsal)) {
+    throw new AuthError(403, `workflow ${workflow} not allowed on ${right}${lane ? ` ${lane}` : ''}`);
   }
   return workflow;
 }

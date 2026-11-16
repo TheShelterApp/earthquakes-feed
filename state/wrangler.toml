@@ -30,8 +30,13 @@ AUDIENCE = "earthquakes-feed-state"
 # "0": only refs/heads/main may call production (src/worker.js refuses "1" with ENVIRONMENT production).
 ALLOW_ANY_REF = "0"
 # The lowest x-feed-state-protocol a write or a GC call may send; bumped with every incompatible layout change, so an old
-# run re-run from the Actions UI cannot write the old layout.
+# run re-run from the Actions UI cannot write the old layout. Protocol 2's ref routes (storage phase 4.0) are additive
+# and always need ≥ 2 themselves; MIN_PROTOCOL becomes 2 only with 4.3's authority flip.
 MIN_PROTOCOL = "1"
+# Where the lane refs live (src/refs.js): "r2" (an R2 object swapped by the binding's conditional put) or "do" (a row
+# of the BudgetLedger Durable Object), the fallback if the staging race rehearsal shows R2's onlyIf is not an atomic
+# compare-and-swap. Same HTTP API either way; switching moves no ref (state/README.md "Ref backend").
+REF_BACKEND = "r2"
 # Hard daily ceilings (src/budget.js): 429 {"error":"budget"} above them, so the store stays inside the R2 free tier
 # (10 GB-month, 1M Class A and 10M Class B a month, shared with the platform's ~0.4 GB) whatever a client does.
 # 20,000 Class A a day is at most 620k in a 31-day month; 200,000 Class B at most 6.2M. The feed's own use is about
@@ -71,6 +76,7 @@ AUDIENCE = "earthquakes-feed-state-staging"
 # "1": the rehearsal workflow (state-rehearsal.yml, synthetic data only) runs from any branch.
 ALLOW_ANY_REF = "1"
 MIN_PROTOCOL = "1"
+REF_BACKEND = "r2"
 # The R2 free tier is per ACCOUNT, so staging's ceilings add to production's: a tenth of production's, which keeps the
 # sum inside the free tier (22,000 Class A a day = 682k in 31 days < 1M; 220,000 Class B = 6.82M < 10M; 6.25 GiB stored).
 # Staging holds synthetic data only.

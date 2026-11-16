@@ -1,4 +1,4 @@
-import { LATE_MINT_PROVIDERS } from './config.js';
+import { EVENT_MAP_HORIZON_DAYS, LATE_MINT_PROVIDERS } from './config.js';
 import type { Resolver } from './dedup.js';
 import type { LogBuffer } from './oplog.js';
 import type { RawObs, Watermarks } from './types.js';
@@ -42,6 +42,27 @@ export interface SweepResult {
 }
 
 const lagDaysOf = (raw: RawObs, ingestTime: string): number => (Date.parse(ingestTime) - raw.eventTimeMs) / 86_400_000;
+
+const DAY_MS = 86_400_000;
+
+/** The first instant derive loads (derive.ts: EVENT_MAP_HORIZON_DAYS of event-days, from 00:00 UTC of the oldest). */
+export const deriveLoadFloorMs = (nowMs: number, horizonDays: number = EVENT_MAP_HORIZON_DAYS): number =>
+  Math.floor((nowMs - horizonDays * DAY_MS) / DAY_MS) * DAY_MS;
+
+/**
+ * The `updatedafter` rows a run may apply, and those whose origin is below derive's load floor (2026-11-15 audit,
+ * feed-live F1 residual). A run that loads the whole event-map horizon (a heal epoch, aggregate.ts) asks the sweeps
+ * from one day below it, so a revision can move a node of the floor day across midnight onto the day before, which
+ * derive never loads: derive rewrites the floor day's partition without the node and prunes the day below, so the
+ * event drops out of the published feed. Such a revision is not applied (the event stays where it was) and the run
+ * names it. Regular runs ask from about 11 days back, far above the floor, so nothing is dropped there.
+ */
+export function splitBelowDeriveFloor(rows: readonly RawObs[], floorMs: number): { kept: RawObs[]; dropped: RawObs[] } {
+  const kept: RawObs[] = [];
+  const dropped: RawObs[] = [];
+  for (const r of rows) (r.eventTimeMs >= floorMs ? kept : dropped).push(r);
+  return { kept, dropped };
+}
 
 /** The `reason` on the op:tombstone line of a COMCAT_ID_PROVIDERS row withdrawn with a ComCat delete of its id
  *  (Resolver.withdrawComcatTwins, PF-5b). */

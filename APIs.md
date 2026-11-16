@@ -572,6 +572,10 @@ query and `includedeleted` delete query in that run, with where the sweep stands
 complete sweep was sent, so a sweep that did not complete keeps the previous one and the next run
 asks for the same window again), `epoch` (the catch-up epoch recorded with that cursor) and
 `catch_up: true` on the one-time catch-up run. `sweeps.epoch` is the current catch-up epoch.
+A run that loads the whole 45-day event-map horizon (the heal run) asks the sweeps from one day below derive's load
+floor (00:00 UTC of the oldest day derive loads); a revision whose origin is below that floor is not applied, since it
+would move the event onto a day derive no longer publishes, and the run log names it (`::notice` "Sweep below the derive
+floor"). Regular runs ask from 11 days back and never reach it.
 `comcat_twins_withdrawn` counts the AEC rows a ComCat delete withdrew in that run,
 `twin_withheld` the AEC reports held back beside another source's event, and `absent.aec`
 (`count`, the first 20 `ids`) the live AEC ids younger than 10 days that AEC's file no longer

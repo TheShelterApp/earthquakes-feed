@@ -33,7 +33,7 @@ import { BATCH_MAX, GC_MAX_KEEP, backendFromEnv, type GcPage, type StateBackend 
  * persist, or an empty map), or a keep set outside the Worker's 1..10,000: the Worker would refuse the call (400), and
  * there is nothing to check the keep set against. The run still completes and writes its marker (`skipped`).
  *
- * The store off (FEED_STATE_BACKEND, the repository variable, unset: before the phase-3a rollout turns it on): nothing
+ * The store off (FEED_STATE_BACKEND off or unset: the repository variable set to `off`, phase 3a's kill switch): nothing
  * is read or called; the run completes and writes its marker with `off: true`.
  *
  *   GH_TOKEN=… FEED_STATE_BACKEND=worker STATE_GC_DRY_RUN=1 npx --no-install tsx src/state-gc.ts
@@ -308,8 +308,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   const backend = backendFromEnv(env);
   const nowMs = Date.now();
   if (!backend) {
-    // The store is off (the repository variable FEED_STATE_BACKEND unset): a completed run that did nothing.
-    const summary = 'the state store is off (FEED_STATE_BACKEND unset): nothing collected';
+    // The store is off (FEED_STATE_BACKEND off or unset): a completed run that did nothing.
+    const summary = 'the state store is off (FEED_STATE_BACKEND off): nothing collected';
     console.log(`state GC: ${summary}`);
     if (env.STATE_GC_MARKER_DIR) {
       mkdirSync(env.STATE_GC_MARKER_DIR, { recursive: true });

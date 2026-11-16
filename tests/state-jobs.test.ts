@@ -37,7 +37,8 @@ import {
   type GcSources,
 } from '../src/state-gc.js';
 import { rehearse } from '../src/state-rehearsal.js';
-import { FsBackend, casKey, sha256Hex, type GcRequest, type StateBackend } from '../src/state-store.js';
+import { FsBackend, backendFromEnv, casKey, sha256Hex, stateBackendSetting, type GcRequest, type StateBackend } from '../src/state-store.js';
+import { stateBackendOn } from '../scripts/feed-health.mjs';
 
 // The state store's daily jobs (storage phase 3): GC's keep set and paging (src/state-gc.ts), the deterministic backup
 // into draft monthly Releases (src/state-backup.ts), and the staging rehearsal (src/state-rehearsal.ts) on the
@@ -337,14 +338,22 @@ test('the store off (the repository variable FEED_STATE_BACKEND unset): GC and t
   }
 });
 
-test('workflows: the store is switched on by the repository variable FEED_STATE_BACKEND (unset: off), never hard-coded on the production jobs', () => {
+test('workflows: the store is on by default and the repository variable FEED_STATE_BACKEND=off switches every production job off (never a bare hard-coded worker)', () => {
   const wf = (f: string): string => readFileSync(fileURLToPath(new URL(`../.github/workflows/${f}`, import.meta.url)), 'utf8');
+  const sw = /FEED_STATE_BACKEND: \$\{\{ vars\.FEED_STATE_BACKEND \|\| 'worker' \}\}/;
   for (const f of ['aggregate.yml', 'derive.yml', 'state-gc.yml', 'state-backup.yml', 'health.yml']) {
     const text = wf(f);
-    assert.match(text, /FEED_STATE_BACKEND: \$\{\{ vars\.FEED_STATE_BACKEND \}\}/, f);
+    assert.match(text, sw, f);
     assert.doesNotMatch(text, /FEED_STATE_BACKEND: worker/, f);
   }
-  assert.equal(wf('aggregate.yml').match(/FEED_STATE_BACKEND: \$\{\{ vars\.FEED_STATE_BACKEND \}\}/g)!.length, 2, 'hydrate and persist');
+  assert.equal(wf('aggregate.yml').match(new RegExp(sw.source, 'g'))!.length, 2, 'hydrate and persist');
+  // The kill switch reads as off everywhere the switch is read.
+  assert.equal(stateBackendSetting({ FEED_STATE_BACKEND: 'off' }), '');
+  assert.equal(stateBackendSetting({ FEED_STATE_BACKEND: ' worker ' }), 'worker');
+  assert.equal(backendFromEnv({ FEED_STATE_BACKEND: 'off' }), null);
+  assert.equal(stateBackendOn({ FEED_STATE_BACKEND: 'off' }), false);
+  assert.equal(stateBackendOn({ FEED_STATE_BACKEND: '' }), false);
+  assert.equal(stateBackendOn({ FEED_STATE_BACKEND: 'worker' }), true);
 });
 
 test('backup: a stall longer than the 25-day catch-up is copied back to the previous marker\'s first uncopied day; a month that cannot be published keeps the run\'s marker', async () => {

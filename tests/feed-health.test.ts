@@ -1479,7 +1479,7 @@ test('collect: the state store off (FEED_STATE_BACKEND unset) reads no state mar
   const r = evaluateFeed(inputs);
   assert.deepEqual(r.findings.filter((f) => /state/.test(f.key)), []);
   assert.deepEqual(r.unjudged.filter((k) => /state/.test(k)), [], 'judged clean: an open entry from before is resolved');
-  assert.match(r.notes.join(), /state store off \(FEED_STATE_BACKEND unset\)/);
+  assert.match(r.notes.join(), /state store off \(FEED_STATE_BACKEND off\)/);
 });
 
 test('collect: a state step\'s mismatch in the newest aggregate marker reaches the board as feed:state-shadow', async () => {

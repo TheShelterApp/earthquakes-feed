@@ -756,15 +756,25 @@ export class FsBackend implements StateBackend {
 // Configuration
 
 /**
- * The backend FEED_STATE_BACKEND names: `worker` (FEED_STATE_URL, FEED_STATE_AUDIENCE), `fs:<dir>`, or null when unset
- * or empty (no store). Anything else throws. `policy` (the Worker only) tightens the retry defaults and sets a step
+ * FEED_STATE_BACKEND as the jobs read it: the workflows pass `${{ vars.FEED_STATE_BACKEND || 'worker' }}`, so the store
+ * is on by default and the repository variable set to `off` is the kill switch (phase 3a only: from phase 3b the store
+ * holds the only copy of the event map). `off`, empty or unset → '' (no store).
+ */
+export function stateBackendSetting(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = (env.FEED_STATE_BACKEND ?? '').trim();
+  return raw === 'off' ? '' : raw;
+}
+
+/**
+ * The backend FEED_STATE_BACKEND names: `worker` (FEED_STATE_URL, FEED_STATE_AUDIENCE), `fs:<dir>`, or null when unset,
+ * empty or `off` (no store). Anything else throws. `policy` (the Worker only) tightens the retry defaults and sets a step
  * deadline over every request, the token requests included.
  */
 export function backendFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   opts: { log?: (line: string) => void; fetchImpl?: FetchImpl; policy?: RetryPolicy } = {},
 ): StateBackend | null {
-  const raw = (env.FEED_STATE_BACKEND ?? '').trim();
+  const raw = stateBackendSetting(env);
   if (!raw) return null;
   if (raw === 'worker') {
     const audience = (env.FEED_STATE_AUDIENCE ?? '').trim() || DEFAULT_STATE_AUDIENCE;

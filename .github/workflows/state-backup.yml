@@ -46,7 +46,7 @@ jobs:
       - name: Back up the daily states
         env:
           GH_TOKEN: ${{ github.token }}
-          FEED_STATE_BACKEND: ${{ vars.FEED_STATE_BACKEND }}
+          FEED_STATE_BACKEND: ${{ vars.FEED_STATE_BACKEND || 'worker' }}
           FEED_STATE_URL: https://feed-state.theshelter.app
           FEED_STATE_AUDIENCE: earthquakes-feed-state
           STATE_BACKUP_MARKER_DIR: state-backup-out

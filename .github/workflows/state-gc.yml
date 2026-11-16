@@ -92,7 +92,7 @@ jobs:
         env:
           # GitHub's API only: the data commits at each midnight, their generation.json, the backup marker.
           GH_TOKEN: ${{ github.token }}
-          FEED_STATE_BACKEND: ${{ vars.FEED_STATE_BACKEND }}
+          FEED_STATE_BACKEND: ${{ vars.FEED_STATE_BACKEND || 'worker' }}
           FEED_STATE_URL: https://feed-state.theshelter.app
           FEED_STATE_AUDIENCE: earthquakes-feed-state
           STATE_GC_DRY_RUN: ${{ github.event_name == 'schedule' && 'scheduled' || (inputs.dry_run && '1' || '') }}

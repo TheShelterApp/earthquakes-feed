@@ -107,7 +107,7 @@ export interface FeedInputs {
   stateGc?: { ok: true; artifact: { id: number; createdAtMs: number; runId: number | null } | null } | { ok: false; message: string } | null;
   stateBackup?: { ok: true; marker: { createdAtMs: number; runId: number | null; json: unknown } | null } | { ok: false; message: string } | null;
   stateBudget?: StateBudgetRead | null;
-  /** The store is off (FEED_STATE_BACKEND unset): the state inputs are absent and a note says so. */
+  /** The store is off (FEED_STATE_BACKEND off): the state inputs are absent and a note says so. */
   stateOff?: boolean;
   /** The newest repo-size-samples document ({samples: [{atMs, kb}]}), null when there is none yet. */
   repoSamples?: { ok: true; json: unknown } | { ok: false; message: string };
@@ -187,3 +187,6 @@ export function main(opts?: {
   readFile?: (path: string) => string;
   writeFile?: (path: string, data: string) => void;
 }): Promise<number>;
+
+/** Whether the state store is on: FEED_STATE_BACKEND set and not `off`. */
+export function stateBackendOn(env: NodeJS.ProcessEnv | Record<string, string | undefined>): boolean;

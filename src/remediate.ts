@@ -129,6 +129,34 @@ function uploadVerified(store: HistoryStore, tag: string, file: string, sum: str
   rmSync(back, { force: true });
 }
 
+/** The part of a run's report a day that throws writes to. */
+export interface ThrewReport {
+  failed: string[];
+  days: { day: string; edition: string | null; raws: string[]; stats: EditionStats | null; failed: string[] }[];
+}
+
+/** The `onThrow` of forEachDayGuarded in main(): the failure goes to `threw` (the run turns red), the report's failures
+ *  (and `extra`, e.g. late_usgs.failed) and a day entry without an edition. */
+export function dayThrewRecorder(report: ThrewReport, threw: string[], extra?: (failure: string) => void): (day: string, failure: string) => void {
+  return (day, failure) => {
+    threw.push(failure);
+    report.failed.push(failure);
+    extra?.(failure);
+    console.log(`::warning::remediate: ${failure}`);
+    report.days.push({ day, edition: null, raws: [], stats: null, failed: [failure] });
+  };
+}
+
+/** The end of a run: the index is written (when it changed) and `changed` set before the exit code is decided, so a
+ *  run where a day threw still hands the workflow the index of what the other days uploaded. Never exits itself. */
+export function finishRun(idx: RemediationIndex, before: string | null, localIndex: string, threw: readonly string[]): { changed: boolean; exitCode: number } {
+  const text = indexText(idx);
+  const changed = text !== before;
+  if (changed) writeFileSync(localIndex, text);
+  setOutput('changed', String(changed));
+  return { changed, exitCode: threw.length ? 1 : 0 };
+}
+
 /** Days in a row that throw before a run stops starting new ones (a gh outage would otherwise fail every day left). */
 export const MAX_CONSECUTIVE_DAY_ERRORS = 3;
 
@@ -556,13 +584,7 @@ async function main(): Promise<void> {
   // A day that throws is a failed day, not a lost run: the index still records what every day uploaded, and the run
   // turns red only after writing it (the workflow commits an index a red run wrote).
   const threw: string[] = [];
-  const dayThrew = (extra?: (failure: string) => void) => (day: string, failure: string): void => {
-    threw.push(failure);
-    report.failed.push(failure);
-    extra?.(failure);
-    console.log(`::warning::remediate: ${failure}`);
-    report.days.push({ day, edition: null, raws: [], stats: null, failed: [failure] });
-  };
+  const dayThrew = (extra?: (failure: string) => void) => dayThrewRecorder(report, threw, extra);
   try {
     const unrun = await forEachDayGuarded(runDays, async (day) => {
       const r = await remediateDay(day, byDay.get(day) ?? [], idx, { store, registry, fetchWindow: fetchProviderWindow, archives, arch, work, nowMs, seqMarker: head.seq, spacingMs: SPACING_MS });
@@ -643,10 +665,7 @@ async function main(): Promise<void> {
   }
   report.queue_done = pruneQueue(idx, skip).map((e) => `${e.range} (${e.providers.join(',')})`);
   report.queue = idx.refill_queue ?? [];
-  const text = indexText(idx);
-  const changed = text !== before;
-  if (changed) writeFileSync(localIndex, text);
-  setOutput('changed', String(changed));
+  const { changed, exitCode } = finishRun(idx, before, localIndex, threw);
   writeFileSync(join(out, 'report.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(`remediate: done=${report.done.length} failed=${report.failed.length} pending=${report.pending} waiting=${report.waiting.length} queue=${(idx.refill_queue ?? []).map((e) => e.range).join(' ') || 'empty'} index_changed=${changed}`);
   // A dispatch defaults to a dry run: say so where it cannot be missed (2026-11-14: a 120-edition campaign ran as four
@@ -658,8 +677,8 @@ async function main(): Promise<void> {
   }
   if (threw.length) {
     console.log(`::error title=remediate::${threw.length} day(s) threw (the index keeps what was uploaded): ${threw.join('; ')}`);
-    process.exitCode = 1;
   }
+  if (exitCode) process.exitCode = exitCode;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

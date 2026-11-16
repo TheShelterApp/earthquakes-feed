@@ -21,6 +21,7 @@ import {
   deepHistory,
   deepKey,
   fetchPolitely,
+  firstSolutionsLimits,
   idsInPartition,
   reopenChangedDeepMonths,
   runLane,
@@ -658,4 +659,19 @@ test('deep: partitions before the boundary come from the current edition; the la
   const res = await runLane(source('ingv'), cur, ctx);
   assert.deepEqual(res.daysDone, ['2023-07-02', '2023-07-10']);
   assert.deepEqual(cur.deep, { '2023-07': '' }, 'no INGV raw asset in that edition yet');
+});
+
+test('firstSolutionsLimits: blank budget_minutes is 30 min; a typo, 0 or a fraction stops the run naming the variable', () => {
+  assert.deepEqual(firstSolutionsLimits({}), { budgetMs: 1_800_000, minIntervalMs: 1000 });
+  assert.deepEqual(firstSolutionsLimits({ FIRST_SOLUTIONS_BUDGET_MIN: '  ' }), { budgetMs: 1_800_000, minIntervalMs: 1000 });
+  assert.equal(firstSolutionsLimits({ FIRST_SOLUTIONS_BUDGET_MIN: '20' }).budgetMs, 1_200_000);
+  assert.equal(firstSolutionsLimits({ FIRST_SOLUTIONS_BUDGET_MIN: '20', FIRST_SOLUTIONS_BUDGET_MS: '5000' }).budgetMs, 1_200_000, 'minutes win over ms');
+  assert.equal(firstSolutionsLimits({ FIRST_SOLUTIONS_BUDGET_MS: '90000' }).budgetMs, 90_000);
+  for (const bad of ['2O', '0', '1.5']) {
+    assert.throws(() => firstSolutionsLimits({ FIRST_SOLUTIONS_BUDGET_MIN: bad }), /FIRST_SOLUTIONS_BUDGET_MIN/, bad);
+  }
+  assert.throws(() => firstSolutionsLimits({ FIRST_SOLUTIONS_BUDGET_MS: 'x' }), /FIRST_SOLUTIONS_BUDGET_MS/);
+  assert.equal(firstSolutionsLimits({ FIRST_SOLUTIONS_MIN_INTERVAL_MS: '500' }).minIntervalMs, 1000, 'raised to 1 s, as before');
+  assert.equal(firstSolutionsLimits({ FIRST_SOLUTIONS_MIN_INTERVAL_MS: '2500' }).minIntervalMs, 2500);
+  assert.throws(() => firstSolutionsLimits({ FIRST_SOLUTIONS_MIN_INTERVAL_MS: 'x' }), /FIRST_SOLUTIONS_MIN_INTERVAL_MS/, 'garbage no longer turns pacing off');
 });

@@ -362,6 +362,18 @@ skipped as stale, and an unreachable ledger never stops a dispatch. Each activat
 (`wrangler deployments list` lists oldest first; the active version is the last entry). A change
 to the Worker goes through a pull request like any other code and is deployed after the merge.
 
+### The state Worker (`state/`)
+
+The event map's blob store (storage phase 3): an HTTP Worker on `feed-state.theshelter.app` (staging
+`feed-state-staging.theshelter.app`) in front of one R2 bucket of content-addressed gzip blobs, with `PUT
+/v1/cas/sha256/<hex>`, a framed `POST /v1/cas:batchGet`, a paged `POST /v1/gc` and `GET /v1/budget`. There is no
+secret: every call carries a GitHub Actions OIDC token, checked against GitHub's keys, this repository's numeric id,
+`main`, a scheduled or dispatched run on a GitHub-hosted runner, and a per-route workflow allow-list. A SQLite-backed
+Durable Object meters every call against hard daily ceilings that keep the bucket inside the R2 free tier.
+**Deploy it only from `main`** with `bash state/deploy.sh` (`--env staging` for staging), which refuses unless the
+checkout is a clean `main` at `origin/main` and `wrangler whoami` names `FEED_STATE_CF_EMAIL`. Contract, policy,
+budgets, rollback and the verify matrix: [`state/README.md`](state/README.md).
+
 **Cron-only workflows.** `remediate` (daily, 04:43 UTC), `remerge` (`:41` every 6 h) and `stats` (`:43` every 6 h) run
 on GitHub's crons and by hand only: the Worker does not dispatch them and `walk-fallback.yml` does not cover them, so
 GitHub's late or dropped deliveries delay them (accepted, 2026-11-15 audit, FEED-WF-4). A delay loses nothing: the

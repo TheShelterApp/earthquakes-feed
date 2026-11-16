@@ -336,6 +336,30 @@ for (const refBackend of ['r2', 'do'] as const) {
   });
 }
 
+test('state refs: an edge that weakens the ETag of a compressed answer (W/"…") does not break the CAS: the client reads x-feed-state-etag, and every answer says no-transform', async () => {
+  // The 4.0 rehearsal on staging (run 43838294375) got W/"…" from Cloudflare's edge on GET /v1/refs and failed closed.
+  const h = harness();
+  const agg: Who = { workflow: 'aggregate.yml' };
+  const weaken = (f: typeof fetch) => (async (input: string | URL | Request, init?: RequestInit) => {
+    const res = await f(input, init);
+    const headers = new Headers(res.headers);
+    const tag = headers.get('etag');
+    if (tag && !tag.startsWith('W/')) headers.set('etag', `W/${tag}`);
+    return new Response(res.body, { status: res.status, headers });
+  }) as typeof fetch;
+  const be = h.client(agg, weaken);
+  const g1 = h.blob('g1');
+  await be.putRef('main', refFor('main', null, g1, h.writer(agg, 'bootstrap')), { create: true });
+  const read = (await be.getRef('main'))!;
+  assert.match(read.etag, /^"[^"\s]+"$/);
+  const res = await h.fetchImpl('https://feed-state.theshelter.app/v1/refs/main', { headers: { authorization: `Bearer ${token(h.aud)}`, 'x-feed-state-protocol': '2' } });
+  assert.equal(res.headers.get('cache-control'), 'no-store, no-transform');
+  assert.equal(res.headers.get('x-feed-state-etag'), res.headers.get('etag'));
+  const g2 = h.blob('g2');
+  const s2 = await be.putRef('main', refFor('main', read.ref, g2, h.writer(agg, 'next')), { etag: read.etag });
+  assert.equal(s2.seq, 2);
+});
+
 test('state refs: a create never restores, not even by the restore pair', async () => {
   const h = harness({ staging: true });
   const restorer: Who = { workflow: 'state-restore.yml', event: 'workflow_dispatch', environment: 'state-restore' };

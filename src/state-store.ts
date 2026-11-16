@@ -1010,7 +1010,9 @@ export class WorkerBackend implements StateBackend, StateRefs {
       null,
       async (res) => {
         if (res.status === 404) return null;
-        const etag = res.headers.get('etag');
+        // x-feed-state-etag first: the edge may weaken the standard ETag of a compressed answer (W/"…"; state/src/worker.js
+        // json), and only a strong tag can go back as If-Match.
+        const etag = res.headers.get('x-feed-state-etag') ?? res.headers.get('etag');
         if (!etag || !/^"[^"\s]+"$/.test(etag)) throw new StateStoreError(`ref ${lane}: no strong ETag in the answer`, 'integrity');
         const text = await res.text();
         return { ref: parseRef(text, lane), text, etag };

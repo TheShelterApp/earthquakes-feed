@@ -115,12 +115,16 @@ export function configFrom(env) {
   };
 }
 
+// `no-transform` on every answer: Cloudflare's edge compresses a response for a client that accepts gzip or brotli and
+// then turns a strong ETag into a weak one (W/"…"), which a ref's If-Match cannot use; the 4.0 rehearsal on staging
+// (run 43838294375) saw exactly that. The ref's ETag also travels in x-feed-state-etag, a header the edge never
+// rewrites, and the client reads that first.
 function json(status, body, requestId, extraHeaders = {}) {
   return new Response(JSON.stringify(body) + '\n', {
     status,
     headers: {
       'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store',
+      'cache-control': 'no-store, no-transform',
       'x-request-id': requestId,
       ...extraHeaders,
     },
@@ -438,8 +442,9 @@ async function handleRefGet(env, cfg, route, log, nowMs) {
     status: 200,
     headers: {
       'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store',
+      'cache-control': 'no-store, no-transform',
       etag: httpEtag(cur.etag),
+      'x-feed-state-etag': httpEtag(cur.etag),
       'x-request-id': log.rid,
     },
   });
@@ -481,7 +486,7 @@ async function handleRefPut(request, env, cfg, route, claims, text, log, nowMs) 
     await ledger(env, log, (b) => b.reflogCollision({ nowMs })).catch(() => {});
   }
   const etag = httpEtag(result.etag);
-  return json(200, { lane: route.lane, seq: ref.seq, generation: ref.generation, etag, reflog: result.reflog }, log.rid, { etag });
+  return json(200, { lane: route.lane, seq: ref.seq, generation: ref.generation, etag, reflog: result.reflog }, log.rid, { etag, 'x-feed-state-etag': etag });
 }
 
 async function handleReflog(url, env, cfg, route, log, nowMs) {
@@ -596,7 +601,7 @@ export function createHandler({ keyStore, cache = null, now = Date.now, log: wri
         response = json(err.status, { error, reason: err.reason }, rid, err.status === 503 ? { 'retry-after': '30' } : {});
       } else if (err instanceof RefError) {
         log.error = err.message;
-        const etag = err.status === 412 && err.extra.etag ? { etag: err.extra.etag } : {};
+        const etag = err.status === 412 && err.extra.etag ? { etag: err.extra.etag, 'x-feed-state-etag': err.extra.etag } : {};
         response = json(err.status, { error: err.message, ...err.extra }, rid, etag);
       } else if (err instanceof HttpError) {
         log.error = err.message;

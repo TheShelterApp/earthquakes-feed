@@ -488,9 +488,23 @@ export const RULES = Object.freeze({
     title: 'state store near a free-tier ceiling',
     // The state Worker's GET /v1/budget (an OIDC token of the health workflow): today's Class A or Class B operations,
     // bytes written or the stored bytes over `share` of the Worker's ceiling. The ceilings keep the account inside R2's
-    // free tier (owner decision: never pay); at a ceiling the Worker refuses (429 budget) until 00:00 UTC.
+    // free tier (owner decision: never pay). Since storage phase 4.0 the Worker refuses background work (GC, backup,
+    // history, first-solutions, stats, health) above 60 % of a ceiling and the feed (aggregate, derive, restore) only
+    // above 95 %, so `share` is the background line: the row opens when background jobs start being refused. P1 when
+    // the critical lane was refused today (used.refused_critical: the feed itself), and a member `requests` when this
+    // Worker served more than requestsPerDay (the account's 100,000 Workers requests a day are shared with the platform).
     board: 'feed', class: 'capacity', severity: 'P2', key: 'feed:state-budget', check: 'gh-capacity',
-    limits: { url: 'https://feed-state.theshelter.app/v1/budget', audience: 'earthquakes-feed-state', share: 0.7 },
+    limits: { url: 'https://feed-state.theshelter.app/v1/budget', audience: 'earthquakes-feed-state', share: 0.6, requestsPerDay: 10_000 },
+  }),
+  'feed:state-quota': rule('feed:state-quota', {
+    title: 'state store refused by the Cloudflare platform',
+    // A Cloudflare error 1027 (the account's 100,000 Workers requests a day are used up: every Worker on it, the
+    // platform's API included, answers it until 00:00 UTC) or a platform 429 (a zone rate limit in front of the
+    // Worker), seen by health's own GET /v1/budget or by a job (a state-shadow marker step whose error_kind is
+    // `quota`, src/state-store.ts) in the last `holdMs`. The store stays on the account the platform uses (owner
+    // decision 2026-11-16), so this is the signal that the shared quota, not the store, stopped the feed's state calls.
+    board: 'feed', class: 'capacity', severity: 'P1', key: 'feed:state-quota', check: 'gh-capacity',
+    limits: { holdMs: 2 * HOUR },
   }),
   'feed:repo-growth': rule('feed:repo-growth', {
     title: 'repository growth over budget',

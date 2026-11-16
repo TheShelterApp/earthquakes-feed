@@ -99,7 +99,7 @@
           },
           "frozen_only": {
             "type": "boolean",
-            "description": "Serves a day partition only once it is frozen (storage option 4 phase 2): the git origins of the data branch, which gains a day only when it freezes."
+            "description": "Serves a day partition only once it is frozen (storage option 4 phase 2): the git origins of the data branch, which gains a day only when it freezes. Concerns day partitions only: every other path on the origin (the v1/stats year and area files, the index files) is served as before."
           }
         }
       }

@@ -72,7 +72,7 @@ runs:
     - name: Start from the data commit
       # In an aggregate run the checkout already holds the pushed aggregate commit. Anything the aggregate step wrote
       # but did not commit is dropped here, so derive sees exactly what a fresh checkout of `data` would hold (as it
-      # did when derive was a workflow of its own) and `git add -A` below stages only derive's own output.
+      # did when derive was a workflow of its own) and the staging below (src/stage-data.ts) stages only derive's own output.
       shell: bash
       working-directory: .data
       run: |

@@ -99,9 +99,10 @@ Same Features, two shapes per UTC day:
   branch (via jsDelivr `@data`), and for the unfrozen days (the last 11) also on Pages
   at `https://earthquakes-feed.theshelter.app/events/YYYY/MM/DD.ndjson`, which their
   `url` names. Discover paths, counts, and `frozen`/`pages_url` through `manifest.json`.
-  **From 2026-11-04, `@data/events/...` holds a day only once it is frozen; use
-  `pages_url` / the manifest** (APIs.md, *Historical day partitions*): the unfrozen days
-  are then on Pages only, and the day that froze last stays there for one more day.
+  **From the merge of PR #120 (2026-11-16), `@data/events/...` holds a day only once it
+  is frozen; use `pages_url` / the manifest** (APIs.md, *Historical day partitions*): the
+  unfrozen days are then on Pages only, and the day that froze last stays there for one
+  more day.
 
 Both shapes are **full-fat** (complete `feed.provenance[]` with each provider's original
 `fields`) — only the rolling summaries are compact.

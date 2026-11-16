@@ -39,7 +39,7 @@ function main(): void {
   const publicV1 = join(PUBLIC_DIR, 'v1');
   const allNodes = [...state.eventMap.values()];
   // From which day the partitions carry `review_status` (partitions.ts PartitionFormat): fixed on the first run after
-  // 2026-11-08 at the first unfrozen day, never moved; the commit step's `git add -A` commits the new file.
+  // 2026-11-08 at the first unfrozen day, never moved; the commit step's staging (stage-data.ts) commits the new file.
   const fmt = ensurePartitionFormat(DATA_DIR, nowMs);
 
   // Summaries: live events plus the recently superseded ones flagged non-live (summaryFeats),

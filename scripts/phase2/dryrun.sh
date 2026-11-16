@@ -8,9 +8,10 @@
 # a fresh checkout (`git clean`: the unfrozen partitions of the previous cycle are not on the branch), the snapshot step
 # (src/live-baseline.ts; its Pages fallback asks PAGES_BASE, default an unreachable address), the given real aggregate
 # commit's changes over its parent (as aggregate.yml stages them), derive at <derive-iso>, validate, stage-data at
-# <stage-iso> (after derive: a day that freezes between the two is committed by this cycle), the commit, the pin and
-# sign-manifest with a throwaway key (DRYRUN_KEY_FILE: a base64 PKCS8 Ed25519 key, e.g. from
-# @theshelter/signing generateEd25519KeyMaterial). --fail-derive stops after the aggregate commit (a derive that failed).
+# <stage-iso> (after derive: a day that freezes between the two is committed by this cycle), the commit, the pin
+# (src/pin-manifest.ts, as derive-publish), sign-manifest with a throwaway key (DRYRUN_KEY_FILE: a base64 PKCS8 Ed25519 key, e.g. from
+# @theshelter/signing generateEd25519KeyMaterial) and publish-r2 with no R2 setting (its off path). --fail-derive stops after
+# the aggregate commit (a derive that failed). Fails when the commit leaves an unfrozen day partition tracked.
 # With a production derive commit, compares this cycle's partitions with production's and the silent changes found.
 #
 # Start the worktree at a production derive commit: git worktree add --detach <dir> <derive-commit>; consecutive cycles
@@ -43,8 +44,12 @@ tail -2 "$OUT/validate.log"
 DATA_DIR=$W tsx "$STAGE_MS" src/stage-data.ts . 2>&1 | tee "$OUT/stage.log"
 if git -C "$W" commit -q -m "derive: views @ $STAGE_ISO (dry run)"; then echo "committed $(git -C "$W" rev-parse --short HEAD)"; else echo "no data-branch changes"; fi
 SHA=$(git -C "$W" rev-parse HEAD)
-node -e "const f=process.argv[1],fs=require('fs');const m=JSON.parse(fs.readFileSync(f));m.data_commit=process.argv[2];fs.writeFileSync(f,JSON.stringify(m,null,2))" "$PUB/v1/manifest.json" "$SHA"
+PUBLIC_DIR=$PUB DATA_COMMIT=$SHA tsx $((DERIVE_MS + 5000)) src/pin-manifest.ts 2>&1 | tee "$OUT/pin.log"
 DATA_DIR=$W PUBLIC_DIR=$PUB FEED_SIGNING_KEY=$(cat "$DRYRUN_KEY_FILE") FEED_SIGNING_KID=dryrun DATA_COMMIT=$SHA tsx $((DERIVE_MS + 6000)) src/sign-manifest.ts 2>&1 | tee "$OUT/sign.log"
+test -s "$PUB/v2/manifest.json" || { echo "no v2 manifest written"; exit 1; }
+(unset R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_S3_ENDPOINT R2_BUCKET R2_PUBLIC_BASE; DATA_DIR=$W PUBLIC_DIR=$PUB tsx $((DERIVE_MS + 7000)) src/publish-r2.ts) 2>&1 | tee "$OUT/r2.log"
+tracked=$(cd "$FEED" && FAKE_NOW_MS=$STAGE_MS node --import "$FEED/scripts/phase2/fake-clock.mjs" --import tsx -e "import('./src/stage-data.ts').then((m) => console.log(m.unfrozenPartitionPaths(process.argv.slice(1), Date.now()).join(' ')))" $(git -C "$W" ls-tree -r --name-only HEAD -- events))
+if [ -n "$tracked" ]; then echo "unfrozen day partition(s) still on the branch: $tracked"; exit 1; fi
 added=0
 for b in $(git -C "$W" diff-tree -r --no-commit-id HEAD | awk '$4 != "0000000000000000000000000000000000000000" {print $4}'); do added=$((added + $(git -C "$W" cat-file -s "$b"))); done
 echo "commit $(git -C "$W" rev-parse --short HEAD): $(git -C "$W" diff-tree -r --no-commit-id --name-only HEAD | wc -l | tr -d ' ') paths, new blob bytes $added; events: $(git -C "$W" diff-tree -r --no-commit-id --name-status HEAD -- events | tr '\t\n' '  ')"

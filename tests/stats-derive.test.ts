@@ -12,6 +12,7 @@ import { dayPartitionFile, writeDayPartition } from '../src/partitions.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import {
   STATS_INDEX_PATH,
+  STATS_TODAY_GRACE_MS,
   checkStats,
   deriveStats,
   loadStatsConfig,
@@ -146,6 +147,73 @@ test('61 days: the map days from the loop, older ones from the data checkout, a 
   assert.equal(readFileSync(join(w.publicDir, `v1/stats/days/${mapDay}.json`), 'utf8'), fromFile.body);
   assert.deepEqual(checkStats(w.publicDir, NOW), []);
   assert.match(checkStats(w.publicDir, NOW + 1)[0]!, /generated/, 'the index belongs to one run');
+});
+
+// The first derive runs after 00:00 UTC: the day in progress has no event yet, so neither an event-map day nor a
+// partition. It is empty so far, not missing, for STATS_TODAY_GRACE_MS (the app's inProgressDayGrace); past that an
+// empty today is an outage and is named, and a past day without a partition is named at any time.
+const midnight = (day: string): number => Date.parse(`${day}T00:00:00Z`);
+
+test('today before its first event, inside the grace: an empty table, not missing', () => {
+  const today = eventDayKey(NOW);
+  const w = world([today]);
+  for (const at of [midnight(today) + 3 * 60_000, midnight(today), midnight(today) + STATS_TODAY_GRACE_MS - 1]) {
+    const out = writeStats(w.tables, { publicDir: w.publicDir, dataDir: w.dataDir, nowMs: at, headSeq: 1, config, warn: quiet() });
+    const when = iso(at);
+    assert.deepEqual(out.errors, [], when);
+    const idx = readIndex(w.publicDir);
+    assert.deepEqual(idx.missing_days, [], when);
+    assert.equal(idx.days.length, 61, when);
+    assert.equal(idx.days.at(-1)!.date, today, when);
+    assert.deepEqual([idx.days.at(-1)!.count, idx.days.at(-1)!.filtered], [0, 0], when);
+    assert.equal(readFileSync(join(w.publicDir, `v1/stats/days/${today}.json`), 'utf8'), dayTableJson(today, []).body, when);
+    assert.equal(out.emptyToday, today, when);
+    assert.deepEqual(checkStats(w.publicDir, at), [], when);
+  }
+});
+
+test('today still without an event once the grace is over: named missing', () => {
+  const today = eventDayKey(NOW);
+  const w = world([today]);
+  // The boundary is exclusive (the app's `<` too): at 00:30:00.000 today is named.
+  for (const at of [midnight(today) + STATS_TODAY_GRACE_MS, NOW]) {
+    const out = writeStats(w.tables, { publicDir: w.publicDir, dataDir: w.dataDir, nowMs: at, headSeq: 1, config, warn: quiet() });
+    const when = iso(at);
+    assert.deepEqual(out.errors, [], when);
+    const idx = readIndex(w.publicDir);
+    assert.deepEqual(idx.missing_days, [today], when);
+    assert.equal(idx.days.length, 60, when);
+    assert.equal(out.emptyToday, null, when);
+    assert.ok(!existsSync(join(w.publicDir, `v1/stats/days/${today}.json`)), when);
+    assert.deepEqual(checkStats(w.publicDir, at), [], when);
+  }
+});
+
+test('a past day without a partition stays missing inside the grace; only today is published empty', () => {
+  const today = eventDayKey(NOW);
+  const yesterday = eventDayKey(NOW - DAY);
+  const w = world([yesterday, today]);
+  const at = midnight(today) + 3 * 60_000;
+  const out = writeStats(w.tables, { publicDir: w.publicDir, dataDir: w.dataDir, nowMs: at, headSeq: 1, config, warn: quiet() });
+  assert.deepEqual(out.errors, []);
+  const idx = readIndex(w.publicDir);
+  assert.deepEqual(idx.missing_days, [yesterday]);
+  assert.equal(out.emptyToday, today);
+  assert.equal(idx.days.at(-1)!.date, today);
+  assert.deepEqual(checkStats(w.publicDir, at), []);
+});
+
+test('today with an event inside the grace: its table, not an empty one', () => {
+  const today = eventDayKey(NOW);
+  const w = world();
+  const at = midnight(today) + 3 * 60_000;
+  // world()'s rows are synthetic: today's two events are timed later in the day than `at`, which the table allows.
+  const out = writeStats(w.tables, { publicDir: w.publicDir, dataDir: w.dataDir, nowMs: at, headSeq: 1, config, warn: quiet() });
+  assert.deepEqual(out.errors, []);
+  const idx = readIndex(w.publicDir);
+  assert.equal(out.emptyToday, null);
+  assert.deepEqual(idx.missing_days, []);
+  assert.equal(idx.days.at(-1)!.count, 2);
 });
 
 function yearDoc(): string {

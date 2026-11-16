@@ -131,6 +131,14 @@ export function statsDays(nowMs: number): string[] {
   return out;
 }
 
+/**
+ * How long after 00:00 UTC the day in progress may have no event (no event-map day, no partition on `data`) and still be
+ * published as an empty day table instead of being named in `missing_days`: before its first event the day is empty so
+ * far, not missing. Past it an empty today is an outage (ingest stalled, every provider failing) and is named. The app's
+ * `StatisticsLoader.inProgressDayGrace` is the same 30 min.
+ */
+export const STATS_TODAY_GRACE_MS = 30 * 60_000;
+
 export interface StatsIndexDay {
   date: string;
   path: string;
@@ -201,6 +209,8 @@ export interface StatsWrite {
   errors: string[];
   /** Days read back from the data checkout's partitions (the event map holds 45 days). */
   fromData: string[];
+  /** The day in progress published as an empty table (no event yet, inside STATS_TODAY_GRACE_MS), else null. */
+  emptyToday: string | null;
   /** Year and area files listed by the ledger but not published (missing, or not the bytes it names). */
   dropped: string[];
   /** Bytes of every file under v1/stats, the index included. */
@@ -244,7 +254,8 @@ export function readStatsState(dataDir: string, warn: (m: string) => void = () =
 /**
  * Writes the run's stats under `publicDir/v1/stats/` and checks them. `tables` holds the rows of the days derive built
  * from the event map inside its partition loop; every other window day is read from the data checkout's partition, and
- * a day with neither is listed in `missing_days`. The rows of the whole window are reconciled together (reconcileRows:
+ * a day with neither is listed in `missing_days`, except the day in progress in its first STATS_TODAY_GRACE_MS: before
+ * its first event it is published as an empty table (`emptyToday`). The rows of the whole window are reconciled together (reconcileRows:
  * a quake's reports across midnight count once) before each day table is written. Year and area files are copied byte
  * for byte from the data checkout when their sha256 is the one the ledger names. Files under `v1/stats/` that this run
  * did not write are removed.
@@ -268,11 +279,19 @@ export function writeStats(
   const missing: string[] = [];
   const fromData: string[] = [];
   const window: DayRows[] = [];
+  const today = eventDayKey(nowMs);
+  const todayInGrace = nowMs - dayStartMs(today) < STATS_TODAY_GRACE_MS;
+  let emptyToday: string | null = null;
   for (const date of statsDays(nowMs)) {
     let d = tables.get(date);
     if (!d) {
       const f = dayPartitionFile(dataDir, date);
       if (!existsSync(f)) {
+        if (date === today && todayInGrace) {
+          window.push(dayRows(date, []));
+          emptyToday = date;
+          continue;
+        }
         missing.push(date);
         continue;
       }
@@ -392,6 +411,7 @@ export function writeStats(
     pointer: { path: STATS_INDEX_PATH, url: `https://${DOMAIN}/${STATS_INDEX_PATH}`, head_seq: headSeq, format: STATS_FORMAT },
     errors,
     fromData,
+    emptyToday,
     dropped: notPublished,
     bytes,
     ms: performance.now() - started,

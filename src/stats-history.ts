@@ -8,7 +8,7 @@ import { gunzipSync } from 'node:zlib';
 import type { ArchiveEntry, Archives } from './archive.js';
 import { extractTarball } from './archive-io.js';
 import { eventDayKey, featureToNode, nodeToFeature } from './bitemporal.js';
-import { DATA_DIR, REMERGE_EPOCH, REMERGE_INGEST_TIME, REMERGE_RULES, REPO, dataPaths } from './config.js';
+import { DATA_DIR, REMERGE_EPOCH, REMERGE_INGEST_TIME, REMERGE_RULES, REPO, dataPaths, envNumber } from './config.js';
 import { haversineKm } from './geo.js';
 import { ghRetry } from './gh.js';
 import { historyQueryUrl } from './history-fetch.js';
@@ -1295,7 +1295,7 @@ async function main(): Promise<void> {
       .map(Number),
   );
   for (const y of forced) if (!Number.isInteger(y) || y < STATS_FIRST_YEAR) throw new Error(`STATS_YEARS: ${y} is not a year from ${STATS_FIRST_YEAR}`);
-  const maxYears = Number(process.env.STATS_MAX_YEARS || config.max_years_per_run);
+  const maxYears = envNumber('STATS_MAX_YEARS', config.max_years_per_run);
   const registry = loadRegistry();
   const usgs = registry.find((p) => p.id === 'usgs');
   if (!usgs) throw new Error('no usgs provider in the registry');

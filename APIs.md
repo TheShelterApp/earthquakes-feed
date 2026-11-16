@@ -584,7 +584,11 @@ query and `includedeleted` delete query in that run, with where the sweep stands
 `updatedafter` it asked from), `pages`, `through` (its cursor after the run: the moment the last
 complete sweep was sent, so a sweep that did not complete keeps the previous one and the next run
 asks for the same window again), `epoch` (the catch-up epoch recorded with that cursor) and
-`catch_up: true` on the one-time catch-up run. `sweeps.epoch` is the current catch-up epoch.
+`catch_up: true` on the one-time catch-up run. `sweeps.epoch` is the current catch-up epoch. The cursors live in
+`knowledge/index/sweeps.json`; a torn or unreadable file reads as no cursors with a warning, so that run's sweeps catch
+up again and it writes a valid file. A damaged heal or correction marker (`knowledge/index/heal.json`,
+`correction.json`) stops the run instead, with an error naming the file: reading it as never run would repeat the
+one-time step.
 `comcat_twins_withdrawn` counts the AEC rows a ComCat delete withdrew in that run,
 `twin_withheld` the AEC reports held back beside another source's event, and `absent.aec`
 (`count`, the first 20 `ids`) the live AEC ids younger than 10 days that AEC's file no longer
@@ -1425,7 +1429,8 @@ fourfold. The `health` watchdog checks the same from outside every 15 minutes (r
 tree from the API, logs the files under `status/history/` (count, total, largest, whatever their layout) and files
 `feed:size` on the "[health] feed" board while a status-history day file (`YYYY-MM-DD.ndjson`) is over 5 MB or any other
 file on the branch over 45 MB (resolved when none is; never a red run). A tree read that fails leaves `feed:size` as it
-was and files `watcher:feed-github`; a truncated listing is judged as far as it goes, with a `Data file size` warning.
+was and files `watcher:feed-github`; a truncated listing is judged as far as it goes, with a `Data file size` warning (a
+file over the line in it is filed; with none, `feed:size` is left as it was, never resolved on a partial listing).
 
 ## Repository size
 
@@ -1780,7 +1785,9 @@ frozen days not archived yet (late ComCat):
   exactly the rows the source answered) in the Release `remediation-YYYY`. Editions built since 2026-11-08 carry
   `review_status` on their lines where the event's rows give one; the editions of 2026-10-04 do not and keep their
   bytes. All assets are immutable; a later remediation of the same day is the next edition, built from the archive
-  and every raw asset of the day. Each upload is read back and its checksum compared;
+  and every raw asset of the day. Each upload is read back and its checksum compared; a day whose upload or read
+  throws is a failed day (the run goes on, writes the index with what every other day uploaded, then ends red; after 3
+  such days in a row it starts no further day);
 - an edition replaces ONE archived day while its neighbours stay as archived, so it holds the archived day's events by
   feed id plus the events the remediation minted. An AFAD event re-read across midnight keeps the day its archive gave
   it (its time may then lie up to 3 h into the next day; `stats.off_day`), the AFAD re-read and its folds stay among
@@ -1933,7 +1940,8 @@ the deep pilot era's 157,212 ComCat events, 2022-07-01 to 2023-07-06, as its edi
 day and a half, GeoNet's 22,000 about 13 hours, and the day sources (1–10 s per answer, about six months of days a run) six to eight
 hourly runs each; then each run
 takes the newly frozen day (about 400 ComCat requests). Failures: three retries per request (2, 8, 30 s, Retry-After
-honoured); a lane that still fails stops for the run and resumes there; 50 answers in a row without the event stop a
+honoured); a lane that still fails stops for the run and resumes there; a corrupt line of the day partition the lane
+reads its ids from is skipped with a warning, not a stop; 50 answers in a row without the event stop a
 lane (its streak is asked again); a day source's day answered with 204 or 404 is checked against the last day the node
 had content for: content there now means the node is up and the day's reports are recorded as missing at once (USP
 answered 204 for 2026-08-25, whose one report it no longer lists); with no such day yet, or with that day empty too (a

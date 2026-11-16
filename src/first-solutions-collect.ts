@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { extractTarball } from './archive-io.js';
 import { eventDayKey, loadEventMap } from './bitemporal.js';
-import { EVENT_MAP_HORIZON_DAYS, REPO, dataPaths } from './config.js';
+import { EVENT_MAP_HORIZON_DAYS, REPO, dataPaths, envNumber } from './config.js';
 import {
   type FirstSolutionsCursor,
   type SourceCursor,
@@ -55,7 +55,8 @@ import { isoFromMs } from './util.js';
  *
  * Environment: DATA_DIR (a checkout of `data`, read only), FIRST_SOLUTIONS_OUT (output directory, default
  * `first-solutions-out`), FIRST_SOLUTIONS_UPLOAD=1 (upload the chunks; without it nothing leaves the machine),
- * FIRST_SOLUTIONS_BUDGET_MIN (or _MS), FIRST_SOLUTIONS_MIN_INTERVAL_MS (at least 1000), FIRST_SOLUTIONS_SOURCES (comma list),
+ * FIRST_SOLUTIONS_BUDGET_MIN (or _MS; whole numbers, see firstSolutionsLimits), FIRST_SOLUTIONS_MIN_INTERVAL_MS (raised to
+ * 1000), FIRST_SOLUTIONS_SOURCES (comma list),
  * FIRST_SOLUTIONS_DAYS (a one-off slice: comma list of days or `from..to`; the walk's order is ignored, finished days
  * are marked done), FIRST_SOLUTIONS_ONLY_IDS (with FIRST_SOLUTIONS_DAYS: only these `provider:id` reports; the cursor
  * is left as it was), GH_TOKEN (archived months and uploads).
@@ -160,15 +161,24 @@ export async function fetchPolitely(url: string, src: Pick<HistorySource, 'timeo
   return { kind: 'fail', error: lastError || 'no answer', attempts: RETRY_PAUSES_MS.length + 1 };
 }
 
-/** The native ids of one provider's reports in one event-day partition, deduplicated, in code-point order. */
-export function idsInPartition(text: string, provider: string): string[] {
+/** The native ids of one provider's reports in one event-day partition, deduplicated, in code-point order, and how
+ *  many of the provider's lines were not JSON (`bad`). A bad line is skipped, not thrown: one corrupt line would
+ *  otherwise stop the lane on that day in every run. */
+export function idsInPartition(text: string, provider: string): { ids: string[]; bad: number } {
   const ids = new Set<string>();
+  let bad = 0;
   for (const line of text.split('\n')) {
     if (!line.trim() || !line.includes(`"${provider}"`)) continue;
-    const f = JSON.parse(line) as { properties?: { feed?: { provenance?: Array<{ provider: string; native_id: string }> } } };
-    for (const r of f.properties?.feed?.provenance ?? []) if (r.provider === provider && r.native_id) ids.add(r.native_id);
+    let f: { properties?: { feed?: { provenance?: Array<{ provider: string; native_id: string }> } } } | null;
+    try {
+      f = JSON.parse(line);
+    } catch {
+      bad++;
+      continue;
+    }
+    for (const r of f?.properties?.feed?.provenance ?? []) if (r.provider === provider && r.native_id) ids.add(r.native_id);
   }
-  return [...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return { ids: [...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)), bad };
 }
 
 interface ArchiveEntry {
@@ -408,7 +418,9 @@ export async function runLane(src: HistorySource, cur: SourceCursor, ctx: LaneCo
     }
     let ids: string[];
     try {
-      ids = idsInPartition(await ctx.partitions.dayText(day), src.provider);
+      const read = idsInPartition(await ctx.partitions.dayText(day), src.provider);
+      ids = read.ids;
+      if (read.bad) console.log(`::warning::first-solutions ${src.provider}: partition ${day}: ${read.bad} unreadable line(s) skipped`);
     } catch (err) {
       out.error = `partition ${day}: ${err instanceof Error ? err.message : String(err)}`;
       break;
@@ -698,14 +710,23 @@ function expandDays(spec: string): string[] {
   return out;
 }
 
+/** The run's budget and request spacing: FIRST_SOLUTIONS_BUDGET_MIN (the dispatch's `budget_minutes`) when set, else
+ *  FIRST_SOLUTIONS_BUDGET_MS (30 min); FIRST_SOLUTIONS_MIN_INTERVAL_MS raised to 1000. Blank means the default; any
+ *  other value that is not a whole number >= 1 stops the run with an error naming the variable (envNumber). */
+export function firstSolutionsLimits(env: NodeJS.ProcessEnv = process.env): { budgetMs: number; minIntervalMs: number } {
+  const budgetMs = env.FIRST_SOLUTIONS_BUDGET_MIN?.trim()
+    ? envNumber('FIRST_SOLUTIONS_BUDGET_MIN', 30, {}, env) * 60_000
+    : envNumber('FIRST_SOLUTIONS_BUDGET_MS', 30 * 60_000, {}, env);
+  const minIntervalMs = Math.max(1000, envNumber('FIRST_SOLUTIONS_MIN_INTERVAL_MS', 1000, {}, env));
+  return { budgetMs, minIntervalMs };
+}
+
 async function main(): Promise<void> {
   const root = dataPaths().root;
   const outDir = process.env.FIRST_SOLUTIONS_OUT ?? 'first-solutions-out';
   const upload = process.env.FIRST_SOLUTIONS_UPLOAD === '1';
   const startedMs = Date.now();
-  const budgetMin = Number(process.env.FIRST_SOLUTIONS_BUDGET_MIN || NaN);
-  const budgetMs = Number.isFinite(budgetMin) && budgetMin > 0 ? budgetMin * 60_000 : Number(process.env.FIRST_SOLUTIONS_BUDGET_MS || 30 * 60_000);
-  const minIntervalMs = Math.max(1000, Number(process.env.FIRST_SOLUTIONS_MIN_INTERVAL_MS ?? 1000));
+  const { budgetMs, minIntervalMs } = firstSolutionsLimits();
   const run = process.env.GITHUB_RUN_ID ? `r${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? '1'}` : `local-${isoFromMs(startedMs).replace(/[-:]/g, '').slice(0, 15)}`;
   const onlySources = process.env.FIRST_SOLUTIONS_SOURCES ? new Set(process.env.FIRST_SOLUTIONS_SOURCES.split(',').map((s) => s.trim()).filter(Boolean)) : null;
   const days = process.env.FIRST_SOLUTIONS_DAYS ? expandDays(process.env.FIRST_SOLUTIONS_DAYS) : undefined;

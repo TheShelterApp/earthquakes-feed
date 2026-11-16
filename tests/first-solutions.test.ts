@@ -21,6 +21,7 @@ import {
   deepHistory,
   deepKey,
   fetchPolitely,
+  firstSolutionsLimits,
   idsInPartition,
   reopenChangedDeepMonths,
   runLane,
@@ -318,7 +319,10 @@ function laneCtx(days: Record<string, string>, get: (url: string) => HttpAnswer,
 const geonetBody = fixture('geonet-history-2026p685142.json');
 
 test('lane: one-event source — ids in code-point order, resumes at the pending offset, stops at the deadline', async () => {
-  assert.deepEqual(idsInPartition([partitionLine('geonet', ['b', 'a']), partitionLine('usgs', ['x']), partitionLine('geonet', ['a', 'c'])].join('\n'), 'geonet'), ['a', 'b', 'c']);
+  assert.deepEqual(idsInPartition([partitionLine('geonet', ['b', 'a']), partitionLine('usgs', ['x']), partitionLine('geonet', ['a', 'c'])].join('\n'), 'geonet'), { ids: ['a', 'b', 'c'], bad: 0 });
+  // One corrupt line of the provider is skipped and counted, not thrown: a throw stopped the lane on that day every run.
+  const torn = partitionLine('geonet', ['d']).slice(0, -3);
+  assert.deepEqual(idsInPartition([partitionLine('geonet', ['b']), torn, partitionLine('geonet', ['a'])].join('\n'), 'geonet'), { ids: ['a', 'b'], bad: 1 });
   const days = { '2026-07-04': [partitionLine('geonet', ['g3', 'g1', 'g2'])].join('\n') };
   const cur: SourceCursor = { ...newSourceCursor(), pending: { day: '2026-07-04', offset: 1 } };
   const ctx = laneCtx(days, () => ({ status: 200, body: geonetBody, retryAfterMs: null }), {});
@@ -337,6 +341,24 @@ test('lane: one-event source — ids in code-point order, resumes at the pending
   assert.equal(cur.pending, undefined);
   assert.equal(res.records.length, 1);
   assert.equal(res.records[0]!.versions.length, 29);
+});
+
+test('lane: a corrupt partition line is skipped with a warning; the day finishes and the lane moves on', async () => {
+  const days = { '2026-07-04': [partitionLine('geonet', ['g1']), partitionLine('geonet', ['g2']).slice(0, -3)].join('\n') };
+  const cur = newSourceCursor();
+  const logged: string[] = [];
+  const log = console.log;
+  console.log = (m: string) => void logged.push(m);
+  let res: Awaited<ReturnType<typeof runLane>>;
+  try {
+    res = await runLane(source('geonet'), cur, laneCtx(days, () => ({ status: 200, body: geonetBody, retryAfterMs: null }), {}));
+  } finally {
+    console.log = log;
+  }
+  assert.equal(res.error, null);
+  assert.equal(res.records.length, 1, 'g1 is collected');
+  assert.deepEqual(cur.done, [['2026-07-01', '2026-07-04']]);
+  assert.deepEqual(logged.filter((m) => m.startsWith('::warning::')), ['::warning::first-solutions geonet: partition 2026-07-04: 1 unreadable line(s) skipped']);
 });
 
 test('lane: a failed request keeps the day pending at that report; a streak of missing answers is dropped and stops', async () => {
@@ -637,4 +659,19 @@ test('deep: partitions before the boundary come from the current edition; the la
   const res = await runLane(source('ingv'), cur, ctx);
   assert.deepEqual(res.daysDone, ['2023-07-02', '2023-07-10']);
   assert.deepEqual(cur.deep, { '2023-07': '' }, 'no INGV raw asset in that edition yet');
+});
+
+test('firstSolutionsLimits: blank budget_minutes is 30 min; a typo, 0 or a fraction stops the run naming the variable', () => {
+  assert.deepEqual(firstSolutionsLimits({}), { budgetMs: 1_800_000, minIntervalMs: 1000 });
+  assert.deepEqual(firstSolutionsLimits({ FIRST_SOLUTIONS_BUDGET_MIN: '  ' }), { budgetMs: 1_800_000, minIntervalMs: 1000 });
+  assert.equal(firstSolutionsLimits({ FIRST_SOLUTIONS_BUDGET_MIN: '20' }).budgetMs, 1_200_000);
+  assert.equal(firstSolutionsLimits({ FIRST_SOLUTIONS_BUDGET_MIN: '20', FIRST_SOLUTIONS_BUDGET_MS: '5000' }).budgetMs, 1_200_000, 'minutes win over ms');
+  assert.equal(firstSolutionsLimits({ FIRST_SOLUTIONS_BUDGET_MS: '90000' }).budgetMs, 90_000);
+  for (const bad of ['2O', '0', '1.5']) {
+    assert.throws(() => firstSolutionsLimits({ FIRST_SOLUTIONS_BUDGET_MIN: bad }), /FIRST_SOLUTIONS_BUDGET_MIN/, bad);
+  }
+  assert.throws(() => firstSolutionsLimits({ FIRST_SOLUTIONS_BUDGET_MS: 'x' }), /FIRST_SOLUTIONS_BUDGET_MS/);
+  assert.equal(firstSolutionsLimits({ FIRST_SOLUTIONS_MIN_INTERVAL_MS: '500' }).minIntervalMs, 1000, 'raised to 1 s, as before');
+  assert.equal(firstSolutionsLimits({ FIRST_SOLUTIONS_MIN_INTERVAL_MS: '2500' }).minIntervalMs, 2500);
+  assert.throws(() => firstSolutionsLimits({ FIRST_SOLUTIONS_MIN_INTERVAL_MS: 'x' }), /FIRST_SOLUTIONS_MIN_INTERVAL_MS/, 'garbage no longer turns pacing off');
 });

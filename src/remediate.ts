@@ -8,7 +8,7 @@ import { gunzipSync, gzipSync } from 'node:zlib';
 import { type ArchiveRef, readArchivedDays } from './archive-io.js';
 import { backfillCfg } from './backfill-cfg.js';
 import { featureToNode } from './bitemporal.js';
-import { DATA_DIR, dataPaths } from './config.js';
+import { DATA_DIR, dataPaths, envNumber } from './config.js';
 import { DryRunStore, GitHubStore, type HistoryStore, LocalStore } from './history-store.js';
 import { FROZEN_AFTER_DAYS, frozenBefore as frozenBeforeAt } from './partitions.js';
 import { partitionBlobs } from './stats-history.js';
@@ -127,6 +127,64 @@ function uploadVerified(store: HistoryStore, tag: string, file: string, sum: str
   store.download(tag, file.split('/').pop()!, back);
   if (sha256(readFileSync(back)) !== sum) throw new Error(`uploaded ${tag}/${file.split('/').pop()} reads back with another checksum`);
   rmSync(back, { force: true });
+}
+
+/** The part of a run's report a day that throws writes to. */
+export interface ThrewReport {
+  failed: string[];
+  days: { day: string; edition: string | null; raws: string[]; stats: EditionStats | null; failed: string[] }[];
+}
+
+/** The `onThrow` of forEachDayGuarded in main(): the failure goes to `threw` (the run turns red), the report's failures
+ *  (and `extra`, e.g. late_usgs.failed) and a day entry without an edition. */
+export function dayThrewRecorder(report: ThrewReport, threw: string[], extra?: (failure: string) => void): (day: string, failure: string) => void {
+  return (day, failure) => {
+    threw.push(failure);
+    report.failed.push(failure);
+    extra?.(failure);
+    console.log(`::warning::remediate: ${failure}`);
+    report.days.push({ day, edition: null, raws: [], stats: null, failed: [failure] });
+  };
+}
+
+/** The end of a run: the index is written (when it changed) and `changed` set before the exit code is decided, so a
+ *  run where a day threw still hands the workflow the index of what the other days uploaded. Never exits itself. */
+export function finishRun(idx: RemediationIndex, before: string | null, localIndex: string, threw: readonly string[]): { changed: boolean; exitCode: number } {
+  const text = indexText(idx);
+  const changed = text !== before;
+  if (changed) writeFileSync(localIndex, text);
+  setOutput('changed', String(changed));
+  return { changed, exitCode: threw.length ? 1 : 0 };
+}
+
+/** Days in a row that throw before a run stops starting new ones (a gh outage would otherwise fail every day left). */
+export const MAX_CONSECUTIVE_DAY_ERRORS = 3;
+
+/**
+ * Runs `run` for each day in order. A day that throws (an upload that reads back wrong, a gh error, an indexed asset
+ * that does not match) goes to `onError` with `<day>: <message>` and the loop moves on, so the index the run writes at the
+ * end keeps every entry the earlier days, and the throwing day up to its throw, pushed: their assets are already on the
+ * Release. After `maxConsecutive` throws in a row no further day starts; those days are returned (asked again next
+ * run). A day that does not throw ends the streak.
+ */
+export async function forEachDayGuarded(
+  days: readonly string[],
+  run: (day: string) => Promise<void>,
+  onError: (day: string, failure: string) => void,
+  maxConsecutive = MAX_CONSECUTIVE_DAY_ERRORS,
+): Promise<string[]> {
+  let streak = 0;
+  for (let i = 0; i < days.length; i++) {
+    const day = days[i]!;
+    try {
+      await run(day);
+      streak = 0;
+    } catch (err) {
+      onError(day, `${day}: ${err instanceof Error ? err.message : String(err)}`);
+      if (++streak >= maxConsecutive) return days.slice(i + 1);
+    }
+  }
+  return [];
 }
 
 /** `bootstrap-2026-07-05` or a comma list; every id must be an active source with a time-range backfill. */
@@ -447,13 +505,13 @@ function readPartition(dataDir: string, day: string, oid: string): FrozenPartiti
 async function main(): Promise<void> {
   const out = process.env.REMEDIATION_OUT ?? 'remediation-out';
   const dryRun = process.env.REMEDIATION_DRY_RUN === '1';
-  const maxDays = Number(process.env.REMEDIATION_MAX_DAYS || 8);
+  const maxDays = envNumber('REMEDIATION_MAX_DAYS', 8);
   const refill = process.env.REMEDIATION_REFILL?.trim() || '';
   const lateMode = resolveLateMode(process.env.REMEDIATION_LATE_USGS);
   const lateRange = process.env.REMEDIATION_LATE_USGS_RANGE?.trim() || '';
   if (lateRange && lateMode === 'off') throw new Error('REMEDIATION_LATE_USGS_RANGE is given without REMEDIATION_LATE_USGS on or plan');
-  const lateMax = Number(process.env.REMEDIATION_LATE_MAX_DAYS || 40);
-  const deadlineMs = Number(process.env.REMEDIATION_DEADLINE_S || 1200) * 1000;
+  const lateMax = envNumber('REMEDIATION_LATE_MAX_DAYS', 40);
+  const deadlineMs = envNumber('REMEDIATION_DEADLINE_S', 1200) * 1000;
   const startedMs = Date.now();
   // A dispatch of the refresh does the queue and the refresh, not the saturated days.
   const lateDispatch = ['on', 'plan'].includes((process.env.REMEDIATION_LATE_USGS ?? '').trim());
@@ -523,8 +581,12 @@ async function main(): Promise<void> {
   // The archived days of this run and their neighbours, read once (one download per month, read only).
   const ctxAll = new Set(runDays.flatMap((d) => [dayShift(d, -1), d, dayShift(d, 1)]));
   const arch = readArchivedDays(archives, ctxAll);
+  // A day that throws is a failed day, not a lost run: the index still records what every day uploaded, and the run
+  // turns red only after writing it (the workflow commits an index a red run wrote).
+  const threw: string[] = [];
+  const dayThrew = (extra?: (failure: string) => void) => dayThrewRecorder(report, threw, extra);
   try {
-    for (const day of runDays) {
+    const unrun = await forEachDayGuarded(runDays, async (day) => {
       const r = await remediateDay(day, byDay.get(day) ?? [], idx, { store, registry, fetchWindow: fetchProviderWindow, archives, arch, work, nowMs, seqMarker: head.seq, spacingMs: SPACING_MS });
       report.failed.push(...r.failed);
       for (const n of r.notFetched) {
@@ -537,6 +599,10 @@ async function main(): Promise<void> {
       }
       for (const m of r.failed) console.log(`::warning::remediate: ${m}`);
       report.days.push({ day, edition: r.edition?.asset ?? null, raws: r.raws.map((x) => x.asset), stats: r.edition?.stats ?? null, failed: r.failed });
+    }, dayThrew());
+    if (unrun.length) {
+      report.pending += unrun.length;
+      console.log(`::warning::remediate: ${MAX_CONSECUTIVE_DAY_ERRORS} days in a row threw; ${unrun.length} day(s) left for the next run`);
     }
 
     // The late-ComCat refresh (SHLTR-150): the frozen, unarchived days of the last 45 (or the dispatched range), oldest
@@ -554,10 +620,10 @@ async function main(): Promise<void> {
         (report.late_usgs.stale.length ? `; edition older than its rewritten partition: ${report.late_usgs.stale.join(', ')}` : ''));
       const partitions = new Map<string, FrozenPartition>();
       const lateArch = readArchivedDays(archives, new Set(lateDays.flatMap((d) => [dayShift(d, -1), dayShift(d, 1)]).filter((d) => archivedDays.has(d))));
-      for (const day of lateDays) {
+      const lateUnrun = await forEachDayGuarded(lateDays, async (day) => {
         if (Date.now() - startedMs > deadlineMs || report.late_usgs.built.length >= lateMax) {
           report.late_usgs.not_reached.push(day);
-          continue;
+          return;
         }
         for (const d of [dayShift(day, -1), day, dayShift(day, 1)]) {
           const oid = blobs.get(d);
@@ -586,6 +652,10 @@ async function main(): Promise<void> {
           if (r.late) console.log(`remediate: ${day} unchanged: ${lateLine(r.late)}`);
         }
         report.days.push({ day, edition: r.edition?.asset ?? null, raws: r.raws.map((x) => x.asset), stats: r.edition?.stats ?? null, failed: r.failed });
+      }, dayThrew((failure) => report.late_usgs.failed.push(failure)));
+      if (lateUnrun.length) {
+        report.late_usgs.not_reached.push(...lateUnrun);
+        console.log(`::warning::remediate: late ComCat: ${MAX_CONSECUTIVE_DAY_ERRORS} days in a row threw; ${lateUnrun.length} day(s) left for the next run`);
       }
       const L = report.late_usgs;
       console.log(`remediate: late ComCat (${lateMode}): ${L.checked.length} day(s) checked, ${L.built.length} edition(s) built, ${L.planned.length} would be built, ${L.unchanged} unchanged, ${L.failed.length} failure(s), ${L.not_reached.length} not reached (next run)`);
@@ -595,10 +665,7 @@ async function main(): Promise<void> {
   }
   report.queue_done = pruneQueue(idx, skip).map((e) => `${e.range} (${e.providers.join(',')})`);
   report.queue = idx.refill_queue ?? [];
-  const text = indexText(idx);
-  const changed = text !== before;
-  if (changed) writeFileSync(localIndex, text);
-  setOutput('changed', String(changed));
+  const { changed, exitCode } = finishRun(idx, before, localIndex, threw);
   writeFileSync(join(out, 'report.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(`remediate: done=${report.done.length} failed=${report.failed.length} pending=${report.pending} waiting=${report.waiting.length} queue=${(idx.refill_queue ?? []).map((e) => e.range).join(' ') || 'empty'} index_changed=${changed}`);
   // A dispatch defaults to a dry run: say so where it cannot be missed (2026-11-14: a 120-edition campaign ran as four
@@ -608,6 +675,10 @@ async function main(): Promise<void> {
     console.log(`::warning title=remediate dry run::${dry}`);
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `**${dry}**\n`);
   }
+  if (threw.length) {
+    console.log(`::error title=remediate::${threw.length} day(s) threw (the index keeps what was uploaded): ${threw.join('; ')}`);
+  }
+  if (exitCode) process.exitCode = exitCode;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

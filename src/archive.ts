@@ -4,7 +4,7 @@ import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { REPO, dataPaths } from './config.js';
+import { REPO, dataPaths, envNumber } from './config.js';
 import { withinShrinkTolerance } from './gh.js';
 import { type ReleaseIo, archiveLogFiles, ghReleaseIo, loadLogArchives, saveLogArchives } from './log-archive.js';
 import { loadInventory, saveInventory } from './partitions.js';
@@ -27,8 +27,8 @@ export interface ArchiveOptions {
 }
 
 const optionsFromEnv = (): ArchiveOptions => ({
-  hotDays: Number(process.env.ARCHIVE_HOT_DAYS ?? 120),
-  maxMonths: Number(process.env.ARCHIVE_MAX_MONTHS ?? 12),
+  hotDays: envNumber('ARCHIVE_HOT_DAYS', 120),
+  maxMonths: envNumber('ARCHIVE_MAX_MONTHS', 12),
   dryRun: process.env.ARCHIVE_DRY_RUN === '1',
   allowShrink: process.env.ARCHIVE_ALLOW_SHRINK === '1',
   markerDir: process.cwd(),

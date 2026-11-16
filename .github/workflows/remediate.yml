@@ -109,13 +109,15 @@ jobs:
           # gh: the archived months (read only) and the remediation assets.
           GH_TOKEN: ${{ github.token }}
         run: npx --no-install tsx src/remediate.ts
-      - if: steps.run.outputs.changed == 'true' && !inputs.dry_run
+      # Also when remediate.ts exited red after writing its index (a day that threw: forEachDayGuarded), so the editions
+      # the other days uploaded are indexed.
+      - if: ${{ !cancelled() && steps.run.outputs.changed == 'true' && !inputs.dry_run }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: remediation-index
           path: remediation-out/remediation.json
           retention-days: 3
-      - if: inputs.dry_run
+      - if: ${{ !cancelled() && inputs.dry_run }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: remediation-dry-run

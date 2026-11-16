@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { relative, sep } from 'node:path';
-import { dataPaths } from './config.js';
+import { dataPaths, envNumber } from './config.js';
 import { dayStartMs } from './backfill-cursor.js';
 import { backfillCfg } from './backfill-cfg.js';
 import {
@@ -9,6 +9,7 @@ import {
   closeBeyondRetention,
   homeDayOf,
   openDispatchLines,
+  partitionReadDays,
   planDays,
   planWindows,
   recordDispatchOutcome,
@@ -41,7 +42,7 @@ import type { EventNode, Head, RawObs } from './types.js';
 import { isoFromMs } from './util.js';
 
 const DAY = 86_400_000;
-const BACKFILL_TARGET_YEARS = Number(process.env.BACKFILL_TARGET_YEARS ?? 3);
+const BACKFILL_TARGET_YEARS = envNumber('BACKFILL_TARGET_YEARS', 3, { integer: false });
 
 type Cursor = BackfillCursorFile;
 
@@ -203,8 +204,6 @@ async function main(): Promise<void> {
   const results = await Promise.all(jobs.map((j) => fetchProviderWindow(j.p, j.startMs, j.endMs, j.cfg.minmag)));
 
   // 3) Build a transient index from existing partitions across the union day range.
-  const minStart = Math.min(...jobs.map((j) => j.startMs));
-  const maxEnd = Math.max(...jobs.map((j) => j.endMs));
   const transient = new Map<string, EventNode>();
   // Which days still have an in-tree partition (readDayPartitionNodes returns [] when the file
   // is absent). Such a day is fully in `transient`, so it stays writable even if its month's
@@ -216,12 +215,9 @@ async function main(): Promise<void> {
   const homeDay = new Map<string, string>();
   const remember = (day: string, n: EventNode): void => rememberHomeDay(homeDay, day, n);
   // The fetch keeps rows up to a minute outside each window (src/providers.ts `inWindow`), so read the margin
-  // days too: a row landing on the day before/after must merge into that day's events, never replace its partition.
-  const readFrom = dayStartMs(eventDayKey(minStart - 60_000));
-  const readTo = maxEnd + 60_000;
-  for (let ms = readFrom; ms <= readTo; ms += DAY) {
-    const day = eventDayKey(ms);
-    if (day >= liveDay) continue; // never touch live-owned days
+  // days too: a row landing on the day before/after must merge into that day's events, never replace its partition
+  // (partitionReadDays; never a live-owned day).
+  for (const day of partitionReadDays(jobs, liveDay)) {
     const nodes = readDayPartitionNodes(root, day);
     if (nodes.length) inTreeDays.add(day);
     for (const node of nodes) {

@@ -136,11 +136,18 @@ export async function run({ env, nowMs = Date.now(), fetchImpl = fetch, sleep, l
     log(`walk-fallback: ${workflow}: would dispatch ${JSON.stringify(dispatchBody(workflow))} (dry run); ${verdict.reason}`);
     return 0;
   }
-  const res = await fetchImpl(`${API}/repos/${repo}/actions/workflows/${workflow}/dispatches`, {
-    method: 'POST',
-    headers: { ...headers(token), 'content-type': 'application/json' },
-    body: JSON.stringify(dispatchBody(workflow)),
-  });
+  let res;
+  try {
+    res = await fetchImpl(`${API}/repos/${repo}/actions/workflows/${workflow}/dispatches`, {
+      method: 'POST',
+      headers: { ...headers(token), 'content-type': 'application/json' },
+      body: JSON.stringify(dispatchBody(workflow)),
+    });
+  } catch (e) {
+    // A network error is a failed dispatch with an annotation, not an unhandled rejection.
+    annotate(`::error::walk-fallback: dispatching ${workflow} failed: ${e instanceof Error ? e.message : String(e)}`);
+    return 1;
+  }
   if (!res.ok) {
     annotate(`::error::walk-fallback: dispatching ${workflow} failed: HTTP ${res.status} ${await res.text().catch(() => '')}`);
     return 1;

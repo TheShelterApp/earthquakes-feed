@@ -99,6 +99,22 @@ test('history config: eras start and end on month boundaries (only the boundary 
   assert.deepEqual(configProblems(cfgOf([pilot, { id: 'b', from: '2022-01-01', to: '2022-07-01', minMagnitude: 4.5, sources: ['usgs'] }]), registry), []);
 });
 
+test('history config: an impossible day or a bad pageLimits is a config problem, not a throw', () => {
+  // '2026-13-01' parses to NaN, which dayKeyOf cannot format: isDay threw a RangeError out of configProblems.
+  for (const boundary of ['2023-13-01', '2023-00-10', '2023-02-30']) {
+    assert.match(configProblems(cfgOf([pilot], { boundary }), registry).join('\n'), new RegExp(`boundary ${boundary} is not a YYYY-MM-DD day`), boundary);
+  }
+  assert.match(configProblems(cfgOf([{ ...pilot, from: '2022-13-01' }]), registry).join('\n'), /era pilot: from\/to must be YYYY-MM-DD days/);
+  // pageLimits may be absent (FETCH_LIMIT_DEFAULT); when present it maps known sources to positive integers.
+  const { pageLimits: _omitted, ...noLimits } = cfgOf([pilot]);
+  assert.deepEqual(configProblems(noLimits, registry), []);
+  assert.match(configProblems(cfgOf([pilot], { pageLimits: [] as unknown as Record<string, number> }), registry).join('\n'), /pageLimits must be an object/);
+  const bad = configProblems(cfgOf([pilot], { pageLimits: { usgs: 0, emsc: 2.5, nope: 100 } }), registry).join('\n');
+  assert.match(bad, /pageLimits\.usgs must be a positive integer/);
+  assert.match(bad, /pageLimits\.emsc must be a positive integer/);
+  assert.match(bad, /pageLimits: unknown source nope/);
+});
+
 test('history config: asset names are never reused (next generation / edition)', () => {
   assert.equal(rawAssetName('usgs', '2022-12'), 'raw-usgs-2022-12.ndjson.zst');
   const names = new Set([rawAssetName('usgs', '2022-12'), rawAssetName('usgs', '2022-12', 2), editionAssetName('2022-12', 1)]);
@@ -240,6 +256,8 @@ test('history fetch: 429 waits for Retry-After (at least the 5 s floor) and retr
   if (r2.ok) assert.equal(r2.rows.length, 2);
   assert.equal(parseRetryAfter('120', 0), 120_000);
   assert.equal(parseRetryAfter('Thu, 01 Jan 1970 00:01:00 GMT', 0), 60_000);
+  assert.equal(parseRetryAfter('  ', 0), null, 'a blank header is absent, not 0 ms');
+  assert.equal(parseRetryAfter(' 5 ', 0), 5_000);
 });
 
 test('history fetch: a Retry-After over the 2-minute cap ends the attempt at once and is handed back (never asked sooner)', async () => {

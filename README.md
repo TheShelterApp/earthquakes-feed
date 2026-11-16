@@ -328,6 +328,12 @@ DATA_DIR=.data PUBLIC_DIR=public npm run derive  # summaries + day files + parti
 DATA_DIR=.data PUBLIC_DIR=public npm run validate
 ```
 
+The numeric settings read from the environment (`FETCH_TIMEOUT_MS`, `LIVE_INDEX_DAYS`, and the workflow_dispatch
+inputs such as `max_units`, `months`, `max_days`, `max_years` and first-solutions' `budget_minutes`) take their default
+when unset or blank; any other value must be a whole number of at least 1 (`REMERGE_EPOCH_OVERRIDE` also takes 0,
+`BACKFILL_TARGET_YEARS` a fraction; `envNumber`, src/config.ts), or the run stops at once with an error naming the
+variable.
+
 ## Deploy (for a fork)
 
 1. **Bootstrap the data branch:** `bash scripts/bootstrap-data-branch.sh && git push -u origin data`
@@ -366,7 +372,8 @@ minutes (one that was cancelled or skipped does not count). One health run runs 
   or a findings file it cannot write, turns its job red.
   - `feed` ([`scripts/feed-health.mjs`](scripts/feed-health.mjs)): the live `v1` and `v2` manifests, `v1/status.json`,
     the files on `data`, the repository size, the walks' blocked markers and the writer queue (a GitHub read that fails
-    is `watcher:feed-github`; a truncated listing of the `data` tree is a warning).
+    is `watcher:feed-github`; a truncated listing of the `data` tree is a warning, and leaves `feed:size` as it was when
+    it shows no file over the line).
   - `alerts` ([`scripts/alerts-watchdog.mjs`](scripts/alerts-watchdog.mjs)): The Shelter's alert pipeline, from the
     alerts-gateway's public `https://data.theshelter.app/alerts/status.json`, the USGS `4.5_hour` canary and, with the
     `CF_ANALYTICS_TOKEN` secret, the account's daily usage (only account totals are logged, and an API error is

@@ -65,6 +65,14 @@ jobs:
       group: earthquakes-feed-history
       cancel-in-progress: false
       queue: max
+    # Restated in full at job level (a job-level block sets every permission it does not name to none): contents: write
+    # for the chunk Releases it creates and uploads to (src/first-solutions-collect.ts, FIRST_SOLUTIONS_UPLOAD), actions:
+    # read for the previous run's artifact, and an OIDC token for the state store (storage phase 3: in phase 3a it still
+    # reads the event map from the checkout; from phase 3b it hydrates it first, src/event-map-store.ts).
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -81,6 +89,17 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      - name: State hydrate (phase 3b)
+        # Storage phase 3b only (src/event-map-store.ts hydrate --3b-only; nothing in phase 3a, where the checkout holds
+        # the event map): the unfrozen days come from the event map, which from phase 3b only the state store holds.
+        # Fails closed: without it the walk would find no reports for those days.
+        timeout-minutes: 3
+        env:
+          DATA_DIR: .data
+          FEED_STATE_BACKEND: worker
+          FEED_STATE_URL: https://feed-state.theshelter.app
+          FEED_STATE_AUDIENCE: earthquakes-feed-state
+        run: npx --no-install tsx src/event-map-store.ts hydrate --3b-only
       - name: Collect
         env:
           DATA_DIR: .data

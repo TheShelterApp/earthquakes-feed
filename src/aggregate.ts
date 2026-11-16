@@ -2,7 +2,8 @@ import { advanceWatermark } from './watermark.js';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { CORRECTION_EPOCH, DATA_DIR, EVENT_MAP_HORIZON_DAYS, HEAL_EPOCH, HOT_WINDOW_DAYS, LIVE_INDEX_DAYS, SWEEP_EPOCH, dataPaths } from './config.js';
-import { HISTORY_FILE_WARN_BYTES, appendObservations, earliestEventMapDay, eventDayKey, loadState, saveEventMap, saveMeta } from './bitemporal.js';
+import { HISTORY_FILE_WARN_BYTES, appendObservations, eventDayKey, loadState, saveEventMap, saveMeta } from './bitemporal.js';
+import { eventMapInGit, liveFloor, moveToDayLayout } from './event-map-store.js';
 import { onboardStep } from './onboard.js';
 import { correctedEpoch, correctionFloor, runCorrection } from './correction.js';
 import { Resolver } from './dedup.js';
@@ -382,7 +383,14 @@ async function main(): Promise<void> {
     providers,
     sweeps,
   };
-  saveEventMap(DATA_DIR, state.eventMap, undefined, { floorDay: eventDayKey(nowMs - loadDays * 86_400_000) });
+  saveEventMap(DATA_DIR, state.eventMap, { floorDay: eventDayKey(nowMs - loadDays * 86_400_000) });
+  // Storage phase 3: while git tracks the event map (phase 3a) it stays in hour shards (saveEventMap; each commit then
+  // rewrites ~70 KB shards, not ~1.7 MB day files, in git's permanent history). Once git no longer holds it (phase 3b)
+  // any day still in shards moves to its day file, the store's layout; the files never reach git then.
+  if (!eventMapInGit()) {
+    const moved = moveToDayLayout(DATA_DIR);
+    if (moved.length) console.log(`aggregate: event map layout: ${moved.length} day(s) moved from hour shards to day files (${moved[0]} … ${moved.at(-1)})`);
+  }
   const history = saveMeta(DATA_DIR, state.head, state.watermarks, status);
   if (history.historyBytes > HISTORY_FILE_WARN_BYTES) {
     console.warn(
@@ -398,7 +406,7 @@ async function main(): Promise<void> {
   // Runs after the main save (loads the just-saved shards fresh); fail-safe — never breaks
   // the critical aggregate run. derive rebuilds the touched partitions on its next run.
   try {
-    const ob = await onboardStep(DATA_DIR, all, active, earliestEventMapDay(DATA_DIR, nowMs), nowMs, ingestTime);
+    const ob = await onboardStep(DATA_DIR, all, active, liveFloor(DATA_DIR, nowMs), nowMs, ingestTime);
     if (ob.provider) console.log(`onboard: ${JSON.stringify(ob)}`);
     if (ob.screened?.bad_coords) console.warn(`::warning::onboard: dropped ${ob.screened.bad_coords} obs with out-of-range coordinates from ${ob.provider}`);
   } catch (err) {

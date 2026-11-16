@@ -102,8 +102,46 @@ export interface FeedInputs {
   ids: string[];
   /** The statistics (providers/stats.json, the v1 pointer, the index); absent: not judged. */
   stats?: StatsInputs;
+  /** The state store's markers and budget (storage phase 3); absent or null: not judged. */
+  stateShadow?: StateShadowRead | null;
+  stateGc?: { ok: true; artifact: { id: number; createdAtMs: number; runId: number | null } | null } | { ok: false; message: string } | null;
+  stateBackup?: { ok: true; marker: { createdAtMs: number; runId: number | null; json: unknown } | null } | { ok: false; message: string } | null;
+  stateBudget?: StateBudgetRead | null;
+  /** The store is off (FEED_STATE_BACKEND unset): the state inputs are absent and a note says so. */
+  stateOff?: boolean;
+  /** The newest repo-size-samples document ({samples: [{atMs, kb}]}), null when there is none yet. */
+  repoSamples?: { ok: true; json: unknown } | { ok: false; message: string };
   notes: string[];
 }
+
+/** The newest state-shadow markers (each the JSON of its `hydrate` and `persist` step). */
+export type StateShadowRead =
+  | { ok: true; markers: Array<{ createdAtMs: number; runId: number | null; steps: Record<string, unknown> }> }
+  | { ok: false; message: string };
+export type StateBudgetRead = { ok: true; json: unknown } | { ok: false; message: string; skipped?: boolean };
+export interface RepoSample {
+  atMs: number;
+  kb: number;
+}
+
+export function pickArtifacts(listing: unknown, name: string, n: number): Array<{ id: number; createdAtMs: number; runId: number | null }>;
+/** Whether a workflow run may vouch for a state marker: one of `workflows`, on this repository's main, by schedule or dispatch. */
+export function trustedRun(run: unknown, workflows: readonly string[]): boolean;
+/** feed:state-shadow (P2): a state step not ok in the newest markers younger than 2 h; none that young: unjudged. */
+export function evaluateStateShadow(read: StateShadowRead | undefined, nowMs: number): Judged;
+/** feed:state-gc (P2): no completed state GC run in 3 days, or none on record. */
+export function evaluateStateGc(read: FeedInputs['stateGc'], nowMs: number): Judged;
+/** feed:state-backup: the newest daily state over 36 h old (P2) or 7 days (P1); no backup on record: P2. */
+export function evaluateStateBackup(read: FeedInputs['stateBackup'], nowMs: number): Judged;
+/** Each ceiling's used share from GET /v1/budget ({used, stored_bytes, ceilings}, snake_case), the highest first. */
+export function budgetShares(json: unknown): Array<{ key: string; used: number; cap: number; share: number }> | null;
+/** feed:state-budget (P2): a ceiling over 70 % used. */
+export function evaluateStateBudget(read: StateBudgetRead | undefined): Judged;
+export function readStateBudget(opts: { env: Record<string, string | undefined>; fetchImpl: FetchImpl; sleep: (ms: number) => Promise<void> }): Promise<StateBudgetRead>;
+/** This run's repository-size sample appended when the newest is 20 h old or more (at most 40 kept). */
+export function nextSamples(prev: unknown, nowMs: number, kb: unknown): { samples: RepoSample[]; changed: boolean };
+/** feed:repo-growth (P3): MB a day since the newest sample at least 6 days old, over 10. */
+export function evaluateRepoGrowth(samples: RepoSample[], nowMs: number, kb: unknown): Judged;
 
 /** Every feed finding of one run; a failed GitHub read (unless `githubSkipped`) adds watcher:feed-github. */
 export interface StatsConfigRead {
@@ -125,7 +163,7 @@ export function statsPointerOf(json: unknown): StatsInputs['pointer'];
 /** feed:stats (P2, held 30 min), feed:stats-through (P3), feed:stats-days (P3). */
 export function evaluateStats(opts: { nowMs: number; v1Ok: boolean; pointer: StatsInputs['pointer']; config: StatsConfigRead | null; index: StatsInputs['index'] }): { findings: Finding[]; unjudged: string[]; notes: string[] };
 
-export function evaluateFeed(inputs: FeedInputs): { findings: Finding[]; unjudged: string[]; notes: string[]; summary: string };
+export function evaluateFeed(inputs: FeedInputs): { findings: Finding[]; unjudged: string[]; notes: string[]; summary: string; samples: { samples: RepoSample[] } | null };
 
 export function collect(opts?: {
   env?: Record<string, string | undefined>;
@@ -137,7 +175,7 @@ export function collect(opts?: {
   readFile?: (path: string) => string;
 }): Promise<FeedInputs>;
 
-export function parseArgs(argv: string[]): { findingsPath: string | null };
+export function parseArgs(argv: string[]): { findingsPath: string | null; samplesPath: string | null };
 
 export function main(opts?: {
   argv?: string[];

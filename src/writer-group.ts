@@ -264,7 +264,7 @@ export interface Design {
 export const SPARSE_BACKFILL_HOLD_MS = 40_000;
 
 /** The gated workflows (scripts/writer-queue.mjs WRITERS: all but aggregate). */
-export const GATED_WORKFLOWS: ReadonlySet<string> = new Set(['backfill', 'archive', 'derive']);
+export const GATED_WORKFLOWS: ReadonlySet<string> = new Set(['backfill', 'archive', 'derive', 'state-gc']);
 
 /** simulate() under a design: its writer queue mode and, when it has one, its gate. */
 export function simulateDesign(arrivals: readonly Arrival[], design: Design): Outcome[] {

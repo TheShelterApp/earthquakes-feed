@@ -10,7 +10,7 @@ export interface WriterDef {
   /** Whether a `gate` job guards it (every writer but aggregate). */
   gated: boolean;
 }
-export const WRITERS: Readonly<Record<'aggregate.yml' | 'backfill.yml' | 'archive.yml' | 'derive.yml', Readonly<WriterDef>>>;
+export const WRITERS: Readonly<Record<'aggregate.yml' | 'backfill.yml' | 'archive.yml' | 'derive.yml' | 'state-gc.yml', Readonly<WriterDef>>>;
 export const STALE_RUN_MS: number;
 export const OPEN_RUN_STATUSES: readonly string[];
 

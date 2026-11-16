@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DATA_DIR, EVENT_MAP_HORIZON_DAYS, JSDELIVR_BASE, PUBLIC_DIR, REPO, SCHEMA_VERSION, dataPaths } from './config.js';
 import { loadState, pruneEventMapShards, writeIfChanged } from './bitemporal.js';
+import { pruneGeneration } from './event-map-store.js';
 import {
   dayMagRange,
   ensurePartitionFormat,
@@ -246,12 +247,17 @@ function main(): void {
   mirrorChangeLog(changesFile, publicV1, changesDay);
   console.log(`derive: status v2 + changes appended=${changed.appended} (seq→${changed.cursor})`);
 
-  const pruned = pruneEventMapShards(DATA_DIR, nowMs - EVENT_MAP_HORIZON_DAYS * 86_400_000);
+  const pruneBefore = nowMs - EVENT_MAP_HORIZON_DAYS * 86_400_000;
+  const pruned = pruneEventMapShards(DATA_DIR, pruneBefore);
+  // Storage phase 3: the same days leave the generation, a pure local edit committed with the derive commit (the blobs
+  // stay in the store until GC; the store is never asked here).
+  const prunedGeneration = pruneGeneration(DATA_DIR, eventDayKey(pruneBefore));
 
   console.log(
     `derive: live=${liveCount} summaries=${Object.keys(summ).length} partitions=${byDay.size} rewritten=${rewritten}` +
       ` pages_ndjson=${pagesNdjsonDays.size} (${pagesNdjsonBytes} B)` +
-      (pruned.length ? ` pruned_shards=${pruned.length}` : ''),
+      (pruned.length ? ` pruned_days=${pruned.length}` : '') +
+      (prunedGeneration.length ? ` generation_pruned=${prunedGeneration.join(',')}` : ''),
   );
   console.log(
     `derive: live index head=${live.index.head_seq} days=${live.index.days.length} (${live.index.days.reduce((s, d) => s + d.bytes, 0)} B)` +

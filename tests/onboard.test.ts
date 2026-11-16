@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { dataPaths } from '../src/config.js';
-import { earliestEventMapDay, loadEventMap, saveEventMap } from '../src/bitemporal.js';
+import { loadEventMap, saveEventMap } from '../src/bitemporal.js';
+import { liveFloor } from '../src/event-map-store.js';
 import { Resolver } from '../src/dedup.js';
 import { onboardStep } from '../src/onboard.js';
 import type { EventNode, ProviderConfig, RawObs } from '../src/types.js';
@@ -88,7 +89,7 @@ test('onboard: a NEW source fills its recent window into the event_map (merges +
   const root = mkdtempSync(join(tmpdir(), 'efd-onb-'));
   try {
     seedEventMap(root);
-    const liveDay = earliestEventMapDay(root, NOW);
+    const liveDay = liveFloor(root, NOW);
     assert.equal(liveDay, '2026-06-30');
     // Pretend only usgs was here before; emsc is the newly-added source.
     writeFileSync(dataPaths(root).onboardCursor, JSON.stringify({ onboarded: ['usgs'], pending: {} }) + '\n');
@@ -188,7 +189,7 @@ test('onboard screens reports like the live path: no coordinate-less or out-of-r
           raw({ provider: 'emsc', providerEventId: 'ok', eventTimeMs: t, lat: 40.0, lon: 25.0, mag: 3.2 }),
         ],
       } satisfies WindowOutcome);
-    const res = await onboardStep(root, ALL, ALL, earliestEventMapDay(root, NOW), NOW, '2026-07-05T12:00:00Z', stub);
+    const res = await onboardStep(root, ALL, ALL, liveFloor(root, NOW), NOW, '2026-07-05T12:00:00Z', stub);
     assert.equal(res.changed, 1, 'only the located report');
     assert.deepEqual(res.screened, { bad_coords: 1, coordinateless: 1 }, 'the drops are counted in the result aggregate prints');
     const aliases = [...loadEventMap(root, {}).values()].flatMap((n) => n.aliases);

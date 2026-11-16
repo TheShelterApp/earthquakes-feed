@@ -58,6 +58,13 @@ jobs:
     # below, kept equal by tests/pages-deploy.test.ts): each attempt is capped and a retry starts only while 7 min are
     # left, so a hung upload no longer runs the job into this timeout (run 38112591591, 2026-10-11).
     timeout-minutes: 16
+    # Restated in full at job level (a job-level block sets every permission it does not name to none): the push to
+    # `data`, and GitHub OIDC tokens for the state store (storage phase 3, src/state-store.ts: the audience
+    # earthquakes-feed-state, verified by the state Worker; no static secret exists). Never at workflow level, where it
+    # would reach any job added later; tests/stage-data.test.ts names every job that holds it.
+    permissions:
+      contents: write
+      id-token: write
     steps:
       # First, so the Pages deploy (.github/actions/derive-publish) counts the job's budget from about its start.
       - name: Note the job's start
@@ -75,6 +82,28 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      - name: State shadow hydrate
+        # Storage phase 3a (APIs.md "Repository size"): every day the committed generation (knowledge/index/generation.json)
+        # names is fetched from the state store, each blob checked against it, and compared with the checked-out
+        # event map (src/event-map-store.ts hydrate, mode shadow). Git is still the truth: a mismatch or a store error
+        # is reported (the step summary, a ::warning::, and the marker the health workflow reads: feed:state-shadow),
+        # never repaired here and never a reason to stop the feed. Before anything writes the checkout.
+        # FEED_STATE_BACKEND is the repository variable that switches the store on (`worker`) once the Worker is
+        # deployed and rehearsed (APIs.md, the phase-3a rollout); unset, both state steps report "off" (a note in
+        # health) and touch nothing, so merging this is inert until the owner turns it on.
+        continue-on-error: true
+        # 46 day blobs (about 12 MB) in two requests of at most 40. Phase 3a's policy (src/event-map-store.ts
+        # SHADOW_RETRY_POLICY): 2 attempts of at most 15 s a request and a 30 s deadline over the whole step, so a
+        # hanging store costs this 5-minute job seconds, not minutes; this timeout is only the backstop (a step it kills
+        # leaves its "killed" marker, which health reads as a failed step).
+        timeout-minutes: 2
+        env:
+          DATA_DIR: .data
+          FEED_STATE_BACKEND: ${{ vars.FEED_STATE_BACKEND }}
+          FEED_STATE_URL: https://feed-state.theshelter.app
+          FEED_STATE_AUDIENCE: earthquakes-feed-state
+          FEED_STATE_MARKER_DIR: ${{ runner.temp }}/state-shadow
+        run: npx --no-install tsx src/event-map-store.ts hydrate
       - name: Snapshot the silent-change baseline
         # Before anything writes the data checkout: the day partitions of the live window rebuilt from the event map the
         # previous derive read (src/live-baseline.ts), into the runner's temp directory, outside .data; a day that differs
@@ -104,12 +133,44 @@ jobs:
           # Passed through the environment, never written into the script: src/recover.ts parses it strictly.
           FEED_RECOVER: ${{ inputs.recover }}
         run: npx --no-install tsx src/aggregate.ts
+      - name: State persist
+        # Storage phase 3a: every event-map day whose canonical bytes differ from its generation entry is gzipped and
+        # PUT to the state store, then knowledge/index/generation.json is rewritten, before the commit below stages it
+        # with the rest of `knowledge` (the one push commits the generation with head.json, sweeps.json, watermarks.json,
+        # the markers and onboard.json). A store error leaves generation.json as it was, so a generation only names
+        # blobs that exist; the next run uploads again. Phase 3a: reported, never fatal (git still tracks the event map).
+        # The first phase-3a run uploads all 46 days (about 12 MB, 4 PUTs at a time). Phase 3a's policy: 2 attempts of at
+        # most 15 s a request and a 60 s deadline over the whole step; this timeout is only the backstop.
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          DATA_DIR: .data
+          FEED_STATE_BACKEND: ${{ vars.FEED_STATE_BACKEND }}
+          FEED_STATE_URL: https://feed-state.theshelter.app
+          FEED_STATE_AUDIENCE: earthquakes-feed-state
+          FEED_STATE_MARKER_DIR: ${{ runner.temp }}/state-shadow
+        run: npx --no-install tsx src/event-map-store.ts persist
+      - name: Upload the state report
+        # The markers of the two state steps (hydrate.json, persist.json), which the health workflow's feed evaluator
+        # reads from the newest runs (scripts/feed-health.mjs, feed:state-shadow).
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: state-shadow
+          path: ${{ runner.temp }}/state-shadow
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Commit & push observation log
         working-directory: .data
         run: |
           git config user.name  "earthquakes-feed-bot"
           git config user.email "bot@users.noreply.github.com"
           git add knowledge status status.json .gitignore
+          # Storage phase 3b (src/event-map-store.ts `stage`; nothing while EVENT_MAP_IN_GIT=1, phase 3a): the transition
+          # (every tracked event-map day file leaves the index, the sentinel and the .gitignore lines are staged), then
+          # the check that no event-map path but the sentinel is staged (a lost .gitignore line would re-track 78 MB).
+          ( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/event-map-store.ts stage )
           git commit -m "aggregate: seq=$(node -e "process.stdout.write(String(require('./knowledge/index/head.json').seq))") @ $(date -u +%FT%TZ)" \
             || { echo 'no changes'; exit 0; }
           # Fail-loud push loop: a swallowed rebase conflict here silently loses data (H3). Five attempts with a 5 s

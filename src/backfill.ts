@@ -1,5 +1,4 @@
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { relative, sep } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dataPaths, envNumber } from './config.js';
 import { dayStartMs } from './backfill-cursor.js';
 import { backfillCfg } from './backfill-cfg.js';
@@ -36,7 +35,8 @@ import {
 import { activeProviders, fetchProviderWindow, loadRegistry, priorityMap, configMap } from './providers.js';
 import type { RemediationIndex } from './remediation.js';
 import { RETENTION } from './retention.js';
-import { assertCheckedOut, isSparseCheckout, treeNames } from './sparse-checkout.js';
+import { assertCheckedOut } from './sparse-checkout.js';
+import { liveFloor } from './event-map-store.js';
 import { byIngestOrder, emptyTally, screen } from './quality.js';
 import type { EventNode, Head, RawObs } from './types.js';
 import { isoFromMs } from './util.js';
@@ -46,19 +46,12 @@ const BACKFILL_TARGET_YEARS = envNumber('BACKFILL_TARGET_YEARS', 3, { integer: f
 
 type Cursor = BackfillCursorFile;
 
-/** Oldest UTC day owned by the live pipeline (has an event_map shard). Backfill fills
- *  strictly before this, so it never collides with aggregate/derive rewrites. On the sparse checkout of backfill.yml
- *  the shards are not checked out: their names come from git (a missing directory would read as "today" and let the
- *  run write live-owned days). */
+/** Oldest UTC day owned by the live pipeline (src/event-map-store.ts liveFloor: the generation's oldest day, else the
+ *  oldest event-map file of the checkout, else, on the sparse checkout of backfill.yml where the files are not checked
+ *  out, the oldest name in git's tree). Backfill fills strictly before it, so it never collides with aggregate/derive
+ *  rewrites. With none of them it throws: a floor read as "today" would let the run write live-owned days. */
 function earliestLiveDay(root: string, nowMs: number): string {
-  const dir = dataPaths(root).eventMapDir;
-  const today = eventDayKey(nowMs);
-  let names: string[];
-  if (existsSync(dir)) names = readdirSync(dir);
-  else if (isSparseCheckout(root)) names = treeNames(root, relative(root, dir).split(sep).join('/'));
-  else return today;
-  const days = names.filter((f) => f.endsWith('.ndjson')).map((f) => f.slice(0, 10)).sort();
-  return days[0] ?? today;
+  return liveFloor(root, nowMs);
 }
 
 /** The index files backfill reads (cursor, archives, inventory, head, partition format): every `*.json` of

@@ -627,20 +627,6 @@ export const CORRECTION_EPOCH = 3;
 export const HOT_WINDOW_DAYS = 7;
 /** aggregate loads only this many days of event_map shards (fast hot path). */
 export const LIVE_INDEX_DAYS = envNumber('LIVE_INDEX_DAYS', 10);
-/**
- * event_map shard length in UTC hours of event time (round 17, LANE G repository growth): an event-day's nodes are
- * written to `event_map/YYYY-MM-DD-HH.ndjson`, one file per EVENT_MAP_SHARD_HOURS hours starting at HH, and a run
- * rewrites only the files whose bytes change (about 70 KB an hour instead of the ~1.7 MB day). 24 = one file per day,
- * `event_map/YYYY-MM-DD.ndjson`, the layout until round 17: setting it back to 24 is the rollback, and the next save
- * of each day rewrites it as one file. A divisor of 24; anything else is refused at load.
- */
-export const EVENT_MAP_SHARD_HOURS = parseShardHours(process.env.EVENT_MAP_SHARD_HOURS ?? '1');
-
-export function parseShardHours(raw: string): number {
-  const h = Number(raw);
-  if (!Number.isInteger(h) || h < 1 || h > 24 || 24 % h !== 0) throw new Error(`EVENT_MAP_SHARD_HOURS=${raw}: a divisor of 24`);
-  return h;
-}
 /** derive loads this many days (covers the 30-day month summary + revision tail);
  *  event_map shards older than this are pruned (their identity lives in frozen partitions). */
 export const EVENT_MAP_HORIZON_DAYS = envNumber('EVENT_MAP_HORIZON_DAYS', 45);
@@ -1011,6 +997,9 @@ export function dataPaths(root = DATA_DIR) {
     head: join(root, 'knowledge', 'index', 'head.json'),
     eventMapDir: join(root, 'knowledge', 'index', 'event_map'),
     eventMapLegacy: join(root, 'knowledge', 'index', 'event_map.ndjson'),
+    /** The generation document (storage phase 3, src/event-map-store.ts): which content-addressed blob of the state
+     *  store holds each event-map day. Committed with the commit whose event map it describes. */
+    generation: join(root, 'knowledge', 'index', 'generation.json'),
     watermarks: join(root, 'knowledge', 'index', 'watermarks.json'),
     backfillCursor: join(root, 'knowledge', 'index', 'backfill.json'),
     onboardCursor: join(root, 'knowledge', 'index', 'onboard.json'),

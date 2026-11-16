@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { test } from 'node:test';
@@ -42,8 +42,9 @@ function stubReleases(opts: { corruptDownloadOf?: (asset: string) => boolean } =
   return { io, store, calls };
 }
 
-/** May 2026 is cold (2 days), June is not (06-10 is inside 120 days), April holds a live event_map shard. */
-function dataRoot(): string {
+/** May 2026 is cold (2 days), June is not (06-10 is inside 120 days); the live event map starts at 06-05 (its floor,
+ *  src/event-map-store.ts liveFloor), so no cold month reaches it. `floorDay` moves the event map's first day. */
+function dataRoot(floorDay = '2026-06-05'): string {
   const root = mkdtempSync(join(tmpdir(), 'archive-run-'));
   const day = (d: string, n: number): void => {
     const [y, m, dd] = d.split('-');
@@ -54,11 +55,10 @@ function dataRoot(): string {
   day('2026-05-02', 2);
   day('2026-06-05', 1);
   day('2026-06-10', 1);
-  day('2026-04-03', 1);
   mkdirSync(join(root, 'knowledge', 'index', 'event_map'), { recursive: true });
-  writeFileSync(join(root, 'knowledge', 'index', 'event_map', '2026-04-03.ndjson'), '');
+  writeFileSync(join(root, 'knowledge', 'index', 'event_map', `${floorDay}.ndjson`), '');
   const inv: Record<string, unknown> = {};
-  for (const d of ['2026-04-03', '2026-05-01', '2026-05-02', '2026-06-05', '2026-06-10']) inv[d] = { count: 1 };
+  for (const d of ['2026-05-01', '2026-05-02', '2026-06-05', '2026-06-10']) inv[d] = { count: 1 };
   writeFileSync(join(root, 'knowledge', 'index', 'partitions.json'), JSON.stringify(inv) + '\n');
   for (const [m, d] of [['05', '01'], ['06', '10']]) {
     mkdirSync(join(root, 'knowledge', 'observations', 'ingest=2026', m!, d!), { recursive: true });
@@ -87,18 +87,17 @@ const silently = <T>(fn: () => T): T => {
   }
 };
 
-test('archive run: only the fully cold month rolls; the live-shard month is refused; verified before index and prune', () => {
+test('archive run: only the fully cold month rolls; verified before index and prune', () => {
   const root = dataRoot();
   const { io, store, calls } = stubReleases();
   const res = silently(() => runArchive(root, NOW, io, opts(root)));
   assert.deepEqual(res.archived, ['2026-05']);
   assert.equal(res.logArchived, 1, 'the cold observation-log month too');
-  // May left the tree and the inventory; June and the shard-guarded April stay.
+  // May left the tree and the inventory; June stays.
   assert.ok(!existsSync(join(root, 'events', '2026', '05')) || readdirSync(join(root, 'events', '2026', '05')).length === 0);
   assert.ok(existsSync(join(root, 'events', '2026', '06', '10.ndjson')));
-  assert.ok(existsSync(join(root, 'events', '2026', '04', '03.ndjson')), 'a month with a live event_map shard is never archived');
   const inv = JSON.parse(readFileSync(join(root, 'knowledge', 'index', 'partitions.json'), 'utf8')) as Record<string, unknown>;
-  assert.deepEqual(Object.keys(inv).sort(), ['2026-04-03', '2026-06-05', '2026-06-10']);
+  assert.deepEqual(Object.keys(inv).sort(), ['2026-06-05', '2026-06-10']);
   const e = index(root).list.find((x) => x.period === '2026-05')!;
   assert.equal(e.count, 5);
   assert.deepEqual(e.days, ['2026-05-01', '2026-05-02']);
@@ -110,6 +109,21 @@ test('archive run: only the fully cold month rolls; the live-shard month is refu
   assert.match(e.asset, /^events-2026-05\.tar\.(zst|gz)$/, 'the first roll is edition 1, the unsuffixed name');
   const i = calls.indexOf(`upload archive-2026-05/${e.asset}`);
   assert.equal(calls[i + 1], `download archive-2026-05/${e.asset}`);
+});
+
+test('archive run: a cold month that reaches the live event map is refused; without an event map the run throws', () => {
+  // The 45-day event-map horizon is far inside the 120-day archive horizon, so this guard should never fire; it is the
+  // backstop for an event map that grew old (its floor from the generation, else the files: liveFloor).
+  const root = dataRoot('2026-05-02');
+  const { io } = stubReleases();
+  const res = silently(() => runArchive(root, NOW, io, opts(root)));
+  assert.deepEqual(res.archived, []);
+  assert.ok(existsSync(join(root, 'events', '2026', '05', '01.ndjson')), 'a month that reaches the live floor is never archived');
+  // No event map at all (storage phase 3: absence never reads as "no live day"): the run stops before it archives.
+  const bare = dataRoot();
+  rmSync(join(bare, 'knowledge', 'index', 'event_map'), { recursive: true });
+  assert.throws(() => silently(() => runArchive(bare, NOW, stubReleases().io, opts(bare))), /no live floor/);
+  assert.ok(existsSync(join(bare, 'events', '2026', '05', '01.ndjson')));
 });
 
 test('archive run: an upload that reads back with another checksum stops the run before the index or the tree changes', () => {

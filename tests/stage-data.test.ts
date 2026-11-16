@@ -289,3 +289,102 @@ test('wiring: derive-publish, backfill and archive stage through src/stage-data.
   // Every workflow that commits to data is checked above (a new one is covered by the glob).
   assert.ok(committers.length >= 9, `committers: ${committers.join(', ')}`);
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Storage phase 3 (src/event-map-store.ts): the jobs that may mint a GitHub OIDC token for the state store, and the
+// phase-3b event-map check on every commit that stages `knowledge`.
+
+/** The jobs of a workflow by id: each job's text up to the next job. */
+const jobsOf = (yml: string): Record<string, string> => {
+  const body = yml.slice(yml.indexOf('\njobs:\n') + '\njobs:\n'.length);
+  const out: Record<string, string> = {};
+  const starts = [...body.matchAll(/^ {2}([\w-]+):\n/gm)];
+  starts.forEach((m, i) => (out[m[1]!] = body.slice(m.index!, starts[i + 1]?.index ?? body.length)));
+  return out;
+};
+
+test('wiring: exactly the state store\'s jobs hold id-token: write, at job level, each restating the permissions it needs', () => {
+  const read = (rel: string): string => readFileSync(here(`../${rel}`), 'utf8');
+  const holders: string[] = [];
+  for (const file of workflowFiles().filter((f) => f.startsWith('.github/workflows/'))) {
+    const text = read(file);
+    const top = text.slice(0, text.indexOf('\njobs:'));
+    assert.doesNotMatch(top, /id-token/, `${file}: never at workflow level (it would reach every job added later)`);
+    for (const [job, block] of Object.entries(jobsOf(text))) {
+      if (!/\n {6}id-token: write\n/.test(block)) continue;
+      holders.push(`${file.slice('.github/workflows/'.length)}:${job}`);
+      assert.match(block, /\n {4}permissions:\n(?: {6}#.*\n| {6}[\w-]+: (?:read|write)\n)+/, `${file}:${job}: a job-level permissions block`);
+    }
+  }
+  assert.deepEqual(holders.sort(), [
+    // Readers and writers of the store (the state Worker's allow-lists, state/README.md).
+    'aggregate.yml:aggregate',
+    'derive.yml:derive',
+    'first-solutions.yml:collect',
+    'health.yml:feed',
+    'state-backup.yml:backup',
+    'state-gc.yml:gc',
+    'state-rehearsal.yml:rehearse',
+  ]);
+  // The jobs that push to data keep contents: write next to it; first-solutions' collect uploads Release chunks.
+  for (const [file, job, perms] of [
+    ['aggregate.yml', 'aggregate', ['contents: write', 'id-token: write']],
+    ['derive.yml', 'derive', ['contents: write', 'id-token: write']],
+    ['first-solutions.yml', 'collect', ['contents: write', 'actions: read', 'id-token: write']],
+    ['health.yml', 'feed', ['contents: read', 'actions: read', 'id-token: write']],
+    ['state-gc.yml', 'gc', ['contents: read', 'actions: read', 'id-token: write']],
+    ['state-backup.yml', 'backup', ['contents: write', 'actions: read', 'id-token: write']],
+    ['state-rehearsal.yml', 'rehearse', ['contents: read', 'id-token: write']],
+  ] as const) {
+    const block = jobsOf(read(`.github/workflows/${file}`))[job]!;
+    const got = [...block.slice(block.indexOf('\n    permissions:\n')).matchAll(/^ {6}([\w-]+: (?:read|write))$/gm)].map((m) => m[1]);
+    assert.deepEqual(got.slice(0, perms.length), [...perms], `${file}:${job}`);
+  }
+});
+
+test('wiring: every commit that stages knowledge carries the phase-3b event-map check (off while EVENT_MAP_IN_GIT=1)', () => {
+  const read = (rel: string): string => readFileSync(here(`../${rel}`), 'utf8');
+  const hook = '( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/event-map-store.ts stage )';
+  let explicit = 0;
+  for (const file of workflowFiles()) {
+    const body = read(file).replace(/^\s*#.*$/gm, '');
+    for (const m of body.matchAll(/\bgit add\b([^\n;&|)]*)/g)) {
+      const specs = m[1]!.trim().split(/\s+/).filter((a) => !a.startsWith('-'));
+      if (!specs.some((p) => p === 'knowledge' || p === 'knowledge/index' || p === '.')) continue;
+      explicit++;
+      const after = body.indexOf(hook, m.index!);
+      assert.ok(after > m.index!, `${file}: ${m[0].trim()} without the event-map check after it`);
+      assert.ok(after < body.indexOf('git commit', m.index!), `${file}: the check before the commit`);
+    }
+  }
+  assert.equal(explicit, 1, 'aggregate.yml stages knowledge itself; derive-publish, backfill and archive go through stage-data.ts');
+});
+
+test('stageData: with EVENT_MAP_IN_GIT=0 (phase 3b) a staged event-map day file stops the commit; deletions and the sentinel pass', () => {
+  const r = repo();
+  try {
+    r.write('knowledge/index/event_map/2026-11-01.ndjson', '{"feedId":"a"}\n');
+    r.write('manifest.json', '{}\n');
+    r.run('add', '-A');
+    r.run('commit', '-q', '-m', 'seed');
+    r.write('knowledge/index/event_map/2026-11-02.ndjson', '{"feedId":"b"}\n');
+    assert.throws(() => stageData(r.dir, ['.'], NOW, r.git, { EVENT_MAP_IN_GIT: '0' }), /event map staged for a commit while EVENT_MAP_IN_GIT=0 .*: A knowledge\/index\/event_map\/2026-11-02\.ndjson/);
+    r.run('reset', '-q');
+    // Phase 3a (the default): git tracks the event map; nothing is checked.
+    assert.doesNotThrow(() => stageData(r.dir, ['.'], NOW, r.git, {}));
+    r.run('reset', '-q');
+    rmSync(join(r.dir, 'knowledge/index/event_map/2026-11-02.ndjson'));
+    // The phase-3b transition: every day file untracked, the sentinel added.
+    r.run('rm', '-q', '-r', '--cached', 'knowledge/index/event_map');
+    r.write('.gitignore', 'knowledge/index/event_map/*\n!knowledge/index/event_map/0000-00-00.ndjson\n');
+    r.write('knowledge/index/event_map/0000-00-00.ndjson', 'phase 3b sentinel: not JSON\n');
+    assert.doesNotThrow(() => stageData(r.dir, ['.'], NOW, r.git, { EVENT_MAP_IN_GIT: '0' }));
+    assert.deepEqual(r.run('diff', '--cached', '--name-status').trim().split('\n').sort(), [
+      'A\t.gitignore',
+      'A\tknowledge/index/event_map/0000-00-00.ndjson',
+      'D\tknowledge/index/event_map/2026-11-01.ndjson',
+    ]);
+  } finally {
+    r.cleanup();
+  }
+});

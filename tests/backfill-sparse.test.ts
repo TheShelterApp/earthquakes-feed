@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { sparseMonthPatterns, windowDays } from '../src/backfill-plan.js';
 import { dayStartMs } from '../src/backfill-cursor.js';
 import { isSparseCheckout, missingFromWorktree, treeNames } from '../src/sparse-checkout.js';
+import { emptyGeneration, liveFloorOf, serializeGeneration } from '../src/event-map-store.js';
 
 // SHLTR-149: backfill.yml holds the writer lock on a sparse, blobless checkout of `data` (the full checkout took 94–101 s
 // of the 2 min 15 s each backfill held the lock on 2026-11-08). The plan step prints the months a run reads and writes,
@@ -224,4 +225,20 @@ test('backfill.yml commit step, the phase-2 transition on a sparse checkout: the
   const rw = stageLine(s, win);
   assert.equal(rw.status, 0, rw.stdout + rw.stderr);
   assert.deepEqual(staged(win), [`D\t${path(today)}`, `D\t${path(yesterday)}`, 'M\tevents/2026/09/15.ndjson'].sort());
+});
+
+test('the live floor on backfill.yml\'s sparse checkout: the generation (checked out with the index files) first, else the names in git\'s tree, never today', () => {
+  const s = setup();
+  const work = s.clone(['/knowledge/index/*.json']);
+  assert.deepEqual(liveFloorOf(work, Date.parse('2026-11-14T15:00:00Z'), {}), { day: '2026-10-01', source: 'tree' });
+  const gen = setup({ 'knowledge/index/generation.json': serializeGeneration({ ...emptyGeneration(), days: { '2026-09-30': { sha256: 'a'.repeat(64), bytes: 1, nodes: 1, blob: 'b'.repeat(64), blob_bytes: 1 } } }) });
+  const gw = gen.clone(['/knowledge/index/*.json']);
+  assert.equal(existsSync(join(gw, 'knowledge/index/generation.json')), true);
+  assert.deepEqual(liveFloorOf(gw, Date.parse('2026-11-14T15:00:00Z'), {}), { day: '2026-09-30', source: 'generation' });
+  // Phase 3b: the tree holds only the sentinel and the generation names the days. Without a generation: no floor.
+  const b3 = setup({ 'knowledge/index/event_map/0000-00-00.ndjson': 'phase 3b sentinel\n' });
+  const w3 = b3.clone(['/knowledge/index/*.json']);
+  b3.git(w3, 'rm', '-q', '--cached', '--sparse', 'knowledge/index/event_map/2026-10-01-00.ndjson', 'knowledge/index/event_map/2026-10-02-00.ndjson');
+  b3.git(w3, 'commit', '-q', '-m', 'untrack');
+  assert.throws(() => liveFloorOf(w3, Date.parse('2026-11-14T15:00:00Z'), {}), /no live floor/);
 });

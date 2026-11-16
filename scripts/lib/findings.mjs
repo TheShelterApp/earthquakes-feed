@@ -456,6 +456,52 @@ export const RULES = Object.freeze({
     // progress only after its first 30 min, STATS_TODAY_GRACE_MS: derive publishes it empty before that).
     board: 'feed', class: 'config', severity: 'P3', key: 'feed:stats-days',
   }),
+  'feed:state-shadow': rule('feed:state-shadow', {
+    title: 'state store shadow mismatch or error',
+    // Storage phase 3a (src/event-map-store.ts): one of the newest `runs` aggregate (or derive.yml) runs of the last
+    // `holdMs` reported a state step that did not succeed: the shadow hydrate found the store's event map differing
+    // from the checkout's, or a store request failed (auth, budget, the Worker down), or persist failed (its generation
+    // then stays as it was). Git is still the truth in phase 3a, so the feed is unaffected; phase 3b's gate needs 24 h
+    // without one. Read from the markers each run uploads (artifact state-shadow); only artifacts of scheduled or
+    // dispatched runs of `workflows` on main count (a pull request can upload an artifact of any name).
+    board: 'feed', class: 'redundancy', severity: 'P2', key: 'feed:state-shadow', check: 'gh-redundancy',
+    limits: { artifact: 'state-shadow', workflows: ['aggregate.yml', 'derive.yml'], runs: 3, holdMs: 2 * HOUR },
+  }),
+  'feed:state-gc': rule('feed:state-gc', {
+    title: 'state store GC not running',
+    // No successful state-gc.yml run (its artifact state-gc, uploaded only by a run that completed, dry or not) in
+    // maxAgeMs, or none on record: the bucket grows by about 0.1 GB a day without it, toward the free tier's 10 GB.
+    board: 'feed', class: 'capacity', severity: 'P2', key: 'feed:state-gc', check: 'gh-capacity',
+    limits: { artifact: 'state-gc', workflows: ['state-gc.yml'], maxAgeMs: 3 * DAY },
+  }),
+  'feed:state-backup': rule('feed:state-backup', {
+    title: 'state store backup behind',
+    // The newest daily state in a Release (state-backup.yml's marker `newest`: the state at 00:00 UTC of that day) is
+    // older than p2AfterMs: P2; older than p1AfterMs: P1 (GC keeps the sources of every day not yet copied, at most 120
+    // days, and the backup catches up to the first day it has not copied; a week is far from that, but nothing else
+    // copies the state off Cloudflare). A marker that names no day is aged by its own date on the same lines. No
+    // successful backup on record: P2. Only markers of scheduled or dispatched runs of `workflows` on main count.
+    board: 'feed', class: 'redundancy', severity: 'P2', key: 'feed:state-backup', check: 'gh-redundancy',
+    limits: { artifact: 'state-backup', workflows: ['state-backup.yml'], p2AfterMs: 36 * HOUR, p1AfterMs: 7 * DAY },
+  }),
+  'feed:state-budget': rule('feed:state-budget', {
+    title: 'state store near a free-tier ceiling',
+    // The state Worker's GET /v1/budget (an OIDC token of the health workflow): today's Class A or Class B operations,
+    // bytes written or the stored bytes over `share` of the Worker's ceiling. The ceilings keep the account inside R2's
+    // free tier (owner decision: never pay); at a ceiling the Worker refuses (429 budget) until 00:00 UTC.
+    board: 'feed', class: 'capacity', severity: 'P2', key: 'feed:state-budget', check: 'gh-capacity',
+    limits: { url: 'https://feed-state.theshelter.app/v1/budget', audience: 'earthquakes-feed-state', share: 0.7 },
+  }),
+  'feed:repo-growth': rule('feed:repo-growth', {
+    title: 'repository growth over budget',
+    // The repository's `size` (feed:repo-size's reading) sampled about once a day (the artifact repo-size-samples the
+    // feed job keeps): the growth from the newest sample at least minSpanMs old, in MB a day, over maxMbPerDay: the
+    // current storage phase's budget (APIs.md "Where the repository stands": phase 2 and the 3a soak 14–15 MB a day, so
+    // 16 now; lower it to 11 in the phase-3b PR, 8–10.7 expected), so the row means growth beyond the budget. GitHub
+    // counts no rewrite back; 10 GB is about 3.2 GB away (APIs.md Repository size, the budget per storage phase).
+    board: 'feed', class: 'capacity', severity: 'P3', key: 'feed:repo-growth',
+    limits: { artifact: 'repo-size-samples', workflows: ['health.yml'], sampleEveryMs: 20 * HOUR, minSpanMs: 6 * DAY, keepSamples: 40, maxMbPerDay: 16 },
+  }),
   'walks': rule('walks', {
     title: 'maintenance walk blocked',
     // A blocked marker of history, first-solutions, backfill, archive, remerge or stats (those runs stay green with a ::warning:: and

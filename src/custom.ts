@@ -1131,7 +1131,9 @@ const koeri: CustomAdapter = async (cfg) =>
  *  apart. The seconds keep those apart; two rows of one stamp still fold (a revision listed twice; B1 and B3F of
  *  2026_1105_180243 share the stamp). Minute-stamped bulletins keep their minute ids, so two of them in one minute still
  *  fold: the page gives nothing finer, and a suffix by row order or place would change an event's id when a later event
- *  is listed beside it. */
+ *  is listed beside it. A quake whose B1 carried a minute stamp and whose later bulletin carries a seconds stamp of the
+ *  same minute (the page then lists only the later one) is read under the seconds id; the Resolver joins that row to
+ *  the event holding the minute id (config REVISED_ID_WINDOWS, Resolver.revisedIdPair). */
 export function parsePhivolcs(html: string, providerId: string): RawObs[] {
   const out: RawObs[] = [];
   const seen = new Set<string>();

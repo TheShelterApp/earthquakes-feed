@@ -481,14 +481,20 @@ export class Resolver {
   }
 
   /** Two rows of a REVISED_ID_WINDOWS provider under different ids within its window (time, place, magnitude and the
-   *  numeric ids' gap): one quake re-located under a new id (CSN, round 14). */
+   *  numeric ids' gap): one quake re-located under a new id (CSN, round 14). For PHIVOLCS the ids are a bulletin's
+   *  minute stamp and a later bulletin's seconds stamp of the same minute (config REVISED_ID_WINDOWS). */
   private static revisedIdPair(a: SourcedSolution, b: SourcedSolution): boolean {
     if (a.provider !== b.provider) return false;
     const w = REVISED_ID_WINDOWS.get(a.provider);
     if (!w || nativeIdOf(a) === nativeIdOf(b)) return false;
-    const ia = Number(nativeIdOf(a));
-    const ib = Number(nativeIdOf(b));
-    if (!Number.isSafeInteger(ia) || !Number.isSafeInteger(ib) || Math.abs(ia - ib) > w.maxIdGap) return false;
+    if (a.provider === 'phivolcs') {
+      const [x, y] = [nativeIdOf(a), nativeIdOf(b)].sort((p, q) => p.length - q.length) as [string, string];
+      if (!/^\d{4}_\d{4}_\d{4}$/.test(x) || !/^\d{4}_\d{4}_\d{6}$/.test(y) || !y.startsWith(x)) return false;
+    } else {
+      const ia = Number(nativeIdOf(a));
+      const ib = Number(nativeIdOf(b));
+      if (!Number.isSafeInteger(ia) || !Number.isSafeInteger(ib) || Math.abs(ia - ib) > w.maxIdGap) return false;
+    }
     if (Math.abs(a.eventTimeMs - b.eventTimeMs) > w.dtMs) return false;
     if (haversineKm(a.lat, a.lon, b.lat, b.lon) > w.km) return false;
     return a.mag != null && b.mag != null && Math.abs(a.mag - b.mag) <= w.maxDeltaMag + REID_MAG_TOLERANCE;

@@ -845,6 +845,15 @@ list only one id of 14 (all inside these limits) and both of 10; 3 of those 10 a
 lists twice (EMSC shows one event for each, and no agency a second quake) and fold too; the other
 7 stay apart. The older row stays in the event's provenance.
 
+PHIVOLCS (Philippines) is a second case of the same rule. Its id is the bulletin's UTC origin stamp, to the minute
+(`2026_1114_0919`) or, for most bulletins since about 2026-10-29, to the second (`2026_1114_091912`). A quake's first
+bulletin can carry the minute stamp and a later one the seconds stamp; the page then lists only the later one. Since
+2026-11-16 a minute-stamped row and a seconds-stamped row of that same minute whose places are ≤ 50 km apart and whose
+magnitudes differ by ≤ 0.6 are one quake: the seconds-stamped report joins the event holding the minute id, under the
+same limits as CSN's pairs. Two seconds-stamped ids are never paired, so two quakes of one minute stay two events. On
+the page of 2026-11-16, 10 of the 70 minute-stamped events the feed held from 2026-10-31 on had been re-issued that way,
+12–15 km and 0.1–0.5 M apart.
+
 OVSICORI (Costa Rica) is another: its analyst's review of a quake comes hours later under a new id while the automatic
 solution stays listed. Since round 27 (2026-10-14) such an automatic / reviewed pair is one quake (see *Regional
 agencies outside their own region*).

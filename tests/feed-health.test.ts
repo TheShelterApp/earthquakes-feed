@@ -14,8 +14,15 @@ import {
   evaluateSizes,
   evaluateSources,
   evaluateStats,
+  evaluateRepoGrowth,
+  evaluateStateBackup,
+  evaluateStateBudget,
+  evaluateStateGc,
+  evaluateStateShadow,
   evaluateWalks,
   evaluateWriterQueue,
+  nextSamples,
+  pickArtifacts,
   GITHUB_API,
   main,
   MANIFEST_V1_URL,
@@ -61,7 +68,11 @@ const STATUS: Record<string, any> = JSON.parse(readFileSync(join(FIXTURES, 'stat
 const STATUS_MS = STATUS.generatedAt as number;
 const REPO = 'TheShelterApp/earthquakes-feed';
 const TOKEN = 'test-token-not-a-secret';
-const ENV = { GH_TOKEN: TOKEN, GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: '4242' };
+/** The job's OIDC request (permissions: id-token: write): its URL and bearer, and the token it mints. */
+const OIDC_URL = 'https://token.actions.example/req?api-version=2.0';
+const OIDC_REQUEST = 'oidc-request-bearer';
+const OIDC_TOKEN = 'eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJlYXJ0aHF1YWtlcy1mZWVkLXN0YXRlIn0.sig';
+const ENV = { GH_TOKEN: TOKEN, GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: '4242', ACTIONS_ID_TOKEN_REQUEST_URL: OIDC_URL, ACTIONS_ID_TOKEN_REQUEST_TOKEN: OIDC_REQUEST };
 const ISO = (ms: number): string => new Date(ms).toISOString();
 
 /** The fixture as of `genMs`, with `patch` applied to a clone. */
@@ -868,7 +879,28 @@ function world(over: Array<[string | RegExp, (url: string, n: number) => Respons
     [/\/actions\/artifacts\?name=walk-blocked-/, () => json({ total_count: 0, artifacts: [] })],
     // The writer queue (scripts/writer-queue.mjs): no unfinished run.
     [/\/actions\/runs\?status=\w+&per_page=100$/, () => json({ total_count: 0, workflow_runs: [] })],
+    // The state store (storage phase 3): an aggregate run's markers 3 min ago, all ok; GC 20 h ago; the backup of today's
+    // state an hour ago; no repository-size samples yet.
+    ...stateWorld(),
   ]);
+}
+
+/** Healthy state-store markers as GitHub lists and zips them. */
+function stateWorld(o: { shadow?: Record<string, unknown>; gcAgoMs?: number | null; backupNewest?: string | null } = {}): Array<[string | RegExp, (url: string, n: number) => Response]> {
+  const art = (id: number, name: string, agoMs: number) => ({ id, name, created_at: ISO(NOW - agoMs), expired: false, workflow_run: { id: id * 10 } });
+  const zipJson = (files: Record<string, unknown>) => new Response(zipSync(Object.fromEntries(Object.entries(files).map(([k, v]) => [`${k}.json`, strToU8(JSON.stringify(v))]))));
+  return [
+    [`${API_REPO}/actions/artifacts?name=state-shadow&per_page=10`, () => json({ total_count: 1, artifacts: [art(901, 'state-shadow', 3 * MIN)] })],
+    [`${API_REPO}/actions/artifacts/901/zip`, () => zipJson(o.shadow ?? { hydrate: { step: 'hydrate', ok: true, summary: '46 day(s), identical' }, persist: { step: 'persist', ok: true, summary: '46 day(s)' } })],
+    [`${API_REPO}/actions/artifacts?name=state-gc&per_page=10`, () => json({ artifacts: o.gcAgoMs === null ? [] : [art(902, 'state-gc', o.gcAgoMs ?? 20 * HOUR)] })],
+    [`${API_REPO}/actions/artifacts?name=state-backup&per_page=10`, () => json({ artifacts: o.backupNewest === null ? [] : [art(903, 'state-backup', HOUR)] })],
+    [`${API_REPO}/actions/artifacts/903/zip`, () => zipJson({ 'state-backup': { ok: true, newest: o.backupNewest ?? '2026-10-22' } })],
+    [`${API_REPO}/actions/artifacts?name=repo-size-samples&per_page=10`, () => json({ artifacts: [art(904, 'repo-size-samples', 2 * HOUR)] })],
+    // A week ago the repository was 50 MB smaller: about 7 MB a day, under the 10 MB line.
+    [`${API_REPO}/actions/artifacts/904/zip`, () => zipJson({ 'repo-size': { samples: [{ atMs: NOW - 7 * DAY, kb: 6_050_000 }, { atMs: NOW - 2 * HOUR, kb: 6_099_000 }] } })],
+    [`${OIDC_URL}&audience=earthquakes-feed-state`, () => json({ value: OIDC_TOKEN })],
+    ['https://feed-state.theshelter.app/v1/budget', () => json({ day: '2026-10-22', counters: { classA: 120, classB: 9_000 }, ceilings: { classA: 20_000, classB: 200_000 } })],
+  ];
 }
 
 test('collect: a stale first read is read again 60 s later (once) and judged on the re-read', async () => {
@@ -965,7 +997,8 @@ test('collect: walk markers: the newest artifact under 26 h is downloaded and re
   assert.match(byKey(r.findings)['watcher:feed-github']!.text, /^walks:history:\* not judged this run: .*: the history walk's marker: listing walk-blocked-history: HTTP 500 after 3 attempt\(s\)$/);
   assert.match(r.notes.join('\n'), /walks: history: marker unreadable \(listing walk-blocked-history: HTTP 500 after 3 attempt\(s\)\)/);
   assert.match(r.notes.join('\n'), /walks: backfill: newest marker 27\.0 h old: the walk has moved on/);
-  const zips = w.calls.filter((x) => x.url.endsWith('/zip')).map((x) => x.url);
+  // (artifacts 901-904 are the state store's healthy markers of the world, read on every run.)
+  const zips = w.calls.filter((x) => x.url.endsWith('/zip') && !/\/artifacts\/90\d\/zip$/.test(x.url)).map((x) => x.url);
   assert.deepEqual(zips, [`${API_REPO}/actions/artifacts/11/zip`], 'only the young, unexpired marker is downloaded');
   // A stored zip reads the same; a non-zip is a note and leaves the walk unjudged.
   const c2 = clock();
@@ -993,11 +1026,16 @@ test('main --findings: a healthy run writes a valid document and exits 0; only G
   const parsed = parseFindingsDocument(doc);
   assert.ok(parsed.ok, JSON.stringify(parsed));
   assert.deepEqual([doc.evaluator, doc.generatedAtMs, doc.findings, doc.unjudged], ['feed', NOW, [], []]);
+  // GH_TOKEN goes to GitHub's API only; the OIDC request bearer to GitHub's token service only; the OIDC token it
+  // mints to the state Worker only.
   for (const call of w.calls) {
     if (call.url.startsWith(`${GITHUB_API}/`)) assert.equal(call.auth, `Bearer ${TOKEN}`, call.url);
+    else if (call.url.startsWith(OIDC_URL)) assert.equal(call.auth, `bearer ${OIDC_REQUEST}`, call.url);
+    else if (call.url.startsWith('https://feed-state.theshelter.app/')) assert.equal(call.auth, `Bearer ${OIDC_TOKEN}`, call.url);
     else assert.equal(call.auth, null, call.url);
   }
-  assert.ok(!logs.join('\n').includes(TOKEN));
+  assert.ok(w.calls.some((x) => x.url === 'https://feed-state.theshelter.app/v1/budget'));
+  for (const secret of [TOKEN, OIDC_REQUEST, OIDC_TOKEN]) assert.ok(!logs.join('\n').includes(secret));
   assert.match(logs[0]!, /^feed health: v1=60 s/);
 });
 
@@ -1014,7 +1052,8 @@ test('main --findings: an unhealthy feed is still exit 0, with plain log lines (
   const code = await main({ readFile: switchesOff, argv: ['--findings', 'f.json'], env: { ...ENV, GITHUB_STEP_SUMMARY: summary }, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep, log: (l) => logs.push(l), writeFile: (p, d) => void (written[p] = d) });
   assert.equal(code, 0);
   const doc = JSON.parse(written['f.json']!);
-  assert.deepEqual(doc.findings.map((f: Finding) => f.key).sort(), ['feed:repo-size', 'feed:source:tmd']);
+  // 8.1 GB against the week-old sample's 6.05 GB is also far over the growth budget.
+  assert.deepEqual(doc.findings.map((f: Finding) => f.key).sort(), ['feed:repo-growth', 'feed:repo-size', 'feed:source:tmd']);
   assert.ok(!logs.some((l) => l.startsWith('::')), 'reconcile annotates findings, the evaluator does not');
   assert.ok(logs.some((l) => /^finding P3 feed:source:tmd \[feed:source:definite\] since 2026-10-17 /.test(l)), logs.join('\n'));
   const md = readFileSync(summary, 'utf8');
@@ -1033,11 +1072,13 @@ test('main: every network call failing still writes a document: unreachable mani
   assert.deepEqual(doc.findings.map((f: Finding) => [f.key, f.rule, f.severity, f.members ?? null]), [
     ['feed:freshness', 'feed:freshness:unreachable', 'P2', ['v1', 'v2']],
     ['feed:status', 'feed:status', 'P3', null],
-    ['watcher:feed-github', 'watcher', 'P3', ['run', 'repository', 'data-tree', 'walks:history', 'walks:first-solutions', 'walks:backfill', 'walks:archive', 'walks:remerge', 'walks:stats', 'writer-queue']],
+    ['watcher:feed-state', 'watcher', 'P3', null],
+    ['watcher:feed-github', 'watcher', 'P3', ['run', 'repository', 'data-tree', 'walks:history', 'walks:first-solutions', 'walks:backfill', 'walks:archive', 'walks:remerge', 'walks:stats', 'writer-queue', 'state-shadow', 'state-gc', 'state-backup', 'repo-size-samples']],
   ]);
-  assert.match(doc.findings[2].text, /^feed:repo-size, feed:size, walks:history:\*, walks:first-solutions:\*, walks:backfill:\*, walks:archive:\*, walks:remerge:\*, walks:stats:\*, feed:writer-queue not judged this run: the feed evaluator's GitHub reads failed/);
-  assert.ok(doc.findings[2].text.length <= 500);
-  assert.deepEqual(doc.unjudged, ['feed:source:*', 'feed:breaker:*', 'feed:cert:*', 'feed:systemic', 'feed:repo-size', 'feed:size', 'feed:stats', 'feed:stats-through', 'feed:stats-days', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue']);
+  assert.match(doc.findings[3].text, /^feed:repo-size, feed:size, walks:history:\*, walks:first-solutions:\*, walks:backfill:\*, walks:archive:\*, walks:remerge:\*, walks:stats:\*, feed:writer-queue, feed:state-shadow, feed:state-gc, feed:state-backup, feed:repo-growth not judged this run: the feed evaluator's GitHub reads failed/);
+  assert.ok(doc.findings[3].text.length <= 500);
+  assert.match(doc.findings[2].text, /^feed:state-budget not judged this run: the state Worker's budget could not be read \(the OIDC token request failed/);
+  assert.deepEqual(doc.unjudged, ['feed:source:*', 'feed:breaker:*', 'feed:cert:*', 'feed:systemic', 'feed:repo-size', 'feed:size', 'feed:stats', 'feed:stats-through', 'feed:stats-days', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue', 'feed:state-shadow', 'feed:state-gc', 'feed:state-backup', 'feed:repo-growth', 'feed:state-budget']);
   assert.match(doc.notes.join('\n'), /queue time unknown \(network error: .*\): counted as 0/);
 });
 
@@ -1052,8 +1093,9 @@ test('main: no GH_TOKEN (a local run): the GitHub parts are unjudged, nothing is
   const doc = JSON.parse(printed);
   assert.ok(parseFindingsDocument(doc).ok);
   assert.deepEqual(doc.findings, []);
-  assert.deepEqual(doc.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue']);
+  assert.deepEqual(doc.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue', 'feed:state-shadow', 'feed:state-gc', 'feed:state-backup', 'feed:repo-growth', 'feed:state-budget']);
   assert.match(doc.notes.join(), /GitHub parts not judged: no GH_TOKEN or GITHUB_REPOSITORY \(a local run\)/);
+  assert.match(doc.notes.join(), /state budget: no OIDC token \(a local run\)/);
   // A token without the run id: the queue time is 0, with a note.
   const c2 = clock();
   const inputs = await collect({ readFile: switchesOff, env: { GH_TOKEN: TOKEN, GITHUB_REPOSITORY: REPO }, fetchImpl: world().fetchImpl, now: c2.now, sleep: c2.sleep });
@@ -1073,11 +1115,15 @@ test('main: in Actions, no GH_TOKEN or a failed created_at read is watcher:feed-
   };
   // GH_TOKEN dropped from the feed job: every GitHub part unjudged, and the watcher names the cause once.
   const noToken = (await findingsOf({ GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: '4242' })).doc;
-  assert.deepEqual(noToken.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue']);
-  assert.deepEqual(noToken.findings.map((f) => [f.key, f.members]), [['watcher:feed-github', ['run', 'repository', 'data-tree', 'walks:history', 'walks:first-solutions', 'walks:backfill', 'walks:archive', 'walks:remerge', 'walks:stats', 'writer-queue']]]);
+  assert.deepEqual(noToken.unjudged, ['feed:repo-size', 'feed:size', 'walks:history:*', 'walks:first-solutions:*', 'walks:backfill:*', 'walks:archive:*', 'walks:remerge:*', 'walks:stats:*', 'feed:writer-queue', 'feed:state-shadow', 'feed:state-gc', 'feed:state-backup', 'feed:repo-growth', 'feed:state-budget']);
+  assert.deepEqual(noToken.findings.map((f) => [f.key, f.members]), [
+    ['watcher:feed-state', undefined],
+    ['watcher:feed-github', ['run', 'repository', 'data-tree', 'walks:history', 'walks:first-solutions', 'walks:backfill', 'walks:archive', 'walks:remerge', 'walks:stats', 'writer-queue', 'state-shadow', 'state-gc', 'state-backup', 'repo-size-samples']],
+  ]);
+  assert.match(noToken.findings[0]!.text, /no OIDC token in the job \(permissions: id-token: write\)/);
   // The effect first: the 500-character cut takes the end of the list of reads (and the reason) here.
-  assert.match(noToken.findings[0]!.text, /: this run's created_at, the repository size, the data tree, the history walk's marker, .*the remerge walk's marker, the stats w…$/);
-  assert.equal(noToken.findings[0]!.text.length, 500);
+  assert.match(noToken.findings[1]!.text, /: this run's created_at, the repository size, the data tree, the history walk's marker, .*…$/);
+  assert.equal(noToken.findings[1]!.text.length, 500);
   // This run's created_at unreadable: the queue time is 0, and the watcher says why.
   const runGone = await findingsOf(ENV, world([[`${API_REPO}/actions/runs/4242`, () => json({ message: 'Not Found' }, 404)]]));
   assert.deepEqual(runGone.doc.findings.map((f) => [f.key, f.members]), [['watcher:feed-github', ['run']]]);
@@ -1109,7 +1155,9 @@ test('main: exit 3 for a bad argument or an unwritable --findings path; the defa
   assert.match(logs.join('\n'), /^::error title=Feed health misconfigured::--findings needs a path$/m);
   assert.equal(await main({ readFile: switchesOff, argv: ['--bogus'], env: {}, fetchImpl: stub([]).fetchImpl, log: () => {} }), 3);
   assert.throws(() => parseArgs(['--findings', '--x']), /needs a path/);
-  assert.deepEqual(parseArgs(['--findings', 'a/b.json']), { findingsPath: 'a/b.json' });
+  assert.deepEqual(parseArgs(['--findings', 'a/b.json']), { findingsPath: 'a/b.json', samplesPath: null });
+  assert.deepEqual(parseArgs(['--findings', 'a/b.json', '--samples', 's.json']), { findingsPath: 'a/b.json', samplesPath: 's.json' });
+  assert.throws(() => parseArgs(['--samples']), /--samples needs a path/);
   const c = clock();
   const out: string[] = [];
   const code = await main({ readFile: switchesOff, argv: ['--findings', 'x.json'], env: ENV, fetchImpl: world().fetchImpl, now: c.now, sleep: c.sleep, log: (l) => out.push(l), writeFile: () => { throw new Error('EACCES: permission denied'); } });
@@ -1261,4 +1309,88 @@ test('feed:writer-queue through collect: the runs and their jobs read from GitHu
   assert.deepEqual(r2.unjudged, ['feed:writer-queue']);
   assert.deepEqual(r2.findings.map((f) => [f.key, f.members]), [['watcher:feed-github', ['writer-queue']]]);
   assert.match(r2.findings[0]!.text, /^feed:writer-queue not judged this run: .*: the writer queue: GET \/repos\/TheShelterApp\/earthquakes-feed\/actions\/runs\?status=queued&per_page=100: HTTP 403$/);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The state store (storage phase 3): feed:state-shadow, feed:state-gc, feed:state-backup, feed:state-budget,
+// feed:repo-growth.
+
+test('feed:state-shadow: a state step not ok in the newest markers of the last 2 h is P2; none that young is unjudged; the store off is a note', () => {
+  const m = (agoMs: number, hydrate: Record<string, unknown>, persist?: Record<string, unknown>) => ({ createdAtMs: NOW - agoMs, runId: 7, steps: { hydrate, ...(persist ? { persist } : {}) } });
+  const ok = { ok: true, summary: 'identical' };
+  const clean = evaluateStateShadow({ ok: true, markers: [m(MIN, ok, ok), m(6 * MIN, ok, ok)] }, NOW);
+  assert.deepEqual([clean.findings, clean.unjudged], [[], []]);
+  const bad = evaluateStateShadow({ ok: true, markers: [m(MIN, ok, ok), m(6 * MIN, { ok: false, summary: '1 MISMATCH(ES) with the checkout' }, { ok: false, summary: 'failed: PUT: HTTP 429 budget' })] }, NOW);
+  assert.deepEqual(bad.findings.map((f) => [f.key, f.severity, f.members, f.sinceMs]), [['feed:state-shadow', 'P2', ['hydrate', 'persist'], NOW - 6 * MIN]]);
+  assert.match(bad.findings[0]!.text, /^hydrate \(run 7, .*\): 1 MISMATCH\(ES\) with the checkout \(\+1 more\): the state store disagrees with git/);
+  assert.deepEqual(evaluateStateShadow({ ok: true, markers: [m(3 * HOUR, { ok: false, summary: 'old' })] }, NOW).unjudged, ['feed:state-shadow']);
+  const off = evaluateStateShadow({ ok: true, markers: [m(MIN, { ok: true, off: true, summary: 'off' }, { ok: true, off: true })] }, NOW);
+  assert.deepEqual(off.findings, []);
+  assert.match(off.notes.join(), /the store off in 2 step\(s\)/);
+  assert.deepEqual(evaluateStateShadow({ ok: false, message: 'HTTP 500' }, NOW).unjudged, ['feed:state-shadow']);
+  assert.deepEqual(pickArtifacts({ artifacts: [{ id: 1, name: 'x', created_at: ISO(NOW - HOUR) }, { id: 2, name: 'x', created_at: ISO(NOW) }, { id: 3, name: 'x', created_at: ISO(NOW), expired: true }] }, 'x', 5).map((a) => a.id), [2, 1]);
+});
+
+test('feed:state-gc and feed:state-backup: a GC older than 3 days or none is P2; the newest daily state past 36 h is P2, past 7 days P1', () => {
+  assert.deepEqual(evaluateStateGc({ ok: true, artifact: { id: 1, createdAtMs: NOW - 2 * DAY, runId: 3 } }, NOW).findings, []);
+  const stale = evaluateStateGc({ ok: true, artifact: { id: 1, createdAtMs: NOW - 4 * DAY, runId: 3 } }, NOW);
+  assert.deepEqual(stale.findings.map((f) => [f.key, f.severity, f.sinceMs]), [['feed:state-gc', 'P2', NOW - DAY]]);
+  assert.match(evaluateStateGc({ ok: true, artifact: null }, NOW).findings[0]!.text, /^no completed state GC run on record/);
+  const backup = (newest: string | null) => evaluateStateBackup({ ok: true, marker: { createdAtMs: NOW - HOUR, runId: 1, json: { ok: true, newest } } }, NOW);
+  assert.deepEqual(backup('2026-10-22').findings, []);
+  assert.deepEqual(backup('2026-10-20').findings.map((f) => [f.key, f.severity]), [['feed:state-backup', 'P2']]);
+  assert.deepEqual(backup('2026-10-14').findings.map((f) => [f.key, f.severity]), [['feed:state-backup', 'P1']]);
+  assert.deepEqual([backup(null).findings, backup(null).unjudged], [[], []]);
+  assert.match(evaluateStateBackup({ ok: true, marker: null }, NOW).findings[0]!.text, /^no completed state backup on record/);
+  assert.deepEqual(evaluateStateBackup({ ok: false, message: 'x' }, NOW).unjudged, ['feed:state-backup']);
+});
+
+test('feed:state-budget: a ceiling over 70 % is P2; an answer without counters and ceilings is unjudged', () => {
+  const r = evaluateStateBudget({ ok: true, json: { day: '2026-10-22', counters: { classA: 15_000, classB: 1_000, storedBytes: 1e9 }, ceilings: { classA: 20_000, classB: 200_000, storedBytes: 6 * 2 ** 30 } } });
+  assert.deepEqual(r.findings.map((f) => [f.key, f.severity, f.members]), [['feed:state-budget', 'P2', ['classA']]]);
+  assert.match(r.findings[0]!.text, /classA 75 % \(15000 of 20000\)/);
+  assert.deepEqual(evaluateStateBudget({ ok: true, json: { counters: { classA: 1 }, ceilings: { classA: 20_000 } } }).findings, []);
+  assert.deepEqual(evaluateStateBudget({ ok: true, json: { a: 1 } }).unjudged, ['feed:state-budget']);
+});
+
+test('feed:repo-growth: a sample a day kept as a series; MB a day since the newest sample 6 days old, over 10 is P3', () => {
+  const first = nextSamples(null, NOW - 8 * DAY, 6_000_000);
+  assert.deepEqual(first, { samples: [{ atMs: NOW - 8 * DAY, kb: 6_000_000 }], changed: true });
+  assert.equal(nextSamples(first, NOW - 8 * DAY + HOUR, 6_000_100).changed, false, 'one sample a day');
+  assert.equal(nextSamples(first, NOW, null).changed, false, 'no reading, no sample');
+  let series = first;
+  for (let d = 7; d >= 0; d--) series = nextSamples(series, NOW - d * DAY, 6_000_000 + (8 - d) * 9_000);
+  assert.equal(series.samples.length, 9);
+  const ok = evaluateRepoGrowth(series.samples, NOW, 6_072_000);
+  assert.deepEqual(ok.findings, []);
+  assert.match(ok.notes[0]!, /^repository growth: 9\.0 MB a day over 6\.0 days/);
+  const fast = evaluateRepoGrowth(series.samples, NOW, 6_200_000);
+  assert.deepEqual(fast.findings.map((f) => [f.key, f.severity]), [['feed:repo-growth', 'P3']]);
+  assert.deepEqual(evaluateRepoGrowth(first.samples, NOW - 7 * DAY, 6_000_000).unjudged, ['feed:repo-growth'], 'not 6 days of samples yet');
+  assert.equal(nextSamples({ samples: Array.from({ length: 45 }, (_, i) => ({ atMs: i * DAY, kb: i })) }, 50 * DAY, 1).samples.length, 40);
+});
+
+test('main --samples: the next sample series is written about once a day; a failed samples read never starts a new one', async () => {
+  const run = async (samplesRoute: [string | RegExp, (url: string, n: number) => Response] | null) => {
+    const c = clock();
+    const w = world(samplesRoute ? [samplesRoute] : []);
+    const written: Record<string, string> = {};
+    await main({ readFile: switchesOff, argv: ['--findings', 'f.json', '--samples', 's.json'], env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep, log: () => {}, writeFile: (p, d) => void (written[p] = d) });
+    return written;
+  };
+  // The world's newest sample is 2 h old: nothing new.
+  assert.equal((await run(null))['s.json'], undefined);
+  const fresh = await run([`${API_REPO}/actions/artifacts?name=repo-size-samples&per_page=10`, () => json({ artifacts: [] })]);
+  assert.deepEqual(JSON.parse(fresh['s.json']!), { samples: [{ atMs: NOW, kb: 6_100_000 }] });
+  const broken = await run([`${API_REPO}/actions/artifacts?name=repo-size-samples&per_page=10`, () => json({ message: 'boom' }, 500)]);
+  assert.equal(broken['s.json'], undefined);
+});
+
+test('collect: a state step\'s mismatch in the newest aggregate marker reaches the board as feed:state-shadow', async () => {
+  const c = clock();
+  const zipJson = (files: Record<string, unknown>) => new Response(zipSync(Object.fromEntries(Object.entries(files).map(([k, v]) => [`${k}.json`, strToU8(JSON.stringify(v))]))));
+  const w = world([[`${API_REPO}/actions/artifacts/901/zip`, () => zipJson({ hydrate: { ok: false, summary: '46 day(s) verified; 2 MISMATCH(ES) with the checkout', mismatches: ['2026-10-20: …'] } })]]);
+  const r = evaluateFeed(await collect({ readFile: switchesOff, env: ENV, fetchImpl: w.fetchImpl, now: c.now, sleep: c.sleep }));
+  assert.deepEqual(r.findings.map((f) => [f.key, f.severity]), [['feed:state-shadow', 'P2']]);
+  assert.match(r.summary, / state=1 report\(s\) writer-queue=0 queued$/);
 });

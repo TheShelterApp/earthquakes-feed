@@ -27,9 +27,14 @@
 //     pointer, v1/stats/index.json (the statistics: feed:stats, feed:stats-through, feed:stats-days);
 //   - with GH_TOKEN, the writer queue (scripts/writer-queue.mjs readQueue, the gates' own count: every unfinished run of
 //     the repository and the jobs of each writer run): feed:writer-queue (SHLTR-149). A read that fails leaves it
-//     unjudged and is a member of watcher:feed-github.
+//     unjudged and is a member of watcher:feed-github;
+//   - with GH_TOKEN, the state store's markers (storage phase 3): the newest state-shadow artifacts of the aggregate
+//     runs (feed:state-shadow), the newest state-gc and state-backup artifacts (feed:state-gc, feed:state-backup) and the
+//     newest repo-size-samples artifact this job keeps (feed:repo-growth; `--samples` writes the next one);
+//   - with the job's OIDC token (permissions: id-token: write), the state Worker's GET /v1/budget (feed:state-budget);
+//     the token goes to that host only. A read that fails is the finding watcher:feed-state.
 //
-//   node scripts/feed-health.mjs --findings findings/feed.json   # the CI invocation: writes the document
+//   node scripts/feed-health.mjs --findings findings/feed.json --samples samples/repo-size.json   # the CI invocation
 //   node scripts/feed-health.mjs                                 # prints the document (a local run: no GitHub parts)
 //
 // Exit codes: 0 the document was written (or printed), whatever it says · 3 a bad argument, or the --findings file
@@ -636,6 +641,162 @@ export function readZipEntries(bytes) {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// The state store (storage phase 3): feed:state-shadow, feed:state-gc, feed:state-backup, feed:state-budget,
+// feed:repo-growth
+
+/** The newest `n` non-expired artifacts named `name` of an artifacts listing, newest first. Throws on a body without a list. */
+export function pickArtifacts(listing, name, n) {
+  const list = isObject(listing) && Array.isArray(listing.artifacts) ? listing.artifacts : null;
+  if (list === null) throw new Error('no artifacts list in the answer');
+  const out = [];
+  for (const a of list) {
+    if (!isObject(a) || a.name !== name || a.expired === true || !isNum(a.id)) continue;
+    const createdAtMs = typeof a.created_at === 'string' ? Date.parse(a.created_at) : NaN;
+    if (!Number.isFinite(createdAtMs)) continue;
+    out.push({ id: a.id, createdAtMs, runId: isObject(a.workflow_run) && isNum(a.workflow_run.id) ? a.workflow_run.id : null });
+  }
+  return out.sort((a, b) => b.createdAtMs - a.createdAtMs).slice(0, n);
+}
+
+/**
+ * feed:state-shadow (P2): a state step that did not succeed in one of the newest markers younger than holdMs (each holds
+ * the `hydrate` and `persist` step's JSON: {ok, off, summary, error_kind}). No marker that young: unjudged (the
+ * aggregate runs are feed:freshness's), so an open entry is never resolved on silence. A store that is off is a note.
+ */
+export function evaluateStateShadow(read, nowMs) {
+  const { holdMs } = RULES['feed:state-shadow'].limits;
+  if (!read || !read.ok) return { findings: [], unjudged: ['feed:state-shadow'], notes: [`state shadow: markers unreadable (${oneLine(read ? read.message : 'not read', 200)})`] };
+  const recent = read.markers.filter((m) => isNum(m.createdAtMs) && nowMs - m.createdAtMs < holdMs);
+  if (recent.length === 0) return { findings: [], unjudged: ['feed:state-shadow'], notes: [`state shadow: no state report in the last ${ageText(holdMs)}`] };
+  const problems = [];
+  let off = 0;
+  for (const m of recent) {
+    for (const step of ['hydrate', 'persist']) {
+      const j = isObject(m.steps) ? m.steps[step] : undefined;
+      if (!isObject(j)) continue;
+      if (j.off === true) {
+        off++;
+        continue;
+      }
+      if (j.ok !== true) problems.push({ m, step, text: `${step} (run ${m.runId ?? '?'}, ${utcText(m.createdAtMs)}): ${oneLine(typeof j.summary === 'string' ? j.summary : 'no summary', 200)}` });
+    }
+  }
+  const notes = [`state shadow: ${recent.length} report(s) in the last ${ageText(holdMs)}, ${problems.length} step(s) not ok${off ? `, the store off in ${off} step(s)` : ''}`];
+  if (problems.length === 0) return { findings: [], unjudged: [], notes };
+  return {
+    findings: [makeFinding('feed:state-shadow', {
+      sinceMs: Math.min(...problems.map((p) => p.m.createdAtMs)),
+      members: [...new Set(problems.map((p) => p.step))],
+      text: `${problems[0].text}${problems.length > 1 ? ` (+${problems.length - 1} more)` : ''}: the state store disagrees with git or cannot be reached; git is still the truth (phase 3a), phase 3b waits for 24 h without this (APIs.md Repository size)`,
+    })],
+    unjudged: [],
+    notes,
+  };
+}
+
+/** feed:state-gc (P2): no state-gc artifact (a run that completed) younger than maxAgeMs, or none at all. */
+export function evaluateStateGc(read, nowMs) {
+  const { maxAgeMs } = RULES['feed:state-gc'].limits;
+  if (!read || !read.ok) return { findings: [], unjudged: ['feed:state-gc'], notes: [`state GC: marker unreadable (${oneLine(read ? read.message : 'not read', 200)})`] };
+  const a = read.artifact;
+  if (a && nowMs - a.createdAtMs <= maxAgeMs) return { findings: [], unjudged: [], notes: [`state GC: last completed ${ageText(nowMs - a.createdAtMs)} ago (run ${a.runId ?? '?'})`] };
+  return {
+    findings: [makeFinding('feed:state-gc', {
+      sinceMs: a ? a.createdAtMs + maxAgeMs : null,
+      text: `${a ? `the last completed state GC run was ${ageText(nowMs - a.createdAtMs)} ago (run ${a.runId ?? '?'})` : 'no completed state GC run on record'}, over ${ageText(maxAgeMs)}: the state bucket grows about 0.1 GB a day without it (state-gc.yml; dispatch it, dry_run first)`,
+    })],
+    unjudged: [],
+    notes: [],
+  };
+}
+
+/** feed:state-backup: the marker's `newest` day (the state at its 00:00 UTC) older than 36 h (P2) or 7 days (P1); no
+ *  marker: P2. A marker without `newest` (no generation to copy yet, before phase 3a's first midnight): a note. */
+export function evaluateStateBackup(read, nowMs) {
+  const { p2AfterMs, p1AfterMs } = RULES['feed:state-backup'].limits;
+  if (!read || !read.ok) return { findings: [], unjudged: ['feed:state-backup'], notes: [`state backup: marker unreadable (${oneLine(read ? read.message : 'not read', 200)})`] };
+  if (!read.marker) {
+    return { findings: [makeFinding('feed:state-backup', { text: 'no completed state backup on record: the state store has no off-Cloudflare copy (state-backup.yml; dispatch it)' })], unjudged: [], notes: [] };
+  }
+  const newest = isObject(read.marker.json) && typeof read.marker.json.newest === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(read.marker.json.newest) ? read.marker.json.newest : null;
+  if (!newest) return { findings: [], unjudged: [], notes: [`state backup: the marker of ${utcText(read.marker.createdAtMs)} names no backed-up day (no generation before a midnight yet)`] };
+  const stateMs = Date.parse(`${newest}T00:00:00Z`);
+  const age = nowMs - stateMs;
+  const notes = [`state backup: newest daily state ${newest} (${ageText(age)} old), marker of ${utcText(read.marker.createdAtMs)}`];
+  if (age <= p2AfterMs) return { findings: [], unjudged: [], notes };
+  return {
+    findings: [makeFinding('feed:state-backup', {
+      severity: age > p1AfterMs ? 'P1' : 'P2',
+      sinceMs: stateMs + p2AfterMs,
+      text: `the newest daily state in a Release is ${newest}, ${ageText(age)} old (lines ${ageText(p2AfterMs)} / ${ageText(p1AfterMs)}): state-backup.yml is not copying; it catches up 25 days, GC keeps every day it has not copied`,
+    })],
+    unjudged: [],
+    notes,
+  };
+}
+
+/** The used share of each ceiling the budget answer names: `counters` and `ceilings` objects with the same keys. */
+export function budgetShares(json) {
+  if (!isObject(json) || !isObject(json.counters) || !isObject(json.ceilings)) return null;
+  const out = [];
+  for (const [k, cap] of Object.entries(json.ceilings)) {
+    const used = json.counters[k];
+    if (isNum(cap) && cap > 0 && isNum(used) && used >= 0) out.push({ key: k, used, cap, share: used / cap });
+  }
+  return out.length ? out.sort((a, b) => b.share - a.share) : null;
+}
+
+/** feed:state-budget (P2): any ceiling over `share` (0.7). Unreadable: unjudged. */
+export function evaluateStateBudget(read) {
+  const { share } = RULES['feed:state-budget'].limits;
+  if (!read || !read.ok) return { findings: [], unjudged: ['feed:state-budget'], notes: [`state budget: ${read ? oneLine(read.message, 200) : 'not read'}`] };
+  const shares = budgetShares(read.json);
+  if (!shares) return { findings: [], unjudged: ['feed:state-budget'], notes: ['state budget: the answer has no counters and ceilings'] };
+  const fmt = (x) => `${x.key} ${Math.round(x.share * 100)} % (${x.used} of ${x.cap})`;
+  const notes = [`state budget${isObject(read.json) && typeof read.json.day === 'string' ? ` ${read.json.day}` : ''}: ${shares.map(fmt).join(', ')}`];
+  const over = shares.filter((x) => x.share > share);
+  if (!over.length) return { findings: [], unjudged: [], notes };
+  return {
+    findings: [makeFinding('feed:state-budget', {
+      members: over.map((x) => x.key),
+      text: `the state store is at ${over.map(fmt).join(', ')} of its daily free-tier ceilings (line ${Math.round(share * 100)} %): at a ceiling it refuses until 00:00 UTC; see what spends them (state/README.md)`,
+    })],
+    unjudged: [],
+    notes,
+  };
+}
+
+/** The repository-size samples ({samples: [{atMs, kb}]}) with this run's reading appended when the newest is older
+ *  than sampleEveryMs; at most keepSamples kept. `changed` says whether there is a new document to keep. */
+export function nextSamples(prev, nowMs, kb) {
+  const { sampleEveryMs, keepSamples } = RULES['feed:repo-growth'].limits;
+  const samples = (isObject(prev) && Array.isArray(prev.samples) ? prev.samples : []).filter((x) => isObject(x) && isNum(x.atMs) && isNum(x.kb)).sort((a, b) => a.atMs - b.atMs);
+  if (!isNum(kb) || kb < 0) return { samples, changed: false };
+  const last = samples.at(-1);
+  if (last && nowMs - last.atMs < sampleEveryMs) return { samples, changed: false };
+  return { samples: [...samples, { atMs: nowMs, kb }].slice(-keepSamples), changed: true };
+}
+
+/** feed:repo-growth (P3): MB a day since the newest sample at least minSpanMs old, over maxMbPerDay. */
+export function evaluateRepoGrowth(samples, nowMs, kb) {
+  const { minSpanMs, maxMbPerDay } = RULES['feed:repo-growth'].limits;
+  if (!isNum(kb)) return { findings: [], unjudged: ['feed:repo-growth'], notes: [] };
+  const base = [...samples].reverse().find((x) => nowMs - x.atMs >= minSpanMs);
+  if (!base) return { findings: [], unjudged: ['feed:repo-growth'], notes: [`repository growth: ${samples.length} daily sample(s), none ${ageText(minSpanMs)} old yet`] };
+  const days = (nowMs - base.atMs) / DAY;
+  const perDay = (kb - base.kb) / 1000 / days;
+  const notes = [`repository growth: ${perDay.toFixed(1)} MB a day over ${days.toFixed(1)} days (line ${maxMbPerDay} MB a day)`];
+  if (perDay <= maxMbPerDay) return { findings: [], unjudged: [], notes };
+  return {
+    findings: [makeFinding('feed:repo-growth', {
+      text: `the repository grew ${perDay.toFixed(1)} MB a day over the last ${days.toFixed(1)} days (${base.kb} → ${kb} KB), over the ${maxMbPerDay} MB a day budget: what grows (feed:size's data tree notes) and the storage phases (APIs.md Repository size)`,
+    })],
+    unjudged: [],
+    notes,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // The whole document
 
 /** The source ids of providers/registry.json ({providers: [{id}]}, or a bare array of {id}). */
@@ -760,6 +921,26 @@ export function evaluateFeed(inputs) {
   add(evaluateWriterQueue({ nowMs, writerQueue: wq, v1: inputs.v1, v2: inputs.v2 }));
   parts.push(`writer-queue=${wq && wq.ok ? `${wq.queue.filter((q) => isQueued(q.state)).length} queued` : 'unread'}`);
 
+  // The state store (storage phase 3); an input that is absent is not judged (as the statistics).
+  if (inputs.stateShadow) add(evaluateStateShadow(inputs.stateShadow, nowMs));
+  if (inputs.stateGc) add(evaluateStateGc(inputs.stateGc, nowMs));
+  if (inputs.stateBackup) add(evaluateStateBackup(inputs.stateBackup, nowMs));
+  // A failed read of the samples never starts a new series: the next run reads the old one again.
+  const samplesRead = !!(inputs.repoSamples && inputs.repoSamples.ok);
+  const samples = samplesRead ? nextSamples(inputs.repoSamples.json, nowMs, repo && repo.ok ? repo.kb : null) : { samples: [], changed: false };
+  if (inputs.repoSamples) add(samplesRead ? evaluateRepoGrowth(samples.samples, nowMs, repo && repo.ok ? repo.kb : null) : { findings: [], unjudged: ['feed:repo-growth'], notes: [] });
+  if (inputs.stateBudget) {
+    add(evaluateStateBudget(inputs.stateBudget));
+    if (!inputs.stateBudget.ok && !inputs.stateBudget.skipped) {
+      findings.push(makeFinding('watcher', {
+        id: 'feed-state',
+        text: `feed:state-budget not judged this run: the state Worker's budget could not be read (${oneLine(inputs.stateBudget.message, 200)}); is the state Worker deployed, and does the health workflow hold id-token: write?`,
+      }));
+    }
+  }
+  // Before the writer queue's part, which stays last.
+  if (inputs.stateShadow) parts.splice(parts.length - 1, 0, `state=${inputs.stateShadow.ok ? `${inputs.stateShadow.markers.length} report(s)` : 'unread'}`);
+
   // The GitHub reads (not in a local run): one that failed froze its keys above; watcher:feed-github says so on the
   // platform board, or a read that keeps failing (a lost `actions: read`, an API outage) would freeze them unseen.
   if (!inputs.githubSkipped) {
@@ -770,11 +951,15 @@ export function evaluateFeed(inputs) {
     else if (!isObject(tree.json) || !Array.isArray(tree.json.tree)) failed.push(['data-tree', 'the data tree', 'no tree in the answer']);
     for (const r of inputs.walks ?? []) if (!r.ok) failed.push([`walks:${r.workflow}`, `the ${r.workflow} walk's marker`, r.message]);
     if (!wq || !wq.ok) failed.push(['writer-queue', 'the writer queue', wq ? wq.message : 'not read']);
-    const frozen = [...new Set(unjudged)].filter((k) => k === 'feed:repo-size' || k === 'feed:size' || k.startsWith('walks:') || k === 'feed:writer-queue');
+    for (const [member, what, r] of [['state-shadow', 'the state-shadow markers', inputs.stateShadow], ['state-gc', 'the state-gc marker', inputs.stateGc], ['state-backup', 'the state-backup marker', inputs.stateBackup], ['repo-size-samples', 'the repository-size samples', inputs.repoSamples]]) {
+      if (r && !r.ok) failed.push([member, what, r.message]);
+    }
+    const ghKeys = new Set(['feed:repo-size', 'feed:size', 'feed:writer-queue', 'feed:state-gc', 'feed:state-backup', 'feed:repo-growth']);
+    const frozen = [...new Set(unjudged)].filter((k) => ghKeys.has(k) || k.startsWith('walks:') || (k === 'feed:state-shadow' && inputs.stateShadow && !inputs.stateShadow.ok));
     if (failed.length > 0) findings.push(githubWatcher(failed, frozen));
   }
 
-  return { findings, unjudged: [...new Set(unjudged)], notes, summary: parts.join(' ') };
+  return { findings, unjudged: [...new Set(unjudged)], notes, summary: parts.join(' '), samples: samples.changed ? { samples: samples.samples } : null };
 }
 
 /**
@@ -880,6 +1065,10 @@ function collectGitHub({ env, fetchImpl, sleep, now }) {
       tree: Promise.resolve({ ok: false, message }),
       walks: Promise.resolve(workflows.map((workflow) => ({ workflow, ok: false, message }))),
       writerQueue: Promise.resolve({ ok: false, message }),
+      stateShadow: Promise.resolve({ ok: false, message }),
+      stateGc: Promise.resolve({ ok: false, message }),
+      stateBackup: Promise.resolve({ ok: false, message }),
+      repoSamples: Promise.resolve({ ok: false, message }),
       notes: [`GitHub parts not judged: ${message}`],
       skipped: local ? message : null,
     };
@@ -906,11 +1095,82 @@ function collectGitHub({ env, fetchImpl, sleep, now }) {
   });
   const tree = gh(`/repos/${repo}/git/trees/data?recursive=1`, { timeoutMs: 60_000 }).then((r) => (r.ok ? { ok: true, json: r.json } : { ok: false, message: failText(r) }));
   const walks = Promise.all(workflows.map((workflow) => readWalk(workflow, { gh, token, repo, fetchImpl, sleep, nowMs: now() })));
+  const zipOf = (id) => fetchBytes(`${GITHUB_API}/repos/${repo}/actions/artifacts/${id}/zip`, { headers: ghHeaders(token), fetchImpl, sleep });
+  const listed = async (name, n) => {
+    const r = await gh(`/repos/${repo}/actions/artifacts?name=${encodeURIComponent(name)}&per_page=${Math.max(10, n * 3)}`);
+    if (!r.ok) throw new Error(`listing ${name}: ${failText(r)}`);
+    return pickArtifacts(r.json, name, n);
+  };
+  /** The JSON files of an artifact's zip, by base name without .json. */
+  const jsonFiles = async (a) => {
+    const zip = await zipOf(a.id);
+    if (!zip.ok) throw new Error(`artifact ${a.id}: ${zip.message}`);
+    const out = {};
+    for (const e of readZipEntries(zip.bytes)) if (e.name.endsWith('.json')) out[e.name.replace(/^.*\//, '').replace(/\.json$/, '')] = JSON.parse(e.data.toString('utf8'));
+    return out;
+  };
+  const settle = (p) => p.catch((e) => ({ ok: false, message: errMsg(e) }));
+  const sh = RULES['feed:state-shadow'].limits;
+  const stateShadow = settle(
+    (async () => {
+      const arts = (await listed(sh.artifact, sh.runs)).filter((a) => now() - a.createdAtMs < sh.holdMs);
+      const markers = [];
+      for (const a of arts) markers.push({ createdAtMs: a.createdAtMs, runId: a.runId, steps: await jsonFiles(a) });
+      return { ok: true, markers };
+    })(),
+  );
+  const stateGc = settle(listed(RULES['feed:state-gc'].limits.artifact, 1).then((a) => ({ ok: true, artifact: a[0] ?? null })));
+  const stateBackup = settle(
+    (async () => {
+      const [a] = await listed(RULES['feed:state-backup'].limits.artifact, 1);
+      if (!a) return { ok: true, marker: null };
+      const files = await jsonFiles(a);
+      return { ok: true, marker: { createdAtMs: a.createdAtMs, runId: a.runId, json: files['state-backup'] ?? null } };
+    })(),
+  );
+  const repoSamples = settle(
+    (async () => {
+      const [a] = await listed(RULES['feed:repo-growth'].limits.artifact, 1);
+      if (!a) return { ok: true, json: null };
+      return { ok: true, json: (await jsonFiles(a))['repo-size'] ?? null };
+    })(),
+  );
   const writerQueue = readQueue({ repo, token, nowMs: now(), fetchImpl, sleep }).then(
     (q) => ({ ok: true, queue: q }),
     (e) => ({ ok: false, message: errMsg(e) }),
   );
-  return { queue, repoSize, tree, walks, writerQueue, notes, skipped: null };
+  return { queue, repoSize, tree, walks, writerQueue, stateShadow, stateGc, stateBackup, repoSamples, notes, skipped: null };
+}
+
+/**
+ * The state Worker's GET /v1/budget with the job's GitHub OIDC token (audience earthquakes-feed-state; the token is
+ * sent to that host only). Without ACTIONS_ID_TOKEN_REQUEST_URL: skipped in a local run, a failure in Actions (the job
+ * lacks id-token: write). Never throws.
+ */
+export async function readStateBudget({ env, fetchImpl, sleep }) {
+  const { url, audience } = RULES['feed:state-budget'].limits;
+  const reqUrl = env.ACTIONS_ID_TOKEN_REQUEST_URL;
+  const reqToken = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+  if (!reqUrl || !reqToken) {
+    const local = env.GITHUB_ACTIONS !== 'true';
+    return { ok: false, skipped: local, message: local ? 'no OIDC token (a local run)' : 'no OIDC token in the job (permissions: id-token: write)' };
+  }
+  const minted = await fetchJson(`${reqUrl}${reqUrl.includes('?') ? '&' : '?'}audience=${encodeURIComponent(audience)}`, {
+    init: { headers: { authorization: `bearer ${reqToken}`, accept: 'application/json' } },
+    fetchImpl,
+    sleep,
+    attempts: 3,
+    backoffMs: [2_000, 5_000],
+  });
+  if (!minted.ok || !isObject(minted.json) || typeof minted.json.value !== 'string') return { ok: false, message: `the OIDC token request failed: ${minted.ok ? 'no token in the answer' : failText(minted)}` };
+  const r = await fetchJson(url, {
+    init: { headers: { authorization: `Bearer ${minted.json.value}`, accept: 'application/json', 'user-agent': 'earthquakes-feed-state-client/1', 'x-feed-state-protocol': '1' } },
+    fetchImpl,
+    sleep,
+    attempts: 3,
+    backoffMs: [2_000, 5_000],
+  });
+  return r.ok ? { ok: true, json: r.json } : { ok: false, message: `GET /v1/budget: ${failText(r)}` };
 }
 
 /**
@@ -978,19 +1238,50 @@ export async function collect({ env = process.env, fetchImpl = globalThis.fetch,
   }
   const stats = { config: statsConfig, pointer, index: statsIndex };
 
-  const [repoSize, tree, walks, writerQueue] = await Promise.all([gh.repoSize, gh.tree, gh.walks, gh.writerQueue]);
-  return { nowMs: clock(), v1, v2, reRead, queuedMs, queueError: queue.error, githubSkipped: gh.skipped, status, repoSize, tree, walks, writerQueue, ids, stats, notes: [...gh.notes, ...notes] };
+  const [repoSize, tree, walks, writerQueue, stateShadow, stateGc, stateBackup, repoSamples, stateBudget] = await Promise.all([
+    gh.repoSize,
+    gh.tree,
+    gh.walks,
+    gh.writerQueue,
+    gh.stateShadow,
+    gh.stateGc,
+    gh.stateBackup,
+    gh.repoSamples,
+    readStateBudget({ env, fetchImpl, sleep }),
+  ]);
+  return {
+    nowMs: clock(),
+    v1,
+    v2,
+    reRead,
+    queuedMs,
+    queueError: queue.error,
+    githubSkipped: gh.skipped,
+    status,
+    repoSize,
+    tree,
+    walks,
+    writerQueue,
+    stateShadow,
+    stateGc,
+    stateBackup,
+    repoSamples,
+    stateBudget,
+    ids,
+    stats,
+    notes: [...gh.notes, ...notes],
+  };
 }
 
 /** argv to options; throws an Error with a readable message on a bad argument. */
 export function parseArgs(argv) {
-  const opts = { findingsPath: null };
+  const opts = { findingsPath: null, samplesPath: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--findings') {
+    if (a === '--findings' || a === '--samples') {
       const value = argv[i + 1];
-      if (value === undefined || value === '' || value.startsWith('--')) throw new Error('--findings needs a path');
-      opts.findingsPath = value;
+      if (value === undefined || value === '' || value.startsWith('--')) throw new Error(`${a} needs a path`);
+      opts[a === '--findings' ? 'findingsPath' : 'samplesPath'] = value;
       i += 1;
       continue;
     }
@@ -1055,6 +1346,16 @@ export async function main({
     }
   } else {
     log(JSON.stringify(doc, null, 2));
+  }
+  // The next repository-size sample series (feed:repo-growth), about once a day: the job keeps it as the artifact
+  // repo-size-samples, which the next runs read. Nothing new: no file, and the job uploads nothing.
+  if (opts.samplesPath && verdict.samples) {
+    try {
+      writeFile(opts.samplesPath, `${JSON.stringify(verdict.samples)}\n`);
+      log(`repository-size samples: ${verdict.samples.samples.length} written to ${opts.samplesPath}`);
+    } catch (e) {
+      log(annotation('warning', 'Feed health', `could not write the repository-size samples: ${errMsg(e)}`));
+    }
   }
 
   if (env.GITHUB_STEP_SUMMARY) {

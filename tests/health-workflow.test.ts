@@ -104,8 +104,12 @@ test('health.yml: each evaluator job writes one findings document as the artifac
     const block = job(health, ev);
     const path = `findings/${ev}.json`;
     const run = stepWith(block, `scripts/${SCRIPTS[ev]}`);
-    assert.match(run, new RegExp(`\\n {8}run: node scripts/${SCRIPTS[ev]!.replace('.', '\\.')} --findings ${path.replace('.', '\\.')}\\n`), ev);
-    const upload = stepWith(block, 'actions/upload-artifact@');
+    // The feed job also keeps feed:repo-growth's repository-size samples (storage phase 3), its one other artifact.
+    const extra = ev === 'feed' ? ' --samples samples/repo-size\\.json' : '';
+    assert.match(run, new RegExp(`\\n {8}run: node scripts/${SCRIPTS[ev]!.replace('.', '\\.')} --findings ${path.replace('.', '\\.')}${extra}\\n`), ev);
+    const upload = stepWith(block, `name: findings-${ev}\n`);
+    if (ev === 'feed') assert.ok(stepWith(block, 'name: repo-size-samples\n').includes('\n          path: samples/repo-size.json\n          if-no-files-found: ignore\n'));
+    assert.equal(steps(block).filter((st) => st.includes('actions/upload-artifact@')).length, ev === 'feed' ? 2 : 1, ev);
     assert.ok(upload.includes(`\n          name: findings-${ev}\n          path: ${path}\n          if-no-files-found: error\n`), ev);
     assert.doesNotMatch(block, /issues:|HC_PING_KEY|continue-on-error/, ev);
   }
@@ -155,7 +159,7 @@ test('health.yml end to end: the documents the evaluator jobs upload are the one
   const dirWith = (docs: Record<string, object>): string => {
     const dir = mkdtempSync(join(tmpdir(), 'health-findings-'));
     for (const ev of Object.keys(docs)) {
-      const path = /\n {10}path: (findings\/[a-z]+\.json)\n/.exec(stepWith(job(health, ev), 'actions/upload-artifact@'))![1]!;
+      const path = /\n {10}path: (findings\/[a-z]+\.json)\n/.exec(stepWith(job(health, ev), `name: findings-${ev}\n`))![1]!;
       writeFileSync(join(dir, path.slice('findings/'.length)), JSON.stringify(docs[ev]));
     }
     return dir;

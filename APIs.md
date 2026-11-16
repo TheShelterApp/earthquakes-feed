@@ -34,9 +34,9 @@ The catalog. Fields:
 | `head_seq` | global monotonic knowledge clock |
 | `event_count` | live events in the rolling window |
 | `freshness.stale_after_seconds` | treat the feed as degraded past this age (default 1800) |
-| `data_commit` | git SHA for building immutable partition URLs |
+| `data_commit` | git SHA for building immutable partition URLs (a frozen partition's `url` is already pinned to it) |
 | `summaries` | map of `{name: {path, url, count}}` for the 20 rolling feeds (`count` = live events in that file) |
-| `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}`; `url` is the NDJSON: the Pages copy for an unfrozen day, jsDelivr `@data` for a frozen one in the v1 manifest and `@<data_commit>` in the signed v2 manifest (*Historical day partitions*). `count` is every feature of the file (all states); since round 26 (2026-10-14) `min_mag` / `max_mag` are the day's **live** events' range, recorded while the day is unfrozen and kept when it freezes (a retired event keeps its last solution: a phantom M8.2 folded into the Panama M7.7 of 2026-10-09 had kept that day at 8.2); days frozen before then keep the range over every feature |
+| `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}`; `url` is the NDJSON: the Pages copy for an unfrozen day, the immutable jsDelivr `@<data_commit>` copy for a frozen one (*Historical day partitions*). `count` is every feature of the file (all states); since round 26 (2026-10-14) `min_mag` / `max_mag` are the day's **live** events' range, recorded while the day is unfrozen and kept when it freezes (a retired event keeps its last solution: a phantom M8.2 folded into the Panama M7.7 of 2026-10-09 had kept that day at 8.2); days frozen before then keep the range over every feature. A run that rewrites a frozen day's partition (a revision moved an event onto that day) records the live range of the new bytes |
 | `archives[]` | rolled-up cold months: `{period, tag, asset, url, bytes, sha256, count, days[]}`; `count` is every line of the asset (all states). Since 2026-11 also `edition` (absent = 1), and for a re-merged month `merge_epoch`, `live`, `superseded`, `built_on`, `remediation[]`, and `previous[]` (the month's earlier assets, never deleted; see *Re-merged history*) |
 | `live` | the live index: `{path, url, head_seq, window_days}` (see *Live index* below; since 2026-10) |
 | `live_month` | the month index: `{path, url, head_seq, min_mag, window_days}` (see *Month index* below; since 2026-10-14) |
@@ -164,10 +164,12 @@ How to use it: keep the features of the days you fetched and the `head_seq` you 
 
 Why a delta is exact: `from_seq` for a window W is the largest `ingest_seq` among the events last changed at least W
 ago; sequence numbers grow with ingest time, so everything changed later is above it, and the delta is by definition
-every window event above it. One kind of change moves no seq: a revision of a provider row that does not represent its
+every window event above it. Two kinds of change move no seq: a revision of a provider row that does not represent its
 event can still change the event's compact feature through the fill-only fields (`updated`, `author`, `magAuthor`,
-`tsunami`, ...). derive compares each window event's line with the one the previous run committed and keeps such an
-event for a day in `knowledge/index/live_silent.json` with the previous run's head (`head_before`); every delta whose
+`tsunami`, ...); and the onboarding of a newly added source (README) can add an event to a window day with the head of a run
+that appended nothing, which is the previous derive's. derive compares each window event's line with the one the
+previous run committed (an event with no line counts only on a day whose previous lines are known whole) and keeps such
+an event for a day in `knowledge/index/live_silent.json` with the previous run's head (`head_before`); every delta whose
 `from_seq` is at most `head_before` carries it. Events that leave the window and retired markers that stop being
 published after 48 h are not changes: the first is your time filter, the second repeats a removal you already applied.
 Replayed over the 566 real derive commits of 2026-10-04 03:04 → 10-06 02:57 UTC (246 such changes detected), a client
@@ -559,7 +561,10 @@ curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2
 Since 2026-10 every unfrozen day (`frozen: false`: today and the 10 days before it, the days the 5-minute run can
 still change) is also on Pages at `/events/YYYY/MM/DD.ndjson`, the bytes of the `data` branch file (the v2 manifest's
 `sha256` covers both), and its `url` names that copy (`max-age=0, must-revalidate`: an ETag check, a 304 when
-unchanged). A frozen day's `url` is jsDelivr `@data` in the v1 manifest (jsDelivr can answer 403 for a file its branch package no longer holds) and the immutable `@<data_commit>` copy in the v2 manifest. `pages_url`, the
+unchanged). A frozen day's `url` is the immutable jsDelivr `@<data_commit>` copy in both published manifests (the v2 one
+since 2026-11-15, the v1 one since 2026-11-16; before, v1 named `@data`, where jsDelivr can answer 403 for a file its
+branch package no longer holds); the `manifest.json` committed to the `data` branch keeps `@data` and `data_commit:
+null`, since it cannot name the commit it is part of. `pages_url`, the
 GeoJSON day file, is unchanged.
 
 **From 2026-11-04, `@data/events/...` holds a day only once it is frozen.** The 5-minute run will stop committing
@@ -589,6 +594,10 @@ asks for the same window again), `epoch` (the catch-up epoch recorded with that 
 up again and it writes a valid file. A damaged heal or correction marker (`knowledge/index/heal.json`,
 `correction.json`) stops the run instead, with an error naming the file: reading it as never run would repeat the
 one-time step.
+A run that loads the whole 45-day event-map horizon (the heal run) asks the sweeps from one day below derive's load
+floor (00:00 UTC of the oldest day derive loads); a revision whose origin is below that floor is not applied, since it
+would move the event onto a day derive no longer publishes, and the run log names it (`::notice` "Sweep below the derive
+floor"). Regular runs ask from 11 days back and never reach it.
 `comcat_twins_withdrawn` counts the AEC rows a ComCat delete withdrew in that run,
 `twin_withheld` the AEC reports held back beside another source's event, and `absent.aec`
 (`count`, the first 20 `ids`) the live AEC ids younger than 10 days that AEC's file no longer
@@ -1409,8 +1418,9 @@ a deliberate one-off, like a heal, not an automatic step.
 
 Two logs record the runs themselves, beside the observation log: the status history (every aggregate run's
 `status.json`, one line per run) and `changes/YYYY-MM-DD.ndjson` (derive's change log of each day; the current day's
-file is also served as `/v1/changes/<day>.ndjson`, compressed like the day partitions on Pages, always whole: a Range
-request gets the full body). The status history is written to `status/history/YYYY-MM-DD.ndjson`,
+file is also served as `/v1/changes/<day>.ndjson` from its first line on, by every deploy whether or not that run
+appended to it (before 2026-11-16 only by a run that did), compressed like the day partitions on Pages, always whole: a
+Range request gets the full body). The status history is written to `status/history/YYYY-MM-DD.ndjson`,
 one file per UTC day of the run's ingest time, since round 17 (2026-10-06); until then it was one file per month,
 `status/history/YYYY-MM.ndjson`, and `status/history/2026-10.ndjson` keeps October's lines from before the switch. Read
 a month's lines in write order: the month file first (where there is one), then the day files by date
@@ -1636,8 +1646,9 @@ does not follow era B (`DEEP_WALK_FLOOR`, *Earliest solutions*).
 An asset is never overwritten or deleted. A failed upload leaves its name behind as `unused` and the walk takes the next
 free name (`raw-usgs-2022-12.g2.ndjson.zst`); when a source joins an era, each month gets a new edition (`e2`) built
 from all its raw assets, newest month first, and the older edition stays. The index of all of it is the walk's one file
-for readers on the `data` branch: `knowledge/index/history.json` (read it through jsDelivr,
-`https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/knowledge/index/history.json`). It lists each raw asset
+for readers on the `data` branch: `knowledge/index/history.json` (read it through jsDelivr pinned to the manifest's
+`data_commit`, `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@<data_commit>/knowledge/index/history.json`;
+jsDelivr's `@data` can answer 403 for a file its branch package no longer holds). It lists each raw asset
 (`url`, `sha256`, `bytes`, `rows`, `provider_count`, `fetched_at`) and each edition (`url`, `sha256`, `events`, `days`,
 `sources`, `built_from`); a month's current edition is its highest `edition` not `withdrawn`. A re-merged edition also
 has `merge_epoch`, `merged_from`, `lines` and `superseded` (*Re-merged history*). It changes only when the walk publishes or
@@ -2469,7 +2480,7 @@ const url = p.frozen
   : p.url;
 
 // Before 2023-07-06 (the deep history; APIs.md, Deep history): a month's current edition
-const h = await (await fetch('https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/knowledge/index/history.json')).json();
+const h = await (await fetch(`https://cdn.jsdelivr.net/gh/${m.data_repo}@${m.data_commit}/knowledge/index/history.json`)).json();
 const ed = h.editions.filter(e => e.period === '2022-12' && !e.withdrawn).sort((a, b) => b.edition - a.edition)[0];
 // ed.url: events-2022-12.e<N>.tar.zst, a zstd tar of DD.ndjson day files; check it against ed.sha256.
 // Keep feed.state === 'live' only: a re-merged edition also holds superseded lines (Re-merged history).

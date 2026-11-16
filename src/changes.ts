@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { EventNode } from './types.js';
 import { geohashEncode } from './geohash.js';
 import { round6 } from './util.js';
@@ -92,4 +92,17 @@ export function appendChanges(file: string, nodes: EventNode[], sinceCursor: num
     lastSeq: lastNewSeq ?? (priorLast.length ? (JSON.parse(priorLast[priorLast.length - 1]!) as ChangeRecord).seq : null),
     cursor: lastNewSeq ?? sinceCursor,
   };
+}
+
+/**
+ * Copy the day's change-log `file` to `<publicV1>/changes/<day>.ndjson` (Pages/R2, hot tailing by Range from the last
+ * byte) whenever it exists, not only on a run that appended to it: every deploy starts from an empty public/, so a quiet
+ * run would otherwise deploy without it and the signed v2 manifest would say `changes: null` (2026-11-15 audit, derive
+ * L1). Returns whether a copy was written.
+ */
+export function mirrorChangeLog(file: string, publicV1: string, day: string): boolean {
+  if (!existsSync(file)) return false;
+  mkdirSync(join(publicV1, 'changes'), { recursive: true });
+  writeFileSync(join(publicV1, 'changes', `${day}.ndjson`), readFileSync(file));
+  return true;
 }

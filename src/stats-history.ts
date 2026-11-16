@@ -8,7 +8,7 @@ import { gunzipSync } from 'node:zlib';
 import type { ArchiveEntry, Archives } from './archive.js';
 import { extractTarball } from './archive-io.js';
 import { eventDayKey, featureToNode, nodeToFeature } from './bitemporal.js';
-import { DATA_DIR, REMERGE_EPOCH, REMERGE_INGEST_TIME, REMERGE_RULES, REPO, dataPaths } from './config.js';
+import { DATA_DIR, REMERGE_EPOCH, REMERGE_INGEST_TIME, REMERGE_RULES, REPO, dataPaths, envNumber } from './config.js';
 import { haversineKm } from './geo.js';
 import { ghRetry } from './gh.js';
 import { historyQueryUrl } from './history-fetch.js';
@@ -42,8 +42,8 @@ import type { EventNode, ProviderConfig } from './types.js';
 import { canonicalJson, fetchText } from './util.js';
 
 /**
- * The stats builder (stats.yml; APIs.md, Statistics): the year files `v1/stats/year/<Y>.json` (the current year and the
- * two before it) and the area files `v1/stats/area/<Y>.json` (1973 .. the year of `through`), committed on `data` with
+ * The stats builder (stats.yml; APIs.md, Statistics): the year files `v1/stats/year/<Y>.json` (the year of `through`
+ * and the two before it) and the area files `v1/stats/area/<Y>.json` (1973 .. the year of `through`), committed on `data` with
  * their ledger `knowledge/stats/state.json`, which derive reads to publish them.
  *
  * Every UTC day up to `through` (the last frozen day) has one input, the first that matches of: the day's current
@@ -954,6 +954,8 @@ export interface RunResult {
   waiting: { year: number; missing: number }[];
   /** Lines of the blocked marker (gate failures, failed builds). */
   blocked: string[];
+  /** Years whose ComCat gate could not be asked (gate `error`): reported, retried on the next run, never blocked. */
+  deferred: string[];
   through: string;
   stale: number[];
   changed: boolean;
@@ -977,7 +979,9 @@ export async function runStatsHistory(o: RunOptions): Promise<RunResult> {
   const through = statsThrough(o.nowMs);
   const nowYear = new Date(o.nowMs).getUTCFullYear();
   const lastYear = Number(through.slice(0, 4));
-  const yearFileYears = new Set([nowYear, nowYear - 1, nowYear - 2].filter((y) => y <= lastYear));
+  // The year files: the last year with frozen days and the two before it. In early January, until the new year's first
+  // day freezes, that is still last year's three, so none is removed before the new year's file can exist.
+  const yearFileYears = new Set([lastYear, lastYear - 1, lastYear - 2]);
   const state: StatsHistoryState = structuredClone(o.state);
   // A builder bump rebuilds everything: the old ledger's digests no longer match anyway (the builder is in them).
   state.builder = builder;
@@ -988,6 +992,11 @@ export async function runStatsHistory(o: RunOptions): Promise<RunResult> {
     if (plan.inputs.every((i) => i == null)) continue;
     plans.set(y, plan);
     if (plan.missing.length) waiting.push({ year: y, missing: plan.missing.length });
+  }
+  // A named year with nothing to build would otherwise be a silent no-op.
+  for (const y of [...o.forced].sort((a, b) => a - b)) {
+    if (plans.has(y)) continue;
+    log(`::warning::STATS_YEARS: ${y} ${y > lastYear ? `is after the last year with frozen days (${lastYear}, through ${through})` : 'has no input on any day'}; nothing to rebuild`);
   }
   const stale: number[] = [];
   const reasons = new Map<number, string>();
@@ -1008,6 +1017,7 @@ export async function runStatsHistory(o: RunOptions): Promise<RunResult> {
   const removes: string[] = [];
   const reports: YearReport[] = [];
   const blocked: string[] = [];
+  const deferred: string[] = [];
   let changed = false;
 
   for (const y of order) {
@@ -1054,16 +1064,24 @@ export async function runStatsHistory(o: RunOptions): Promise<RunResult> {
     };
     const rep: YearReport = { year: y, reason, result: 'built', months, inputs, remerged_months: built.remergedMonths.length, folds: built.folds, collapsed: acc.collapsedTotal, out_of_region: acc.outOfRegionTotal, area_bytes: Buffer.byteLength(built.areaBody), ...(built.yearBody ? { year_bytes: Buffer.byteLength(built.yearBody) } : {}), records: acc.area.size, ms: built.ms, check };
     if (check.gate === 'fail' || check.gate === 'error') {
-      // Keep the previous files and their ledger entry; a gate failure is not retried on the same inputs.
-      log(`::warning::stats: ${y}: ComCat gate ${check.gate}: ${check.message ?? ''}; the previous files stay`);
+      // Keep the previous files and their ledger entry; a gate failure is not retried on the same inputs. A gate error
+      // (ComCat's count failed: an outage) says nothing about the year: it is retried on the next run and deferred, not
+      // blocked (a longer outage stops `through` and shows as feed:stats-through). An outage never clears a standing
+      // gate failure: the fail verdict stays, so the year keeps alarming below; on the very inputs that failed (a run
+      // that named the year) it is not retried either, so it is not deferred.
+      const keepFail = check.gate === 'error' && prev?.check?.gate === 'fail';
+      const stands = check.gate === 'error' && prev?.failed_digest === plan.digest;
+      const suffix = check.gate !== 'error' ? '' : stands ? ', the earlier gate failure on these inputs stands' : ', retried on the next run';
+      log(`::warning::stats: ${y}: ComCat gate ${check.gate}: ${check.message ?? ''}; the previous files stay${suffix}`);
       state.years[key] = {
         ...(prev ?? { inputs_digest: '', through: plan.through, complete: plan.complete, remerged_in_memory: false, inputs }),
-        check,
+        check: keepFail ? prev.check! : check,
         ...(check.gate === 'fail' ? { failed_digest: plan.digest } : {}),
       };
       delete state.years[key]!.error;
       reports.push({ ...rep, result: check.gate === 'fail' ? 'gate-failed' : 'error' });
-      blocked.push(`stats ${y}: ComCat gate ${check.gate}: ${check.message ?? ''}`);
+      if (check.gate === 'fail') blocked.push(`stats ${y}: ComCat gate fail: ${check.message ?? ''}`);
+      else if (!stands) deferred.push(`stats ${y}: ComCat gate error: ${check.message ?? ''}`);
       continue;
     }
     writes.set(areaPath(y), built.areaBody);
@@ -1077,7 +1095,7 @@ export async function runStatsHistory(o: RunOptions): Promise<RunResult> {
     log(`stats: ${y}: ${check.gate}${check.gate === 'warn' && check.message ? ` (${check.message})` : ''}; ${acc.area.size} cells, M6+ ${feed.m6}, M4.5+ ${feed.m45}${check.comcat ? ` (ComCat ${check.comcat.m6} / ${check.comcat.m45})` : ''}, ${built.ms} ms`);
   }
 
-  // Year files outside the current year and the two before it go.
+  // Year files outside the last year with frozen days and the two before it go.
   for (const [key, st] of Object.entries(state.years)) {
     const y = Number(key);
     if (st.year && !yearFileYears.has(y)) {
@@ -1095,7 +1113,7 @@ export async function runStatsHistory(o: RunOptions): Promise<RunResult> {
   state.through = newest ? state.years[newest]!.through : null;
   state.generated = new Date(o.nowMs).toISOString();
   state.run_id = o.runId;
-  return { state, writes, removes, reports, waiting, blocked, through, stale, changed };
+  return { state, writes, removes, reports, waiting, blocked, deferred, through, stale, changed };
 }
 
 // --- I/O ---
@@ -1227,6 +1245,7 @@ export function reportMarkdown(r: RunResult, o: { dryRun: boolean; verify: Verif
   }
   if (r.waiting.length) out.push(`Waiting (days without an input): ${r.waiting.map((w) => `${w.year} (${w.missing})`).join(', ')}`, '');
   if (r.blocked.length) out.push('Blocked:', '', ...r.blocked.map((b) => `- ${b}`), '');
+  if (r.deferred.length) out.push('Deferred (retried on the next run):', '', ...r.deferred.map((b) => `- ${b}`), '');
   out.push('## Ledger', '', '| Year | Through | Gate | M6+ feed / ComCat | M4.5+ feed / ComCat | Re-merged in memory | dup_suspects / n45 | Area bytes |', '|---|---|---|---|---|---|---|---|');
   for (const y of Object.keys(r.state.years).sort()) {
     const s = r.state.years[y]!;
@@ -1276,7 +1295,7 @@ async function main(): Promise<void> {
       .map(Number),
   );
   for (const y of forced) if (!Number.isInteger(y) || y < STATS_FIRST_YEAR) throw new Error(`STATS_YEARS: ${y} is not a year from ${STATS_FIRST_YEAR}`);
-  const maxYears = Number(process.env.STATS_MAX_YEARS || config.max_years_per_run);
+  const maxYears = envNumber('STATS_MAX_YEARS', config.max_years_per_run);
   const registry = loadRegistry();
   const usgs = registry.find((p) => p.id === 'usgs');
   if (!usgs) throw new Error('no usgs provider in the registry');
@@ -1352,7 +1371,7 @@ async function main(): Promise<void> {
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, md + '\n');
   if (res.blocked.length) writeFileSync('stats-blocked.txt', res.blocked.join('\n') + '\n');
   setOutput('changed', String(res.changed));
-  console.log(`stats: ${res.changed ? 'changed' : 'nothing to do'}; ${res.writes.size} file(s) written, ${res.removes.length} removed, ${res.blocked.length} blocked line(s), ${Math.round((Date.now() - t0) / 1000)} s`);
+  console.log(`stats: ${res.changed ? 'changed' : 'nothing to do'}; ${res.writes.size} file(s) written, ${res.removes.length} removed, ${res.blocked.length} blocked line(s), ${res.deferred.length} deferred, ${Math.round((Date.now() - t0) / 1000)} s`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

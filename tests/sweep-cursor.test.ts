@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
@@ -140,6 +140,29 @@ test('the catch-up runs once: the next run asks from its cursor (less the overla
     assert.equal(second.status.catch_up, undefined);
     assert.equal(calls[1]!.url.searchParams.get('updatedafter'), fdsn(NOW - SWEEP_OVERLAP_MS));
     assert.deepEqual(second.cursor, { through: iso(later), epoch: SWEEP_EPOCH });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a torn or non-object sweeps.json reads as no cursors with a warning: the sweeps catch up, the run goes on', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sweeps-'));
+  try {
+    const f = dataPaths(root).sweepCursors;
+    mkdirSync(dirname(f), { recursive: true });
+    for (const body of ['{"usgs:updated": {"through": "2026-', 'null', '[1]', '"x"']) {
+      writeFileSync(f, body);
+      const warnings: string[] = [];
+      assert.deepEqual(loadSweepCursors(root, (m) => warnings.push(m)), {}, body);
+      assert.equal(warnings.length, 1, body);
+      assert.match(warnings[0]!, /^::warning title=Sweep cursors::knowledge\/index\/sweeps\.json is unreadable \(/);
+      assert.equal(sweepWindow(loadSweepCursors(root, () => {})['usgs:updated'], NOW, FLOOR).catchUp, true);
+    }
+    // A readable file keeps its valid entries and drops a damaged one silently, as before.
+    writeFileSync(f, JSON.stringify({ 'usgs:updated': { through: iso(NOW), epoch: SWEEP_EPOCH }, 'emsc:updated': null }));
+    const warnings: string[] = [];
+    assert.deepEqual(loadSweepCursors(root, (m) => warnings.push(m)), { 'usgs:updated': { through: iso(NOW), epoch: SWEEP_EPOCH } });
+    assert.deepEqual(warnings, []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

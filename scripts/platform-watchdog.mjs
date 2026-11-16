@@ -15,6 +15,10 @@
 //                           10 d, P1 over 25 d (the bundle expires at 30 d); under 5 d, the copy's version behind the
 //                           version /healthz serves (an upload that stopped partway, 2026-10-19 v65/v66): P3, which
 //                           reconcile holds for 24 h
+//   config:bundle:<env>     the staging and dev bundles (2026-11-15 audit, FEED-PLATFORM-WATCHDOG): no status.json
+//                           reports them (their gateways publish it only on a debug tick), so the `expiresAt` that
+//                           config-<env>.theshelter.app/healthz serves: under 25 d left (no refresh for over 5 d of
+//                           the bundle's 30) or expired, P3 at most. A host that gives no expiresAt: not judged, a note
 // Health and status.json GETs are retried twice (2 s, 5 s); the API's three tries are 30 s apart, so an outage of
 // under a minute (an edge blip, a deploy) is not reported.
 //
@@ -28,6 +32,7 @@
 //
 //   node scripts/platform-watchdog.mjs [--findings findings/platform.json]
 //   node scripts/platform-watchdog.mjs --api-url <url> --config-url <url> --status-url <url>
+//     [--staging-config-url <url>] [--dev-config-url <url>]
 //
 // Dependency-free (Node >= 22, global fetch). The pure helpers are exported for tests/platform-watchdog.test.ts.
 
@@ -39,10 +44,17 @@ import { RULES, ageText, findingsDocument, makeFinding, oneLine, utcText } from 
 
 export const API_HEALTH_URL = 'https://api.theshelter.app/v1/health';
 export const CONFIG_HEALTH_URL = 'https://config.theshelter.app/healthz';
+/** The config Workers of the non-prod environments (platform infra/wrangler/config.<env>.jsonc), by env. */
+export const ENV_CONFIG_HEALTH_URLS = Object.freeze({
+  staging: 'https://config-staging.theshelter.app/healthz',
+  dev: 'https://config-dev.theshelter.app/healthz',
+});
 
 const DAY_MS = 86_400_000;
 const API_LIMITS = RULES['platform:api'].limits;
 const BUNDLE_LIMITS = RULES['config:bundle:age'].limits;
+const ENV_BUNDLE_LIMITS = RULES['config:bundle:env'].limits;
+const ENV_BUNDLE_PREFIX = RULES['config:bundle:env'].keyPrefix;
 /** status.json older than this (the alerts:status:stale line, 300 s) is a stale copy: the version gap is not judged. */
 const STATUS_MAX_AGE_MS = RULES['alerts:status:stale'].limits.maxAgeMs;
 const BUNDLE_KEY = RULES['config:bundle:age'].key;
@@ -54,7 +66,7 @@ export const API_RETRY = Object.freeze({
 });
 
 /** Every key this evaluator judges: all of them are unjudged when it cannot run (a bad argument). */
-export const PLATFORM_KEYS = Object.freeze([RULES['platform:api'].key, RULES['platform:api:envelope'].key, RULES['platform:config-worker'].key, BUNDLE_KEY]);
+export const PLATFORM_KEYS = Object.freeze([RULES['platform:api'].key, RULES['platform:api:envelope'].key, RULES['platform:config-worker'].key, BUNDLE_KEY, `${ENV_BUNDLE_PREFIX}*`]);
 
 /** The findings that mean "a host is down" (plain-mode exit 1, as before the findings). */
 const DOWN_KEYS = Object.freeze([RULES['platform:api'].key, RULES['platform:config-worker'].key]);
@@ -228,6 +240,43 @@ export function evaluateConfigBundle({ status, hostVersion, nowMs }) {
   return { findings, unjudged: findings.length === 0 && unjudgedPart ? [BUNDLE_KEY] : [], notes, summary };
 }
 
+/**
+ * Judge one non-prod environment's config bundle (key config:bundle:<env>) from its config Worker's /healthz answer (a
+ * fetchJson result). Pure. The bundle's `expiresAt` comes from a 200 answer, or from the 503 body of an expired bundle
+ * (`ok: false, expired: true`). Under `minLeftMs` left, or expired: P3, sinceMs when it crossed the line. No usable
+ * expiresAt (the host down or unreadable, no bundle resolvable, or an older Worker): the key is not judged, with a note;
+ * the host itself is not judged off prod.
+ * @param {{ env: string, health: import('./alerts-watchdog.d.mts').FetchResult, nowMs: number }} input
+ */
+export function evaluateEnvConfigBundle({ env, health, nowMs }) {
+  const key = `${ENV_BUNDLE_PREFIX}${env}`;
+  const host = `config-${env}.theshelter.app`;
+  let doc;
+  if (health && health.ok) doc = health.json;
+  else if (health && health.kind === 'http' && typeof health.body === 'string') {
+    try {
+      doc = JSON.parse(health.body);
+    } catch {
+      doc = undefined;
+    }
+  }
+  const expiresAtMs = isObject(doc) && typeof doc.expiresAt === 'string' ? Date.parse(doc.expiresAt) : NaN;
+  if (!Number.isFinite(expiresAtMs)) {
+    const why = !health || !health.ok ? (isObject(doc) ? `${failure(health)}, no expiresAt` : failure(health ?? { kind: 'network', message: 'not read', attempts: 0 })) : 'the answer has no expiresAt';
+    return { findings: [], unjudged: [key], notes: [`${host}/healthz: ${why}: the ${env} config bundle's age is not judged this run`], summary: `config_bundle_${env}=unreadable` };
+  }
+  const version = isObject(doc) && isNum(doc.version) && doc.version > 0 ? doc.version : null;
+  const leftMs = expiresAtMs - nowMs;
+  const expired = doc.expired === true || leftMs <= 0;
+  const summary = `config_bundle_${env}=v${version ?? '?'} ${expired ? 'EXPIRED' : `expires_in=${ageText(leftMs).replace(' ', '')}`}`;
+  if (!expired && leftMs >= ENV_BUNDLE_LIMITS.minLeftMs) return { findings: [], unjudged: [], notes: [], summary };
+  const bundle = `the ${env} config bundle (v${version ?? '?'}, served by ${host})`;
+  const state = expired ? `EXPIRED at ${utcText(expiresAtMs)}: ${env} builds fall back to compiled defaults` : `expires at ${utcText(expiresAtMs)}, in ${ageText(leftMs)}`;
+  const text = `${bundle} ${state}: under the ${days(ENV_BUNDLE_LIMITS.minLeftMs)} line (a bundle lives ${days(ENV_BUNDLE_LIMITS.expiresMs)}), so the ${env} config refresh has not run for over ${days(ENV_BUNDLE_LIMITS.expiresMs - ENV_BUNDLE_LIMITS.minLeftMs)}: rerun it for ${env}`;
+  const finding = makeFinding('config:bundle:env', { id: env, sinceMs: expiresAtMs - ENV_BUNDLE_LIMITS.minLeftMs, text });
+  return { findings: [finding], unjudged: [], notes: [], summary };
+}
+
 /** Plain-mode exit code: 1 when a host is down or unhealthy (as before the findings), else 3 for a watcher fault, else 0. */
 export function plainExitCode(findings) {
   if (findings.some((f) => DOWN_KEYS.includes(f.key))) return 1;
@@ -235,11 +284,25 @@ export function plainExitCode(findings) {
   return 0;
 }
 
-const VALUE_FLAGS = { '--api-url': 'apiUrl', '--config-url': 'configUrl', '--status-url': 'statusUrl', '--findings': 'findingsPath' };
+const VALUE_FLAGS = {
+  '--api-url': 'apiUrl',
+  '--config-url': 'configUrl',
+  '--status-url': 'statusUrl',
+  '--staging-config-url': 'stagingConfigUrl',
+  '--dev-config-url': 'devConfigUrl',
+  '--findings': 'findingsPath',
+};
 
 /** Parse argv into options; throws an Error with a readable message on a bad argument. */
 export function parseArgs(argv) {
-  const opts = { apiUrl: API_HEALTH_URL, configUrl: CONFIG_HEALTH_URL, statusUrl: STATUS_URL, findingsPath: null };
+  const opts = {
+    apiUrl: API_HEALTH_URL,
+    configUrl: CONFIG_HEALTH_URL,
+    statusUrl: STATUS_URL,
+    stagingConfigUrl: ENV_CONFIG_HEALTH_URLS.staging,
+    devConfigUrl: ENV_CONFIG_HEALTH_URLS.dev,
+    findingsPath: null,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (!Object.hasOwn(VALUE_FLAGS, a)) throw new Error(`unknown argument ${JSON.stringify(a)}`);
@@ -328,29 +391,33 @@ export async function main({
   }
 
   const init = { headers: { 'cache-control': 'no-cache', accept: 'application/json', 'user-agent': 'earthquakes-feed-health (+https://github.com/TheShelterApp/earthquakes-feed)' } };
-  const [api, config, status] = await Promise.all([
+  const envUrls = [['staging', opts.stagingConfigUrl], ['dev', opts.devConfigUrl]];
+  const [api, config, status, ...envHealth] = await Promise.all([
     fetchJson(opts.apiUrl, { init, fetchImpl, sleep, attempts: API_RETRY.attempts, backoffMs: [...API_RETRY.backoffMs] }),
     fetchJson(opts.configUrl, { init, fetchImpl, sleep }),
     // The status document is judged as of when it was read (the API's tries take a minute longer).
     fetchJson(opts.statusUrl, { init, fetchImpl, sleep }).then((r) => ({ r, readMs: now() })),
+    ...envUrls.map(([, url]) => fetchJson(url, { init, fetchImpl, sleep }).then((r) => ({ r, readMs: now() }))),
   ]);
   const apiVerdict = evaluateApiHealth(api);
   const configVerdict = evaluateConfigHealth(config);
   const bundleVerdict = evaluateConfigBundle({ status: status.r, hostVersion: configVerdict.version, nowMs: status.readMs });
-  const findings = [...apiVerdict.findings, ...configVerdict.findings, ...bundleVerdict.findings];
-  const unjudged = [...apiVerdict.unjudged, ...bundleVerdict.unjudged];
-  const summaries = [`api: ${apiVerdict.summary}`, `config: ${configVerdict.summary}`, `config bundle: ${bundleVerdict.summary}`];
+  const envVerdicts = envUrls.map(([env], i) => evaluateEnvConfigBundle({ env, health: envHealth[i].r, nowMs: envHealth[i].readMs }));
+  const findings = [...apiVerdict.findings, ...configVerdict.findings, ...bundleVerdict.findings, ...envVerdicts.flatMap((v) => v.findings)];
+  const unjudged = [...apiVerdict.unjudged, ...bundleVerdict.unjudged, ...envVerdicts.flatMap((v) => v.unjudged)];
+  const notes = [...bundleVerdict.notes, ...envVerdicts.flatMap((v) => v.notes)];
+  const summaries = [`api: ${apiVerdict.summary}`, `config: ${configVerdict.summary}`, `config bundle: ${bundleVerdict.summary}`, ...envVerdicts.map((v, i) => `config bundle ${envUrls[i][0]}: ${v.summary}`)];
 
   for (const s of summaries) log(s);
-  for (const n of bundleVerdict.notes) log(`note: ${n}`);
+  for (const n of notes) log(`note: ${n}`);
   for (const s of summaries) summaryLines.push(`- \`${s}\``);
   for (const f of findings) summaryLines.push(`- **${f.severity}** \`${f.key}\`: ${f.text}`);
-  for (const n of bundleVerdict.notes) summaryLines.push(`- note: ${n}`);
+  for (const n of notes) summaryLines.push(`- note: ${n}`);
 
   if (opts.findingsPath !== null) {
     for (const f of findings) log(`${f.severity} ${f.key}: ${f.text}`);
     for (const u of unjudged) log(`not judged: ${u}`);
-    return finish(writeDocument(opts.findingsPath, { findings, unjudged, notes: [...summaries, ...bundleVerdict.notes] }));
+    return finish(writeDocument(opts.findingsPath, { findings, unjudged, notes: [...summaries, ...notes] }));
   }
 
   for (const f of findings) log(findingAnnotation(f));

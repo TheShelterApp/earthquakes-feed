@@ -36,13 +36,16 @@ import { isoFromMs } from './util.js';
  * retired marker that stops being published after 48 h only stops repeating a removal the client already applied.
  * Every change inside the window that the event map records takes a new seq: the aggregate's log (LogBuffer) gives
  * each its own, and the writers that stamp the current head instead (backfill, remediation) only write days before the
- * event-map horizon or frozen days, weeks outside the window. One kind does not: a revision of a provenance row that
+ * event-map horizon or frozen days, weeks outside the window. Two kinds do not. A revision of a provenance row that
  * represents nothing in its event replaces the stored row and leaves the event's `lastSeq` as it was (PF-5h (2)), yet
  * it can change the compact feature through the fill-only fields (`updated`, `author`, `magAuthor`, `tsunami`, ...).
- * Replaying a client over the real derive commits of 2026-10-05 14:00..10-06 02:45 found 20 such features. So derive
+ * Replaying a client over the real derive commits of 2026-10-05 14:00..10-06 02:45 found 20 such features. And
+ * onboarding (onboard.ts), which writes a new source's recent days, overlapping the window, stamps the head of the
+ * run it follows: on a run that appended no line that is the previous derive's head. So derive
  * also compares each window event's partition line with the one the previous run wrote (detectSilentChanges; since
  * round 25 rebuilt from the event map the run checked out, live-baseline.ts, not read from the committed partitions):
- * one that differs while its `lastSeq` is not above the previous run's head is a silent change, kept for a day in
+ * one that differs, or is missing from a day whose previous lines are known, while its `lastSeq` is not above the
+ * previous run's head is a silent change, kept for a day in
  * `knowledge/index/live_silent.json` with that previous head (`head_before`), and every delta whose `from_seq` is at
  * most `head_before` carries it. A client at a cursor c >= from_seq that has not seen the change synced at or before
  * that previous run, so c <= head_before: the change reaches it.
@@ -141,11 +144,13 @@ const ID_IN_LINE = /^\{"type":"Feature","id":"([^"]+)"/;
  * not above that run's head `prevHead`. Reads the day partitions as they are on disk, so it must run before derive
  * rewrites them. The line is compared whole (full-fat): a superset of the compact feature's changes. Since round 25
  * derive reads the previous lines from the event map instead (live-baseline.ts previousWindowLines) and runs this one
- * beside it as a check until the unfrozen partitions leave the `data` branch (storage option 4 phase 2).
+ * beside it as a check until the unfrozen partitions leave the `data` branch (storage option 4 phase 2). The days with
+ * a partition file are the covered ones (silentChangesAgainst).
  */
 export function detectSilentChanges(root: string, nodes: Iterable<EventNode>, days: Iterable<string>, prevHead: number): string[] {
   const window = [...new Set(days)];
-  return silentChangesAgainst(partitionLines(root, window), nodes, window, prevHead);
+  const covered = new Set(window.filter((day) => existsSync(dayPartitionFile(root, day))));
+  return silentChangesAgainst(partitionLines(root, window), nodes, window, prevHead, covered);
 }
 
 /** The lines of the committed day partitions of `days`, by feed id (a later day wins an id found twice). */
@@ -169,14 +174,28 @@ export function addPartitionLines(into: Map<string, string>, text: string): void
 /** detectSilentChanges against previous lines from any source: the window nodes at or below `prevHead` whose full-fat
  *  line differs from the one in `previous`. A line equal to the node's feature with or without `review_status` counts
  *  as unchanged: the run that switches a day's partitions to carry it (partitions.ts PartitionFormat) changes no event,
- *  and both serializations encode every other field, so a real change is still caught. */
-export function silentChangesAgainst(previous: ReadonlyMap<string, string>, nodes: Iterable<EventNode>, days: Iterable<string>, prevHead: number): string[] {
+ *  and both serializations encode every other field, so a real change is still caught.
+ *  A node with no previous line is a silent change only on a `covered` day, one whose previous lines are known whole
+ *  (an event onboarding added with the previous head, see the module comment): a day missing from the baseline would
+ *  otherwise put every one of its events into every delta. */
+export function silentChangesAgainst(
+  previous: ReadonlyMap<string, string>,
+  nodes: Iterable<EventNode>,
+  days: Iterable<string>,
+  prevHead: number,
+  covered: ReadonlySet<string> = new Set(),
+): string[] {
   const window = new Set(days);
   const out: string[] = [];
   for (const n of nodes) {
-    if (n.lastSeq > prevHead || !window.has(eventDayKey(n.eventTimeMs))) continue;
+    const day = eventDayKey(n.eventTimeMs);
+    if (n.lastSeq > prevHead || !window.has(day)) continue;
     const before = previous.get(n.feedId);
-    if (before === undefined || before === JSON.stringify(nodeToFeature(n))) continue;
+    if (before === undefined) {
+      if (covered.has(day)) out.push(n.feedId);
+      continue;
+    }
+    if (before === JSON.stringify(nodeToFeature(n))) continue;
     if (before !== JSON.stringify(nodeToFeature(n, { reviewStatus: true }))) out.push(n.feedId);
   }
   return out.sort();

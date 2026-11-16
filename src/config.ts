@@ -14,6 +14,23 @@ export const PUBLIC_DIR = process.env.PUBLIC_DIR ?? 'public';
 export const REGISTRY_PATH = process.env.REGISTRY_PATH ?? 'providers/registry.json';
 export const SCHEMA_DIR = process.env.SCHEMA_DIR ?? 'schema';
 
+/**
+ * A number from the environment: unset, empty or whitespace-only gives `def` (a blank workflow_dispatch input means
+ * the default, never 0); anything else must be a finite number of at least `min` (default 1), and an integer unless
+ * `integer` is false, or it throws an error naming the variable. `Number(process.env.X ?? def)` read an empty value as
+ * 0 and a typo as NaN, and a NaN limit compares false everywhere, so a cap such as HISTORY_MAX_UNITS became no cap.
+ */
+export function envNumber(name: string, def: number, opts: { min?: number; integer?: boolean } = {}, env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[name]?.trim();
+  if (!raw) return def;
+  const { min = 1, integer = true } = opts;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < min || (integer && !Number.isInteger(n))) {
+    throw new Error(`${name}=${JSON.stringify(env[name])} is not ${integer ? 'an integer' : 'a number'} >= ${min}`);
+  }
+  return n;
+}
+
 // --- dedup / identity (base windows held identical to the iOS/web clients) ---
 export const SPATIAL_KM = 10;
 export const TEMPORAL_MS = 60_000;
@@ -356,9 +373,18 @@ export const NEW_ID_PER_REVISION_PROVIDERS: ReadonlySet<string> = new Set(['nrca
  *  and the regular heal) against the rules before: the 17 pairs fold, 2 quakes keep two events with their rows grouped
  *  otherwise (2026-07-30 and 08-22: CSN's two ids now share an event, while EMSC's own solution with INPRES's, or ComCat's,
  *  45 and 52 km from CSN's newer one, stays the quake's second event as before); per connected group of ids 15 fewer events, 0 more; rows in two live
- *  events 0. */
+ *  events 0.
+ *
+ *  PHIVOLCS (Philippines; FEED-PROV-L1 follow-up) ids are the bulletin's UTC origin stamp, `YYYY_MMDD_HHMM` or, for most
+ *  bulletins since about 2026-10-29, `YYYY_MMDD_HHMMSS` (src/custom.ts parsePhivolcs). A quake's B1 can carry the minute
+ *  stamp and its later B2 the seconds stamp, and the page then lists only the B2: on the page of 2026-11-16, 10 of the
+ *  70 minute-stamped events the feed held from 2026-10-31 on were re-issued that way, 12–15 km and 0.1–0.5 M apart
+ *  (2026_1114_0919, 18.71/121.16 M2.8 → 2026_1114_091912_B2, 18.76/121.05 M3.3; 2026_1112_0142). For PHIVOLCS the pair is
+ *  a minute stamp and a seconds stamp of that same minute (`maxIdGap` is unused); two seconds stamps never pair, so two
+ *  quakes of one minute keep apart, and a minute row pairs only with a seconds row of its minute within 50 km and 0.6 M. */
 export const REVISED_ID_WINDOWS: ReadonlyMap<string, { dtMs: number; km: number; maxDeltaMag: number; maxIdGap: number }> = new Map([
   ['csn', { dtMs: 3_000, km: 45, maxDeltaMag: 0.5, maxIdGap: 2 }],
+  ['phivolcs', { dtMs: 60_000, km: 50, maxDeltaMag: 0.6, maxIdGap: 0 }],
 ]);
 /** A REVIEWED_ID_WINDOWS provider's two windows (round 27, Resolver.reviewedPairScore). `near`: origin times, places and
  *  magnitudes at most this far apart. `far`, only when the reviewed solution lies outside the provider's region
@@ -560,14 +586,14 @@ export const AUTHORITY_WINDOW = {
   great: { fromMag: 7.0, km: 300, maxDeltaMag: 1.5 },
 } as const;
 /** Archive months `remerge.yml` merges per run, newest first (src/remerge-archives.ts). */
-export const REMERGE_MONTHS_PER_RUN = Number(process.env.REMERGE_MONTHS_PER_RUN || 4);
+export const REMERGE_MONTHS_PER_RUN = envNumber('REMERGE_MONTHS_PER_RUN', 4);
 /** The widest pair-time window any merge gate accepts: two events whose rows' origin times are all further apart can
  *  never fold, so the offline re-merge (src/remerge.ts) skips such candidates before whyNotMerged (Resolver
  *  `pairPrefilterMs`). Every window, for tests/remerge.test.ts to keep this at or above each one:
  *  - TEMPORAL_MS 60 s (20 s in a dense cell, Resolver.windows);
  *  - MODERATE_EVENT_MAX_DT_MS 20 s (the regional windows share it);
  *  - OVSICORI_WINDOW.maxDtMs 30 s (the out-of-region window);
- *  - REVISED_ID_WINDOWS (csn) 3 s; REVIEWED_ID_WINDOWS near 4 s / far 40 s;
+ *  - REVISED_ID_WINDOWS csn 3 s, phivolcs 60 s; REVIEWED_ID_WINDOWS near 4 s / far 40 s;
  *  - LOCATION_JOIN_DT_MS 8 s; REVIEWED_DT_HARD_MS (the reviewed-vs-reviewed guard only blocks);
  *  - epoch 2: AUTHORITY_WINDOW.maxDtMs 30 s; ISC_COPY_DT_MS 1 s.
  *  ComCat exact-id twins (Resolver.comcatTwin) have no time gate and are not pre-filtered. Live never passes it; enabling
@@ -600,7 +626,7 @@ export const CORRECTION_EPOCH = 3;
 /** Only events within this many days are kept in the in-memory dedup index. */
 export const HOT_WINDOW_DAYS = 7;
 /** aggregate loads only this many days of event_map shards (fast hot path). */
-export const LIVE_INDEX_DAYS = Number(process.env.LIVE_INDEX_DAYS ?? 10);
+export const LIVE_INDEX_DAYS = envNumber('LIVE_INDEX_DAYS', 10);
 /**
  * event_map shard length in UTC hours of event time (round 17, LANE G repository growth): an event-day's nodes are
  * written to `event_map/YYYY-MM-DD-HH.ndjson`, one file per EVENT_MAP_SHARD_HOURS hours starting at HH, and a run
@@ -617,14 +643,14 @@ export function parseShardHours(raw: string): number {
 }
 /** derive loads this many days (covers the 30-day month summary + revision tail);
  *  event_map shards older than this are pruned (their identity lives in frozen partitions). */
-export const EVENT_MAP_HORIZON_DAYS = Number(process.env.EVENT_MAP_HORIZON_DAYS ?? 45);
+export const EVENT_MAP_HORIZON_DAYS = envNumber('EVENT_MAP_HORIZON_DAYS', 45);
 
 // --- fetching ---
-export const FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS ?? 8000);
+export const FETCH_TIMEOUT_MS = envNumber('FETCH_TIMEOUT_MS', 8000);
 /** Backfill/onboarding tolerate slower nodes (hourly, not the 5-min hot path). */
-export const BACKFILL_FETCH_TIMEOUT_MS = Number(process.env.BACKFILL_FETCH_TIMEOUT_MS ?? 20000);
+export const BACKFILL_FETCH_TIMEOUT_MS = envNumber('BACKFILL_FETCH_TIMEOUT_MS', 20000);
 /** Each run asks providers for events in [now - lookback, now]; dedup absorbs overlap. */
-export const QUERY_LOOKBACK_MS = Number(process.env.QUERY_LOOKBACK_MS ?? 2 * 24 * 3600 * 1000);
+export const QUERY_LOOKBACK_MS = envNumber('QUERY_LOOKBACK_MS', 2 * 24 * 3600 * 1000);
 /** Providers whose `updatedafter` revision sweep may mint (PF-5a, src/sweep.ts). ComCat publishes
  *  many events days after their origin, once analysts release them, past the live query's
  *  lookback: 184 of 693 M ≥ 2.5 events with origins 2026-09-10..20 never reached the feed (a
@@ -896,7 +922,7 @@ export const ABSENCE_WATCH_PROVIDERS: readonly string[] = ['aec', 'mexico'];
 /** Watched sources whose file is their last N items rather than a time span (absence.ts). */
 export const ABSENCE_LAST_ITEMS_PROVIDERS: ReadonlySet<string> = new Set(['mexico']);
 export const ABSENCE_WATCH_DAYS = 10;
-export const FETCH_LIMIT = Number(process.env.FETCH_LIMIT ?? 5000);
+export const FETCH_LIMIT = envNumber('FETCH_LIMIT', 5000);
 
 // --- sweeps (src/sweep-cursor.ts, PF-5c) ---
 /** Sources whose `updatedafter` revision sweep runs every aggregate: the two FDSN nodes whose rows
@@ -913,7 +939,7 @@ export const DELETE_SWEEP_PROVIDERS: readonly string[] = ['usgs'];
  *  use the whole budget keeps the Aggregate step near 40 s and the job (about 100 s, most of it
  *  the data checkout) far inside its 5-minute timeout and the heartbeat's 5-minute interval.
  *  The live FDSN fetches keep FETCH_TIMEOUT_MS (or the source's own timeoutMs). */
-export const SWEEP_TIMEOUT_MS = Number(process.env.SWEEP_TIMEOUT_MS ?? 30_000);
+export const SWEEP_TIMEOUT_MS = envNumber('SWEEP_TIMEOUT_MS', 30_000);
 /** A sweep asks from this long before its cursor: an update can reach the provider's search index
  *  after the moment it is stamped with, and the runner's clock is not the provider's. Rows seen
  *  twice change nothing (an unchanged re-report is a no-op). */

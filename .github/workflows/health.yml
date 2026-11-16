@@ -9,7 +9,8 @@ name: health
 #             size and the walks' blocked markers
 #   alerts    scripts/alerts-watchdog.mjs: The Shelter's alert pipeline (data.theshelter.app/alerts/status.json, the
 #             USGS canary, the optional account usage)
-#   platform  scripts/platform-watchdog.mjs: The Shelter's API and config Workers and the config bundle's age
+#   platform  scripts/platform-watchdog.mjs: The Shelter's API and config Workers and the config bundles' age (prod,
+#             staging and dev)
 #   reconcile scripts/reconcile.mjs: the only writer of the three board issues ("[health] alert pipeline", "[health]
 #             feed", "[health] platform"; created together on the first run, then pinned and locked) and the only
 #             pinger; it sets the run's conclusion: red on every run a P1's finding holds (or cannot be judged), during

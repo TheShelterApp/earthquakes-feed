@@ -98,7 +98,9 @@ export function loadEventMap(root: string, opts: { sinceDays?: number; nowMs?: n
 /** Persist the in-memory event_map as shards of `hours` hours of each event-day (EVENT_MAP_SHARD_HOURS; byte-compare
  *  writes, lines in feed-id order). Only days present in `map` are (re)written, and each of those loses the shard files
  *  it no longer fills (an hour every node left, or the other layout's files after a change of `hours`); other days'
- *  shards are left untouched. Retires the legacy monolithic file once shards exist.
+ *  shards are left untouched. With `opts.floorDay` (the first event-day the run loaded), a day below it is not
+ *  rewritten from `map`: its nodes there are merged into its shards on disk, upserted by feed id. Retires the legacy
+ *  monolithic file once shards exist.
  *
  *  Round 17 (LANE G): each aggregate commit rewrote ~2.3 day shards of ~1.7 MB, and GitHub's incremental repacks keep
  *  about one compressed copy of every rewritten file per repack (APIs.md, Repository size): ~30 MB a day of the

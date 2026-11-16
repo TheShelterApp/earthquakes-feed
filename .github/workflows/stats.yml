@@ -1,7 +1,7 @@
 name: stats
 
 # The statistics builder (src/stats-history.ts; APIs.md, Statistics): the year files v1/stats/year/<Y>.json (the
-# current year and the two before it), the area files v1/stats/area/<Y>.json (1973 .. the last frozen day's year) and
+# last frozen day's year and the two before it), the area files v1/stats/area/<Y>.json (1973 .. the last frozen day's year) and
 # their ledger knowledge/stats/state.json on the `data` branch, which derive copies to Pages byte for byte. A year is
 # rebuilt when the digest of its inputs changes (a new frozen day, a re-merged archive or edition, a new remediation or
 # era B edition, a builder bump), newest first, a few years per run; each rebuilt year is checked against USGS ComCat's

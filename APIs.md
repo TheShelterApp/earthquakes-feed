@@ -34,9 +34,9 @@ The catalog. Fields:
 | `head_seq` | global monotonic knowledge clock |
 | `event_count` | live events in the rolling window |
 | `freshness.stale_after_seconds` | treat the feed as degraded past this age (default 1800) |
-| `data_commit` | git SHA for building immutable partition URLs |
+| `data_commit` | git SHA for building immutable partition URLs (a frozen partition's `url` is already pinned to it) |
 | `summaries` | map of `{name: {path, url, count}}` for the 20 rolling feeds (`count` = live events in that file) |
-| `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}`; `url` is the NDJSON: the Pages copy for an unfrozen day, jsDelivr `@data` for a frozen one in the v1 manifest and `@<data_commit>` in the signed v2 manifest (*Historical day partitions*). `count` is every feature of the file (all states); since round 26 (2026-10-14) `min_mag` / `max_mag` are the day's **live** events' range, recorded while the day is unfrozen and kept when it freezes (a retired event keeps its last solution: a phantom M8.2 folded into the Panama M7.7 of 2026-10-09 had kept that day at 8.2); days frozen before then keep the range over every feature |
+| `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}`; `url` is the NDJSON: the Pages copy for an unfrozen day, the immutable jsDelivr `@<data_commit>` copy for a frozen one (*Historical day partitions*). `count` is every feature of the file (all states); since round 26 (2026-10-14) `min_mag` / `max_mag` are the day's **live** events' range, recorded while the day is unfrozen and kept when it freezes (a retired event keeps its last solution: a phantom M8.2 folded into the Panama M7.7 of 2026-10-09 had kept that day at 8.2); days frozen before then keep the range over every feature. A run that rewrites a frozen day's partition (a revision moved an event onto that day) records the live range of the new bytes |
 | `archives[]` | rolled-up cold months: `{period, tag, asset, url, bytes, sha256, count, days[]}`; `count` is every line of the asset (all states). Since 2026-11 also `edition` (absent = 1), and for a re-merged month `merge_epoch`, `live`, `superseded`, `built_on`, `remediation[]`, and `previous[]` (the month's earlier assets, never deleted; see *Re-merged history*) |
 | `live` | the live index: `{path, url, head_seq, window_days}` (see *Live index* below; since 2026-10) |
 | `live_month` | the month index: `{path, url, head_seq, min_mag, window_days}` (see *Month index* below; since 2026-10-14) |
@@ -164,10 +164,12 @@ How to use it: keep the features of the days you fetched and the `head_seq` you 
 
 Why a delta is exact: `from_seq` for a window W is the largest `ingest_seq` among the events last changed at least W
 ago; sequence numbers grow with ingest time, so everything changed later is above it, and the delta is by definition
-every window event above it. One kind of change moves no seq: a revision of a provider row that does not represent its
+every window event above it. Two kinds of change move no seq: a revision of a provider row that does not represent its
 event can still change the event's compact feature through the fill-only fields (`updated`, `author`, `magAuthor`,
-`tsunami`, ...). derive compares each window event's line with the one the previous run committed and keeps such an
-event for a day in `knowledge/index/live_silent.json` with the previous run's head (`head_before`); every delta whose
+`tsunami`, ...); and the onboarding of a newly added source (README) can add an event to a window day with the head of a run
+that appended nothing, which is the previous derive's. derive compares each window event's line with the one the
+previous run committed (an event with no line counts only on a day whose previous lines are known whole) and keeps such
+an event for a day in `knowledge/index/live_silent.json` with the previous run's head (`head_before`); every delta whose
 `from_seq` is at most `head_before` carries it. Events that leave the window and retired markers that stop being
 published after 48 h are not changes: the first is your time filter, the second repeats a removal you already applied.
 Replayed over the 566 real derive commits of 2026-10-04 03:04 → 10-06 02:57 UTC (246 such changes detected), a client
@@ -372,10 +374,10 @@ origins `jsdelivr-sha` and `raw-sha` serve them too (a mirror at `data_commit` m
 |---|---|
 | `schema_version`, `format` | `1`, `1` |
 | `generated`, `generated_iso`, `head_seq` | the run, equal to the v1 manifest's |
-| `days[]` | `{date, path, count, filtered, bytes, sha256}` for each UTC day today − 60 … today, oldest first; a day missing here is named in `missing_days` |
-| `missing_days[]` | window days with no table this run (neither in the 45-day event map nor as a partition on `data`): count them as missing, never as quiet |
+| `days[]` | `{date, path, count, filtered, bytes, sha256}` for each UTC day today − 60 … today, oldest first; a day missing here is named in `missing_days`. Today's table holds the day so far: before its first event, in the first 30 min after 00:00 UTC, it is an empty table (`count` 0), not a missing day |
+| `missing_days[]` | window days with no table this run (neither in the 45-day event map nor as a partition on `data`; today only once it is 30 min past 00:00 UTC without an event): count them as missing, never as quiet |
 | `through` | the last day the year and area files cover (the stats builder's last frozen day), or `null` before its first run |
-| `years[]` | `{year, path, bytes, sha256, first, through, complete, mirrorable}`: the current year and the two before it |
+| `years[]` | `{year, path, bytes, sha256, first, through, complete, mirrorable}`: the current year and the two before it (in early January, until the new year's first day freezes, the year before and the two before that: the year of `through` and the two before it) |
 | `area[]` | `{year, path, bytes, sha256, min_mag, records, m6, complete, mirrorable}`: one per year from 1973 |
 | `completeness[]` | `{from, to, key, min_mag?}`: the completeness regimes (`eraB` 1973–1999 M4.5+ from USGS ComCat, `eraA` 2000 → 2023-07-06 17 sources, `archives` → 2026-07-05, `live` since). A count compared across two regimes is compared on M4.5+ only |
 | `attribution` | the licence line |
@@ -422,8 +424,8 @@ then distance, then ids) and join two groups only while the groups share no prov
 constraint). Each group keeps one row, its representative: the member holding a `usgs` provenance row (ComCat's
 magnitude is the reference), else the member whose chosen provider ranks first in the registry's provider `priority`
 (as the merge ranks), then the earliest origin, then the smallest feed id; the others are left out and counted. derive
-reconciles the rows of its whole 61-day window together before writing the day tables, so a pair across midnight
-counts once; the stats builder reconciles each year with the day before and the day after it as context. Counters:
+reconciles the rows of its whole 61-day window together, with the day before the window as context (never a table),
+before writing the day tables, so a pair across midnight counts once, the oldest day's too; the stats builder reconciles each year with the day before and the day after it as context. Counters:
 `collapsed` and `out_of_region` in each day table, `days.collapsed` and `days.out_of_region` per day and
 `reconciled: {rule, collapsed, out_of_region}` in a year file, `reconciled: {rule, collapsed, out_of_region}` in an
 area file. Which row a collapsed id folded into: `collapsed_into` in the event tables (below), so a shared id the
@@ -438,13 +440,14 @@ indexes `providers` (the sorted chosen providers). Optional columns, an absent o
 of them, a year table all but `delay`, an area table `depth`, `place`, `prov`. After the columns, `collapsed_into`
 (share links, 2026-11): `{"<feed id>": "<representative's feed id>"}`, keys in feed-id order, for rows the
 reconciliation collapsed (never a row of the table itself). A day table lists every collapsed row of the day (its
-representative is in that day's table or, across midnight, the neighbouring day's). A year table's `events` (M5+) and
+representative is in that day's table or, across midnight, the neighbouring day's; for the oldest day that can be
+the day before the window, which has no table: the event is then no longer available). A year table's `events` (M5+) and
 an area table's `m6` (M6+) list every row the year's reconciliation collapsed into one of the year's own rows at or
 above the table's floor, whatever the collapsed row's own magnitude (the live map may share a member's id rather than
 the representative's): the representative's row is always in that same table. The collapsed row is of the year or,
 across New Year, of the day before or after it (the build's context); a row of the year collapsed into a row of the
-neighbouring year is listed by the neighbouring year's table, when that year has one (year files cover the current
-year and the two before it, area files every year). Absent in year and area files of builder 2:
+neighbouring year is listed by the neighbouring year's table, when that year has one (year files cover the year of
+`through` and the two before it, area files every year). Absent in year and area files of builder 2:
 none listed.
 
 **Day table** (`v1/stats/days/YYYY-MM-DD.json`): the event table of `kind: "day"` with `date` (after `kind`),
@@ -503,6 +506,13 @@ day tables.
   context, each read from its own input, the fixed `REMERGE_INGEST_TIME` — and counts the result. The ledger records
   `remerged_in_memory: true` for such a year; once the merged assets are published, their checksums change the digest
   and the year is rebuilt from them. The epoch the statistics count at is at least 1 whatever `REMERGE_EPOCH` says.
+- **Known gap across New Year (AFAD):** an event of AFAD rows only that the pre-2026-10-01 parser stored 3 h early
+  (*Turkey (AFAD)*) at 21:00–24:00 UTC on 31 December is re-timed into 1 January by the normalization, but stays in
+  31 December's input (a merged archive keeps an event in its stored day, `stats.off_day`; the in-memory re-merge reads
+  that day only as context of the next year). Neither year counts it: a year leaves out a row timed outside its days,
+  and the next year reads 31 December only as context. That is at most the AFAD-only events of three hours a year,
+  small Turkish quakes; it is documented rather than counted, since counting them would change how every year reads
+  its inputs (a builder bump and a rebuild of all years) for a handful of rows.
 - **Era B** (1973–1999, USGS ComCat M4.5+): rows under M4.5 and the filtered events are left out, so `min_mag: 4.5` and
   `m45 == total`. Compare a count across the `completeness` epochs on M4.5+ only: the number of contributing agencies
   grows from one (era B) to 17 (era A, 2000 → 2023-07-05), more with the archives (→ 2026-07-04) and about 40 live.
@@ -513,7 +523,12 @@ day tables.
   below a band (ComCat's late publications, *Late publications*), `split copies` above one. A year that fails keeps its previous files (a first
   build stays absent) and is not retried until its inputs change; every real run names each year whose ledger entry
   failed in its marker `walk-blocked-stats`, which reaches the health board (`walks:stats:run`), and a run with
-  nothing blocked uploads a marker with only a `#` line, which resolves the board entry on the next health run.
+  nothing blocked uploads a marker with only a `#` line, which resolves the board entry on the next health run. A
+  ComCat count that fails (an outage: gate `error`) is no verdict on the year: it keeps its previous files, is retried
+  on the next run and is listed under *Deferred* in the run's report, not in the marker (an outage of days stops
+  `through` and shows as `feed:stats-through`). An outage never clears a standing gate failure: the year keeps its
+  `fail` verdict and stays in the marker; on the inputs that failed it is not deferred, since it is not retried. A dispatch's `years` naming a year with nothing to build (after the
+  year of `through`, or with no input on any day) gets a `::warning::STATS_YEARS` line.
 - **Ledger** `knowledge/stats/state.json` on `data` (derive reads `through` and each file's `sha256` from it):
   `{version, builder, through, generated, run_id, years: {Y: {inputs_digest, through, complete, area: {bytes, sha256,
   records, m6}, year?: {bytes, sha256}, check: {gate: ok|warn|fail|error, era, window, feed, comcat, ratio, bands},
@@ -546,7 +561,10 @@ curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2
 Since 2026-10 every unfrozen day (`frozen: false`: today and the 10 days before it, the days the 5-minute run can
 still change) is also on Pages at `/events/YYYY/MM/DD.ndjson`, the bytes of the `data` branch file (the v2 manifest's
 `sha256` covers both), and its `url` names that copy (`max-age=0, must-revalidate`: an ETag check, a 304 when
-unchanged). A frozen day's `url` is jsDelivr `@data` in the v1 manifest (jsDelivr can answer 403 for a file its branch package no longer holds) and the immutable `@<data_commit>` copy in the v2 manifest. `pages_url`, the
+unchanged). A frozen day's `url` is the immutable jsDelivr `@<data_commit>` copy in both published manifests (the v2 one
+since 2026-11-15, the v1 one since 2026-11-16; before, v1 named `@data`, where jsDelivr can answer 403 for a file its
+branch package no longer holds); the `manifest.json` committed to the `data` branch keeps `@data` and `data_commit:
+null`, since it cannot name the commit it is part of. `pages_url`, the
 GeoJSON day file, is unchanged.
 
 **From 2026-11-04, `@data/events/...` holds a day only once it is frozen.** The 5-minute run will stop committing
@@ -571,7 +589,15 @@ query and `includedeleted` delete query in that run, with where the sweep stands
 `updatedafter` it asked from), `pages`, `through` (its cursor after the run: the moment the last
 complete sweep was sent, so a sweep that did not complete keeps the previous one and the next run
 asks for the same window again), `epoch` (the catch-up epoch recorded with that cursor) and
-`catch_up: true` on the one-time catch-up run. `sweeps.epoch` is the current catch-up epoch.
+`catch_up: true` on the one-time catch-up run. `sweeps.epoch` is the current catch-up epoch. The cursors live in
+`knowledge/index/sweeps.json`; a torn or unreadable file reads as no cursors with a warning, so that run's sweeps catch
+up again and it writes a valid file. A damaged heal or correction marker (`knowledge/index/heal.json`,
+`correction.json`) stops the run instead, with an error naming the file: reading it as never run would repeat the
+one-time step.
+A run that loads the whole 45-day event-map horizon (the heal run) asks the sweeps from one day below derive's load
+floor (00:00 UTC of the oldest day derive loads); a revision whose origin is below that floor is not applied, since it
+would move the event onto a day derive no longer publishes, and the run log names it (`::notice` "Sweep below the derive
+floor"). Regular runs ask from 11 days back and never reach it.
 `comcat_twins_withdrawn` counts the AEC rows a ComCat delete withdrew in that run,
 `twin_withheld` the AEC reports held back beside another source's event, and `absent.aec`
 (`count`, the first 20 `ids`) the live AEC ids younger than 10 days that AEC's file no longer
@@ -600,7 +626,10 @@ providers/tls/README.md).
 **Failing and silent sources.** A provider whose fetch failed has `ok: false` and is in `degraded`. An FDSN answer of
 HTTP 204 is an empty success; HTTP 404 is an empty success only for a source whose query asks `nodata=404` (none does
 today) and an error otherwise, because it means the query path is gone (before 2026-10-04 every 404 counted as empty).
-A source can also answer `ok` with no rows while it has stopped publishing: since 2026-10-04 each run records per
+A custom adapter that asks several files (IPMA's two areas, IGP's year files, BMKG's two lists, CSN's day pages, CWA's
+two bundles) fails when every one of them failed, with `<id>: every request failed (<n>; last: <error>)`; some failing
+leaves the others' rows, `ok`. IGN fails when its file holds no readable `dias30`. Before 2026-11-16 all of these read as
+`ok` with no rows, which only the silence below noticed (FEED-PROV-L3). A source can also answer `ok` with no rows while it has stopped publishing: since 2026-10-04 each run records per
 source the last run whose answer had rows (`knowledge/index/provider_activity.json`, seeded once from the status
 history), and a source with no rows for longer than its activity budget is **silent**: listed in `silent` (by id:
 `last_non_empty_at`, null when none was seen since `counted_from`; `silent_hours`; `budget_hours`) and counted in
@@ -841,6 +870,15 @@ pairs of CSN ids within 60 s and 100 km in the observation log of 2026-07-05…1
 list only one id of 14 (all inside these limits) and both of 10; 3 of those 10 are one quake CSN
 lists twice (EMSC shows one event for each, and no agency a second quake) and fold too; the other
 7 stay apart. The older row stays in the event's provenance.
+
+PHIVOLCS (Philippines) is a second case of the same rule. Its id is the bulletin's UTC origin stamp, to the minute
+(`2026_1114_0919`) or, for most bulletins since about 2026-10-29, to the second (`2026_1114_091912`). A quake's first
+bulletin can carry the minute stamp and a later one the seconds stamp; the page then lists only the later one. Since
+2026-11-16 a minute-stamped row and a seconds-stamped row of that same minute whose places are ≤ 50 km apart and whose
+magnitudes differ by ≤ 0.6 are one quake: the seconds-stamped report joins the event holding the minute id, under the
+same limits as CSN's pairs. Two seconds-stamped ids are never paired, so two quakes of one minute stay two events. On
+the page of 2026-11-16, 10 of the 70 minute-stamped events the feed held from 2026-10-31 on had been re-issued that way,
+12–15 km and 0.1–0.5 M apart.
 
 OVSICORI (Costa Rica) is another: its analyst's review of a quake comes hours later under a new id while the automatic
 solution stays listed. Since round 27 (2026-10-14) such an automatic / reviewed pair is one quake (see *Regional
@@ -1380,8 +1418,9 @@ a deliberate one-off, like a heal, not an automatic step.
 
 Two logs record the runs themselves, beside the observation log: the status history (every aggregate run's
 `status.json`, one line per run) and `changes/YYYY-MM-DD.ndjson` (derive's change log of each day; the current day's
-file is also served as `/v1/changes/<day>.ndjson`, compressed like the day partitions on Pages, always whole: a Range
-request gets the full body). The status history is written to `status/history/YYYY-MM-DD.ndjson`,
+file is also served as `/v1/changes/<day>.ndjson` from its first line on, by every deploy whether or not that run
+appended to it (before 2026-11-16 only by a run that did), compressed like the day partitions on Pages, always whole: a
+Range request gets the full body). The status history is written to `status/history/YYYY-MM-DD.ndjson`,
 one file per UTC day of the run's ingest time, since round 17 (2026-10-06); until then it was one file per month,
 `status/history/YYYY-MM.ndjson`, and `status/history/2026-10.ndjson` keeps October's lines from before the switch. Read
 a month's lines in write order: the month file first (where there is one), then the day files by date
@@ -1412,7 +1451,8 @@ fourfold. The `health` watchdog checks the same from outside every 15 minutes (r
 tree from the API, logs the files under `status/history/` (count, total, largest, whatever their layout) and files
 `feed:size` on the "[health] feed" board while a status-history day file (`YYYY-MM-DD.ndjson`) is over 5 MB or any other
 file on the branch over 45 MB (resolved when none is; never a red run). A tree read that fails leaves `feed:size` as it
-was and files `watcher:feed-github`; a truncated listing is judged as far as it goes, with a `Data file size` warning.
+was and files `watcher:feed-github`; a truncated listing is judged as far as it goes, with a `Data file size` warning (a
+file over the line in it is filed; with none, `feed:size` is left as it was, never resolved on a partial listing).
 
 ## Repository size
 
@@ -1475,7 +1515,10 @@ Round 17 (LANE G) changes what the commits rewrite, never what consumers read, a
   UTC); the Resolver's equal-distance tie-break follows that order. The code before round 17 reads hour shards in name
   order (hour, then feed id): the same nodes, another order, so the rollback is `EVENT_MAP_SHARD_HOURS=24` rather than
   a revert. Replayed alone, the event_map's share of the days to 10-04, 10-05 and 10-06 falls from 13, 20
-  and 32 MB to 6, 7.5 and 10.
+  and 32 MB to 6, 7.5 and 10. A save rewrites only the days the run's map holds. Aggregate loads the event_map from a
+  floor day back and passes that floor to `saveEventMap` (`floorDay`): a day below it that a revision moved a node onto
+  (an `updatedafter` sweep reaches further back than the loaded window) is merged with its shards on disk, upserted by
+  feed id, never rewritten from the run's nodes alone, which would drop the day's other events (2026-11-15 audit).
 
 Both together replay to 45 MB a day on average over the eight days instead of 63 (23–42 % less a day, 28 % in all); at
 GitHub's 67 MB a day that is about 48 MB. What remains is about three quarters day partitions, which consumers read
@@ -1606,8 +1649,9 @@ does not follow era B (`DEEP_WALK_FLOOR`, *Earliest solutions*).
 An asset is never overwritten or deleted. A failed upload leaves its name behind as `unused` and the walk takes the next
 free name (`raw-usgs-2022-12.g2.ndjson.zst`); when a source joins an era, each month gets a new edition (`e2`) built
 from all its raw assets, newest month first, and the older edition stays. The index of all of it is the walk's one file
-for readers on the `data` branch: `knowledge/index/history.json` (read it through jsDelivr,
-`https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/knowledge/index/history.json`). It lists each raw asset
+for readers on the `data` branch: `knowledge/index/history.json` (read it through jsDelivr pinned to the manifest's
+`data_commit`, `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@<data_commit>/knowledge/index/history.json`;
+jsDelivr's `@data` can answer 403 for a file its branch package no longer holds). It lists each raw asset
 (`url`, `sha256`, `bytes`, `rows`, `provider_count`, `fetched_at`) and each edition (`url`, `sha256`, `events`, `days`,
 `sources`, `built_from`); a month's current edition is its highest `edition` not `withdrawn`. A re-merged edition also
 has `merge_epoch`, `merged_from`, `lines` and `superseded` (*Re-merged history*). It changes only when the walk publishes or
@@ -1682,7 +1726,9 @@ hour. A cron-started first-solutions run queued behind the Worker's and then hel
 across history's turn: 10 of the 48 Worker-started history runs waited 2.2–31 minutes (9 behind a cron-started or
 delayed first-solutions run, 1 behind a cron-started history run), and GitHub, which keeps one pending run or job per
 group, cancelled 3 cron-started runs while they waited. Replayed without those deliveries, the same 48 hours have no
-wait and no cancellation in the group. The fallback for a Worker outage is `walk-fallback.yml`
+wait and no cancellation in the group. Since the 2026-11-15 audit both sides of the group (history.yml's workflow-level
+group and the `collect` job's) set `queue: max`, so a run or job that waits for the group is kept until its turn, in
+arrival order, instead of being cancelled by the next one to arrive. The fallback for a Worker outage is `walk-fallback.yml`
 (`scripts/walk-fallback.mjs`): on its `:29` and `:50` crons it reads the walk's newest `workflow_dispatch` run and
 dispatches the walk as the Worker does only when that run is more than 2 h 5 min old (two missed ticks; the Worker
 missed 1 of 48 first-solutions ticks in those 48 hours, 10-06 19:48, and a single miss costs one hour of the walk). It
@@ -1725,7 +1771,7 @@ Three kinds of days are incomplete for some sources although they are frozen:
   2025-04-01 and 2025-05-24. All but KAGSR 2025-07-30 got their editions on 2026-10-04 (dispatches named their days;
   the scheduled run then took the refill queue only). KAGSR 2025-07-30, measured read only on 2026-11-14: KAGSR's
   answer for the whole day holds 676 events (and one for 2025-07-29 .. 08-01, 1,004: KAGSR applies no 500-row cap; the
-  backfill's custom-source rule, an answer of 490 rows or more is an overflow, marked the day), the 24 hour windows of
+  backfill's custom-source rule, an answer of 490 rows or more in the window is an overflow, marked the day), the 24 hour windows of
   the day sum to the same 676 ids, and the archived day (`archive-2025-07`, `events-2025-07.e3.tar.zst`) holds 578 of
   them: 98 KAGSR events of the day are missing (60 with ids above the newest one archived: KAGSR added them after the
   backfill fetched the day in July 2026). Since SHLTR-151 such a day is a block on backfill's marker
@@ -1767,7 +1813,9 @@ frozen days not archived yet (late ComCat):
   exactly the rows the source answered) in the Release `remediation-YYYY`. Editions built since 2026-11-08 carry
   `review_status` on their lines where the event's rows give one; the editions of 2026-10-04 do not and keep their
   bytes. All assets are immutable; a later remediation of the same day is the next edition, built from the archive
-  and every raw asset of the day. Each upload is read back and its checksum compared;
+  and every raw asset of the day. Each upload is read back and its checksum compared; a day whose upload or read
+  throws is a failed day (the run goes on, writes the index with what every other day uploaded, then ends red; after 3
+  such days in a row it starts no further day);
 - an edition replaces ONE archived day while its neighbours stay as archived, so it holds the archived day's events by
   feed id plus the events the remediation minted. An AFAD event re-read across midnight keeps the day its archive gave
   it (its time may then lie up to 3 h into the next day; `stats.off_day`), the AFAD re-read and its folds stay among
@@ -1805,6 +1853,9 @@ frozen days not archived yet (late ComCat):
   asked again by the scheduled run whatever its age, after the window's days so they keep the run's cap
   (`late_usgs.stale` in the report), and rebuilt on the current
   partition, so the edition never shadows the backfilled rows and the month's re-merge is not blocked at the roll.
+  The scheduled run comes from GitHub's cron alone (the heartbeat Worker does not dispatch `remediate`, `remerge` or
+  `stats`; README, *Cron-only workflows*): a late or dropped delivery delays a day's refresh and loses nothing, since
+  every day stays in the 12–45-day window for 33 daily runs.
 
 `knowledge/index/remediation.json` lists every raw asset (`provider`, `day`, `rows`, `requests`, `partial`,
 `sha256`, `reason`, …) and every edition (`day`, `edition`, `url`, `sha256`, `built_on`: the archive asset and its
@@ -1920,7 +1971,8 @@ the deep pilot era's 157,212 ComCat events, 2022-07-01 to 2023-07-06, as its edi
 day and a half, GeoNet's 22,000 about 13 hours, and the day sources (1–10 s per answer, about six months of days a run) six to eight
 hourly runs each; then each run
 takes the newly frozen day (about 400 ComCat requests). Failures: three retries per request (2, 8, 30 s, Retry-After
-honoured); a lane that still fails stops for the run and resumes there; 50 answers in a row without the event stop a
+honoured); a lane that still fails stops for the run and resumes there; a corrupt line of the day partition the lane
+reads its ids from is skipped with a warning, not a stop; 50 answers in a row without the event stop a
 lane (its streak is asked again); a day source's day answered with 204 or 404 is checked against the last day the node
 had content for: content there now means the node is up and the day's reports are recorded as missing at once (USP
 answered 204 for 2026-08-25, whose one report it no longer lists); with no such day yet, or with that day empty too (a
@@ -1970,7 +2022,7 @@ of the moment and seldom follows a revision; it follows CSN's), and EMSC replace
 its own solution later (most of KOERI's and AFAD's): such a copy counts only while it is within
 those limits of the agency's row. Where KOERI gives both ML and Mw the feed's row carries the Mw
 while EMSC copies the ML, so those copies do not count. Not on the list: BMKG (its public lists
-carry another solution), PHIVOLCS and JMA (their lists give the origin to the minute), GFZ,
+carry another solution), PHIVOLCS and JMA (their lists gave the origin to the minute when this was measured), GFZ,
 ReNaSS, ETHZ, NOA, IMO (too many copies differ from every version the feed saw), GSRAS (not
 KAGSR's solution), CN (the feed's NRCan rows carry no magnitude) and the agencies with fewer than 50
 copies (IPMA, IGP, GA, CWA, IPGP's observatories, BGS, USP, KNMI, AEC). The US networks the feed reads only through ComCat count against ComCat's row whose own
@@ -2120,7 +2172,12 @@ older than that is skipped with the reason `retention` (the run's log and the dr
 whose next window lies wholly before it is done with `stoppedBy: "retention"` in `knowledge/index/backfill.json`; a
 dispatched window that is still open there is closed), and a remediation day older than that is built without AFAD,
 its edition naming it in `not_fetched` (*Remediation editions*). Neither is a block on the health board: nothing more
-can be fetched. The live path asks AFAD for its last 2 days and is not affected. Since every backfill window lies
+can be fetched. A swarm can shorten the store below the 7 days (FEED-DI-2), so since 2026-11-16 every AFAD window query
+first asks the store over [window start, now] with `limit=1000`: when that answer holds 1,000 events and its oldest is
+more than 60 s after the window start, the window fails (`afad: its newest 1000 events, all it answers for, begin at
+…`) instead of reading as filled; backfill halves a walk's window or blocks on a dispatched one, as for any failure (on
+2026-11-16 the store began 2026-11-04 01:50:49 UTC, 12 days back). The live path asks AFAD for its last 2 days, with
+no such query, and is not affected. Since every backfill window lies
 before the live floor (the oldest `event_map` day, about 45 days back) and every queued refill day is archived, AFAD's
 history before the live floor can no longer be refilled from AFAD at all: what the archives and frozen partitions hold
 is all there is. The AFAD raw assets of the seam editions of 2026-06-28..30 (`raw-afad-2026-06-2{8,9}`,
@@ -2403,6 +2460,22 @@ depth, and one of four events mislocated by 185 km. Look again if the network st
 depths and creation times and lists quakes no agency has; then read its terms again (above). `DECLINED` also holds
 `map.geoshake.org`, the same service under the map's host name.
 
+**NIEP / INFP Romania (`eida-sc3.infp.ro`, issue #136), declined 2026-11-16.**
+
+- Where it comes from: not from the FDSN registry. NIEP's data centre entry there lists dataselect, station,
+  availability, wfcatalog and psd on `https://eida-sc3.infp.ro`, and no fdsnws-event. The event service is the curated
+  lead `http://eida-sc3.infp.ro/fdsnws/event/1/query` in src/discover.ts: an unadvertised SeisComP event service on
+  NIEP's EIDA waveform host.
+- Reachability: it answered 1 of 3 monthly probes (2026-11-01, over http, 3 events as text; whether it serves https is
+  unconfirmed) and timed out on 2026-11-16 together with every other infp.ro host.
+- Terms: no licence or terms of use found for the event service.
+- Coverage: NIEP's solutions already reach the feed through EMSC, which carries NIEP as the author: 6 of the 11 Romanian
+  events of 2026-11-01..15 on the `data` branch (the other five: EMSC 4, MCSM 1).
+
+Why not: no event or solution the feed lacks can be shown, the service is unadvertised and not reliably reachable, and
+its licence is unknown. Look again if NIEP registers an fdsnws-event service with stated terms. The curated lead stays
+in src/discover.ts, so removing the `DECLINED` entry brings the monthly probe back.
+
 ## Recipes
 
 ```js
@@ -2431,7 +2504,7 @@ const url = p.frozen
   : p.url;
 
 // Before 2023-07-06 (the deep history; APIs.md, Deep history): a month's current edition
-const h = await (await fetch('https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/knowledge/index/history.json')).json();
+const h = await (await fetch(`https://cdn.jsdelivr.net/gh/${m.data_repo}@${m.data_commit}/knowledge/index/history.json`)).json();
 const ed = h.editions.filter(e => e.period === '2022-12' && !e.withdrawn).sort((a, b) => b.edition - a.edition)[0];
 // ed.url: events-2022-12.e<N>.tar.zst, a zstd tar of DD.ndjson day files; check it against ed.sha256.
 // Keep feed.state === 'live' only: a re-merged edition also holds superseded lines (Re-merged history).

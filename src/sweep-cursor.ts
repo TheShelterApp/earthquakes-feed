@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, relative } from 'node:path';
 import {
   DELETE_SWEEP_PROVIDERS,
   FETCH_LIMIT,
@@ -43,12 +43,23 @@ export type SweepCursors = Record<string, SweepCursor>;
 
 export const sweepKey = (provider: string, kind: SweepKind): string => `${provider}:${kind}`;
 
-export function loadSweepCursors(root: string): SweepCursors {
+/** The cursors of knowledge/index/sweeps.json; {} when the file does not exist. A file that is not JSON or not an
+ *  object reads as {} with a warning, never a thrown run: a missing cursor only makes that sweep's one-time catch-up
+ *  due (sweepWindow, bounded by the origin floor and SWEEP_MAX_PAGES), and saveSweepCursors writes a valid file in the
+ *  same run. */
+export function loadSweepCursors(root: string, warn: (msg: string) => void = console.warn): SweepCursors {
   const f = dataPaths(root).sweepCursors;
   if (!existsSync(f)) return {};
-  const raw = JSON.parse(readFileSync(f, 'utf8')) as Record<string, Partial<SweepCursor>>;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(f, 'utf8'));
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`not an object: ${JSON.stringify(raw)}`);
+  } catch (err) {
+    warn(`::warning title=Sweep cursors::${relative(root, f)} is unreadable (${err instanceof Error ? err.message : String(err)}); read as empty, the sweeps catch up`);
+    return {};
+  }
   const out: SweepCursors = {};
-  for (const [k, c] of Object.entries(raw)) {
+  for (const [k, c] of Object.entries(raw as Record<string, Partial<SweepCursor>>)) {
     if (typeof c?.through === 'string' && Number.isFinite(Date.parse(c.through)) && typeof c.epoch === 'number') {
       out[k] = { through: c.through, epoch: c.epoch };
     }

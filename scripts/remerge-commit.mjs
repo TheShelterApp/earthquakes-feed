@@ -47,6 +47,11 @@ export function applyPending(archives, remediation, pending) {
       dropped.push(`${m.period}: no archive entry`);
       continue;
     }
+    // An entry or a pending month without a checksum cannot be matched (and undefined === undefined would apply it).
+    if (typeof cur.sha256 !== 'string' || typeof m.base_sha256 !== 'string') {
+      dropped.push(`${m.period}: archive entry or pending month has no sha256`);
+      continue;
+    }
     if (cur.sha256 !== m.base_sha256) {
       dropped.push(`${m.period}: the entry moved on (${cur.sha256.slice(0, 12)}, built on ${m.base_sha256.slice(0, 12)})`);
       continue;

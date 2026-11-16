@@ -48,10 +48,12 @@ export async function fetchHttp(url: string, timeoutMs: number): Promise<HttpAns
 
 /** Retry-After as delta-seconds or an HTTP date, in ms from `nowMs`; null when absent or unreadable. */
 export function parseRetryAfter(v: string | null, nowMs: number): number | null {
-  if (!v) return null;
-  const s = Number(v.trim());
+  const raw = v?.trim();
+  // Number('') is 0: a blank header is absent, not 'retry now'.
+  if (!raw) return null;
+  const s = Number(raw);
   if (Number.isFinite(s)) return Math.max(0, s * 1000);
-  const t = Date.parse(v);
+  const t = Date.parse(raw);
   return Number.isFinite(t) ? Math.max(0, t - nowMs) : null;
 }
 

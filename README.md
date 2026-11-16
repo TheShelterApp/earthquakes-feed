@@ -187,8 +187,9 @@ new sources are reviewed and enabled by hand, then **auto-backfilled** into hist
 
 Kazakhstan, Kyrgyzstan, Uzbekistan, Tajikistan, Turkmenistan, Belarus, Ukraine, and
 Pakistan have no open real-time earthquake API (KNDC is CTBTO-restricted; others publish
-only delayed waveforms); Iran (IRSC) geo-restricts to domestic IPs, and Romania (INFP) has no
-reachable event service. Those regions are covered via the global catalogs until an
+only delayed waveforms); Iran (IRSC) geo-restricts to domestic IPs, and Romania (INFP/NIEP) has no
+advertised, reliably reachable event service (its solutions arrive through EMSC; APIs.md, *Sources looked at and not
+added*). Those regions are covered via the global catalogs until an
 open, reachable source appears. The Philippines (PHIVOLCS) has no machine API either, but is a source: its public
 HTML bulletin is read by a custom adapter (hypocentre parameters only).
 
@@ -227,7 +228,7 @@ HTML bulletin is read by a custom adapter (hypocentre parameters only).
   (2023-07-06) in July 2026 except ISC, whose walk is paused; a backfilled row is the
   source's solution when it was fetched, while the log holds each report as first seen
   since 2026-07-05 (`scripts/first-observations.ts`; [APIs.md](APIs.md#history-and-backfill)). A source that answers
-  for its recent past only (registry `retentionDays`; AFAD since late 2026: it answers its newest 1,000 events, about 12 days at its usual rate, and is asked for the last 7 whole days only, `retentionDays: 7`) is
+  for its recent past only (registry `retentionDays`; AFAD since late 2026: it answers its newest 1,000 events, about 12 days at its usual rate, and is asked for the last 7 whole days only, `retentionDays: 7`, and a window that a swarm has pushed out of those 1,000 fails instead) is
   never asked for an older day: backfill skips such windows with the reason `retention` and remediation builds the day
   without it (`not_fetched` in the edition), instead of recording its empty answer as filled
   ([APIs.md](APIs.md#turkey-afad)). `gh workflow run backfill.yml -f dry_run=true` (with `starttime`, `endtime`,
@@ -315,7 +316,8 @@ drain a queue that got too long: `gh run cancel <id>` for the surplus runs (neve
 
 ## Run locally
 
-Requires Node 22+.
+Requires Node 22+. `.npmrc` turns dependency install scripts off (`ignore-scripts=true`, as in every workflow's
+`npm ci`); nothing here needs them, and `validate.yml` checks esbuild, tsx and wrangler without them.
 
 ```bash
 npm install
@@ -327,6 +329,12 @@ DATA_DIR=.data npm run aggregate                 # fetch → dedup → append lo
 DATA_DIR=.data PUBLIC_DIR=public npm run derive  # summaries + day files + partitions + live and month index + detail hours + manifest
 DATA_DIR=.data PUBLIC_DIR=public npm run validate
 ```
+
+The numeric settings read from the environment (`FETCH_TIMEOUT_MS`, `LIVE_INDEX_DAYS`, and the workflow_dispatch
+inputs such as `max_units`, `months`, `max_days`, `max_years` and first-solutions' `budget_minutes`) take their default
+when unset or blank; any other value must be a whole number of at least 1 (`REMERGE_EPOCH_OVERRIDE` also takes 0,
+`BACKFILL_TARGET_YEARS` a fraction; `envNumber`, src/config.ts), or the run stops at once with an error naming the
+variable.
 
 ## Deploy (for a fork)
 
@@ -352,6 +360,14 @@ skipped as stale, and an unreachable ledger never stops a dispatch. Each activat
 (`wrangler deployments list` lists oldest first; the active version is the last entry). A change
 to the Worker goes through a pull request like any other code and is deployed after the merge.
 
+**Cron-only workflows.** `remediate` (daily, 04:43 UTC), `remerge` (`:41` every 6 h) and `stats` (`:43` every 6 h) run
+on GitHub's crons and by hand only: the Worker does not dispatch them and `walk-fallback.yml` does not cover them, so
+GitHub's late or dropped deliveries delay them (accepted, 2026-11-15 audit, FEED-WF-4). A delay loses nothing: the
+late-ComCat refresh asks again for every frozen day 12–45 days old, so a day stays in its window for 33 daily runs; the
+refill queue and the saturated days persist in `remediation.json` until a run takes them; a re-merge month waits for
+the next run; and a statistics index more than 3 days behind is `feed:stats-through` (P3, below). Covering them from
+the Worker would need hour-aware dispatch (`workflowFor` takes only the minute, and `:41` is backfill's).
+
 ## Health watchdogs (`.github/workflows/health.yml`)
 
 The heartbeat Worker dispatches `health.yml` every 15 minutes (:07, :22, :37, :52). The workflow's own `:25` cron is
@@ -366,7 +382,8 @@ minutes (one that was cancelled or skipped does not count). One health run runs 
   or a findings file it cannot write, turns its job red.
   - `feed` ([`scripts/feed-health.mjs`](scripts/feed-health.mjs)): the live `v1` and `v2` manifests, `v1/status.json`,
     the files on `data`, the repository size, the walks' blocked markers and the writer queue (a GitHub read that fails
-    is `watcher:feed-github`; a truncated listing of the `data` tree is a warning).
+    is `watcher:feed-github`; a truncated listing of the `data` tree is a warning, and leaves `feed:size` as it was when
+    it shows no file over the line).
   - `alerts` ([`scripts/alerts-watchdog.mjs`](scripts/alerts-watchdog.mjs)): The Shelter's alert pipeline, from the
     alerts-gateway's public `https://data.theshelter.app/alerts/status.json`, the USGS `4.5_hour` canary and, with the
     `CF_ANALYTICS_TOKEN` secret, the account's daily usage (only account totals are logged, and an API error is
@@ -375,7 +392,8 @@ minutes (one that was cancelled or skipped does not count). One health run runs 
     changes one, update the mirror and that snapshot (`tests/platform-constants.test.ts` compares the snapshot with a
     platform checkout when one is at hand).
   - `platform` ([`scripts/platform-watchdog.mjs`](scripts/platform-watchdog.mjs)): `https://api.theshelter.app/v1/health`,
-    `https://config.theshelter.app/healthz` and the config bundle's age.
+    `https://config.theshelter.app/healthz` and the config bundle's age; the staging and dev bundles' expiry, from
+    `config-staging.theshelter.app/healthz` and `config-dev.theshelter.app/healthz`.
 - **`reconcile`** ([`scripts/reconcile.mjs`](scripts/reconcile.mjs)): the only job that writes issues. It applies each
   rule's holds, resolves, inhibitions, escalation and the silences, writes the boards and sets the run's conclusion. It
   runs after a failed evaluator too (its rows freeze), but not in a run cancelled by hand. Exit 1 is red for a finding;
@@ -446,7 +464,7 @@ hundred, the board is not written at all: exit 3). The label `health:p1` … `he
 | `alerts:budget` | P2 | The tightest of the gateway's five daily free-tier ratios projected to 0.75 of the day (from 02:00 UTC); resolves under 0.65 | What spends rows or requests (`budget` in `status.json`), before the degradation ladder sheds tiers |
 | `alerts:degraded` | P1; P3 when forced | The degradation ladder is active | Relieve the budget cause; a forced override is a reminder to lift it |
 | `alerts:policy` | P1 | The compiled fallback policy runs instead of the signed one | Republish or repair the signed alerts policy |
-| `alerts:apns` | P1 / P3 | P1: APNs not configured, `apns.problems` not empty, or split mode without production; P3: today's `skipped_no_key` or `retry_dropped_budget` above 0 | The gateway's APNs keys for the environment named |
+| `alerts:apns` | P1 / P2 / P3 | P1: APNs not configured, `apns.problems` not empty, or split mode without production; also when today's fan-out jobs sent 0 with 3 or more pushes failed or queued for retry. P2: at least 20 pushes failed today and they are half or more of today's sent + failed (queued retries left out), or today's last fan-out job ended failed (its deadline passed before every shard reported). P3: today's `skipped_no_key` or `retry_dropped_budget` above 0 | The gateway's APNs keys for the environment named; for the delivery rules, the APNs provider key, Apple's status and the gateway's fan-out shards |
 | `alerts:selftest` | P1 | The selftest (below) | Expected; never stored on a board |
 | `feed:writer-queue` | P2 | More than 3 runs wait for (or are about to enter) the `earthquakes-feed-writer` group, or the older live manifest is over 15 min old while any does (unfinished runs older than 6 h are GitHub's ghosts and do not count) | [Writer group](#writer-group): cancel the surplus runs (`gh run cancel <id>`), pace the dispatches; usually a burst dispatched with `force=true` |
 | `feed:freshness` | P2 (unreachable: 2nd run) | The older of the live `v1` and `v2` manifests past `stale_after_seconds` (1,800 s), confirmed by a re-read 60 s later; or a manifest unreachable | The aggregate runs, the heartbeat Worker and its `GH_PAT`, the Pages deploy; `v1` fresh and `v2` stale means signing stopped |
@@ -458,12 +476,13 @@ hundred, the board is not written at all: exit 3). The label `health:p1` … `he
 | `feed:repo-size` | P3 | The repository over 8,000,000 KB | [APIs.md](APIs.md#repository-size) |
 | `feed:stats` | P2 (after 30 min) | `providers/stats.json` says `derive_publish: "on"` and the live v1 manifest has no `stats` pointer | derive's `::warning::stats dropped: …` says why; the live feed is unaffected and the app keeps its last verified statistics |
 | `feed:stats-through` | P3 | With `history_enabled`, the statistics index's `through` null or more than 3 days behind the last frozen day | The stats builder's runs (`stats.yml`) and its ComCat gate |
-| `feed:stats-days` | P3 | The statistics index names `missing_days` | A window day with neither an event-map day nor a partition on `data` |
+| `feed:stats-days` | P3 | The statistics index names `missing_days` | A window day with neither an event-map day nor a partition on `data`; today only once 30 min past 00:00 UTC without an event (ingest stalled or every provider failing: see `feed:freshness` and the `feed:source:<id>` rows) |
 | `walks:<workflow>:<source>` | P3 | A line of the newest blocked marker of `history`, `first-solutions`, `backfill`, `archive`, `remerge` or `stats` (a year that failed its ComCat gate or its build, a failed verify, a month that cannot be re-rolled or merged, a source failing for days), if under 26 h old (`run` for a line about the walk itself) | The walk run's warning; the row resolves with the walk's next run that names it no more (each run states every standing block), at the latest 26 h after the last marker |
 | `platform:api` | P2 | `/v1/health` not 200 `ok: true` after 3 tries over 60 s, or `sessionKeySource: "ephemeral"` | The API Worker; an ephemeral key means its session signing secret is missing (random 401s in the app) |
 | `platform:api:envelope` | P3 | `providerTokenEnvelope: "missing"` | Account deletion cannot revoke at Apple until the envelope key is set |
 | `platform:config-worker` | P3 | `/healthz` not 200 `ok: true`; escalates at 6 h | Apps read the data copy first and keep their last good config: the config Worker |
 | `config:bundle` | P3 / P2 / P1 | The older of the config bundle's data copy and the signed policy over 5 / 10 / 25 days (the bundle expires at 30); or the copy's version behind `/healthz` for 24 h (a partial publish) | Rerun the config bundle's refresh, then check the copy reaches the host's version |
+| `config:bundle:staging`, `config:bundle:dev` | P3 | That environment's bundle, by the `expiresAt` its config Worker's `/healthz` serves: under 25 days left (no refresh for over 5 of its 30), or expired; a host without `expiresAt` is not judged | Rerun the config refresh for that environment (the config repo's `publish.yml`, which refreshes every environment twice a week) |
 | `platform:cf-usage` | P2 / P1 | Only with `CF_ANALYTICS_TOKEN`: Workers requests or D1 rows written at 80 % (or a projected 100 %) / 95 % of the free daily caps | What spends them; the caps reset at 00:00 UTC |
 | `watcher:<name>` | P3 (2nd run) | The monitoring itself: an evaluator without findings, a refused token, a usage query that failed, a GitHub read of the feed job (`feed-github`), board comments `reconcile` could not post (`reconcile`), no selftest for 35 days (`selftest-overdue`) | The job's log; the frozen rows wait for it; `selftest-overdue`: run the selftest |
 

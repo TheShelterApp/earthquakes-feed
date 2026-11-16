@@ -9,7 +9,9 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { rootCertificates } from 'node:tls';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { CERT_HINT, PIN_HINT, getText, isPinnedCertError, pinnedCa, pinnedLeaf } from '../src/custom.js';
+import { HISTORY_SOURCES } from '../src/first-solutions.js';
 import { loadRegistry } from '../src/providers.js';
 
 // FEED-SEC-1: TMD and PHIVOLCS serve their leaf certificate without the intermediate. The feed fetched them with TLS
@@ -184,6 +186,35 @@ test('pinned fetch: the leaf a pinned host presented is kept by host name (statu
   }
 });
 
+test('pinned fetch: a body past maxBytes is aborted, also once inflated; a gzip body under it decodes (FEED-PROV-L5)', async (t) => {
+  const chain = makeChain();
+  if (!chain) {
+    t.skip('openssl CLI not available');
+    return;
+  }
+  const server = createServer({ key: chain.leafKey, cert: chain.leaf }, (req, res) => {
+    if (req.url === '/big') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('x'.repeat(5_000));
+      return;
+    }
+    // PHIVOLCS answers gzip whatever the request asks: the size that counts is the inflated one.
+    res.writeHead(200, { 'content-type': 'text/plain', 'content-encoding': 'gzip' });
+    res.end(gzipSync(Buffer.alloc(req.url === '/bomb' ? 5_000 : 800, 0x61)));
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  const port = (server.address() as AddressInfo).port;
+  const opts = { ca: [chain.int, chain.root], retries: 0, timeoutMs: 5_000, maxBytes: 1_000 };
+  try {
+    await assert.rejects(getText(`https://localhost:${port}/big`, opts), (e: Error) => /body over 1000 bytes/.test(e.message) && !isPinnedCertError(e.message));
+    await assert.rejects(getText(`https://localhost:${port}/bomb`, opts), (e: Error) => /body over 1000 bytes/.test(e.message) && !isPinnedCertError(e.message));
+    assert.equal(await getText(`https://localhost:${port}/small`, opts), 'a'.repeat(800));
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
 test('tls pins: PHIVOLCS pins GlobalSign\'s current OV CAs beside the one of its leaf, ahead of the 2026-11-19 renewal', () => {
   // The leaf under GlobalSign RSA OV SSL CA 2018 expires 2026-11-19; GlobalSign issues OV leaves under its GCC R3 OV TLS
   // CA 2024 and GCC R46 OV TLS CA 2025 now. Both are pinned so the renewed leaf verifies on the first fetch, instead of
@@ -191,4 +222,15 @@ test('tls pins: PHIVOLCS pins GlobalSign\'s current OV CAs beside the one of its
   const phivolcs = registry.find((p) => p.id === 'phivolcs')!;
   const subjects = pinnedCa(phivolcs, registryPath).map((pem) => /CN=([^\n]+)/.exec(new X509Certificate(pem).subject)?.[1]);
   assert.deepEqual(subjects, ['GlobalSign RSA OV SSL CA 2018', 'GlobalSign GCC R3 OV TLS CA 2024', 'GlobalSign GCC R46 OV TLS CA 2025']);
+});
+
+test('cleartext: only SSN (mexico) and KOERI are fetched over http, and their notes say why (FEED-PROV-L4)', () => {
+  // IPGP, USP and BGS answered the same bytes over https with a chain Node trusts on 2026-11-16 and moved to it. SSN
+  // refuses port 443 and KOERI does not answer on it.
+  const cleartext = registry.filter((p) => p.active && new URL(p.base).protocol === 'http:');
+  assert.deepEqual(cleartext.map((p) => p.id).sort(), ['koeri', 'mexico']);
+  for (const p of cleartext) assert.match(p.notes ?? '', /Cleartext HTTP: .*port 443.*FEED-PROV-L4/, p.id);
+  for (const p of registry.filter((x) => x.fallbackBase)) assert.equal(new URL(p.fallbackBase!).protocol, 'https:', p.id);
+  // The first-solutions history walk reads the same hosts.
+  for (const s of HISTORY_SOURCES) assert.equal(new URL(s.url('2026-11-10')).protocol, 'https:', s.provider);
 });

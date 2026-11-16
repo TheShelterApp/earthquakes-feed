@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { type ArchiveEntry, type ArchiveRemediationRef, type ArchiveUnused, type Archives, archiveAssetName, extractTarball, makeTarball, nextFreeEdition, uploadNew } from './archive.js';
 import { featureToNode } from './bitemporal.js';
-import { DATA_DIR, REMERGE_EPOCH, REMERGE_INGEST_TIME, REMERGE_MONTHS_PER_RUN, REMERGE_RULES, REPO, dataPaths } from './config.js';
+import { DATA_DIR, REMERGE_EPOCH, REMERGE_INGEST_TIME, REMERGE_MONTHS_PER_RUN, REMERGE_RULES, REPO, dataPaths, envNumber } from './config.js';
 import { type HistoryIndex, currentEdition as currentHistoryEdition } from './history-index.js';
 import { type ReleaseIo, ghReleaseIo } from './log-archive.js';
 import { loadRegistry } from './providers.js';
@@ -684,7 +684,7 @@ const dryRunIo: ReleaseIo = {
 function main(): void {
   const out = process.env.REMERGE_OUT ?? 'remerge-out';
   const dryRun = process.env.REMERGE_DRY_RUN === '1';
-  const override = Number(process.env.REMERGE_EPOCH_OVERRIDE || 0);
+  const override = envNumber('REMERGE_EPOCH_OVERRIDE', 0, { min: 0 });
   if (override && !dryRun) throw new Error('REMERGE_EPOCH_OVERRIDE is for dry runs only');
   const noWait = process.env.REMERGE_NO_WAIT === '1';
   if (noWait && !dryRun) throw new Error('REMERGE_NO_WAIT is for dry runs only');
@@ -705,7 +705,7 @@ function main(): void {
     dryRun,
     epoch,
     ingestTime: REMERGE_INGEST_TIME,
-    deadline: Date.now() + Number(process.env.REMERGE_DEADLINE_S || 2100) * 1000,
+    deadline: Date.now() + envNumber('REMERGE_DEADLINE_S', 2100) * 1000,
     registry: loadRegistry(),
     archives,
     remediation,
@@ -716,7 +716,7 @@ function main(): void {
   console.log(`remerge: epoch ${epoch} rules ${REMERGE_RULES}${dryRun ? ' (dry run)' : ''}; ${archives.list.length} archive month(s), ${archives.list.filter((e) => archiveIsMerged(e, epoch)).length} merged`);
   let res: ReturnType<typeof runRemergeArchives>;
   try {
-    res = runRemergeArchives(ctx, { max: Number(process.env.REMERGE_MONTHS || REMERGE_MONTHS_PER_RUN), ...(only ? { only } : {}) });
+    res = runRemergeArchives(ctx, { max: envNumber('REMERGE_MONTHS', REMERGE_MONTHS_PER_RUN), ...(only ? { only } : {}) });
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

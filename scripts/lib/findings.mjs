@@ -452,7 +452,8 @@ export const RULES = Object.freeze({
   }),
   'feed:stats:days': rule('feed:stats:days', {
     title: 'feed statistics days missing',
-    // The index names missing_days: a window day with neither an event-map day nor a partition on `data`.
+    // The index names missing_days: a window day with neither an event-map day nor a partition on `data` (the day in
+    // progress only after its first 30 min, STATS_TODAY_GRACE_MS: derive publishes it empty before that).
     board: 'feed', class: 'config', severity: 'P3', key: 'feed:stats-days',
   }),
   'walks': rule('walks', {
@@ -497,6 +498,15 @@ export const RULES = Object.freeze({
     // an upload that stopped partway (2026-10-19, v65/v66).
     board: 'platform', class: 'config', severity: 'P3', key: 'config:bundle',
     holdMs: 24 * HOUR,
+  }),
+  'config:bundle:env': rule('config:bundle:env', {
+    title: 'staging or dev config bundle old',
+    // The staging and dev bundles, which no status.json reports (their gateways publish only on a debug tick): the
+    // `expiresAt` their config Worker's /healthz serves. Under 25 d left (no refresh for over 5 d of the bundle's 30)
+    // or expired: P3 at most, as no user runs on them; the staging TestFlight and dev builds do. Key
+    // `config:bundle:<env>` (2026-11-15 audit, FEED-PLATFORM-WATCHDOG).
+    board: 'platform', class: 'expiry', severity: 'P3', keyPrefix: 'config:bundle:',
+    limits: { envs: ['staging', 'dev'], minLeftMs: 25 * DAY, expiresMs: 30 * DAY },
   }),
   'platform:cf-usage': rule('platform:cf-usage', {
     title: 'Cloudflare account usage',

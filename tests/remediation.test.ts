@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -8,7 +8,7 @@ import { gunzipSync } from 'node:zlib';
 import { featureToNode, nodeToFeature } from '../src/bitemporal.js';
 import { LocalStore } from '../src/history-store.js';
 import { NO_PARTITION_FORMAT, dayPartitionText } from '../src/partitions.js';
-import { BOOTSTRAP_2026_07_05, type DayRunDeps, remediateDay, resolveProviders } from '../src/remediate.js';
+import { BOOTSTRAP_2026_07_05, type DayRunDeps, MAX_CONSECUTIVE_DAY_ERRORS, type ThrewReport, dayThrewRecorder, finishRun, forEachDayGuarded, remediateDay, resolveProviders } from '../src/remediate.js';
 import type { WindowOutcome } from '../src/providers.js';
 import { Resolver } from '../src/dedup.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
@@ -364,6 +364,98 @@ test('seam day: a failed source uploads only the other raws and no edition; the 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('a day that throws is a failed day: the run goes on and the index keeps the editions the other days uploaded', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'efd-seam-'));
+  try {
+    const idx = emptyRemediationIndex();
+    const prevDay = '2026-06-28';
+    const rows = [usgsRow('ci0', S0 - 5 * HOUR), usgsRow('ci1', S0 + 2 * HOUR), usgsRow('ci2', S0 + 30 * HOUR)];
+    // The Release refuses every asset of the second day (a gh error, or a read-back that does not match).
+    class FailingStore extends LocalStore {
+      override upload(tag: string, file: string): void {
+        if (file.includes(SEAM)) throw new Error(`gh release upload ${tag}: HTTP 502`);
+        super.upload(tag, file);
+      }
+    }
+    const deps: DayRunDeps = { ...seamDeps(dir, seamArchive(), stubSources(rows)), store: new FailingStore(join(dir, 'releases')) };
+    const failed: string[] = [];
+    const run = async (day: string): Promise<void> => {
+      const r = await remediateDay(day, refillTasks(day, ['usgs'], new Set()), idx, deps);
+      failed.push(...r.failed);
+    };
+    const unrun = await forEachDayGuarded([prevDay, SEAM, '2026-06-30'], run, (_day, f) => failed.push(f));
+    assert.deepEqual(unrun, []);
+    assert.deepEqual(failed, [`${SEAM}: gh release upload remediation-2026: HTTP 502`]);
+    assert.deepEqual(idx.editions.map((e) => e.asset).sort(), ['events-2026-06-28.e1.ndjson.gz', 'events-2026-06-30.e1.ndjson.gz'], 'the days on either side are indexed');
+    assert.ok(indexText(idx).includes('events-2026-06-28.e1.ndjson.gz'), 'and written with the index');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('finishRun: a run where a day threw writes the index and changed=true, then asks for exit code 1 (never exits)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'efd-seam-'));
+  const savedOutput = process.env.GITHUB_OUTPUT;
+  try {
+    const idx = emptyRemediationIndex();
+    const rows = [usgsRow('ci0', S0 - 5 * HOUR), usgsRow('ci1', S0 + 2 * HOUR), usgsRow('ci2', S0 + 30 * HOUR)];
+    class FailingStore extends LocalStore {
+      override upload(tag: string, file: string): void {
+        if (file.includes(SEAM)) throw new Error(`gh release upload ${tag}: HTTP 502`);
+        super.upload(tag, file);
+      }
+    }
+    const deps: DayRunDeps = { ...seamDeps(dir, seamArchive(), stubSources(rows)), store: new FailingStore(join(dir, 'releases')) };
+    const report: ThrewReport & { late_failed: string[] } = { failed: [], days: [], late_failed: [] };
+    const threw: string[] = [];
+    await forEachDayGuarded(['2026-06-28', SEAM, '2026-06-30'], async (day) => {
+      const r = await remediateDay(day, refillTasks(day, ['usgs'], new Set()), idx, deps);
+      report.failed.push(...r.failed);
+      report.days.push({ day, edition: r.edition?.asset ?? null, raws: r.raws.map((x) => x.asset), stats: r.edition?.stats ?? null, failed: r.failed });
+    }, dayThrewRecorder(report, threw, (f) => report.late_failed.push(f)));
+    const failure = `${SEAM}: gh release upload remediation-2026: HTTP 502`;
+    assert.deepEqual(threw, [failure]);
+    assert.deepEqual(report.failed, [failure]);
+    assert.deepEqual(report.late_failed, [failure], 'the extra sink (late_usgs.failed) gets it too');
+    assert.deepEqual(report.days.map((d) => [d.day, d.edition]), [
+      ['2026-06-28', 'events-2026-06-28.e1.ndjson.gz'],
+      [SEAM, null],
+      ['2026-06-30', 'events-2026-06-30.e1.ndjson.gz'],
+    ]);
+    const outFile = join(dir, 'github-output');
+    writeFileSync(outFile, '');
+    process.env.GITHUB_OUTPUT = outFile;
+    const localIndex = join(dir, 'remediation.json');
+    const res = finishRun(idx, null, localIndex, threw);
+    assert.deepEqual(res, { changed: true, exitCode: 1 });
+    const written = readFileSync(localIndex, 'utf8');
+    assert.ok(written.includes('events-2026-06-28.e1.ndjson.gz') && written.includes('events-2026-06-30.e1.ndjson.gz'), 'the red run still writes the index');
+    assert.equal(readFileSync(outFile, 'utf8'), 'changed=true\n');
+    // Unchanged index and no throw: nothing written, changed=false, exit 0.
+    writeFileSync(outFile, '');
+    assert.deepEqual(finishRun(idx, written, join(dir, 'unchanged.json'), []), { changed: false, exitCode: 0 });
+    assert.equal(readFileSync(outFile, 'utf8'), 'changed=false\n');
+  } finally {
+    if (savedOutput === undefined) delete process.env.GITHUB_OUTPUT;
+    else process.env.GITHUB_OUTPUT = savedOutput;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('forEachDayGuarded: after MAX_CONSECUTIVE_DAY_ERRORS throws in a row no further day starts; a day that works ends the streak', async () => {
+  const days = ['d1', 'd2', 'd3', 'd4', 'd5', 'd6', 'd7'];
+  const ran: string[] = [];
+  const errors: string[] = [];
+  const unrun = await forEachDayGuarded(days, async (d) => {
+    ran.push(d);
+    if (d !== 'd3') throw new Error('gh: 503');
+  }, (_d, f) => errors.push(f));
+  assert.equal(MAX_CONSECUTIVE_DAY_ERRORS, 3);
+  assert.deepEqual(ran, ['d1', 'd2', 'd3', 'd4', 'd5', 'd6'], 'd3 ends the first streak; d4..d6 make three in a row');
+  assert.deepEqual(unrun, ['d7']);
+  assert.deepEqual(errors, ['d1: gh: 503', 'd2: gh: 503', 'd4: gh: 503', 'd5: gh: 503', 'd6: gh: 503']);
 });
 
 test('seam day: the neighbour context is the neighbour\'s current edition; against it, an archive-only build is refused', async () => {

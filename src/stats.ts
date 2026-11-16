@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { DOMAIN, SCHEMA_DIR, SCHEMA_VERSION } from './config.js';
@@ -21,6 +21,7 @@ import {
   parseNdjson,
   reconcileRows,
   type DayRows,
+  type StatsEvent,
 } from './stats-table.js';
 import { loadRegistry, priorityMap } from './providers.js';
 import { isoFromMs } from './util.js';
@@ -131,6 +132,14 @@ export function statsDays(nowMs: number): string[] {
   return out;
 }
 
+/**
+ * How long after 00:00 UTC the day in progress may have no event (no event-map day, no partition on `data`) and still be
+ * published as an empty day table instead of being named in `missing_days`: before its first event the day is empty so
+ * far, not missing. Past it an empty today is an outage (ingest stalled, every provider failing) and is named. The app's
+ * `StatisticsLoader.inProgressDayGrace` is the same 30 min.
+ */
+export const STATS_TODAY_GRACE_MS = 30 * 60_000;
+
 export interface StatsIndexDay {
   date: string;
   path: string;
@@ -201,6 +210,8 @@ export interface StatsWrite {
   errors: string[];
   /** Days read back from the data checkout's partitions (the event map holds 45 days). */
   fromData: string[];
+  /** The day in progress published as an empty table (no event yet, inside STATS_TODAY_GRACE_MS), else null. */
+  emptyToday: string | null;
   /** Year and area files listed by the ledger but not published (missing, or not the bytes it names). */
   dropped: string[];
   /** Bytes of every file under v1/stats, the index included. */
@@ -244,9 +255,11 @@ export function readStatsState(dataDir: string, warn: (m: string) => void = () =
 /**
  * Writes the run's stats under `publicDir/v1/stats/` and checks them. `tables` holds the rows of the days derive built
  * from the event map inside its partition loop; every other window day is read from the data checkout's partition, and
- * a day with neither is listed in `missing_days`. The rows of the whole window are reconciled together (reconcileRows:
- * a quake's reports across midnight count once) before each day table is written. Year and area files are copied byte
- * for byte from the data checkout when their sha256 is the one the ledger names. Files under `v1/stats/` that this run
+ * a day with neither is listed in `missing_days`, except the day in progress in its first STATS_TODAY_GRACE_MS: before
+ * its first event it is published as an empty table (`emptyToday`). The rows of the whole window are reconciled
+ * together (reconcileRows: a quake's reports across midnight count once), with the day before the window as context,
+ * before each day table is written. Year and area files are copied byte for byte from the data checkout when their
+ * sha256 is the one the ledger names. Files under `v1/stats/` that this run
  * did not write are removed.
  */
 export function writeStats(
@@ -268,11 +281,19 @@ export function writeStats(
   const missing: string[] = [];
   const fromData: string[] = [];
   const window: DayRows[] = [];
+  const today = eventDayKey(nowMs);
+  const todayInGrace = nowMs - dayStartMs(today) < STATS_TODAY_GRACE_MS;
+  let emptyToday: string | null = null;
   for (const date of statsDays(nowMs)) {
     let d = tables.get(date);
     if (!d) {
       const f = dayPartitionFile(dataDir, date);
       if (!existsSync(f)) {
+        if (date === today && todayInGrace) {
+          window.push(dayRows(date, []));
+          emptyToday = date;
+          continue;
+        }
         missing.push(date);
         continue;
       }
@@ -281,10 +302,22 @@ export function writeStats(
     }
     window.push(d);
   }
+  // The day before the window, as reconciliation context only (never a table, never counted): a pair across the oldest
+  // day's midnight collapses as it did while that day was younger. Optional: without its partition the oldest day is
+  // reconciled within the window, and an unreadable one is a warning, never a dropped run.
+  const contextDay = eventDayKey(dayStartMs(statsDays(nowMs)[0]!) - DAY_MS);
+  let context: StatsEvent[] = [];
+  try {
+    const f = dayPartitionFile(dataDir, contextDay);
+    const t = tables.get(contextDay) ?? (existsSync(f) ? dayRows(contextDay, parseNdjson(readFileSync(f, 'utf8'))) : null);
+    context = t?.rows ?? [];
+  } catch (err) {
+    warn(`stats: ${contextDay} (reconciliation context of the oldest day) unreadable: ${err instanceof Error ? err.message : String(err)}`);
+  }
   // 2. The reconciliation over the whole window, then the day tables.
   const r0 = performance.now();
   const rec = reconcileRows(
-    window.flatMap((d) => d.rows),
+    [...context, ...window.flatMap((d) => d.rows)],
     opts.priority ?? priorityMap(loadRegistry()),
   );
   const reconcileMs = performance.now() - r0;
@@ -392,6 +425,7 @@ export function writeStats(
     pointer: { path: STATS_INDEX_PATH, url: `https://${DOMAIN}/${STATS_INDEX_PATH}`, head_seq: headSeq, format: STATS_FORMAT },
     errors,
     fromData,
+    emptyToday,
     dropped: notPublished,
     bytes,
     ms: performance.now() - started,
@@ -403,20 +437,30 @@ export function writeStats(
 
 // --- checks (derive drops on any error; validate.ts fails on any) ---
 
-let validators: { index: ValidateFunction; table: ValidateFunction; year: ValidateFunction; area: ValidateFunction } | null = null;
-function schemaValidators(schemaDir: string): NonNullable<typeof validators> {
-  if (validators) return validators;
+interface StatsValidators {
+  index: ValidateFunction;
+  table: ValidateFunction;
+  year: ValidateFunction;
+  area: ValidateFunction;
+}
+/** Compiled once per schema directory (a test may check against another directory than SCHEMA_DIR). */
+const validators = new Map<string, StatsValidators>();
+function schemaValidators(schemaDir: string): StatsValidators {
+  const key = resolve(schemaDir);
+  const cached = validators.get(key);
+  if (cached) return cached;
   const ajv = new Ajv2020({ allErrors: true, strict: false });
   addFormats(ajv);
-  const load = (name: string): object => JSON.parse(readFileSync(join(schemaDir, name), 'utf8')) as object;
+  const load = (name: string): object => JSON.parse(readFileSync(join(key, name), 'utf8')) as object;
   ajv.addSchema(load('stats-table.schema.json'));
-  validators = {
+  const v: StatsValidators = {
     index: ajv.compile(load('stats-index.schema.json')),
     table: ajv.getSchema('https://earthquakes-feed.theshelter.app/schema/stats-table.schema.json')!,
     year: ajv.compile(load('stats-year.schema.json')),
     area: ajv.compile(load('stats-area.schema.json')),
   };
-  return validators;
+  validators.set(key, v);
+  return v;
 }
 
 /** The invariants of one event table (format 1); `where` prefixes each problem. */

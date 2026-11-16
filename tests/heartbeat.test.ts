@@ -51,8 +51,17 @@ test('heartbeat: a history dispatch is a plain workflow_dispatch on main, and th
   assert.match(yml, /workflow_dispatch:/);
   assert.match(yml, /jq -r '\.enabled' providers\/history\.json/);
   const top = yml.slice(0, yml.indexOf('\njobs:'));
-  assert.match(top, /concurrency:\n {2}group: earthquakes-feed-history\n {2}cancel-in-progress: false/);
+  assert.match(top, /concurrency:\n {2}group: earthquakes-feed-history\n {2}cancel-in-progress: false\n {2}queue: max\n/);
   assert.equal((yml.match(/group: earthquakes-feed-writer/g) ?? []).length, 0);
+});
+
+test('workflows: both sides of the shared history group queue instead of cancelling a waiting run (FEED-WF-1)', () => {
+  // history.yml holds the group at workflow level, first-solutions.yml in its collect job; with `queue: max` on both,
+  // a newer arrival of one never cancels the other's pending run, whichever queued first.
+  const fs = readFileSync(here('../.github/workflows/first-solutions.yml'), 'utf8');
+  const collect = fs.slice(fs.indexOf('\n  collect:'), fs.indexOf('\n    steps:', fs.indexOf('\n  collect:')) + 1);
+  assert.match(collect, /\n {4}concurrency:\n {6}group: earthquakes-feed-history\n {6}cancel-in-progress: false\n {6}queue: max\n/);
+  assert.equal((fs.match(/group: earthquakes-feed-history/g) ?? []).length, 1, 'only the collect job takes the history group');
 });
 
 test('heartbeat: the Worker has no HTTP surface', async () => {

@@ -249,9 +249,16 @@ export function writeDayPartition(
  *  change, and, once it is frozen, the range it had then (`stored`). The partition holds every state, and a retired
  *  event keeps its last solution: an OVSICORI phantom folded into the 2026-10-09 Panama M7.7 kept the day's max_mag at
  *  8.2. Days frozen before round 26 keep the range over every node they were recorded with; the backfill still records
- *  that one. */
-export function dayMagRange(nodes: readonly EventNode[], stored: PartStat | undefined, frozen: boolean): Pick<PartStat, 'min_mag' | 'max_mag'> {
-  if (frozen && stored) return { min_mag: stored.min_mag, max_mag: stored.max_mag };
+ *  that one. A frozen day whose partition this run `rewritten` (a revision merged a node into it, bitemporal.ts
+ *  saveEventMap) takes the live range of its new bytes (2026-11-15 audit, derive L2): a day frozen before round 26 then
+ *  switches from the range over every node to the live one, the definition every later day has. */
+export function dayMagRange(
+  nodes: readonly EventNode[],
+  stored: PartStat | undefined,
+  frozen: boolean,
+  rewritten = false,
+): Pick<PartStat, 'min_mag' | 'max_mag'> {
+  if (frozen && stored && !rewritten) return { min_mag: stored.min_mag, max_mag: stored.max_mag };
   const mags = nodes.filter((n) => n.state === 'live').map((n) => n.mag).filter((m): m is number => m != null);
   return { min_mag: mags.length ? Math.min(...mags) : null, max_mag: mags.length ? Math.max(...mags) : null };
 }

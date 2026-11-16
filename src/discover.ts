@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { REGISTRY_PATH } from './config.js';
+import { REGISTRY_PATH, envNumber } from './config.js';
 import type { ProviderConfig } from './types.js';
 
 /**
@@ -11,7 +11,7 @@ import type { ProviderConfig } from './types.js';
  * (format quirks, timezone, license, reliability) and flips `active:true` in the registry.
  */
 const FDSN_REGISTRY = 'https://www.fdsn.org/ws/datacenters/1/query';
-const PROBE_TIMEOUT_MS = Number(process.env.PROBE_TIMEOUT_MS ?? 20_000);
+const PROBE_TIMEOUT_MS = envNumber('PROBE_TIMEOUT_MS', 20_000);
 const startISO = new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 19);
 
 /** Known FDSN event endpoints outside the datacenter registry — down when last checked; kept
@@ -42,6 +42,13 @@ export const DECLINED: { host: string; dc: string; issue: number; why: string }[
   },
   // The same application serves the same event service on its map host (round 20 review).
   { host: 'map.geoshake.org', dc: 'GeoShake Data Center (map host)', issue: 38, why: 'the event service of api.geoshake.org under another host name' },
+  // The CURATED lead above stays: removing this entry brings the monthly probe back.
+  {
+    host: 'eida-sc3.infp.ro',
+    dc: 'NIEP (Romania)',
+    issue: 136,
+    why: "an unadvertised SeisComP event service on NIEP's EIDA waveform host (the FDSN registry lists no fdsnws-event for NIEP); answered 1 of 3 monthly probes (2026-11-01, over http; https unconfirmed) and timed out on 2026-11-16 with every infp.ro host; no licence or terms found; NIEP's solutions already reach the feed through EMSC (author NIEP on 6 of 11 Romanian events, 2026-11-01..15)",
+  },
 ];
 
 /** Labels of a host name that name a service, not its operator (`api.geoshake.org` → `geoshake`). */

@@ -61,8 +61,8 @@ export interface HistoryConfig {
   requestSpacingMs: number;
   /** Per-request timeout. */
   timeoutMs: number;
-  /** Rows per request by provider id (the source's own maximum); FETCH_LIMIT_DEFAULT otherwise. */
-  pageLimits: Record<string, number>;
+  /** Rows per request by provider id (the source's own maximum); FETCH_LIMIT_DEFAULT otherwise (and when absent). */
+  pageLimits?: Record<string, number>;
 }
 
 /** Rows per request for a source with no `pageLimits` entry (the live path's FETCH_LIMIT). */
@@ -86,7 +86,10 @@ export interface Period {
 
 export const dayKeyOf = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 export const dayMs = (day: string): number => Date.parse(`${day}T00:00:00Z`);
-const isDay = (s: unknown): s is string => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && dayKeyOf(dayMs(s)) === s;
+/** A real YYYY-MM-DD day. A month or day out of range ('2026-13-01') parses to NaN, which dayKeyOf cannot format (it
+ *  would throw a RangeError instead of reporting a config problem); one that rolls over ('2026-02-30') fails the round
+ *  trip. */
+export const isDay = (s: unknown): s is string => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && Number.isFinite(dayMs(s)) && dayKeyOf(dayMs(s)) === s;
 
 export function loadHistoryConfig(path = HISTORY_CONFIG_PATH): HistoryConfig {
   return JSON.parse(readFileSync(path, 'utf8')) as HistoryConfig;
@@ -101,6 +104,15 @@ export function configProblems(cfg: HistoryConfig, registry: ProviderConfig[]): 
   }
   if (typeof cfg.requestSpacingMs === 'number' && cfg.requestSpacingMs < 1000) out.push('requestSpacingMs must be at least 1000 (one request per second per host)');
   const byId = new Map(registry.map((p) => [p.id, p]));
+  if (cfg.pageLimits !== undefined) {
+    if (cfg.pageLimits === null || typeof cfg.pageLimits !== 'object' || Array.isArray(cfg.pageLimits)) out.push('pageLimits must be an object of rows per request by source id');
+    else {
+      for (const [id, n] of Object.entries(cfg.pageLimits)) {
+        if (!byId.has(id)) out.push(`pageLimits: unknown source ${id}`);
+        if (!(typeof n === 'number' && Number.isInteger(n) && n > 0)) out.push(`pageLimits.${id} must be a positive integer`);
+      }
+    }
+  }
   const ids = new Set<string>();
   const spans: [number, number, string][] = [];
   for (const era of cfg.eras ?? []) {

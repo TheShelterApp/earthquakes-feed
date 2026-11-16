@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { relative } from 'node:path';
 import { CATALOGUE_MIRRORS, CATALOGUE_MIRROR_ID_PREFIX, COMCAT_ID_PREFIX, COMCAT_PROVIDER } from './config.js';
 
 export const round6 = (n: number): number => Math.round(n * 1e6) / 1e6;
@@ -20,6 +22,27 @@ export function parseUtcMs(v: string | number | null | undefined): number | null
 }
 
 export const isoFromMs = (ms: number): string => new Date(ms).toISOString();
+
+/**
+ * The `epoch` of a one-time-step marker (knowledge/index/heal.json, correction.json); 0 when the file does not exist.
+ * A marker that exists but is not JSON, not an object, or has no non-negative integer `epoch` throws an error naming
+ * the file: reading it as 0 would run the one-time step again over data that already had it, so the run stops until
+ * someone fixes or restores the file by hand.
+ */
+export function readMarkerEpoch(root: string, f: string): number {
+  if (!existsSync(f)) return 0;
+  let m: unknown;
+  try {
+    m = JSON.parse(readFileSync(f, 'utf8'));
+  } catch (err) {
+    throw new Error(`${relative(root, f)} is not valid JSON (${err instanceof Error ? err.message : String(err)}); fix it or restore it from git history`);
+  }
+  const epoch = m !== null && typeof m === 'object' && !Array.isArray(m) ? (m as { epoch?: unknown }).epoch : undefined;
+  if (typeof epoch !== 'number' || !Number.isInteger(epoch) || epoch < 0) {
+    throw new Error(`${relative(root, f)} has no non-negative integer "epoch" (${m === null || typeof m !== 'object' ? `body ${JSON.stringify(m)}` : `epoch ${JSON.stringify(epoch) ?? 'missing'}`}); fix it or restore it from git history`);
+  }
+  return epoch;
+}
 
 export function num(v: unknown): number | null {
   if (v == null || v === '') return null;

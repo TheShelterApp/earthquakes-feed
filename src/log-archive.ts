@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { basename, join, relative } from 'node:path';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { statusHistoryFiles } from './bitemporal.js';
-import { REPO, dataPaths } from './config.js';
+import { REPO, dataPaths, envNumber } from './config.js';
 import { gh, ghRetry, ghRetryNet, sleepMs } from './gh.js';
 
 /**
@@ -30,7 +30,7 @@ import { gh, ghRetry, ghRetryNet, sleepMs } from './gh.js';
  * the tree files in `files`.
  */
 export const LOG_ARCHIVE_GRACE_MS = 86_400_000;
-export const LOG_ARCHIVE_MAX_FILES = Number(process.env.LOG_ARCHIVE_MAX_FILES ?? 60);
+export const LOG_ARCHIVE_MAX_FILES = envNumber('LOG_ARCHIVE_MAX_FILES', 60);
 
 export type LogKind = 'status_history' | 'changes';
 

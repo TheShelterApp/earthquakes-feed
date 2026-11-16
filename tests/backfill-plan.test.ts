@@ -8,7 +8,9 @@ import {
   type OpenDispatch,
   applyWindowResult,
   closeBeyondRetention,
+  WINDOW_SLACK_MS,
   openDispatchLines,
+  partitionReadDays,
   planDays,
   planJobs,
   planWindows,
@@ -16,6 +18,7 @@ import {
   saturatedReport,
   skipLine,
   stallReport,
+  windowDays,
 } from '../src/backfill-plan.js';
 import { loadRegistry } from '../src/providers.js';
 import type { ProviderConfig, RawObs } from '../src/types.js';
@@ -301,4 +304,29 @@ test('saturated days: a block until a complete raw of the day is in its current 
   assert.match(p.warnings.join('\n'), /kagsr 2025-07-30 .*its remediation edition is partial too/);
   // The parser of the health board files the block under kagsr: walks:backfill:kagsr.
   assert.match(r.blockers[0]!, /^backfill: kagsr /);
+});
+
+test('partitionReadDays: the margin day a row within the fetch slack lands on is read; live days never; windowDays covers it', () => {
+  const D = dayStartMs('2026-08-01');
+  const live = '2026-10-01';
+  // The fetch keeps rows up to a minute outside the window (providers.ts inWindow): a window that starts at D 00:00 can
+  // carry a row of D-1 23:59:30, and one that ends at D+1 00:00 a row of D+1 00:00:30, so both margin days are read.
+  assert.equal(WINDOW_SLACK_MS, 60_000);
+  const whole = [{ startMs: D, endMs: D + DAY }];
+  assert.deepEqual(partitionReadDays(whole, live), ['2026-07-31', '2026-08-01', '2026-08-02'], 'across a month boundary');
+  // A window ending 23:59:30 reads the next day (its slack reaches past midnight); one ending 23:58 does not.
+  assert.deepEqual(partitionReadDays([{ startMs: D + 3_600_000, endMs: D + DAY - 30_000 }], live), ['2026-08-01', '2026-08-02']);
+  assert.deepEqual(partitionReadDays([{ startMs: D + 3_600_000, endMs: D + DAY - 120_000 }], live), ['2026-08-01']);
+  // The union of several windows; a day from the live day on is the live pipeline's.
+  const jobs = [{ startMs: D, endMs: D + 2 * DAY }, { startMs: D + 5 * DAY, endMs: D + 6 * DAY }];
+  assert.deepEqual(partitionReadDays(jobs, live), ['2026-07-31', '2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05', '2026-08-06', '2026-08-07']);
+  assert.deepEqual(partitionReadDays(jobs, '2026-08-02'), ['2026-07-31', '2026-08-01']);
+  assert.deepEqual(partitionReadDays([], live), []);
+  // Every day read is checked out by the sparse plan (windowDays, a whole day of margin each side).
+  for (const js of [whole, jobs, [{ startMs: D + 3_600_000, endMs: D + DAY - 30_000 }], [{ startMs: D - 1, endMs: D + 1 }]]) {
+    for (const lv of [live, '2026-08-02']) {
+      const sparse = new Set(windowDays(js, lv));
+      for (const d of partitionReadDays(js, lv)) assert.ok(sparse.has(d), `${d} is read but not checked out`);
+    }
+  }
 });

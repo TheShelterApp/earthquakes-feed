@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DATA_DIR, EVENT_MAP_HORIZON_DAYS, JSDELIVR_BASE, PUBLIC_DIR, REPO, SCHEMA_VERSION, dataPaths } from './config.js';
 import { loadState, pruneEventMapShards, writeIfChanged } from './bitemporal.js';
@@ -19,7 +19,7 @@ import type { EventNode } from './types.js';
 import { eventDayKey } from './bitemporal.js';
 import { isoFromMs } from './util.js';
 import { enrichStatusV2, updateProviderHealth, type AggregateStatus, type ProviderHealth } from './status-v2.js';
-import { appendChanges } from './changes.js';
+import { appendChanges, mirrorChangeLog } from './changes.js';
 import { FRESHNESS_EXPECTED_INTERVAL_SECONDS, FRESHNESS_STALE_AFTER_SECONDS } from './freshness.js';
 import { pagesHeaders } from './pages-headers.js';
 import { detectSilentChanges, liveWindowDays, nextSilentLog, readSilentLog, silentChangesAgainst, writeLiveIndex, writeSilentLog } from './live-sync.js';
@@ -64,7 +64,7 @@ function main(): void {
       snapshot: readBaselineSnapshot(process.env.LIVE_BASELINE_DIR),
       compare: true,
     });
-    const fromBaseline = silentChangesAgainst(previous.lines, allNodes, window, prevHead);
+    const fromBaseline = silentChangesAgainst(previous.lines, allNodes, window, prevHead, previous.covered);
     // Phase 1 (until the unfrozen partitions leave `data`): the committed partitions' check beside it. The union is
     // kept: an extra entry only repeats a feature in a delta, a missing one would lose a change for a client.
     const fromPartitions = detectSilentChanges(DATA_DIR, allNodes, window, prevHead);
@@ -120,7 +120,7 @@ function main(): void {
       }
       statsLoopMs += performance.now() - t;
     }
-    inv[day] = { ...out.stat, ...dayMagRange(nodes, inv[day], isFrozenDay(day, nowMs)) };
+    inv[day] = { ...out.stat, ...dayMagRange(nodes, inv[day], isFrozenDay(day, nowMs), out.written) };
     if (baselineWanted.has(day)) written.set(day, out.ndjson);
     if (!isFrozenDay(day, nowMs)) {
       writePagesPartition(PUBLIC_DIR, day, out.ndjson);
@@ -181,8 +181,8 @@ function main(): void {
       freshness: { expected_interval_seconds: 300, stale_after_seconds: 1800 },
       data_repo: REPO,
       jsdelivr_base: `${JSDELIVR_BASE}@data`,
-      // Injected post-commit into the Pages manifest (derive.yml). For an immutable copy
-      // of any frozen partition: `${jsdelivr_base%@data}@<data_commit>/<partition.path>`.
+      // Injected post-commit into the Pages manifest (derive-publish, src/pin-manifest.ts), which also pins every frozen
+      // partition's `url` to it: `${jsdelivr_base%@data}@<data_commit>/<partition.path>`.
       data_commit: null,
       summaries: summ,
       partitions: manifestPartitions(inv, nowMs, pagesDays, pagesNdjsonDays),
@@ -240,12 +240,9 @@ function main(): void {
   const cursor = existsSync(paths.changesCursor) ? (JSON.parse(readFileSync(paths.changesCursor, 'utf8')) as { seq: number }).seq : 0;
   const changesFile = join(paths.changesDir, `${changesDay}.ndjson`);
   const changed = appendChanges(changesFile, allNodes, cursor);
-  if (changed.appended > 0) {
-    writeIfChanged(paths.changesCursor, JSON.stringify({ seq: changed.cursor, day: changesDay }) + '\n');
-    // Mirror the day's change-log to Pages/R2 for hot tailing (Range from the last byte).
-    mkdirSync(join(publicV1, 'changes'), { recursive: true });
-    writeFileSync(join(publicV1, 'changes', `${changesDay}.ndjson`), readFileSync(changesFile));
-  }
+  if (changed.appended > 0) writeIfChanged(paths.changesCursor, JSON.stringify({ seq: changed.cursor, day: changesDay }) + '\n');
+  // Mirror the day's change-log to Pages/R2 on every run that has one, appended to or not (mirrorChangeLog).
+  mirrorChangeLog(changesFile, publicV1, changesDay);
   console.log(`derive: status v2 + changes appended=${changed.appended} (seq→${changed.cursor})`);
 
   const pruned = pruneEventMapShards(DATA_DIR, nowMs - EVENT_MAP_HORIZON_DAYS * 86_400_000);
@@ -275,6 +272,7 @@ function main(): void {
     `stats: ${statsCfg.mode}` +
       (stats
         ? ` days=${stats.index.days.length} missing=${stats.index.missing_days.length} from_data=${stats.fromData.length}` +
+          (stats.emptyToday ? ` empty_today=${stats.emptyToday}` : '') +
           ` years=${stats.index.years.length} area=${stats.index.area.length} through=${stats.index.through ?? 'null'}` +
           ` bytes=${stats.bytes} ms=${Math.round(stats.ms + statsLoopMs)} (rows in the loop ${Math.round(statsLoopMs)}, reconciliation ${Math.round(stats.reconcileMs)}: ${stats.collapsed} collapsed, ${stats.outOfRegion} out of region)` +
           (stats.dropped.length ? ` not_published=${stats.dropped.length}` : '')

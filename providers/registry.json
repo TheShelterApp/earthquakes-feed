@@ -266,7 +266,7 @@
       "doi": null,
       "contact": "https://deprem.afad.gov.tr",
       "retentionDays": 7,
-      "notes": "Custom JSON. Times are UTC without a zone suffix (read as Turkish local time until 2026-10-01, which stored every AFAD event 3 h early; PF-5e). Dense small local events down to ~M0.6. retentionDays 7 (SHLTR-146): event/filter answers from AFAD's newest 1,000 events only (2026-11-14: 2026-11-02 21:18 UTC on, about 11.8 days at about 85 events a day; a swarm shortens it), every older window answers 0 rows; it answered 2025-08 in full on 2026-10-04. Backfill and remediation never ask it for a day before the retention."
+      "notes": "Custom JSON. Times are UTC without a zone suffix (read as Turkish local time until 2026-10-01, which stored every AFAD event 3 h early; PF-5e). Dense small local events down to ~M0.6. retentionDays 7 (SHLTR-146): event/filter answers from AFAD's newest 1,000 events only (2026-11-14: 2026-11-02 21:18 UTC on, about 11.8 days at about 85 events a day; a swarm shortens it), every older window answers 0 rows; it answered 2025-08 in full on 2026-10-04. Backfill and remediation never ask it for a day before the retention. A swarm can push the store's start inside the 7 days: every window query first asks [window start, now] with limit=1000 and fails when that answer holds 1,000 events beginning after the window start (FEED-DI-2)."
     },
     {
       "id": "cenc",
@@ -395,7 +395,7 @@
       "adapter": "fdsn",
       "parse": "text",
       "queryFormat": "text",
-      "base": "http://ws.ipgp.fr/fdsnws/event/1/query",
+      "base": "https://ws.ipgp.fr/fdsnws/event/1/query",
       "supportsTimeRange": true,
       "refreshSeconds": 300,
       "license": "CC-BY-4.0",
@@ -412,7 +412,7 @@
       "adapter": "fdsn",
       "parse": "text",
       "queryFormat": "text",
-      "base": "http://www.moho.iag.usp.br/fdsnws/event/1/query",
+      "base": "https://www.moho.iag.usp.br/fdsnws/event/1/query",
       "supportsTimeRange": true,
       "refreshSeconds": 600,
       "activityBudgetHours": 72,
@@ -478,7 +478,8 @@
       "license": "SSN-UNAM",
       "attribution": "Servicio Sismológico Nacional (SSN), UNAM, Mexico",
       "doi": "10.21766/SSNMX/EC/MX",
-      "contact": "http://www.ssn.unam.mx"
+      "contact": "http://www.ssn.unam.mx",
+      "notes": "Cleartext HTTP: www.ssn.unam.mx refuses connections on port 443 (checked 2026-11-16, FEED-PROV-L4). A public catalogue: a tampered row would stand against the other agencies' solutions of the same event in the dedup."
     },
     {
       "id": "ipma",
@@ -546,7 +547,7 @@
       "adapter": "custom",
       "parse": "custom",
       "queryFormat": "rss",
-      "base": "http://www.earthquakes.bgs.ac.uk/feeds/MhSeismology.xml",
+      "base": "https://www.earthquakes.bgs.ac.uk/feeds/MhSeismology.xml",
       "supportsTimeRange": false,
       "refreshSeconds": 600,
       "frozenBudgetHours": 216,
@@ -733,7 +734,7 @@
       "attribution": "Kandilli Observatory and Earthquake Research Institute (KOERI/RETMC), Boğaziçi University — non-commercial use with citation",
       "doi": null,
       "contact": "http://www.koeri.boun.edu.tr",
-      "notes": "lasteq.asp English quick determinations, times in UTC. NON-COMMERCIAL license — flagged for governance review; hypocenter parameters carried as facts with per-record license."
+      "notes": "lasteq.asp English quick determinations, times in UTC. Cleartext HTTP: www.koeri.boun.edu.tr does not answer on port 443 (every address timed out, checked 2026-11-16, FEED-PROV-L4); a public catalogue: a tampered row would stand against the other agencies' solutions of the same event in the dedup. NON-COMMERCIAL license — flagged for governance review; hypocenter parameters carried as facts with per-record license."
     },
     {
       "id": "phivolcs",
@@ -755,7 +756,7 @@
       "attribution": "DOST-PHIVOLCS (Philippine Institute of Volcanology and Seismology) — © all rights reserved, attribution requested",
       "doi": null,
       "contact": "https://earthquake.phivolcs.dost.gov.ph",
-      "notes": "Scraped from the public bulletin table (hypocenter parameters only; magType absent without a per-event fetch). No open redistribution grant — flagged for governance review."
+      "notes": "Scraped from the public bulletin table (hypocenter parameters only; magType absent without a per-event fetch). The bulletin filename stamps the UTC origin and is the id: YYYY_MMDD_HHMMSS for most bulletins since about 2026-10-29, YYYY_MMDD_HHMM before and for some still (only that form was read until 2026-11-16, so about 9 in 10 events were missed from 2026-10-29; FEED-PROV-L1). A later bulletin's seconds stamp of a minute-stamped event's minute joins that event (config REVISED_ID_WINDOWS). No open redistribution grant — flagged for governance review."
     }
   ]
 }

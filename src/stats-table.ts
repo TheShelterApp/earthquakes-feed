@@ -356,7 +356,9 @@ export function dayRows(date: string, features: Iterable<unknown>): DayRows {
  * The day table `v1/stats/days/<date>.json` of a day's rows, without the rows the reconciliation dropped (`dropped`,
  * feed ids): the bytes and the counts the index lists. Invariant: count + filtered + skipped + collapsed + out_of_region
  * = the day's live, non-tombstoned features. `collapsed_into` names every collapsed row's representative (its row is in
- * this day's table or, across midnight, the neighbouring day's).
+ * this day's table or, across midnight, the neighbouring day's; for the oldest day of derive's window that can be the
+ * day before the window, which has no table: a link to the collapsed row then finds no representative, and the quake is
+ * counted on its representative's day, outside the window).
  */
 export function dayTableFromRows(d: DayRows, rec: Reconciliation = EMPTY_RECONCILIATION): DayTableResult {
   const t0 = dayStartMs(d.date);

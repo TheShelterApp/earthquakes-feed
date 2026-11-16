@@ -40,6 +40,15 @@ jobs:
         run: npm run typecheck
       - name: Unit tests
         run: npm test
+      # .npmrc sets ignore-scripts=true (FEED-SEC-3): the tools the workflows run must work on the runner without the
+      # install scripts of esbuild and workerd (tsx and wrangler's bundler use esbuild; pages deploys run wrangler).
+      - name: Tools without install scripts
+        run: |
+          test "$(npm config get ignore-scripts)" = true
+          npx --no-install esbuild --version
+          npx --no-install tsx -e 'process.stdout.write("tsx ok\n")'
+          npx --no-install wrangler --version
+          (cd heartbeat && WRANGLER_SEND_METRICS=false ../node_modules/.bin/wrangler deploy --dry-run --outdir "$RUNNER_TEMP/heartbeat-dry-run")
 
   # The artifact hand-off the writers depend on (history, remediate and first-solutions upload in `collect` and download
   # in `commit`), exercised on every pull request with the pinned upload-artifact / download-artifact: one file and a

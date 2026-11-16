@@ -355,6 +355,31 @@ export function windowDays(jobs: ReadonlyArray<Pick<Job, 'startMs' | 'endMs'>>, 
   return out;
 }
 
+/** How far outside its window a fetched row may sit: the fetch keeps rows up to a minute either side
+ *  (src/providers.ts `inWindow`). */
+export const WINDOW_SLACK_MS = 60_000;
+
+/**
+ * The days whose partitions a run reads into its transient index before ingesting (src/backfill.ts): from the day of
+ * the first window's start less WINDOW_SLACK_MS to the last window's end plus WINDOW_SLACK_MS, below `liveDay`. A row
+ * landing on the day before or after a window must merge into that day's events, never replace its partition, so the
+ * margin day is read whenever the slack reaches it (a window starting at 00:00 reads the day before; one ending within
+ * a minute of midnight reads the day after). windowDays is a superset (a whole day each side), so the sparse checkout
+ * holds every day read. Empty without jobs (FEED-REMERGE-M1).
+ */
+export function partitionReadDays(jobs: ReadonlyArray<Pick<Job, 'startMs' | 'endMs'>>, liveDay: string): string[] {
+  if (!jobs.length) return [];
+  const from = Math.min(...jobs.map((j) => j.startMs)) - WINDOW_SLACK_MS;
+  const to = Math.max(...jobs.map((j) => j.endMs)) + WINDOW_SLACK_MS;
+  const out: string[] = [];
+  for (let ms = Date.parse(`${eventDayKey(from)}T00:00:00Z`); ms <= to; ms += DAY) {
+    const d = eventDayKey(ms);
+    if (d >= liveDay) break; // never touch live-owned days
+    out.push(d);
+  }
+  return out;
+}
+
 /** The sparse-checkout patterns (non-cone) of those days: one `/events/YYYY/MM/` per month, oldest first. */
 export function sparseMonthPatterns(days: readonly string[]): string[] {
   return [...new Set(days.map((d) => `/events/${d.slice(0, 4)}/${d.slice(5, 7)}/`))];

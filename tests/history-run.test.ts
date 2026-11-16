@@ -20,7 +20,7 @@ import {
   walkTexts,
 } from '../src/history-state.js';
 import { DryRunStore, type HistoryStore, LocalStore } from '../src/history-store.js';
-import { ALARM_FAILURES, type Ctx, adoptOrphans, emptyReport, failingMonthBlocks, fetchUnits, runWalk, sealPeriods } from '../src/history.js';
+import { ALARM_FAILURES, type Ctx, adoptOrphans, emptyReport, failingMonthBlocks, fetchUnits, runWalk, sealPeriods, stillAnswersRows } from '../src/history.js';
 import { loadRegistry } from '../src/providers.js';
 
 // FEED-TEST-1: the deep-history walk's run decisions (src/history.ts): taking over assets a run uploaded but never
@@ -722,4 +722,14 @@ test('isolation: an upload that reads back with other bytes still stops the walk
   assert.ok(run.fatal instanceof Error);
   assert.match((run.fatal as Error).message, /reads back with another checksum/);
   assert.equal(run.complete, false);
+});
+
+test('stillAnswersRows: a raw that holds no rows (it disagrees with the index) is a failed check, not a TypeError', async () => {
+  const ctx = ctxOf();
+  const period = allPeriods(CFG).find((x) => x.key === '2022-12')!;
+  const asset = rawAssetName('usgs', '2022-12');
+  ctx.rawCache.set(asset, { asset, sha256: 'x', header: {} as RawHeader, rows: [] });
+  const entry = { tag: historyTag('2022-12'), asset, sha256: 'x', fetched_at: NOW_ISO } as Parameters<typeof stillAnswersRows>[3];
+  const res = await stillAnswersRows(ctx, registry.find((p) => p.id === 'usgs')!, period, entry, {} as Parameters<typeof stillAnswersRows>[4]);
+  assert.deepEqual(res, { ok: false, error: `${asset} holds no rows to check against`, requests: 0 });
 });

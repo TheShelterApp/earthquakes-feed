@@ -14,6 +14,7 @@ import {
   buildManifestV2,
   envelopeKeyCheck,
   manifestV2Bytes,
+  pinManifestV1,
   sha256Hex,
   signManifestV2,
   verifyManifestV2,
@@ -243,4 +244,35 @@ test('v2 publishes the immutable @data_commit url for a frozen day, the v1 url f
   const m = build();
   assert.equal(m.partitions.find((p) => p.date === '2025-08-01')!.url, `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@${COMMIT}/events/2025/08/01.ndjson`);
   assert.equal(m.partitions.find((p) => p.date === '2025-09-04')!.url, v1().partitions[0]!.url);
+});
+
+test('the pin step pins the published v1 manifest: data_commit, and a frozen day\'s @data url to @<data_commit> (FEED-DI-1)', () => {
+  const pinned = pinManifestV1(v1(), COMMIT);
+  assert.equal(pinned.data_commit, COMMIT);
+  assert.equal(pinned.partitions.find((p) => p.date === '2025-08-01')!.url, `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@${COMMIT}/events/2025/08/01.ndjson`);
+  assert.equal(pinned.partitions.find((p) => p.date === '2025-09-04')!.url, v1().partitions[0]!.url, 'an unfrozen day keeps its url');
+  // A frozen url that is not jsDelivr @data (none today) is left alone; key order and every other field are kept.
+  const odd = { ...v1(), partitions: v1().partitions.map((p) => (p.frozen ? { ...p, url: 'https://example.org/x.ndjson' } : p)) };
+  assert.equal(pinManifestV1(odd, COMMIT).partitions.find((p) => p.frozen)!.url, 'https://example.org/x.ndjson');
+  assert.deepEqual(Object.keys(pinned), Object.keys(v1()));
+  assert.deepEqual({ ...pinned, data_commit: null, partitions: [] }, { ...v1(), partitions: [] });
+  assert.throws(() => pinManifestV1(v1(), 'HEAD'), /full git sha/);
+  // v2 built from the pinned v1 is the same as from the unpinned one.
+  assert.deepEqual(buildManifestV2({ v1: pinned, dataCommit: COMMIT, read }), build());
+  // The step's script, on a manifest file.
+  const pub = mkdtempSync(join(tmpdir(), 'pin-manifest-'));
+  try {
+    mkdirSync(join(pub, 'v1'), { recursive: true });
+    writeFileSync(join(pub, 'v1', 'manifest.json'), JSON.stringify(v1(), null, 2));
+    const r = spawnSync(process.execPath, ['--import', 'tsx', 'src/pin-manifest.ts'], {
+      cwd: new URL('..', import.meta.url),
+      env: { ...process.env, DATA_COMMIT: COMMIT, PUBLIC_DIR: pub },
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /data_commit=9c1e0d3b; 1 frozen partition url\(s\) pinned to it/);
+    assert.equal(readFileSync(join(pub, 'v1', 'manifest.json'), 'utf8'), JSON.stringify(pinned, null, 2));
+  } finally {
+    rmSync(pub, { recursive: true, force: true });
+  }
 });

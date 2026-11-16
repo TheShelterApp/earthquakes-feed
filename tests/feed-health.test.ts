@@ -96,6 +96,11 @@ test('the fixture: the live status of 2026-10-22 has 42 sources, all ok, so it j
   assert.equal(statusRefMs('x'), null);
 });
 
+test('a last success Date cannot format (a malformed published number) reads as ?, not a RangeError', () => {
+  const r = judge(statusAt(STATUS_MS, (s) => failing(s, 'bgs', -9e15)));
+  assert.match(byKey(r.findings)['feed:source:bgs']!.text, /^bgs: fetch failing for .* \(last successful fetch \?; /);
+});
+
 // --- ported from tests/health-check.test.ts: silent, frozen, pinned leaves, TLS failures (FEED-3, FEED-SEC-1, round 24) ---
 
 test('silent and frozen sources: one feed:source row each, rule quiet, members naming why, never the systemic line', () => {
@@ -600,7 +605,11 @@ test('data file sizes: a truncated listing is a note; an unreadable answer leave
   const t = evaluateSizes({ ...todaysTree(), truncated: true });
   assert.match(t.notes.join('\n'), /listing TRUNCATED/);
   assert.match(t.notes.join('\n'), /the data tree listing was truncated, so some files were not judged/);
-  assert.deepEqual(t.unjudged, []);
+  // Nothing over the line in a partial listing proves nothing: an open feed:size is held, not resolved.
+  assert.deepEqual([t.findings, t.unjudged], [[], ['feed:size']]);
+  // A file over the line in a partial listing is still filed.
+  const big = evaluateSizes({ ...todaysTree(46_200_000), truncated: true });
+  assert.deepEqual([big.findings[0]!.members, big.unjudged], [['status/history/2026-10.ndjson'], []]);
   for (const bad of [null, '', 'not json', { message: 'Not Found' }, { tree: 'x' }]) {
     const r = evaluateSizes(bad);
     assert.deepEqual([r.findings, r.unjudged], [[], ['feed:size']], JSON.stringify(bad));
@@ -1074,9 +1083,10 @@ test('main: in Actions, no GH_TOKEN or a failed created_at read is watcher:feed-
   assert.deepEqual(runGone.doc.findings.map((f) => [f.key, f.members]), [['watcher:feed-github', ['run']]]);
   assert.deepEqual(runGone.doc.unjudged, []);
   assert.match(runGone.doc.findings[0]!.text, /^the queue time is unknown this run \(counted as 0\): .*: this run's created_at: HTTP 404 after 1 attempt\(s\)$/);
-  // A truncated listing is judged as far as it goes, with the warning the health job always gave.
+  // A truncated listing is judged as far as it goes, with the warning the health job always gave; with nothing over the
+  // line found, feed:size stays unjudged (an open finding is not resolved on a partial listing).
   const truncated = await findingsOf(ENV, world([[`${API_REPO}/git/trees/data?recursive=1`, () => json({ ...todaysTree(), truncated: true })]]));
-  assert.deepEqual([truncated.doc.findings, truncated.doc.unjudged], [[], []]);
+  assert.deepEqual([truncated.doc.findings, truncated.doc.unjudged], [[], ['feed:size']]);
   assert.deepEqual(truncated.logs.filter((l) => l.startsWith('::')), ['::warning title=Data file size::the data tree listing was truncated, so some files were not judged']);
   assert.ok(!(await findingsOf(ENV)).logs.some((l) => l.startsWith('::')));
 });
@@ -1141,12 +1151,16 @@ test('evaluateStats: through behind the last frozen day by more than 3 days (his
   assert.deepEqual(at('2026-10-07'), ['feed:stats-through']);
   assert.deepEqual(at(null), ['feed:stats-through']);
   assert.deepEqual(at(null, false), [], 'the builder is off: no year files expected');
+  // A clock Date cannot format (beyond ±8.64e15 ms) leaves the rule unjudged instead of a RangeError.
+  const odd = evaluateStats({ nowMs: 9e15, v1Ok: true, pointer: POINTER, config: statsCfg('on', true), index: statsIndex(null) });
+  assert.deepEqual([odd.findings, odd.unjudged], [[], ['feed:stats-through']]);
   const t = evaluateStats({ nowMs: NOW, v1Ok: true, pointer: POINTER, config: statsCfg('on', true), index: statsIndex('2026-10-01') }).findings[0]!;
   assert.deepEqual([t.severity, t.class, t.check], ['P3', 'maintenance', null]);
   assert.equal(mayTurnRed(t.class), false);
   const d = evaluateStats({ nowMs: NOW, v1Ok: true, pointer: POINTER, config: statsCfg('shadow'), index: statsIndex(null, ['2026-09-01', '2026-09-02']) });
   assert.deepEqual(keys(d.findings), ['feed:stats-days']);
   assert.match(d.findings[0]!.text, /2 missing day\(s\): 2026-09-01, 2026-09-02/);
+  assert.match(d.findings[0]!.text, /today counts only 30 min after 00:00 UTC/, 'derive publishes the day in progress empty before that');
   const u = evaluateStats({ nowMs: NOW, v1Ok: true, pointer: POINTER, config: statsCfg('on', true), index: { ok: false, message: 'HTTP 404 after 4 attempt(s)' } });
   assert.deepEqual([u.findings, u.unjudged], [[], ['feed:stats-through', 'feed:stats-days']]);
   assert.match(u.notes.join(), /index\.json unreadable \(HTTP 404/);

@@ -5,7 +5,10 @@ way into one R2 bucket that holds content-addressed blobs: today the event map, 
 NDJSON. Which blobs make up the map is recorded by the generation document `knowledge/index/generation.json`, which
 stays in git in phase 3 and is committed with head, sweeps and watermarks in the same push, so git remains the single
 compare-and-swap. The Worker itself holds no map logic: it stores and returns bytes by their sha256, collects garbage,
-and keeps the store inside the free tier.
+and keeps the store inside the free tier. Since storage phase 4.0 it also speaks protocol 2: one compare-and-swap ref
+per writer lane and a create-only reflog ([below](#protocol-2-lane-refs-and-the-reflog-storage-phase-40)). Step 4.0 is
+inert: nothing in the production pipeline calls the ref routes until 4.1 writes `refs/main-shadow`, and `MIN_PROTOCOL`
+stays 1.
 
 | | Production | Staging |
 |---|---|---|
@@ -17,9 +20,11 @@ and keeps the store inside the free tier.
 | Data | the feed's | synthetic only (`state-rehearsal.yml`); staging never reads production data |
 
 Code: `src/index.js` (entry, the `BudgetLedger` Durable Object class), `src/worker.js` (routes, logging),
-`src/auth.js` (OIDC), `src/cas.js` (keys, frames, GC page), `src/budget.js` (ceilings). Plain JavaScript deployed as it
-is, like `heartbeat/`; the tests are `tests/state-worker.test.ts` (in `npm test`, offline, with an in-memory bucket,
-the ledger on node:sqlite and a locally generated RSA key behind an injected JWKS).
+`src/auth.js` (OIDC, the (repository_id, workflow) pairs), `src/cas.js` (keys, frames, GC page), `src/refs.js` (lane
+refs, the reflog, the Durable Object fallback), `src/budget.js` (ceilings, priority lanes). Plain JavaScript deployed as
+it is, like `heartbeat/`; the tests are `tests/state-worker.test.ts` and `tests/state-refs.test.ts` (in `npm test`,
+offline, with an in-memory bucket that honours `onlyIf`, the ledger on node:sqlite and a locally generated RSA key
+behind an injected JWKS; the refs tests drive the real Worker handler with the real client, `src/state-store.ts`).
 
 ## HTTP contract
 
@@ -104,6 +109,92 @@ can refresh a blob between a page's listing and its delete.
  "ceilings": {"class_a": n, "class_b": n, "bytes_written": n, "stored_bytes": n}}
 ```
 
+### Protocol 2: lane refs and the reflog (storage phase 4.0)
+
+Additive routes: a protocol-1 client never calls them, and `MIN_PROTOCOL` stays 1 until 4.3 flips authority to the
+refs. Every one needs `x-feed-state-protocol` ≥ 2 on a write (426 below; reads need none). A lane is `main` (aggregate,
+derive, backfill, archive, state-gc under the writer lock), `main-shadow` (4.1's shadow of main), `first-solutions` or
+`history` (the lockless lanes of 4.5); staging also admits `rehearsal-<run>[-x]` lanes for `state-rehearsal.yml`. Any
+other lane is 404.
+
+**A ref** (`refs/<lane>` in the bucket) is canonical JSON (keys sorted, no whitespace, at most 4 KiB):
+
+```
+{"data_commit":"<40 hex>","format":1,"generation":"<sha256 of the generation blob>","head_seq":n,"lane":"<lane>",
+ "parent":"<sha256>"|null,"seq":n,"written":"<ISO-8601 Z>","writer":"<workflow>/<run_id>-<attempt>/<step>/<hex nonce>"
+ [,"restore_of":{"generation":"<sha256>","seq":n}]}
+```
+
+The Worker refuses (400) a body with another field, another lane, a non-canonical serialization, or a `writer` that does
+not start with the CALLING run's `<workflow>/<run_id>-<run_attempt>/` (from the token), so the reflog's audit trail
+names the run that really wrote and the nonce is the client's own.
+
+**`GET /v1/refs/<lane>`** (ref-read): 200 with the ref's exact bytes and a strong `ETag`, or 404 `{"error":"no ref"}`.
+One Class B.
+
+**`PUT /v1/refs/<lane>`** (ref-write; restore when the body has `restore_of`): exactly one of `If-Match: "<etag>"` (the
+version the writer read) or `If-None-Match: *` (the lane's first ref, the bootstrap); neither is 428, both or a weak tag
+400. The Worker then:
+
+1. checks the lane's pairs (below) and the body;
+2. GETs the current ref: a create on an existing lane, or an `If-Match` that is not its ETag (or no ref at all), is 412;
+3. requires the successor: `seq` = current + 1, `parent` = the current `generation`, `head_seq` ≥ the current one (a
+   restore: >), else 409 `{"error", "current_seq" | "current_generation" | "current_head_seq"}`;
+4. HEADs the generation blob `cas/sha256/…/<generation>`: absent is 409 (blobs first, then the ref, invariant 2);
+5. repairs the reflog entry of the CURRENT seq, create-only (a Worker that died between its swap and its reflog write
+   left it missing; an entry that exists is never rewritten);
+6. swaps: `STATE.put(refs/<lane>, body, {onlyIf: {etagMatches}})` (a create: `If-None-Match: *`); a null answer (another
+   writer swapped between steps 2 and 6) is 412, its body re-read;
+7. writes the reflog entry of the NEW seq, create-only.
+
+Answers: 200 `{"lane", "seq", "generation", "etag", "reflog": {"previous": "none"|"present"|"repaired", "entry":
+"created"|"exists"}}` with the new `ETag`; 412 `{"error", "current": <ref>|null, "etag", "at": "read"|"swap"}` (`at`:
+which check refused; the client fails closed, it never rebases); 409, 400, 428, 426 as above. `entry: "exists"` means the
+swap happened but the new seq's reflog slot was already taken: two writers of one seq (the CAS was not atomic) or an
+entry left by a lost ref, logged as an error and treated by the client as an integrity failure. At most **5 store
+operations** per PUT whatever happens (GET, HEAD, repair, swap, entry; a refused swap re-GETs instead of writing the
+entry); every ref route answers `x-feed-state-store-ops` and `x-feed-state-ledger-calls` (one reservation, plus a
+refund on a 412 or 409), which the rehearsal checks. Cost: 3 Class A, 2 Class B, three bodies written; the stored
+estimate gains the entry (and the ref object on a create), which a 412 or 409 gives back.
+
+**`GET /v1/gen/<lane>?after=<seq>&limit=<1..1000>`** (reflog): one listing page, ascending:
+`{"lane", "entries": [{"seq", "generation", "parent", "head_seq", "data_commit", "written", "writer", "restore_of",
+"uploaded", "size"}], "next": <seq>|null}` (ask again with `after=next`). The entry's fields come from the R2 custom
+metadata the Worker wrote with it, so a page is one Class A listing, no GET per entry. Keys `gen/<lane>/<seq, 12
+digits>`; GC lists `cas/` only and never touches `refs/` or `gen/` (reflog retention is 4.2's).
+
+**The ambiguous answer** (a timeout, a cut connection, a 5xx: the swap may or may not have happened): the client
+(`swapRef`, `src/state-store.ts`) never repeats a ref PUT blindly. It re-GETs the ref: its own writer nonce there means
+the write landed; the ETag still the one it named (no ref, for a create) means it did not, and the same body goes again
+(a repeat that meets its own landed write gets a 412 whose `current` is its own, which also counts as landed); anything
+else is someone else's write: a 412, fail closed.
+
+**`POST /v1/rehearsal/<rehearsal lane>`** (staging only; 404 in production; `state-rehearsal.yml` only) runs one probe:
+`{"op":"create-only","form":"headers"|"conditional"}` puts `rehearsal/<lane>/create-only-<form>` twice with the
+binding's create-only precondition (`If-None-Match: *` as Headers, the form the Worker uses; or R2Conditional
+`etagDoesNotMatch: "*"`) and answers what happened each time; `{"op":"drop-reflog","seq":n}` deletes one reflog entry,
+so the rehearsal can watch the next PUT repair it.
+
+### Ref backend (`REF_BACKEND`)
+
+`"r2"` (default): the ref is an R2 object, swapped by the binding's conditional put. `"do"`: the fallback if the staging
+race rehearsal shows that `onlyIf` is not an atomic compare-and-swap on the binding: the ref is a row of the existing
+`BudgetLedger` Durable Object (table `refs`, created by every version since 4.0 and empty while unused; one object whose
+methods run alone, so the check and the write are one SQLite transaction), its ETag the first 32 hex of the body's
+sha256. Same HTTP API, same reflog (in R2), same store-operation bound. Switching moves no ref: do it before any lane has
+a ref (4.0/4.1), or copy each lane's current ref (`GET`, then a bootstrap `If-None-Match: *` under the new backend from
+the runbook below) while no writer runs. Both are covered offline by `tests/state-refs.test.ts`.
+
+### Bootstrap of a lane (runbook)
+
+A lane's first ref is written once with `If-None-Match: *`. The Worker refuses a second create itself (its GET sees
+the ref), so only two creates that race could both pass if the binding ignored the create-only precondition. The
+rehearsal proves the precondition (`create-only` probe, two racing creates); if it shows R2 does not honour it, every
+lane is bootstrapped by this runbook instead of by a job: dispatch the lane's seeding step (4.1: the first shadow write;
+4.3: `scripts/phase4/seed.ts`) **only while the lane's writers cannot run** (the writer group idle for `main`, the
+lane's own workflow disabled for the lockless lanes), then check with `GET /v1/refs/<lane>` that `seq` and `writer` are
+the seeding run's before re-enabling the writers.
+
 **Errors shared by every route.** 401 `{"error": "unauthenticated", "reason"}` (no, malformed or invalid token);
 403 `{"error": "forbidden", "reason"}` (a valid token of this repository that this route does not admit); 503
 `{"error": "unavailable"}` with `Retry-After: 30` when no GitHub signing key can be had (GitHub down and no cached key);
@@ -132,11 +223,15 @@ The Worker verifies (401 on any failure):
 - `iss` = `https://token.actions.githubusercontent.com`, `aud` = `AUDIENCE`, `exp` > now − 30 s, `nbf` ≤ now + 30 s, `iat`
   (if present) ≤ now + 30 s, and `repository_id` = `REPOSITORY_ID` (1289538519, the numeric id of
   TheShelterApp/earthquakes-feed: it survives a rename or a transfer, so no owner, repository or `sub` string is ever
-  matched).
+  matched) or a peer repository that one of the pairs below names (none in 4.0).
 
 Then it authorises (403): `ref_type` = `branch`, `runner_environment` = `github-hosted`, `event_name` ∈ {`schedule`,
 `workflow_dispatch`} (no `push`, no `pull_request`), `ref` = `refs/heads/main` unless `ALLOW_ANY_REF` (staging), and
-`workflow_ref` ends with `/.github/workflows/<file>@<ref>` with `<file>` in the route's allow-list:
+`workflow_ref` ends with `/.github/workflows/<file>@<ref>`, and (`repository_id`, `<file>`) is one of the right's
+**pairs** (storage phase 4.0). A pair names its repository (`HOME` = `REPOSITORY_ID`, or a peer's numeric id), so when
+phase 5.3's data repository gets its own `publish.yml` pair, a file of the same name in this repository (or this
+repository's `aggregate.yml` name in the other one) matches nothing. A pair may also require the token's `environment`
+claim and narrow the events (the restore). Blob routes (protocol 1; all pairs of this repository):
 
 | Route | Workflows |
 |---|---|
@@ -144,13 +239,33 @@ Then it authorises (403): `ref_type` = `branch`, `runner_environment` = `github-
 | write (`PUT /v1/cas/sha256/…`) | `aggregate.yml` |
 | gc (`POST /v1/gc`) | `state-gc.yml` |
 | budget (`GET /v1/budget`) | the readers and `health.yml` |
-| staging only, every route | `state-rehearsal.yml` |
+| staging only, every route but restore | `state-rehearsal.yml` |
+
+Lane rights (protocol 2; the end state of the design, so 4.1–4.5 need no Worker deploy for authorisation alone; in 4.0
+no production workflow calls them):
+
+| Lane | ref-write (`PUT`) | ref-read (`GET`): the writers and | reflog (`GET /v1/gen`) | restore |
+|---|---|---|---|---|
+| `main` | `aggregate.yml`, `derive.yml`, `backfill.yml`, `archive.yml`, `state-gc.yml` | `remediate.yml`, `stats.yml`, `history.yml` | GC, backup, health | yes |
+| `main-shadow` | `aggregate.yml`, `derive.yml`, `backfill.yml`, `archive.yml` | — | GC, backup, health | no |
+| `first-solutions` | `first-solutions.yml` | `derive.yml` | GC, backup, health | yes |
+| `history` | `history.yml`, `remerge.yml` | `derive.yml`, `stats.yml` | GC, backup, health | yes |
+
+`state-gc.yml`, `state-backup.yml` and `health.yml` read every lane's ref and reflog. **Restore** is a ref PUT whose
+body has `restore_of` (the reflog entry it restores) and whose `head_seq` jumps forward (409 otherwise; invariant 5:
+seqs never repeat). It is admitted for exactly one pair: `state-restore.yml` of this repository, `event_name`
+`workflow_dispatch`, with the token claim `environment: state-restore`, which GitHub only puts in a job of the GitHub
+Environment `state-restore` (required reviewer: the owner) after the review passed. That pair also reads the refs and
+the reflogs it restores from. The restore workflow without `restore_of` is no writer, a writer with `restore_of` is no
+restorer (403 both), and the rehearsal workflow is never admitted, not even on staging.
 
 Only the aggregate job persists the map. `derive.yml` runs derive alone (it never aggregates) and its prune is a pure
 local edit of the generation document, so it holds no write right; a workflow is added to the write list only when it
-calls persist. `health.yml` reads the budget and nothing else. Writes and GC also need `x-feed-state-protocol` ≥
-`MIN_PROTOCOL` (426): the minimum is raised with every incompatible layout change, so an old run re-run from the Actions
-UI (its token is still valid for main) cannot write an old layout.
+calls persist. `health.yml` reads the budget (and from 4.2 the refs and reflogs, for its reconciler). Writes and GC also
+need `x-feed-state-protocol` ≥ `MIN_PROTOCOL` (426), ref writes ≥ max(`MIN_PROTOCOL`, 2): the minimum is raised with
+every incompatible layout change, so an old run re-run from the Actions UI (its token is still valid for main) cannot
+write an old layout. The production client keeps sending 1 on the blob routes until 4.3, so 4.3's `MIN_PROTOCOL` 2
+fences every pre-flip run.
 
 ## Budgets: never pay
 
@@ -161,16 +276,33 @@ row per UTC day, rows older than 40 days pruned) and is refused with 429 `{"erro
 
 | Ceiling (var) | Production | Staging | Counts |
 |---|---|---|---|
-| `CLASS_A_PER_DAY` | 20,000 (≤ 620k a month) | 2,000 | a PUT 1, a GC page 1 (its list) |
-| `CLASS_B_PER_DAY` | 200,000 (≤ 6.2M a month) | 20,000 | a batchGet n (a missing blob too), a GC first page 1 per `current` |
-| `BYTES_WRITTEN_PER_DAY` | 1 GiB | 256 MiB | a PUT's `Content-Length` |
-| `STORED_BYTES_MAX` | 6 GiB | 256 MiB | the running stored estimate, checked by every PUT |
+| `CLASS_A_PER_DAY` | 20,000 (≤ 620k a month) | 2,000 | a PUT 1, a GC page 1 (its list), a ref PUT 3, a reflog page 1 |
+| `CLASS_B_PER_DAY` | 200,000 (≤ 6.2M a month) | 20,000 | a batchGet n (a missing blob too), a GC first page 1 per `current`, a ref GET 1, a ref PUT 2 |
+| `BYTES_WRITTEN_PER_DAY` | 1 GiB | 256 MiB | a PUT's `Content-Length`, a ref PUT three bodies |
+| `STORED_BYTES_MAX` | 6 GiB | 256 MiB | the running stored estimate, checked by every PUT and ref PUT |
+
+**Priority lanes** (storage phase 4.0; the store stays on the account the platform uses, owner decision 2026-11-16, so
+the budgets are shared and background work must never starve the feed). Every reservation names its lane by the
+caller's workflow:
+
+| Lane | Workflows | Refused above |
+|---|---|---|
+| critical | `aggregate.yml`, `derive.yml`, `state-restore.yml` (this repository) | 95 % of any ceiling |
+| background | every other caller: GC, backup, history, first-solutions, stats, health, the rehearsal, a peer repository | 60 % of any ceiling |
+
+So the last 35 % of every ceiling is the feed's alone. `GET /v1/budget` never reserves (health can always read it). The
+day row counts `refused` and, apart, `refused_critical` (health: P1) and `ref_conflicts` (412s on ref PUTs, for 4.3's
+`feed:state-ref-conflict`); the snapshot also carries `meta_bytes` and `lanes` ({critical: 0.95, background: 0.6}).
 
 The two environments together stay inside the account's free tier with room for the platform's own R2 use. The stored
 estimate is raised by every PUT (an overwrite counts again: it errs high), lowered by what GC deletes, refunded when R2
 refuses a PUT, and re-seeded at the end of every complete GC pass from what the pass listed and kept plus what was PUT
-meanwhile. If GC stops, the estimate climbs by the day's writes until PUTs are refused; `feed:state-budget` (above 70 %
-of a ceiling) and `feed:state-gc` (no successful GC in 3 days) fire long before.
+meanwhile plus `meta_bytes`: the ref and reflog bytes (outside `cas/`, so never listed by GC), kept in their own counter
+that only a refund lowers until 4.2's reflog retention. If GC stops, the estimate climbs by the day's writes until PUTs
+are refused; `feed:state-budget` (above 60 % of a ceiling, where background work is refused) and `feed:state-gc` (no
+successful GC in 3 days) fire long before. The ledger's new columns are added in place (`ALTER TABLE … ADD COLUMN`,
+a no-op once present), so a rollback to a protocol-1 version still reads every row; that version's re-seed leaves the
+meta bytes out (the estimate then reads low by them: tens of kB a day).
 
 The feed's own use: about 1,500 requests a day (about 288 aggregate runs, each one or two batchGets and a few PUTs),
 roughly 1-2 % of every ceiling. The ledger writes one day row per authenticated request (the account's Durable Object
@@ -180,13 +312,17 @@ never reaches the ledger or the bucket.
 **The Workers request cap is shared.** Workers Free allows 100,000 requests a day per account, and the platform's API
 budgets most of it. When the account hits the cap, Cloudflare answers Error 1027 until 00:00 UTC: in phase 3a the
 store calls fail, the shadow check reports `feed:state-shadow`, and the feed carries on from git; from phase 3b the feed
-stops until the cap resets (APIs.md "Repository size", outage budget).
+stops until the cap resets (APIs.md "Repository size", outage budget). The client tells it apart (kind `quota`: a 1027
+page is never retried; a platform 429 that outlives the retries is `quota` too), and health raises `feed:state-quota`
+(P1) when its own budget read or a job's state-shadow step met it.
 
 ## Logging
 
 One JSON line per request (Workers Logs, kept 3 days; `wrangler tail` live):
-`{"t":"feed-state","rid","method","route","path","workflow","run_id","run_attempt","sha","n","bytes","missing",
-"deleted","dry_run","status","ms","error","cause"}` (fields that do not apply are absent). A batchGet logs when its
+`{"t":"feed-state","rid","method","route","path","workflow","run_id","run_attempt","repository_id","priority","lane",
+"seq","restore_of","reflog","probe","sha","n","bytes","missing","deleted","dry_run","ops","ledger","status","ms","error",
+"cause"}` (fields that do not apply are absent; `repository_id` only for a peer repository; `reflog` is
+`<previous>/<entry>` of a ref PUT). A batchGet logs when its
 stream ends. The token, the claims other than the run and workflow, and the request bodies are never logged. A failed
 JWKS fetch logs `{"t":"feed-state","event":"jwks-fetch-failed"}`.
 
@@ -233,6 +369,8 @@ each with its `main <commit>` message; `npx wrangler rollback <version-id> -c st
 with `deploy.sh`, so the active Worker is again the code on `main`. A rollback never touches the bucket or the ledger:
 the key layout and the ledger schema only ever grow (`CREATE TABLE IF NOT EXISTS`), so an older version reads them.
 Lowering `MIN_PROTOCOL` in a rollback re-admits older clients; only do that together with the client rollback.
+Rolling 4.0 back (redeploying the protocol-1 Worker) leaves `refs/`, `gen/` and `rehearsal/` keys and the `refs` table
+in place, unread; nothing in production depends on them before 4.3.
 
 ## Verify
 
@@ -243,10 +381,31 @@ After every deploy (production host shown; staging the same with its host):
 | `curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://feed-state.theshelter.app/v1/cas:batchGet` | `401` from the Worker (JSON `{"error":"unauthenticated"}`, an `x-request-id`), not a zone `403`/`1010` or `429` |
 | `curl -sS -o /dev/null -w '%{http_code}\n' https://feed-state.theshelter.app/` | `404` |
 | `curl -sS -o /dev/null -w '%{http_code}\n' https://earthquakes-feed-state.<account>.workers.dev/` | no answer from the Worker (no workers.dev route) |
-| `state-rehearsal.yml` on staging (dispatch from any branch) | PUT, batchGet (a present and a missing blob, the trailer), a 10037 PUT answered 400, GC dry run, `GET /v1/budget`: all as above |
+| `state-rehearsal.yml` on staging (dispatch from any branch) | PUT, batchGet (a present and a missing blob, the trailer), a 10037 PUT answered 400, GC dry run, `GET /v1/budget`: all as above; then the protocol-2 table in the job summary, every row `ok` (below) |
 | `wrangler tail` during an aggregate run | one `feed-state` line per call with the run id, status 200 |
 
 To rehearse on staging (not covered offline): the binding's error on a wrong `sha256` (expected `… (10037)`, mapped to
 400), whether R2 binding calls count against the 50 or the 1,000 subrequest limit (a batchGet of 40 and a GC first page
 of 40 HEADs stay under either), and the CPU time of a 40-blob batchGet and of a 1,000-key GC page (`wrangler tail`
 shows `cpuTime`; Workers Free allows 10 ms per request).
+
+**The 4.0 gate** (`src/state-rehearsal.ts` `rehearseRefs`, fresh `rehearsal-<run>-*` lanes each run; the job summary
+has one row per check with what was expected and what the binding did):
+
+| Check | Holds when | If not |
+|---|---|---|
+| R2 create-only, `If-None-Match: *` (and `etagDoesNotMatch "*"`, for information) | created, then refused, the first body kept | WARN: bootstrap every lane by the runbook above |
+| create twice | the second is 412 with the first ref | FAIL |
+| two racing creates | one 200, one 412 | WARN: the runbook bootstrap |
+| two racing writers on one ref, 6 rounds | every round one 200 and one 412 naming the winner; no reflog slot taken twice | FAIL: `REF_BACKEND = "do"`, rehearse again |
+| racers that met at the conditional put | at least one 412 came from the put itself (`at: "swap"`) | WARN: the race was not exercised, dispatch again |
+| ambiguous outcome: answer dropped / never sent / a real 5 ms abort | `reconciled` / `retried` / any landed outcome, and the ref is ours | FAIL |
+| a stale writer after another's swap | 412, fail closed | FAIL |
+| reflog repair, then create-only | `repaired`, then `present` | FAIL |
+| reflog complete | entries 1..seq, the last = the ref | FAIL |
+| refused: no precondition, seq skip, missing blob, protocol 1, non-canonical body, restore by the rehearsal | 428, 409, 409, 426, 400, 403 | FAIL |
+| store operations per ref PUT | ≤ 5 on every PUT | FAIL |
+| budget ledger | ref conflicts counted, meta bytes held | FAIL |
+
+A FAIL exits 1. `POST /v1/cas:batchPut` (≤ 16 blobs in one request) is not built in 4.0: it would ship only if the
+rehearsal showed its CPU under 10 ms, and without it a run is about 10 requests, which is affordable.

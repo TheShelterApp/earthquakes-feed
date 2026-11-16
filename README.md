@@ -385,7 +385,8 @@ minutes (one that was cancelled or skipped does not count). One health run runs 
     changes one, update the mirror and that snapshot (`tests/platform-constants.test.ts` compares the snapshot with a
     platform checkout when one is at hand).
   - `platform` ([`scripts/platform-watchdog.mjs`](scripts/platform-watchdog.mjs)): `https://api.theshelter.app/v1/health`,
-    `https://config.theshelter.app/healthz` and the config bundle's age.
+    `https://config.theshelter.app/healthz` and the config bundle's age; the staging and dev bundles' expiry, from
+    `config-staging.theshelter.app/healthz` and `config-dev.theshelter.app/healthz`.
 - **`reconcile`** ([`scripts/reconcile.mjs`](scripts/reconcile.mjs)): the only job that writes issues. It applies each
   rule's holds, resolves, inhibitions, escalation and the silences, writes the boards and sets the run's conclusion. It
   runs after a failed evaluator too (its rows freeze), but not in a run cancelled by hand. Exit 1 is red for a finding;
@@ -474,6 +475,7 @@ hundred, the board is not written at all: exit 3). The label `health:p1` … `he
 | `platform:api:envelope` | P3 | `providerTokenEnvelope: "missing"` | Account deletion cannot revoke at Apple until the envelope key is set |
 | `platform:config-worker` | P3 | `/healthz` not 200 `ok: true`; escalates at 6 h | Apps read the data copy first and keep their last good config: the config Worker |
 | `config:bundle` | P3 / P2 / P1 | The older of the config bundle's data copy and the signed policy over 5 / 10 / 25 days (the bundle expires at 30); or the copy's version behind `/healthz` for 24 h (a partial publish) | Rerun the config bundle's refresh, then check the copy reaches the host's version |
+| `config:bundle:staging`, `config:bundle:dev` | P3 | That environment's bundle, by the `expiresAt` its config Worker's `/healthz` serves: under 25 days left (no refresh for over 5 of its 30), or expired; a host without `expiresAt` is not judged | Rerun the config refresh for that environment (the config repo's `publish.yml`, which refreshes every environment twice a week) |
 | `platform:cf-usage` | P2 / P1 | Only with `CF_ANALYTICS_TOKEN`: Workers requests or D1 rows written at 80 % (or a projected 100 %) / 95 % of the free daily caps | What spends them; the caps reset at 00:00 UTC |
 | `watcher:<name>` | P3 (2nd run) | The monitoring itself: an evaluator without findings, a refused token, a usage query that failed, a GitHub read of the feed job (`feed-github`), board comments `reconcile` could not post (`reconcile`), no selftest for 35 days (`selftest-overdue`) | The job's log; the frozen rows wait for it; `selftest-overdue`: run the selftest |
 

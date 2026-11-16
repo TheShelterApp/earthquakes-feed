@@ -52,6 +52,7 @@ export type RuleId =
   | 'platform:config-worker'
   | 'config:bundle:age'
   | 'config:bundle:gap'
+  | 'config:bundle:env'
   | 'platform:cf-usage'
   | 'watcher';
 

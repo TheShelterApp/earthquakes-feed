@@ -5,6 +5,8 @@ import type { Finding } from './lib/findings.mjs';
 
 export const API_HEALTH_URL: string;
 export const CONFIG_HEALTH_URL: string;
+/** The non-prod config Workers' /healthz, by env (staging, dev). */
+export const ENV_CONFIG_HEALTH_URLS: Readonly<{ staging: string; dev: string }>;
 /** The API's tries (RULES['platform:api'].limits): 3, spread evenly over 60 s. */
 export const API_RETRY: Readonly<{ attempts: number; backoffMs: ReadonlyArray<number> }>;
 /** Every key this evaluator judges (unjudged, all of them, when a bad argument stops it). */
@@ -21,6 +23,13 @@ export function evaluateConfigBundle(input: { status: FetchResult; hostVersion: 
   notes: string[];
   summary: string;
 };
+/** config:bundle:<env> (config:bundle:env, P3) from that env's config Worker /healthz `expiresAt`. */
+export function evaluateEnvConfigBundle(input: { env: string; health: FetchResult; nowMs: number }): {
+  findings: Finding[];
+  unjudged: string[];
+  notes: string[];
+  summary: string;
+};
 /** 1 when platform:api or platform:config-worker is present, else 3 for a watcher:* finding, else 0. */
 export function plainExitCode(findings: ReadonlyArray<Pick<Finding, 'key'>>): 0 | 1 | 3;
 
@@ -28,6 +37,8 @@ export interface Options {
   apiUrl: string;
   configUrl: string;
   statusUrl: string;
+  stagingConfigUrl: string;
+  devConfigUrl: string;
   /** --findings <path>: write a findings document there and exit 0; null for plain mode. */
   findingsPath: string | null;
 }

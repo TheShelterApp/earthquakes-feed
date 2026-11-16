@@ -498,6 +498,15 @@ export const RULES = Object.freeze({
     board: 'platform', class: 'config', severity: 'P3', key: 'config:bundle',
     holdMs: 24 * HOUR,
   }),
+  'config:bundle:env': rule('config:bundle:env', {
+    title: 'staging or dev config bundle old',
+    // The staging and dev bundles, which no status.json reports (their gateways publish only on a debug tick): the
+    // `expiresAt` their config Worker's /healthz serves. Under 25 d left (no refresh for over 5 d of the bundle's 30)
+    // or expired: P3 at most, as no user runs on them; the staging TestFlight and dev builds do. Key
+    // `config:bundle:<env>` (2026-11-15 audit, FEED-PLATFORM-WATCHDOG).
+    board: 'platform', class: 'expiry', severity: 'P3', keyPrefix: 'config:bundle:',
+    limits: { envs: ['staging', 'dev'], minLeftMs: 25 * DAY, expiresMs: 30 * DAY },
+  }),
   'platform:cf-usage': rule('platform:cf-usage', {
     title: 'Cloudflare account usage',
     // Only with the CF_ANALYTICS_TOKEN secret (unset today). Workers requests and D1 rows written against the Workers

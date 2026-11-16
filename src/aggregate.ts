@@ -11,7 +11,7 @@ import { healedEpoch, runFeedSideSteps, withdrawZeroedReports } from './heal.js'
 import { LogBuffer } from './oplog.js';
 import { activeProviders, configMap, loadRegistry, priorityMap } from './providers.js';
 import { byIngestOrder, emptyTally, screen } from './quality.js';
-import { COMCAT_DELETE_REASON, deriveLoadFloorMs, revisionSweep, splitBelowDeriveFloor } from './sweep.js';
+import { COMCAT_DELETE_REASON, revisionSweep, sweepRowsAboveDeriveFloor } from './sweep.js';
 import { vanishedIds } from './absence.js';
 import { breakerPlan, breakerStatus, loadBreakers, saveBreakers, updateBreakers } from './breaker.js';
 import { frozenProviders, loadActivity, saveActivity, silentProviders, soonestLeaf, tlsErrorStatus, tlsLeafStatus, updateActivity } from './activity.js';
@@ -181,20 +181,14 @@ async function main(): Promise<void> {
   // status counts late_minted and late_withheld.
   const screenedUpdates = screen(updateRuns.flatMap((o) => o.obs).filter((r) => r.eventTimeMs <= futureCeil), tally, undefined, zeroed);
   // A revision whose origin is below derive's load floor would move its event off the days derive publishes
-  // (splitBelowDeriveFloor; only a run that loads the whole horizon asks that far back): not applied, named here.
-  const { kept: updates, dropped: belowFloor } = splitBelowDeriveFloor(screenedUpdates, deriveLoadFloorMs(nowMs));
-  for (const raw of belowFloor) {
-    if (raw.providerUpdatedMs != null) {
-      state.watermarks[raw.provider] = advanceWatermark(state.watermarks[raw.provider], raw.providerUpdatedMs, nowMs);
-    }
-  }
+  // (sweepRowsAboveDeriveFloor; only a run that loads the whole horizon asks that far back): not applied, named here.
+  const { updates, belowFloor, floorMs } = sweepRowsAboveDeriveFloor(screenedUpdates, state.watermarks, nowMs);
   if (belowFloor.length) {
     console.log(
-      `::notice title=Sweep below the derive floor::${belowFloor.length} revision(s) with an origin before ${isoFromMs(deriveLoadFloorMs(nowMs))} not applied: ` +
+      `::notice title=Sweep below the derive floor::${belowFloor.length} revision(s) with an origin before ${isoFromMs(floorMs)} not applied: ` +
         belowFloor.slice(0, 10).map((r) => `${r.provider}:${r.providerEventId} ${isoFromMs(r.eventTimeMs)}`).join(', '),
     );
   }
-  updates.sort(byIngestOrder);
   const sweep = revisionSweep(resolver, log, updates, state.watermarks, ingestTime, undefined, nowMs);
   const revisions = sweep.revisions;
   const lateMinted = sweep.lateMinted.length;

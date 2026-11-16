@@ -1,6 +1,7 @@
 import { EVENT_MAP_HORIZON_DAYS, LATE_MINT_PROVIDERS } from './config.js';
 import type { Resolver } from './dedup.js';
 import type { LogBuffer } from './oplog.js';
+import { byIngestOrder } from './quality.js';
 import type { RawObs, Watermarks } from './types.js';
 import { advanceWatermark } from './watermark.js';
 
@@ -62,6 +63,26 @@ export function splitBelowDeriveFloor(rows: readonly RawObs[], floorMs: number):
   const dropped: RawObs[] = [];
   for (const r of rows) (r.eventTimeMs >= floorMs ? kept : dropped).push(r);
   return { kept, dropped };
+}
+
+/**
+ * aggregate's preparation of the screened `updatedafter` rows for revisionSweep: the rows at or above derive's load
+ * floor (splitBelowDeriveFloor), in ingest order, and the rows below it, which are not applied but still advance
+ * their provider's watermark (`watermarks` is updated in place), as every report the run saw does, so the next
+ * horizon-sized sweep does not fetch them again.
+ */
+export function sweepRowsAboveDeriveFloor(
+  screened: readonly RawObs[],
+  watermarks: Watermarks,
+  nowMs: number,
+): { updates: RawObs[]; belowFloor: RawObs[]; floorMs: number } {
+  const floorMs = deriveLoadFloorMs(nowMs);
+  const { kept, dropped } = splitBelowDeriveFloor(screened, floorMs);
+  for (const raw of dropped) {
+    if (raw.providerUpdatedMs != null) watermarks[raw.provider] = advanceWatermark(watermarks[raw.provider], raw.providerUpdatedMs, nowMs);
+  }
+  kept.sort(byIngestOrder);
+  return { updates: kept, belowFloor: dropped, floorMs };
 }
 
 /** The `reason` on the op:tombstone line of a COMCAT_ID_PROVIDERS row withdrawn with a ComCat delete of its id

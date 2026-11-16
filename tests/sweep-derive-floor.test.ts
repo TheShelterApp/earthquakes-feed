@@ -6,9 +6,10 @@ import { eventDayKey } from '../src/bitemporal.js';
 import { Resolver } from '../src/dedup.js';
 import { LogBuffer } from '../src/oplog.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
-import { deriveLoadFloorMs, revisionSweep, splitBelowDeriveFloor } from '../src/sweep.js';
+import { byIngestOrder } from '../src/quality.js';
+import { deriveLoadFloorMs, revisionSweep, splitBelowDeriveFloor, sweepRowsAboveDeriveFloor } from '../src/sweep.js';
 import { sweepOriginFloorMs } from '../src/sweep-cursor.js';
-import type { EventNode, RawObs } from '../src/types.js';
+import type { EventNode, RawObs, Watermarks } from '../src/types.js';
 
 // 2026-11-15 audit, feed-live F1 residual: a run that loads the whole event-map horizon (a heal epoch) asks the sweeps
 // from one day below derive's load floor. A revision of an event at 00:00:10 UTC of the floor day F that moves it to
@@ -85,4 +86,24 @@ test('a revision at or above the floor still applies', () => {
   const sweep = revisionSweep(resolver, new LogBuffer(100, INGEST), kept, {}, INGEST, new Set(), NOW);
   assert.equal(sweep.revisions, 1);
   assert.equal(node.eventTimeMs, FLOOR + 2_000);
+});
+
+test("aggregate's sweep preparation: below-floor rows are not applied but advance the watermark; the rest go in ingest order", () => {
+  const { resolver, node } = nodeOnFloorDay();
+  const below = geofon(FLOOR - 10_000, FLOOR + 3_600_000);
+  const later = { ...geofon(FLOOR + 5_000, FLOOR + 1_800_000), providerEventId: 'gfz2026wxyz' };
+  const onFloor = geofon(FLOOR + 2_000, FLOOR + 1_200_000);
+  const watermarks: Watermarks = {};
+  const { updates, belowFloor, floorMs } = sweepRowsAboveDeriveFloor([later, below, onFloor], watermarks, NOW);
+  assert.equal(floorMs, FLOOR);
+  assert.deepEqual(belowFloor, [below]);
+  // Only the dropped row advances the watermark here; the kept rows advance it in revisionSweep.
+  assert.equal(watermarks.geofon, below.providerUpdatedMs);
+  assert.deepEqual(updates, [onFloor, later]);
+  assert.deepEqual(updates, [...updates].sort(byIngestOrder));
+
+  revisionSweep(resolver, new LogBuffer(100, INGEST), updates, watermarks, INGEST, new Set(), NOW);
+  assert.equal(node.eventTimeMs, FLOOR + 2_000);
+  assert.equal(eventDayKey(node.eventTimeMs), FLOOR_DAY);
+  assert.equal(watermarks.geofon, FLOOR + 3_600_000);
 });

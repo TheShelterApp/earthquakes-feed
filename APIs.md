@@ -372,10 +372,10 @@ origins `jsdelivr-sha` and `raw-sha` serve them too (a mirror at `data_commit` m
 |---|---|
 | `schema_version`, `format` | `1`, `1` |
 | `generated`, `generated_iso`, `head_seq` | the run, equal to the v1 manifest's |
-| `days[]` | `{date, path, count, filtered, bytes, sha256}` for each UTC day today − 60 … today, oldest first; a day missing here is named in `missing_days` |
-| `missing_days[]` | window days with no table this run (neither in the 45-day event map nor as a partition on `data`): count them as missing, never as quiet |
+| `days[]` | `{date, path, count, filtered, bytes, sha256}` for each UTC day today − 60 … today, oldest first; a day missing here is named in `missing_days`. Today's table holds the day so far: before its first event, in the first 30 min after 00:00 UTC, it is an empty table (`count` 0), not a missing day |
+| `missing_days[]` | window days with no table this run (neither in the 45-day event map nor as a partition on `data`; today only once it is 30 min past 00:00 UTC without an event): count them as missing, never as quiet |
 | `through` | the last day the year and area files cover (the stats builder's last frozen day), or `null` before its first run |
-| `years[]` | `{year, path, bytes, sha256, first, through, complete, mirrorable}`: the current year and the two before it |
+| `years[]` | `{year, path, bytes, sha256, first, through, complete, mirrorable}`: the current year and the two before it (in early January, until the new year's first day freezes, the year before and the two before that: the year of `through` and the two before it) |
 | `area[]` | `{year, path, bytes, sha256, min_mag, records, m6, complete, mirrorable}`: one per year from 1973 |
 | `completeness[]` | `{from, to, key, min_mag?}`: the completeness regimes (`eraB` 1973–1999 M4.5+ from USGS ComCat, `eraA` 2000 → 2023-07-06 17 sources, `archives` → 2026-07-05, `live` since). A count compared across two regimes is compared on M4.5+ only |
 | `attribution` | the licence line |
@@ -422,8 +422,8 @@ then distance, then ids) and join two groups only while the groups share no prov
 constraint). Each group keeps one row, its representative: the member holding a `usgs` provenance row (ComCat's
 magnitude is the reference), else the member whose chosen provider ranks first in the registry's provider `priority`
 (as the merge ranks), then the earliest origin, then the smallest feed id; the others are left out and counted. derive
-reconciles the rows of its whole 61-day window together before writing the day tables, so a pair across midnight
-counts once; the stats builder reconciles each year with the day before and the day after it as context. Counters:
+reconciles the rows of its whole 61-day window together, with the day before the window as context (never a table),
+before writing the day tables, so a pair across midnight counts once, the oldest day's too; the stats builder reconciles each year with the day before and the day after it as context. Counters:
 `collapsed` and `out_of_region` in each day table, `days.collapsed` and `days.out_of_region` per day and
 `reconciled: {rule, collapsed, out_of_region}` in a year file, `reconciled: {rule, collapsed, out_of_region}` in an
 area file. Which row a collapsed id folded into: `collapsed_into` in the event tables (below), so a shared id the
@@ -438,13 +438,14 @@ indexes `providers` (the sorted chosen providers). Optional columns, an absent o
 of them, a year table all but `delay`, an area table `depth`, `place`, `prov`. After the columns, `collapsed_into`
 (share links, 2026-11): `{"<feed id>": "<representative's feed id>"}`, keys in feed-id order, for rows the
 reconciliation collapsed (never a row of the table itself). A day table lists every collapsed row of the day (its
-representative is in that day's table or, across midnight, the neighbouring day's). A year table's `events` (M5+) and
+representative is in that day's table or, across midnight, the neighbouring day's; for the oldest day that can be
+the day before the window, which has no table: the event is then no longer available). A year table's `events` (M5+) and
 an area table's `m6` (M6+) list every row the year's reconciliation collapsed into one of the year's own rows at or
 above the table's floor, whatever the collapsed row's own magnitude (the live map may share a member's id rather than
 the representative's): the representative's row is always in that same table. The collapsed row is of the year or,
 across New Year, of the day before or after it (the build's context); a row of the year collapsed into a row of the
-neighbouring year is listed by the neighbouring year's table, when that year has one (year files cover the current
-year and the two before it, area files every year). Absent in year and area files of builder 2:
+neighbouring year is listed by the neighbouring year's table, when that year has one (year files cover the year of
+`through` and the two before it, area files every year). Absent in year and area files of builder 2:
 none listed.
 
 **Day table** (`v1/stats/days/YYYY-MM-DD.json`): the event table of `kind: "day"` with `date` (after `kind`),
@@ -503,6 +504,13 @@ day tables.
   context, each read from its own input, the fixed `REMERGE_INGEST_TIME` — and counts the result. The ledger records
   `remerged_in_memory: true` for such a year; once the merged assets are published, their checksums change the digest
   and the year is rebuilt from them. The epoch the statistics count at is at least 1 whatever `REMERGE_EPOCH` says.
+- **Known gap across New Year (AFAD):** an event of AFAD rows only that the pre-2026-10-01 parser stored 3 h early
+  (*Turkey (AFAD)*) at 21:00–24:00 UTC on 31 December is re-timed into 1 January by the normalization, but stays in
+  31 December's input (a merged archive keeps an event in its stored day, `stats.off_day`; the in-memory re-merge reads
+  that day only as context of the next year). Neither year counts it: a year leaves out a row timed outside its days,
+  and the next year reads 31 December only as context. That is at most the AFAD-only events of three hours a year,
+  small Turkish quakes; it is documented rather than counted, since counting them would change how every year reads
+  its inputs (a builder bump and a rebuild of all years) for a handful of rows.
 - **Era B** (1973–1999, USGS ComCat M4.5+): rows under M4.5 and the filtered events are left out, so `min_mag: 4.5` and
   `m45 == total`. Compare a count across the `completeness` epochs on M4.5+ only: the number of contributing agencies
   grows from one (era B) to 17 (era A, 2000 → 2023-07-05), more with the archives (→ 2026-07-04) and about 40 live.
@@ -513,7 +521,12 @@ day tables.
   below a band (ComCat's late publications, *Late publications*), `split copies` above one. A year that fails keeps its previous files (a first
   build stays absent) and is not retried until its inputs change; every real run names each year whose ledger entry
   failed in its marker `walk-blocked-stats`, which reaches the health board (`walks:stats:run`), and a run with
-  nothing blocked uploads a marker with only a `#` line, which resolves the board entry on the next health run.
+  nothing blocked uploads a marker with only a `#` line, which resolves the board entry on the next health run. A
+  ComCat count that fails (an outage: gate `error`) is no verdict on the year: it keeps its previous files, is retried
+  on the next run and is listed under *Deferred* in the run's report, not in the marker (an outage of days stops
+  `through` and shows as `feed:stats-through`). An outage never clears a standing gate failure: the year keeps its
+  `fail` verdict and stays in the marker; on the inputs that failed it is not deferred, since it is not retried. A dispatch's `years` naming a year with nothing to build (after the
+  year of `through`, or with no input on any day) gets a `::warning::STATS_YEARS` line.
 - **Ledger** `knowledge/stats/state.json` on `data` (derive reads `through` and each file's `sha256` from it):
   `{version, builder, through, generated, run_id, years: {Y: {inputs_digest, through, complete, area: {bytes, sha256,
   records, m6}, year?: {bytes, sha256}, check: {gate: ok|warn|fail|error, era, window, feed, comcat, ratio, bands},

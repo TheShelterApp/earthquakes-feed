@@ -735,9 +735,11 @@ const shiftDay = (day: string, n: number): string => new Date(Date.parse(`${day}
 
 /**
  * The days the refresh looks at, ascending within each part: frozen partitions on the data branch (`partitionDays`) that no archive
- * lists, whose next day is frozen too (before frozenBefore − 1), and from `today − maxAgeDays` on, then (after those,
- * ascending) the `stale` days whatever their age — or, with `range` (a dispatch's catch-up, at most MAX_REFILL_DAYS
- * days), the range's days under the same rules. Never an unfrozen day (the live run's), never an archived one.
+ * lists, whose next day is frozen too (before frozenBefore − 1) and on the branch or archived (a day derive has not
+ * committed since it froze is missing context, not a gap: the day before it waits), and from `today − maxAgeDays` on,
+ * then (after those, ascending) the `stale` days whatever their age — or, with `range` (a dispatch's catch-up, at most
+ * MAX_REFILL_DAYS days), the range's days under the same rules. Never an unfrozen day (the live run's), never an
+ * archived one.
  */
 export function lateUsgsDays(o: {
   nowMs: number;
@@ -756,7 +758,18 @@ export function lateUsgsDays(o: {
     const first = shiftDay(eventDayKey(o.nowMs), -(o.maxAgeDays ?? LATE_USGS_MAX_AGE_DAYS));
     for (let d = first; d <= last; d = shiftDay(d, 1)) candidates.push(d);
   }
-  const keep = (d: string): boolean => d <= last && o.partitionDays.has(d) && !o.archivedDays.has(d);
+  // The next day is the edition's context (a frozen partition counts as the neighbour's archived day). From phase 2 a
+  // frozen day reaches the data branch only with the first derive commit after it froze, so after a derive outage
+  // across midnight the newest frozen days are not on the branch yet: a day whose next day is missing and not archived
+  // waits (the window still holds it next run) unless a later day is on the branch, i.e. derive committed past it and
+  // the missing day is a real gap (then the day is built as before, without that neighbour).
+  let newest = '';
+  for (const d of o.partitionDays) if (d > newest) newest = d;
+  const nextReady = (d: string): boolean => {
+    const n = shiftDay(d, 1);
+    return o.partitionDays.has(n) || o.archivedDays.has(n) || n < newest;
+  };
+  const keep = (d: string): boolean => d <= last && o.partitionDays.has(d) && !o.archivedDays.has(d) && nextReady(d);
   const days = [...new Set(candidates)].filter(keep).sort();
   // The stale days after the window's: a run's cap (REMEDIATION_LATE_MAX_DAYS) and deadline go to the window first, so
   // a backlog of stale days never leaves the window's oldest day unchecked until it ages out of the window. A stale

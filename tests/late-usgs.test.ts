@@ -64,6 +64,38 @@ test('late_usgs days: frozen, unarchived partitions of the last 45 days whose ne
   assert.throws(() => lateUsgsDays({ nowMs: NOW, frozenBefore: fb, partitionDays, archivedDays, range: '2026-07-01..2026-08-31' }), /at most 31/);
 });
 
+test('late_usgs days (review): the newest frozen day waits while its next day, frozen at midnight, is not committed yet', () => {
+  // From phase 2 a frozen day reaches the data branch only with the first derive commit after it froze. With derive
+  // down across midnight, frozenBefore - 1 (11-03) is not on the branch: frozenBefore - 2 (11-02) would be built
+  // without its next day's context (a late quake near 23:59 twice, a missing context ref), so it waits.
+  const fb = frozenBefore(NOW);
+  const archivedDays = new Set<string>();
+  const partitionDays = new Set(days('2026-07-01', '2026-11-02'));
+  let d = lateUsgsDays({ nowMs: NOW, frozenBefore: fb, partitionDays, archivedDays });
+  assert.equal(d.at(-1), '2026-11-01', '11-02 waits for 11-03');
+  assert.equal(d.length, 33);
+  // Two midnights without a derive commit: 11-02 and 11-03 missing, 11-01 waits too.
+  partitionDays.delete('2026-11-02');
+  d = lateUsgsDays({ nowMs: NOW, frozenBefore: fb, partitionDays, archivedDays });
+  assert.equal(d.at(-1), '2026-10-31');
+  // The window still holds the day: the next run, after derive committed 11-03, takes it.
+  partitionDays.add('2026-11-02');
+  partitionDays.add('2026-11-03');
+  d = lateUsgsDays({ nowMs: NOW, frozenBefore: fb, partitionDays, archivedDays });
+  assert.equal(d.at(-1), '2026-11-02');
+  assert.equal(d.length, 34);
+  // An archived next day is context too.
+  partitionDays.delete('2026-11-03');
+  assert.equal(lateUsgsDays({ nowMs: NOW, frozenBefore: fb, partitionDays, archivedDays: new Set(['2026-11-03']) }).at(-1), '2026-11-02');
+  // A dispatched range follows the same rule.
+  assert.deepEqual(lateUsgsDays({ nowMs: NOW, frozenBefore: fb, partitionDays, archivedDays, range: '2026-10-30..2026-11-10' }), ['2026-10-30', '2026-10-31', '2026-11-01']);
+  // A real gap (derive committed later days, this one was never written) does not hold its previous day back forever.
+  partitionDays.add('2026-11-03');
+  partitionDays.delete('2026-10-10');
+  d = lateUsgsDays({ nowMs: NOW, frozenBefore: fb, partitionDays, archivedDays });
+  assert.ok(d.includes('2026-10-09') && !d.includes('2026-10-10'));
+});
+
 const row = (id: string, mag: number | null, ids: string[] = []): LateUsgsRow => ({ id, ids: [id, ...ids], mag });
 
 test('late_usgs diff: new and upgraded M4.5+ solutions, revisions of 0.3 or more and drops below M4.5 change the day; gone rows are reported only', () => {

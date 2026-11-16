@@ -1666,7 +1666,8 @@ passed); `writeDayPartition`'s byte compare (only avoids a rewrite); `validate.t
 `publish-r2.ts` (they read the files derive just wrote: kept on disk); derive's statistics (`writeStats` reads the
 stats days older than the event map from the data checkout's frozen files); `stats-history.ts` and remediate's
 `late_usgs` (they read frozen days by blob from the `data` HEAD: the day that froze at midnight appears with the first
-derive commit after it, so a run before that commit waits, or leaves the day out of that run, until the next one);
+derive commit after it; `stats-history` waits for that commit, and `late_usgs` leaves out the day before it, whose next
+day is its context, until a run after that commit);
 `scripts/first-observations.ts` (reads
 `events/` only for an event the observation log no longer holds, a frozen one). They never read an unfrozen day:
 backfill (days before the earliest event_map shard), archive (months over 120 days old), onboard and heal (they write
@@ -1923,7 +1924,9 @@ frozen days not archived yet (late ComCat):
   reading the edition instead of the archived day never drops an event or publishes one twice.
 - **Late ComCat** (`reason: "late_usgs"`): once a day the scheduled run asks ComCat (the `usgs` source) again for every
   frozen day the archive has not rolled yet, from 45 days ago to the last frozen day whose next day is frozen too
-  (12–45 days old: the live run owns the 11 newest, and mints late ComCat events of its first 7 itself), one whole-day
+  (12–45 days old: the live run owns the 11 newest, and mints late ComCat events of its first 7 itself) and on the
+  `data` branch or archived (a day that froze at midnight is committed by the first derive run after it: until then the
+  day before it waits for a later run; a day missing behind newer committed ones is a gap and holds nothing back), one whole-day
   fetch in 6-hour windows per day, at least 1.1 s apart. It compares ComCat's M4.5+ set with the `usgs` rows the day
   holds (the `usgs` raw asset its current edition was built from, else the current edition, else the frozen partition;
   ids matched through ComCat's `ids` too): the day changed when ComCat lists an M4.5+ solution the day holds no row of

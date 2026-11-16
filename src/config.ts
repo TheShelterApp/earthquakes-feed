@@ -373,9 +373,18 @@ export const NEW_ID_PER_REVISION_PROVIDERS: ReadonlySet<string> = new Set(['nrca
  *  and the regular heal) against the rules before: the 17 pairs fold, 2 quakes keep two events with their rows grouped
  *  otherwise (2026-07-30 and 08-22: CSN's two ids now share an event, while EMSC's own solution with INPRES's, or ComCat's,
  *  45 and 52 km from CSN's newer one, stays the quake's second event as before); per connected group of ids 15 fewer events, 0 more; rows in two live
- *  events 0. */
+ *  events 0.
+ *
+ *  PHIVOLCS (Philippines; FEED-PROV-L1 follow-up) ids are the bulletin's UTC origin stamp, `YYYY_MMDD_HHMM` or, for most
+ *  bulletins since about 2026-10-29, `YYYY_MMDD_HHMMSS` (src/custom.ts parsePhivolcs). A quake's B1 can carry the minute
+ *  stamp and its later B2 the seconds stamp, and the page then lists only the B2: on the page of 2026-11-16, 10 of the
+ *  70 minute-stamped events the feed held from 2026-10-31 on were re-issued that way, 12–15 km and 0.1–0.5 M apart
+ *  (2026_1114_0919, 18.71/121.16 M2.8 → 2026_1114_091912_B2, 18.76/121.05 M3.3; 2026_1112_0142). For PHIVOLCS the pair is
+ *  a minute stamp and a seconds stamp of that same minute (`maxIdGap` is unused); two seconds stamps never pair, so two
+ *  quakes of one minute keep apart, and a minute row pairs only with a seconds row of its minute within 50 km and 0.6 M. */
 export const REVISED_ID_WINDOWS: ReadonlyMap<string, { dtMs: number; km: number; maxDeltaMag: number; maxIdGap: number }> = new Map([
   ['csn', { dtMs: 3_000, km: 45, maxDeltaMag: 0.5, maxIdGap: 2 }],
+  ['phivolcs', { dtMs: 60_000, km: 50, maxDeltaMag: 0.6, maxIdGap: 0 }],
 ]);
 /** A REVIEWED_ID_WINDOWS provider's two windows (round 27, Resolver.reviewedPairScore). `near`: origin times, places and
  *  magnitudes at most this far apart. `far`, only when the reviewed solution lies outside the provider's region
@@ -584,7 +593,7 @@ export const REMERGE_MONTHS_PER_RUN = envNumber('REMERGE_MONTHS_PER_RUN', 4);
  *  - TEMPORAL_MS 60 s (20 s in a dense cell, Resolver.windows);
  *  - MODERATE_EVENT_MAX_DT_MS 20 s (the regional windows share it);
  *  - OVSICORI_WINDOW.maxDtMs 30 s (the out-of-region window);
- *  - REVISED_ID_WINDOWS (csn) 3 s; REVIEWED_ID_WINDOWS near 4 s / far 40 s;
+ *  - REVISED_ID_WINDOWS csn 3 s, phivolcs 60 s; REVIEWED_ID_WINDOWS near 4 s / far 40 s;
  *  - LOCATION_JOIN_DT_MS 8 s; REVIEWED_DT_HARD_MS (the reviewed-vs-reviewed guard only blocks);
  *  - epoch 2: AUTHORITY_WINDOW.maxDtMs 30 s; ISC_COPY_DT_MS 1 s.
  *  ComCat exact-id twins (Resolver.comcatTwin) have no time gate and are not pre-filtered. Live never passes it; enabling

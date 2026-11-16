@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs';
 import { request as httpsRequest } from 'node:https';
 import { dirname, resolve } from 'node:path';
 import { type TLSSocket, rootCertificates } from 'node:tls';
-import { gunzipSync, strFromU8, unzipSync, unzlibSync } from 'fflate';
+import { gunzipSync, inflateSync } from 'node:zlib';
+import { strFromU8, unzipSync } from 'fflate';
 import { QUERY_LOOKBACK_MS, REGISTRY_PATH } from './config.js';
 import type { ProviderConfig, RawObs } from './types.js';
 import { flattenScalars, knownAliasIdsOf, num, parseUtcMs } from './util.js';
@@ -19,6 +20,8 @@ interface GetOpts {
   ca?: readonly string[];
   /** The whole call, every attempt and backoff included (default 45 s): no attempt starts or runs past it. */
   deadlineMs?: number;
+  /** The most the body may hold once decoded (default MAX_BODY_BYTES): past it the request is aborted. */
+  maxBytes?: number;
 }
 
 /** Certificate-chain errors of a pinned fetch: the pins no longer complete the host's chain. */
@@ -41,6 +44,34 @@ export const isPinnedCertError = (message: string | null | undefined): boolean =
 
 /** Default bound on one getText call, all attempts included (FEED-SEC-1). */
 export const GET_DEADLINE_MS = 45_000;
+
+/** The most one getText or getBinary body may hold, decoded (FEED-PROV-L5; before, a source could answer with any size
+ *  and the run held all of it, a gzip body inflated without a bound). The largest real answers, measured 2026-11-16:
+ *  PHIVOLCS's page 1.9 MB, AEC's file 0.76 MB, IMO's 30-day backfill window 0.6 MB, IGP's year file 0.58 MB; IMO's
+ *  window over a Reykjanes-sized swarm month (tens of thousands of M >= 1 events at about 400 B each) stays under it too.
+ *  A body past it fails the request like any other error. */
+export const MAX_BODY_BYTES = 32 * 1024 * 1024;
+const bodyTooLarge = (maxBytes: number): Error => new Error(`body over ${maxBytes} bytes: aborted (MAX_BODY_BYTES)`);
+
+/** A fetch body read with a running byte count (decoded bytes: fetch inflates a compressed body as it reads), cancelled
+ *  past `maxBytes`. */
+async function readCapped(res: Response, maxBytes: number): Promise<Uint8Array> {
+  if (!res.body) return new Uint8Array(0);
+  const reader = res.body.getReader();
+  const parts: Uint8Array[] = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.byteLength;
+    if (n > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw bodyTooLarge(maxBytes);
+    }
+    parts.push(value);
+  }
+  return Buffer.concat(parts, n);
+}
 
 /** The leaf certificate each pinned host presented in this process, by host name: status.json shows its expiry (FEED-SEC-1;
  *  TMD's leaf expires 2026-10-09 01:59 UTC). Read from every pinned response whose chain verified. */
@@ -66,15 +97,18 @@ export function pinnedCa(cfg: Pick<ProviderConfig, 'id' | 'tlsIntermediates'>, r
   return pems;
 }
 
-function once(url: string, timeoutMs: number, ua: string, ca: readonly string[] | undefined): Promise<string> {
+function once(url: string, timeoutMs: number, ua: string, ca: readonly string[] | undefined, maxBytes: number): Promise<string> {
   if (!ca) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     return fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'user-agent': ua, accept: '*/*' } })
       .then(async (res) => {
-        const body = await res.text();
-        if (res.status >= 200 && res.status < 300) return body;
-        throw new Error(`HTTP ${res.status}`);
+        if (res.status < 200 || res.status >= 300) {
+          await res.body?.cancel().catch(() => undefined);
+          throw new Error(`HTTP ${res.status}`);
+        }
+        // UTF-8, as res.text() decodes (a leading BOM dropped, a bad sequence replaced).
+        return new TextDecoder().decode(await readCapped(res, maxBytes));
       })
       .finally(() => clearTimeout(timer));
   }
@@ -94,7 +128,12 @@ function once(url: string, timeoutMs: number, ua: string, ca: readonly string[] 
         // Collect raw bytes — some gov CDNs (e.g. PHIVOLCS) return content-encoding: gzip
         // regardless of Accept-Encoding, so decode by the header rather than assuming utf8.
         const chunks: Buffer[] = [];
-        res.on('data', (c: Buffer) => chunks.push(c));
+        let received = 0;
+        res.on('data', (c: Buffer) => {
+          received += c.length;
+          if (received > maxBytes) res.destroy(bodyTooLarge(maxBytes));
+          else chunks.push(c);
+        });
         res.on('error', (e) => {
           clearTimeout(deadline);
           reject(e);
@@ -106,10 +145,12 @@ function once(url: string, timeoutMs: number, ua: string, ca: readonly string[] 
           try {
             let buf: Uint8Array = Buffer.concat(chunks);
             const enc = String(res.headers['content-encoding'] ?? '').toLowerCase();
-            if (enc.includes('gzip')) buf = gunzipSync(buf);
-            else if (enc.includes('deflate')) buf = unzlibSync(buf);
+            // The inflated size is bounded too: a small gzip body can decode to gigabytes.
+            if (enc.includes('gzip')) buf = gunzipSync(buf, { maxOutputLength: maxBytes });
+            else if (enc.includes('deflate')) buf = inflateSync(buf, { maxOutputLength: maxBytes });
             resolvePromise(strFromU8(buf));
           } catch (e) {
+            if ((e as { code?: string } | null)?.code === 'ERR_BUFFER_TOO_LARGE') return reject(bodyTooLarge(maxBytes));
             reject(e instanceof Error ? e : new Error(String(e)));
           }
         });
@@ -133,7 +174,7 @@ function once(url: string, timeoutMs: number, ua: string, ca: readonly string[] 
 
 export async function getText(url: string, opts: GetOpts = {}): Promise<string> {
   // National-agency endpoints commonly UA-gate non-browser clients — default to a browser UA.
-  const { timeoutMs = 10_000, retries = 1, ua = BROWSER_UA, ca, deadlineMs = GET_DEADLINE_MS } = opts;
+  const { timeoutMs = 10_000, retries = 1, ua = BROWSER_UA, ca, deadlineMs = GET_DEADLINE_MS, maxBytes = MAX_BODY_BYTES } = opts;
   const startedAt = Date.now();
   const left = (): number => deadlineMs - (Date.now() - startedAt);
   let lastErr: unknown = new Error('no attempt');
@@ -143,7 +184,7 @@ export async function getText(url: string, opts: GetOpts = {}): Promise<string> 
       break;
     }
     try {
-      return await once(url, Math.min(timeoutMs, left()), ua, ca);
+      return await once(url, Math.min(timeoutMs, left()), ua, ca, maxBytes);
     } catch (e) {
       lastErr = e;
     }
@@ -153,16 +194,19 @@ export async function getText(url: string, opts: GetOpts = {}): Promise<string> 
 }
 
 /** Fetch a binary body (for zip bundles). S3/CDN endpoints — valid TLS, no UA gating. */
-async function getBinary(url: string, opts: { timeoutMs?: number; retries?: number } = {}): Promise<Uint8Array> {
-  const { timeoutMs = 15_000, retries = 2 } = opts;
+async function getBinary(url: string, opts: { timeoutMs?: number; retries?: number; maxBytes?: number } = {}): Promise<Uint8Array> {
+  const { timeoutMs = 15_000, retries = 2, maxBytes = MAX_BODY_BYTES } = opts;
   let lastErr: unknown = new Error('no attempt');
   for (let attempt = 0; attempt <= retries; attempt++) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'user-agent': BROWSER_UA, accept: '*/*' } });
-      if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}`);
-      return new Uint8Array(await res.arrayBuffer());
+      if (res.status < 200 || res.status >= 300) {
+        await res.body?.cancel().catch(() => undefined);
+        throw new Error(`HTTP ${res.status}`);
+      }
+      return await readCapped(res, maxBytes);
     } catch (e) {
       lastErr = e;
     } finally {
@@ -196,6 +240,14 @@ export interface Window {
 }
 export type CustomAdapter = (cfg: ProviderConfig, nowMs: number, window?: Window) => Promise<RawObs[]>;
 
+/** The error of a multi-request adapter (IPMA, IGP, BMKG, CSN, CWA) whose every request failed. It throws, so the run
+ *  records the source as failed (ok: false, the error in status.json; the breaker and the health board see it at once)
+ *  instead of ok with no rows, which only the silent-provider budget (12 h) noticed (FEED-PROV-L3). Some requests failing
+ *  still keeps the others' rows, as before. */
+export function everyRequestFailed(id: string, requests: number, last: unknown): Error {
+  return new Error(`${id}: every request failed (${requests}; last: ${last instanceof Error ? last.message : String(last)})`);
+}
+
 // --- Turkey: AFAD (UTC timestamps without a zone suffix, dense down to ~M0.6) ---
 /** AFAD apiv2 `event/filter` records. `date` and `lastUpdateDate` are UTC written without a zone suffix
  *  ("2026-09-30T19:19:18"), and the `start` / `end` query bounds are read in the same frame. Until 2026-10-01 this
@@ -226,13 +278,45 @@ export function parseAfad(list: unknown, providerId: string): RawObs[] {
 
 /** The AFAD query for [startMs, endMs]: the bounds are UTC, like `date` (fetchProviderWindow re-filters to the exact
  *  window afterward). Until 2026-10-01 they were padded by 4 h for a local-time reading of the API. */
-export function afadQueryUrl(base: string, startMs: number, endMs: number): string {
-  return `${base}?start=${fmt(startMs).replace(' ', '%20')}&end=${fmt(endMs).replace(' ', '%20')}&orderby=timedesc&limit=500`;
+export function afadQueryUrl(base: string, startMs: number, endMs: number, limit = 500): string {
+  return `${base}?start=${fmt(startMs).replace(' ', '%20')}&end=${fmt(endMs).replace(' ', '%20')}&orderby=timedesc&limit=${limit}`;
+}
+
+/** AFAD's event API answers from its newest 1,000 events only (SHLTR-146, registry `retentionDays`): measured 2026-11-14,
+ *  and again 2026-11-16 (a query of 2026-10-20 .. 11-16 with limit=2000 answered exactly 1,000 rows, from 2026-11-04
+ *  01:50:49 on, and one of 10-20 .. 11-06 answered 209 rows, all from that instant on). */
+export const AFAD_STORE_EVENTS = 1_000;
+
+/** Where AFAD's store begins, from the answer of a query over [window start, now] with limit=AFAD_STORE_EVENTS: the
+ *  oldest `date` when the answer holds AFAD_STORE_EVENTS rows (the store, or the limit, cut it: only [oldest, now] is
+ *  known in full), null when it holds fewer (every event since the window start is in the store). */
+export function afadStoreFloorMs(list: unknown): number | null {
+  const rows = Array.isArray(list) ? list : ((list as { eventList?: unknown[] } | null)?.eventList ?? []);
+  if (rows.length < AFAD_STORE_EVENTS) return null;
+  let floor: number | null = null;
+  for (const e of rows as Record<string, unknown>[]) {
+    const t = parseUtcMs(e?.['date'] as string | number | null);
+    if (t != null && (floor == null || t < floor)) floor = t;
+  }
+  return floor;
 }
 
 const afad: CustomAdapter = async (cfg, nowMs, window) => {
   const startMs = window ? window.startMs : nowMs - QUERY_LOOKBACK_MS;
   const endMs = window ? window.endMs : nowMs;
+  if (window) {
+    // FEED-DI-2: retentionDays (7) keeps backfill and remediation off the days AFAD's 1,000 events no longer reach at its
+    // usual rate (about 12 days), but a swarm shortens that to a day or two (the Sindirgi sequence of 2025-08 filled
+    // 500-row days). A window that starts before the store does answers only its part after it, which read as filled.
+    // One query over [window start, now] finds where the store begins; a window starting before it fails (backfill:
+    // counted and halved, a dispatched window a block; asked again until the retention edge passes it).
+    const nowWallMs = Math.max(Date.now(), endMs);
+    const floor = afadStoreFloorMs(JSON.parse(await getText(afadQueryUrl(cfg.base, startMs, nowWallMs, AFAD_STORE_EVENTS), { timeoutMs: 12_000, retries: 2 })) as unknown);
+    if (floor != null && floor > startMs + 60_000) {
+      const iso = (ms: number): string => new Date(ms).toISOString();
+      throw new Error(`${cfg.id}: its newest ${AFAD_STORE_EVENTS} events, all it answers for, begin at ${iso(floor)}, after the window start ${iso(startMs)}: the window cannot be answered in full (FEED-DI-2)`);
+    }
+  }
   return parseAfad(JSON.parse(await getText(afadQueryUrl(cfg.base, startMs, endMs), { timeoutMs: 12_000, retries: 2 })) as unknown, cfg.id);
 };
 
@@ -497,11 +581,16 @@ const mexico: CustomAdapter = async (cfg) => {
 // --- Portugal + Azores: IPMA (UTC times; areas 3=Azores, 7=mainland; magnitud -99 = none) ---
 const ipma: CustomAdapter = async (cfg) => {
   const out: RawObs[] = [];
-  for (const area of ['3', '7']) {
+  const areas = ['3', '7'];
+  let failed = 0;
+  let lastErr: unknown = null;
+  for (const area of areas) {
     let list: Record<string, unknown>[] = [];
     try {
       list = (JSON.parse(await getText(`${cfg.base}${area}.json`, { timeoutMs: 12_000, retries: 1 })) as { data?: Record<string, unknown>[] }).data ?? [];
-    } catch {
+    } catch (e) {
+      failed++;
+      lastErr = e;
       continue;
     }
     for (const e of list) {
@@ -518,21 +607,31 @@ const ipma: CustomAdapter = async (cfg) => {
       });
     }
   }
+  if (failed === areas.length) throw everyRequestFailed(cfg.id, failed, lastErr);
   return out.filter((o) => o.providerEventId);
 };
 
 // --- Peru: IGP (one JSON file per year; fecha_utc has the date, hora_utc the time-of-day) ---
 const igp: CustomAdapter = async (cfg, nowMs, window) => {
   const endMs = window ? window.endMs : nowMs;
-  const startMs = window ? window.startMs : endMs;
+  // Live: the years of the live lookback, so on 1-2 January the previous year's file is read too (FEED-PROV-L2: before,
+  // only the current year's, and a 31 December event IGP published or revised after midnight UTC was never fetched
+  // live). aggregate keeps only the rows inside its hot window, so the older file's other rows are dropped there.
+  const startMs = window ? window.startMs : nowMs - QUERY_LOOKBACK_MS;
   const out: RawObs[] = [];
-  // Live = current year; backfill = every year the window spans (each is one file).
-  for (let year = new Date(startMs).getUTCFullYear(); year <= new Date(endMs).getUTCFullYear(); year++) {
+  let failed = 0;
+  let lastErr: unknown = null;
+  const firstYear = new Date(startMs).getUTCFullYear();
+  const lastYear = new Date(endMs).getUTCFullYear();
+  // Every year the live lookback or the backfill window spans (each is one file).
+  for (let year = firstYear; year <= lastYear; year++) {
     let list: Record<string, unknown>[] = [];
     try {
       const j = JSON.parse(await getText(`${cfg.base}${year}`, { timeoutMs: 15_000, retries: 2 }));
       list = Array.isArray(j) ? j : [];
-    } catch {
+    } catch (e) {
+      failed++;
+      lastErr = e;
       continue;
     }
     for (const e of list) {
@@ -552,6 +651,7 @@ const igp: CustomAdapter = async (cfg, nowMs, window) => {
       });
     }
   }
+  if (failed === lastYear - firstYear + 1) throw everyRequestFailed(cfg.id, failed, lastErr);
   return out.filter((o) => o.providerEventId);
 };
 
@@ -651,13 +751,14 @@ function jsonObjectAfter(src: string, marker: string): string | null {
 // --- Spain: IGN (JS-wrapped GeoJSON; `dias30` = 30-day superset; `fecha` is UTC) ---
 const ign: CustomAdapter = async (cfg) => {
   const js = await getText(cfg.base, { timeoutMs: 15_000, retries: 2 });
+  // A file without a readable `dias30` is a failed fetch, not an empty list (FEED-PROV-L3: it read as ok with 0 rows).
   const objText = jsonObjectAfter(js, 'dias30');
-  if (!objText) return [];
+  if (!objText) throw new Error(`${cfg.id}: no dias30 object in the answer (${js.length} bytes)`);
   let fc: { features?: { geometry?: { coordinates?: number[] }; properties?: Record<string, unknown> }[] };
   try {
     fc = JSON.parse(objText);
-  } catch {
-    return [];
+  } catch (e) {
+    throw new Error(`${cfg.id}: dias30 does not parse: ${e instanceof Error ? e.message : String(e)}`);
   }
   const out: RawObs[] = [];
   for (const f of fc.features ?? []) {
@@ -713,13 +814,18 @@ const bmkg: CustomAdapter = async (cfg) => {
   const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
   const out: RawObs[] = [];
   const seen = new Set<string>();
-  for (const file of ['gempaterkini.json', 'gempadirasakan.json']) {
+  const files = ['gempaterkini.json', 'gempadirasakan.json'];
+  let failed = 0;
+  let lastErr: unknown = null;
+  for (const file of files) {
     let list: Record<string, unknown>[] = [];
     try {
       const j = JSON.parse(await getText(`${cfg.base}${file}`, { timeoutMs: 12_000, retries: 2, ua: UA })) as { Infogempa?: { gempa?: unknown } };
       const g = j.Infogempa?.gempa;
       list = Array.isArray(g) ? (g as Record<string, unknown>[]) : g ? [g as Record<string, unknown>] : [];
-    } catch {
+    } catch (e) {
+      failed++;
+      lastErr = e;
       continue;
     }
     for (const e of list) {
@@ -739,6 +845,7 @@ const bmkg: CustomAdapter = async (cfg) => {
       });
     }
   }
+  if (failed === files.length) throw everyRequestFailed(cfg.id, failed, lastErr);
   return out;
 };
 
@@ -863,6 +970,9 @@ const csn: CustomAdapter = async (cfg, nowMs, window) => {
   } else {
     days.push(nowMs, nowMs - DAY);
   }
+  // One day page missing (today's just after midnight UTC) leaves the others' rows; all of them failing is an error.
+  let failed = 0;
+  let lastErr: unknown = null;
   for (const dms of days) {
     const d = new Date(dms);
     const y = d.getUTCFullYear();
@@ -871,7 +981,9 @@ const csn: CustomAdapter = async (cfg, nowMs, window) => {
     let html: string;
     try {
       html = await getText(`${cfg.base}${y}/${mm}/${y}${mm}${dd}.html`, { timeoutMs: 12_000, retries: 1 });
-    } catch {
+    } catch (e) {
+      failed++;
+      lastErr = e;
       continue;
     }
     for (const row of html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)) {
@@ -895,6 +1007,7 @@ const csn: CustomAdapter = async (cfg, nowMs, window) => {
       });
     }
   }
+  if (days.length && failed === days.length) throw everyRequestFailed(cfg.id, failed, lastErr);
   return out;
 };
 
@@ -904,11 +1017,16 @@ const cwa: CustomAdapter = async (cfg) => {
   const seen = new Set<string>();
   // BOTH bundles: E-A0015 = significant/felt, E-A0016 = small-area minor (only place the
   // frequent small quakes appear). Each is ~16 per-event XML files.
-  for (const file of ['E-A0015-001.zip', 'E-A0016-001.zip']) {
+  const bundles = ['E-A0015-001.zip', 'E-A0016-001.zip'];
+  let failed = 0;
+  let lastErr: unknown = null;
+  for (const file of bundles) {
     let files: Record<string, Uint8Array>;
     try {
       files = unzipSync(await getBinary(`${cfg.base}${file}`, { timeoutMs: 20_000, retries: 2 }));
-    } catch {
+    } catch (e) {
+      failed++;
+      lastErr = e;
       continue;
     }
     for (const name of Object.keys(files)) {
@@ -934,6 +1052,7 @@ const cwa: CustomAdapter = async (cfg) => {
       });
     }
   }
+  if (failed === bundles.length) throw everyRequestFailed(cfg.id, failed, lastErr);
   return out.filter((o) => o.providerEventId);
 };
 
@@ -1000,18 +1119,29 @@ const koeri: CustomAdapter = async (cfg) =>
   parseKoeri(await getText(cfg.base, { timeoutMs: 12_000, retries: 2 }), cfg.id);
 
 // --- Philippines: PHIVOLCS. Hand-authored HTML whose data rows link to per-event
-//     bulletins; the bulletin FILENAME encodes the origin time in UTC (YYYY_MMDD_HHMM),
-//     used for both the timestamp and the dedup id (trailing _B1/_B2F = a bulletin
-//     revision of the same event). Cells: [PST datetime] [lat°N] [lon°E] [depth km]
+//     bulletins; the bulletin FILENAME stamps the origin time in UTC, used for both the
+//     timestamp and the dedup id (trailing _B1/_B2F = a bulletin revision of the same
+//     event, under the same stamp). Cells: [PST datetime] [lat°N] [lon°E] [depth km]
 //     [mag] [place]. magType lives only in the sub-bulletins, so it is left null. ---
+/** PHIVOLCS's bulletin stamp, `YYYY_MMDD_HHMM` or, for most bulletins since about 2026-10-29, `YYYY_MMDD_HHMMSS`; the
+ *  id is the stamp as the file gives it. Until 2026-11-16 only the minute form was read, so every bulletin with seconds
+ *  was skipped: the page of 2026-11-16 listed 957 events of 2026-10-31 .. 11-16, 900 of them with seconds, and the feed
+ *  held 3 to 11 PHIVOLCS events a day from 2026-10-30 against about 50 to 80 before. Two events of one minute also folded
+ *  into one (FEED-PROV-L1): that page held 20 such minutes, each two events with their own bulletins, 16 to 1,675 km
+ *  apart. The seconds keep those apart; two rows of one stamp still fold (a revision listed twice; B1 and B3F of
+ *  2026_1105_180243 share the stamp). Minute-stamped bulletins keep their minute ids, so two of them in one minute still
+ *  fold: the page gives nothing finer, and a suffix by row order or place would change an event's id when a later event
+ *  is listed beside it. A quake whose B1 carried a minute stamp and whose later bulletin carries a seconds stamp of the
+ *  same minute (the page then lists only the later one) is read under the seconds id; the Resolver joins that row to
+ *  the event holding the minute id (config REVISED_ID_WINDOWS, Resolver.revisedIdPair). */
 export function parsePhivolcs(html: string, providerId: string): RawObs[] {
   const out: RawObs[] = [];
   const seen = new Set<string>();
   for (const row of html.split(/<tr[ >]/i)) {
-    const href = /href="([^"]*_Earthquake_Information[^"]*?(\d{4})_(\d{4})_(\d{4})_[^"]*\.html)"/i.exec(row);
+    const href = /href="([^"]*_Earthquake_Information[^"]*?(\d{4})_(\d{4})_(\d{4})(\d{2})?_[^"]*\.html)"/i.exec(row);
     if (!href) continue;
-    const [, file, yyyy, mmdd, hhmm] = href;
-    const id = `${yyyy}_${mmdd}_${hhmm}`; // UTC origin-minute; folds B1/B2 revisions
+    const [, file, yyyy, mmdd, hhmm, ss] = href;
+    const id = `${yyyy}_${mmdd}_${hhmm}${ss ?? ''}`; // the UTC origin stamp; folds B1/B2 revisions
     if (seen.has(id)) continue;
     const tds = [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map((m) =>
       htmlDecode(m[1]!.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim(),
@@ -1019,7 +1149,7 @@ export function parsePhivolcs(html: string, providerId: string): RawObs[] {
     if (tds.length < 6) continue;
     const lat = num(tds[1]);
     const lon = num(tds[2]);
-    const t = parseUtcMs(`${yyyy}-${mmdd!.slice(0, 2)}-${mmdd!.slice(2)}T${hhmm!.slice(0, 2)}:${hhmm!.slice(2)}:00Z`);
+    const t = parseUtcMs(`${yyyy}-${mmdd!.slice(0, 2)}-${mmdd!.slice(2)}T${hhmm!.slice(0, 2)}:${hhmm!.slice(2)}:${ss ?? '00'}Z`);
     if (lat == null || lon == null || t == null) continue;
     seen.add(id);
     out.push({

@@ -617,7 +617,10 @@ providers/tls/README.md).
 **Failing and silent sources.** A provider whose fetch failed has `ok: false` and is in `degraded`. An FDSN answer of
 HTTP 204 is an empty success; HTTP 404 is an empty success only for a source whose query asks `nodata=404` (none does
 today) and an error otherwise, because it means the query path is gone (before 2026-10-04 every 404 counted as empty).
-A source can also answer `ok` with no rows while it has stopped publishing: since 2026-10-04 each run records per
+A custom adapter that asks several files (IPMA's two areas, IGP's year files, BMKG's two lists, CSN's day pages, CWA's
+two bundles) fails when every one of them failed, with `<id>: every request failed (<n>; last: <error>)`; some failing
+leaves the others' rows, `ok`. IGN fails when its file holds no readable `dias30`. Before 2026-11-16 all of these read as
+`ok` with no rows, which only the silence below noticed (FEED-PROV-L3). A source can also answer `ok` with no rows while it has stopped publishing: since 2026-10-04 each run records per
 source the last run whose answer had rows (`knowledge/index/provider_activity.json`, seeded once from the status
 history), and a source with no rows for longer than its activity budget is **silent**: listed in `silent` (by id:
 `last_non_empty_at`, null when none was seen since `counted_from`; `silent_hours`; `budget_hours`) and counted in
@@ -858,6 +861,15 @@ pairs of CSN ids within 60 s and 100 km in the observation log of 2026-07-05…1
 list only one id of 14 (all inside these limits) and both of 10; 3 of those 10 are one quake CSN
 lists twice (EMSC shows one event for each, and no agency a second quake) and fold too; the other
 7 stay apart. The older row stays in the event's provenance.
+
+PHIVOLCS (Philippines) is a second case of the same rule. Its id is the bulletin's UTC origin stamp, to the minute
+(`2026_1114_0919`) or, for most bulletins since about 2026-10-29, to the second (`2026_1114_091912`). A quake's first
+bulletin can carry the minute stamp and a later one the seconds stamp; the page then lists only the later one. Since
+2026-11-16 a minute-stamped row and a seconds-stamped row of that same minute whose places are ≤ 50 km apart and whose
+magnitudes differ by ≤ 0.6 are one quake: the seconds-stamped report joins the event holding the minute id, under the
+same limits as CSN's pairs. Two seconds-stamped ids are never paired, so two quakes of one minute stay two events. On
+the page of 2026-11-16, 10 of the 70 minute-stamped events the feed held from 2026-10-31 on had been re-issued that way,
+12–15 km and 0.1–0.5 M apart.
 
 OVSICORI (Costa Rica) is another: its analyst's review of a quake comes hours later under a new id while the automatic
 solution stays listed. Since round 27 (2026-10-14) such an automatic / reviewed pair is one quake (see *Regional
@@ -1743,7 +1755,7 @@ Three kinds of days are incomplete for some sources although they are frozen:
   2025-04-01 and 2025-05-24. All but KAGSR 2025-07-30 got their editions on 2026-10-04 (dispatches named their days;
   the scheduled run then took the refill queue only). KAGSR 2025-07-30, measured read only on 2026-11-14: KAGSR's
   answer for the whole day holds 676 events (and one for 2025-07-29 .. 08-01, 1,004: KAGSR applies no 500-row cap; the
-  backfill's custom-source rule, an answer of 490 rows or more is an overflow, marked the day), the 24 hour windows of
+  backfill's custom-source rule, an answer of 490 rows or more in the window is an overflow, marked the day), the 24 hour windows of
   the day sum to the same 676 ids, and the archived day (`archive-2025-07`, `events-2025-07.e3.tar.zst`) holds 578 of
   them: 98 KAGSR events of the day are missing (60 with ids above the newest one archived: KAGSR added them after the
   backfill fetched the day in July 2026). Since SHLTR-151 such a day is a block on backfill's marker
@@ -1991,7 +2003,7 @@ of the moment and seldom follows a revision; it follows CSN's), and EMSC replace
 its own solution later (most of KOERI's and AFAD's): such a copy counts only while it is within
 those limits of the agency's row. Where KOERI gives both ML and Mw the feed's row carries the Mw
 while EMSC copies the ML, so those copies do not count. Not on the list: BMKG (its public lists
-carry another solution), PHIVOLCS and JMA (their lists give the origin to the minute), GFZ,
+carry another solution), PHIVOLCS and JMA (their lists gave the origin to the minute when this was measured), GFZ,
 ReNaSS, ETHZ, NOA, IMO (too many copies differ from every version the feed saw), GSRAS (not
 KAGSR's solution), CN (the feed's NRCan rows carry no magnitude) and the agencies with fewer than 50
 copies (IPMA, IGP, GA, CWA, IPGP's observatories, BGS, USP, KNMI, AEC). The US networks the feed reads only through ComCat count against ComCat's row whose own
@@ -2141,7 +2153,12 @@ older than that is skipped with the reason `retention` (the run's log and the dr
 whose next window lies wholly before it is done with `stoppedBy: "retention"` in `knowledge/index/backfill.json`; a
 dispatched window that is still open there is closed), and a remediation day older than that is built without AFAD,
 its edition naming it in `not_fetched` (*Remediation editions*). Neither is a block on the health board: nothing more
-can be fetched. The live path asks AFAD for its last 2 days and is not affected. Since every backfill window lies
+can be fetched. A swarm can shorten the store below the 7 days (FEED-DI-2), so since 2026-11-16 every AFAD window query
+first asks the store over [window start, now] with `limit=1000`: when that answer holds 1,000 events and its oldest is
+more than 60 s after the window start, the window fails (`afad: its newest 1000 events, all it answers for, begin at
+…`) instead of reading as filled; backfill halves a walk's window or blocks on a dispatched one, as for any failure (on
+2026-11-16 the store began 2026-11-04 01:50:49 UTC, 12 days back). The live path asks AFAD for its last 2 days, with
+no such query, and is not affected. Since every backfill window lies
 before the live floor (the oldest `event_map` day, about 45 days back) and every queued refill day is archived, AFAD's
 history before the live floor can no longer be refilled from AFAD at all: what the archives and frozen partitions hold
 is all there is. The AFAD raw assets of the seam editions of 2026-06-28..30 (`raw-afad-2026-06-2{8,9}`,

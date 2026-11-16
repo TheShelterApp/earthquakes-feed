@@ -74,9 +74,10 @@ function pair(over: Partial<RawObs>, id = '384790'): number {
   return live(map).length;
 }
 
-test('config: CSN only, 3 s, 45 km, |ΔM| ≤ 0.5, informes at most 2 apart', () => {
-  assert.deepEqual([...REVISED_ID_WINDOWS.keys()], ['csn']);
+test('config: CSN 3 s, 45 km, |ΔM| ≤ 0.5, informes at most 2 apart; PHIVOLCS minute / seconds stamps, 60 s, 50 km, |ΔM| ≤ 0.6', () => {
+  assert.deepEqual([...REVISED_ID_WINDOWS.keys()], ['csn', 'phivolcs']);
   assert.deepEqual(REVISED_ID_WINDOWS.get('csn'), { dtMs: 3_000, km: 45, maxDeltaMag: 0.5, maxIdGap: 2 });
+  assert.deepEqual(REVISED_ID_WINDOWS.get('phivolcs'), { dtMs: 60_000, km: 50, maxDeltaMag: 0.6, maxIdGap: 0 });
 });
 
 test('the two revisions are one event each, with EMSC’s copy; the double listing and the two quakes stay apart', () => {

@@ -169,6 +169,10 @@ export async function fetchSweepPage(p: ProviderConfig, q: SweepPageQuery, timeo
   return { provider: p.id, obs: r.obs, status: r.status, rows: r.rows, full: r.status.ok && r.overflow };
 }
 
+/** The row count of a custom adapter's window answer that reads as an overflow: AFAD's query (`limit=500`, custom.ts
+ *  afadQueryUrl) with a margin. */
+export const CUSTOM_WINDOW_CAP = 490;
+
 /** Backfill path: a bounded [startMs, endMs] window; rows outside are dropped (providers
  *  ignore params). `overflow` drives the caller's window-halving. */
 export async function fetchProviderWindow(p: ProviderConfig, startMs: number, endMs: number, minmag?: number): Promise<WindowOutcome> {
@@ -179,7 +183,11 @@ export async function fetchProviderWindow(p: ProviderConfig, startMs: number, en
     const started = performance.now();
     try {
       const raw = await adapter(p, endMs, { startMs, endMs });
-      return { provider: p.id, obs: raw.filter(inWindow), status: { ok: true, latency_ms: Math.round(performance.now() - started), events_returned: raw.length }, overflow: raw.length >= 490 };
+      const obs = raw.filter(inWindow);
+      // AFAD's query caps an answer at 500 rows; a window that held ~490 of them is too wide. Counted on the window's
+      // rows: an adapter that returns a whole file or list (most do) holds rows outside it, which say nothing about
+      // whether the window fits (FEED-PROV-L6; the count was of every row, so a long file read as an overflow).
+      return { provider: p.id, obs, status: { ok: true, latency_ms: Math.round(performance.now() - started), events_returned: raw.length }, overflow: obs.length >= CUSTOM_WINDOW_CAP };
     } catch (err) {
       return { provider: p.id, obs: [], status: { ok: false, latency_ms: Math.round(performance.now() - started), error: err instanceof Error ? err.message : String(err) }, overflow: false };
     }

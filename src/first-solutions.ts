@@ -150,10 +150,10 @@ export const HISTORY_SOURCES: readonly HistorySource[] = [
   },
   // ETHZ and LMU give the whole publicID as their FDSN text EventID; the others the last segment.
   { provider: 'ethz', method: 'quakeml-all-origins', unit: 'day', url: allOriginsDay('https://eida.ethz.ch/fdsnws/event/1/query'), accept: QUAKEML_ACCEPT, timeoutMs: 60_000, idOf: wholePublicId },
-  { provider: 'usp', method: 'quakeml-all-origins', unit: 'day', url: allOriginsDay('http://www.moho.iag.usp.br/fdsnws/event/1/query'), accept: QUAKEML_ACCEPT, timeoutMs: 60_000, idOf: lastSegment },
+  { provider: 'usp', method: 'quakeml-all-origins', unit: 'day', url: allOriginsDay('https://www.moho.iag.usp.br/fdsnws/event/1/query'), accept: QUAKEML_ACCEPT, timeoutMs: 60_000, idOf: lastSegment },
   { provider: 'geofon', method: 'quakeml-all-origins', unit: 'day', url: allOriginsDay('https://geofon.gfz.de/fdsnws/event/1/query'), accept: QUAKEML_ACCEPT, timeoutMs: 60_000, idOf: lastSegment },
   { provider: 'knmi', method: 'quakeml-all-origins', unit: 'day', url: allOriginsDay('https://rdsa.knmi.nl/fdsnws/event/1/query'), accept: QUAKEML_ACCEPT, timeoutMs: 60_000, idOf: lastSegment },
-  { provider: 'ipgp', method: 'quakeml-all-origins', unit: 'day', url: allOriginsDay('http://ws.ipgp.fr/fdsnws/event/1/query'), accept: QUAKEML_ACCEPT, timeoutMs: 60_000, idOf: lastSegment },
+  { provider: 'ipgp', method: 'quakeml-all-origins', unit: 'day', url: allOriginsDay('https://ws.ipgp.fr/fdsnws/event/1/query'), accept: QUAKEML_ACCEPT, timeoutMs: 60_000, idOf: lastSegment },
   { provider: 'lmu', method: 'quakeml-all-origins', unit: 'day', url: allOriginsDay('https://erde.geophysik.uni-muenchen.de/fdsnws/event/1/query'), accept: QUAKEML_ACCEPT, timeoutMs: 60_000, idOf: wholePublicId },
 ];
 

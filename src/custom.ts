@@ -49,9 +49,10 @@ export const GET_DEADLINE_MS = 45_000;
  *  and the run held all of it, a gzip body inflated without a bound). The largest real answers, measured 2026-11-16:
  *  PHIVOLCS's page 1.9 MB, AEC's file 0.76 MB, IMO's 30-day backfill window 0.6 MB, IGP's year file 0.58 MB; IMO's
  *  window over a Reykjanes-sized swarm month (tens of thousands of M >= 1 events at about 400 B each) stays under it too.
- *  A body past it fails the request like any other error. */
+ *  A body past it fails the request like any other error; the message never reads as no answer (breaker isNoAnswer), since
+ *  the host did answer. */
 export const MAX_BODY_BYTES = 32 * 1024 * 1024;
-const bodyTooLarge = (maxBytes: number): Error => new Error(`body over ${maxBytes} bytes: aborted (MAX_BODY_BYTES)`);
+const bodyTooLarge = (maxBytes: number): Error => new Error(`body over ${maxBytes} bytes (MAX_BODY_BYTES): the host answered, the read was stopped`);
 
 /** A fetch body read with a running byte count (decoded bytes: fetch inflates a compressed body as it reads), cancelled
  *  past `maxBytes`. */

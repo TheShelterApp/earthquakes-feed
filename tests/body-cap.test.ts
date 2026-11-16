@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
 import { gzipSync } from 'node:zlib';
+import { isNoAnswer } from '../src/breaker.js';
 import { MAX_BODY_BYTES, getText } from '../src/custom.js';
 
 // FEED-PROV-L5: getText read a source's whole body with no bound (and inflated a gzip body without one). A body past
@@ -49,7 +50,12 @@ test('body cap: a fetched body past maxBytes is aborted, compressed or not; one 
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {
-    await assert.rejects(getText(`${base}/big`, { retries: 0, maxBytes: 1_000 }), /body over 1000 bytes/);
+    await assert.rejects(getText(`${base}/big`, { retries: 0, maxBytes: 1_000 }), (e: Error) => {
+      assert.match(e.message, /body over 1000 bytes/);
+      // The host answered: an oversized body is never 'no answer' for the circuit breaker.
+      assert.equal(isNoAnswer({ ok: false, error: e.message }), false);
+      return true;
+    });
     await assert.rejects(getText(`${base}/gzip`, { retries: 0, maxBytes: 1_000 }), /body over 1000 bytes/);
     assert.equal(await getText(`${base}/gzip`, { retries: 0, maxBytes: 5_000 }), 'a'.repeat(5_000), 'exactly the cap passes');
     assert.equal(await getText(`${base}/big`, { retries: 0 }), 'x'.repeat(5_000), 'the default cap lets a normal body through');

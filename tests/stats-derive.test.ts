@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -214,6 +214,58 @@ test('today with an event inside the grace: its table, not an empty one', () => 
   assert.equal(out.emptyToday, null);
   assert.deepEqual(idx.missing_days, []);
   assert.equal(idx.days.at(-1)!.count, 2);
+});
+
+test('the oldest day is reconciled with the day before the window as context, which is never a table', () => {
+  const w = world();
+  const oldest = statsDays(NOW)[0]!;
+  const before = eventDayKey(Date.parse(`${oldest}T00:00:00Z`) - DAY);
+  // One quake, reported by EMSC 10 s after the oldest day's midnight and by USGS 10 s before it (the representative).
+  const feature = (id: string, timeMs: number, provider: string): string =>
+    JSON.stringify({ type: 'Feature', id, geometry: { type: 'Point', coordinates: [140, 35, 10] }, properties: { mag: 5.1, time: timeMs, type: 'earthquake', feed: { state: 'live', chosen_provider: provider, provenance: [{ provider, chosen: true }] } } }) + '\n';
+  const t = Date.parse(`${oldest}T00:00:00Z`);
+  const emsc = 'efd_01M6Q2J4WG0000000000000011';
+  const usgs = 'efd_01M6Q2J4WG0000000000000012';
+  appendFileSync(dayPartitionFile(w.dataDir, oldest), feature(emsc, t + 10_000, 'emsc'));
+  appendFileSync(dayPartitionFile(w.dataDir, before), feature(usgs, t - 10_000, 'usgs'));
+  const warn = quiet();
+  const out = writeStats(w.tables, { publicDir: w.publicDir, dataDir: w.dataDir, nowMs: NOW, headSeq: 1, config, warn });
+  assert.deepEqual(out.errors, []);
+  assert.deepEqual(warn.lines, []);
+  const idx = readIndex(w.publicDir);
+  assert.equal(idx.days.length, 61);
+  assert.ok(!idx.days.some((d) => d.date === before), 'the context day is not a table');
+  assert.deepEqual([idx.days[0]!.date, idx.days[0]!.count], [oldest, 2]);
+  const table = JSON.parse(readFileSync(join(w.publicDir, idx.days[0]!.path), 'utf8')) as { collapsed: number; collapsed_into: Record<string, string> };
+  assert.deepEqual([table.collapsed, table.collapsed_into], [1, { [emsc]: usgs }]);
+  assert.equal(out.collapsed, 1);
+
+  // Without the context day's partition the oldest day is reconciled within the window: the EMSC row stays.
+  rmSync(dayPartitionFile(w.dataDir, before));
+  writeStats(w.tables, { publicDir: w.publicDir, dataDir: w.dataDir, nowMs: NOW, headSeq: 1, config, warn });
+  assert.equal(readIndex(w.publicDir).days[0]!.count, 3);
+  assert.deepEqual(warn.lines, []);
+
+  // An unreadable context partition is a warning, never a dropped run.
+  writeFileSync(dayPartitionFile(w.dataDir, before), '{not json\n');
+  assert.deepEqual(writeStats(w.tables, { publicDir: w.publicDir, dataDir: w.dataDir, nowMs: NOW, headSeq: 1, config, warn }).errors, []);
+  assert.equal(warn.lines.length, 1);
+  assert.match(warn.lines[0]!, new RegExp(`${before} \\(reconciliation context of the oldest day\\) unreadable`));
+});
+
+test('checkStats validates against the schema directory it is given, not the first one compiled', () => {
+  const w = world();
+  writeStats(w.tables, { publicDir: w.publicDir, dataDir: w.dataDir, nowMs: NOW, headSeq: 1, config, warn: quiet() });
+  assert.deepEqual(checkStats(w.publicDir, NOW), []);
+  // A copy of the schemas whose index allows no missing day at all, and no more than 60 days.
+  const dir = mkdtempSync(join(tmpdir(), 'stats-schema-'));
+  cpSync(here('../schema'), dir, { recursive: true });
+  const f = join(dir, 'stats-index.schema.json');
+  const s = JSON.parse(readFileSync(f, 'utf8')) as { properties: Record<string, Record<string, unknown>> };
+  s.properties['days']!['maxItems'] = 60;
+  writeFileSync(f, JSON.stringify(s));
+  assert.match(checkStats(w.publicDir, NOW, dir).join(), /index\.json: \/days must NOT have more than 60 items/);
+  assert.deepEqual(checkStats(w.publicDir, NOW), [], 'the default directory is still its own');
 });
 
 function yearDoc(): string {

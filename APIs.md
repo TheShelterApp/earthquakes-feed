@@ -422,8 +422,8 @@ then distance, then ids) and join two groups only while the groups share no prov
 constraint). Each group keeps one row, its representative: the member holding a `usgs` provenance row (ComCat's
 magnitude is the reference), else the member whose chosen provider ranks first in the registry's provider `priority`
 (as the merge ranks), then the earliest origin, then the smallest feed id; the others are left out and counted. derive
-reconciles the rows of its whole 61-day window together before writing the day tables, so a pair across midnight
-counts once; the stats builder reconciles each year with the day before and the day after it as context. Counters:
+reconciles the rows of its whole 61-day window together, with the day before the window as context (never a table),
+before writing the day tables, so a pair across midnight counts once, the oldest day's too; the stats builder reconciles each year with the day before and the day after it as context. Counters:
 `collapsed` and `out_of_region` in each day table, `days.collapsed` and `days.out_of_region` per day and
 `reconciled: {rule, collapsed, out_of_region}` in a year file, `reconciled: {rule, collapsed, out_of_region}` in an
 area file. Which row a collapsed id folded into: `collapsed_into` in the event tables (below), so a shared id the
@@ -438,7 +438,8 @@ indexes `providers` (the sorted chosen providers). Optional columns, an absent o
 of them, a year table all but `delay`, an area table `depth`, `place`, `prov`. After the columns, `collapsed_into`
 (share links, 2026-11): `{"<feed id>": "<representative's feed id>"}`, keys in feed-id order, for rows the
 reconciliation collapsed (never a row of the table itself). A day table lists every collapsed row of the day (its
-representative is in that day's table or, across midnight, the neighbouring day's). A year table's `events` (M5+) and
+representative is in that day's table or, across midnight, the neighbouring day's; for the oldest day that can be
+the day before the window, which has no table: the event is then no longer available). A year table's `events` (M5+) and
 an area table's `m6` (M6+) list every row the year's reconciliation collapsed into one of the year's own rows at or
 above the table's floor, whatever the collapsed row's own magnitude (the live map may share a member's id rather than
 the representative's): the representative's row is always in that same table. The collapsed row is of the year or,

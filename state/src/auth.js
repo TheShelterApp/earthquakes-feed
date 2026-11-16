@@ -43,7 +43,8 @@ const MAX_TOKEN_CHARS = 8_192;
 // file name it shares with this repository (publish.yml, aggregate.yml) then matches nothing here: every pair names
 // the repository it belongs to. `repository: HOME` is the Worker's REPOSITORY_ID (this repository); a peer is a
 // numeric id string. A pair may also require the token's `environment` claim (a GitHub Environment, whose required
-// reviewers GitHub enforces before the job gets a token at all) and narrow the events.
+// reviewers GitHub enforces before the job gets a token at all, once the Environment exists with them) and narrow the
+// events.
 export const HOME = 'home';
 const pair = (workflow, extra = {}) => Object.freeze({ repository: HOME, workflow, ...extra });
 const pairs = (...workflows) => Object.freeze(workflows.map((w) => pair(w)));
@@ -62,10 +63,13 @@ export const ROUTE_POLICY = Object.freeze({
 });
 
 /**
- * The restore pair: only state-restore.yml, only dispatched by hand, and only in a job of the GitHub Environment
- * `state-restore` (required reviewer: the owner), whose token carries `environment: state-restore`. It is the one
- * writer that may send `restore_of` (a ref PUT that jumps head_seq forward); it reads the ref and the reflog it
- * restores from. The rehearsal workflow is never admitted here, not even on staging.
+ * The restore pair: only state-restore.yml, only dispatched by hand, and only in a job whose token carries
+ * `environment: state-restore`. It is the one writer that may send `restore_of` (a ref PUT that jumps head_seq
+ * forward); it reads the ref and the reflog it restores from. The rehearsal workflow is never admitted here, not even
+ * on staging. The claim proves only that the job named the GitHub Environment, not that it was reviewed: GitHub creates
+ * a named Environment that does not exist with no protection rules, so the owner's review holds only once the owner has
+ * created `state-restore` with a required reviewer and deployments limited to main (state/README.md, Owner setup step
+ * 5), before any state-restore.yml lands.
  */
 export const RESTORE_ENVIRONMENT = 'state-restore';
 export const RESTORE_PAIR = pair('state-restore.yml', { environment: RESTORE_ENVIRONMENT, events: Object.freeze(['workflow_dispatch']) });

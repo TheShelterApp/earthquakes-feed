@@ -1934,7 +1934,8 @@ names a generation blob and its place in the chain (seq, parent, head_seq, data_
 the Worker swaps it only to the direct successor of the version the writer read (If-Match), answers 412 with the current
 ref otherwise (the writer fails closed, no automatic rebase), and keeps every version in the reflog, the future GC root
 set, backup index and restore index. Allow-lists are (repository_id, workflow) pairs, ready for the escape route's
-second repository; a restore is admitted only for `state-restore.yml` in the GitHub Environment `state-restore`. The
+second repository; a restore is admitted only for `state-restore.yml` in the GitHub Environment `state-restore`, which
+the owner creates with a required reviewer before that workflow lands (state/README.md, Owner setup). The
 step changes nothing in production: no job calls the new routes, `MIN_PROTOCOL` stays 1, and the blob routes are
 unchanged apart from the priority lanes above. Its gate is `state-rehearsal.yml` on staging: R2's create-only
 precondition, two racing writers (exactly one 412), the ambiguous-answer reconcile, the reflog repair and at most 5

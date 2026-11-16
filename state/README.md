@@ -291,8 +291,10 @@ no production workflow calls them):
 `state-gc.yml`, `state-backup.yml` and `health.yml` read every lane's ref and reflog. **Restore** is a ref PUT whose
 body has `restore_of` (the reflog entry it restores) and whose `head_seq` jumps forward (409 otherwise; invariant 5:
 seqs never repeat). It is admitted for exactly one pair: `state-restore.yml` of this repository, `event_name`
-`workflow_dispatch`, with the token claim `environment: state-restore`, which GitHub only puts in a job of the GitHub
-Environment `state-restore` (required reviewer: the owner) after the review passed. That pair also reads the refs and
+`workflow_dispatch`, with the token claim `environment: state-restore`. The claim proves only that the job named that
+GitHub Environment, not that anyone reviewed it: GitHub creates an Environment a workflow names but that does not exist
+yet, with no protection rules. So the review is real only once the owner has created `state-restore` with a required
+reviewer (Owner setup, step 5), which must happen before any `state-restore.yml` lands on `main`. That pair also reads the refs and
 the reflogs it restores from. The restore workflow without `restore_of` is no writer, a writer with `restore_of` is no
 restorer (403 both), and the rehearsal workflow is never admitted, not even on staging.
 
@@ -375,6 +377,12 @@ JWKS fetch logs `{"t":"feed-state","event":"jwks-fetch-failed"}`.
    `feed-state*`; otherwise add a Configuration Rule for hostname `feed-state*.theshelter.app` with Browser Integrity
    Check off and exclude the host from the rate limit (platform/infra/wrangler/README.md lists the zone's rules).
 4. Turn on Cloudflare usage notifications for R2 storage and operations (a second alarm beside the Worker's ceilings).
+5. Before any `state-restore.yml` is merged (storage phase 4.2; production only, staging never admits a restore): in
+   the repository's Settings → Environments, create the Environment `state-restore` with the owner as **required
+   reviewer** and **deployment branches limited to `main`** (selected branches, rule `main`). Check that it is there
+   with `gh api repos/TheShelterApp/earthquakes-feed/environments/state-restore --jq '.protection_rules'` (a
+   `required_reviewers` rule naming the owner). Without it, the first dispatch of the restore workflow would create the
+   Environment unprotected and the Worker would admit its restore with no review.
 
 ## Deploy
 

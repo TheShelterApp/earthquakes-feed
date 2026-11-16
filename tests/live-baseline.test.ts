@@ -23,7 +23,7 @@ import {
   writeBaselineSnapshot,
 } from '../src/live-baseline.js';
 import { detectSilentChanges, liveWindowDays, silentChangesAgainst } from '../src/live-sync.js';
-import { NO_PARTITION_FORMAT, dayPartitionFile, dayPartitionText, partitionPath, writeDayPartition } from '../src/partitions.js';
+import { NO_PARTITION_FORMAT, dayPartitionFile, dayPartitionText, partitionPath, writeDayPartition, type PartitionFormat } from '../src/partitions.js';
 import { LogBuffer } from '../src/oplog.js';
 import { configMap, loadRegistry, priorityMap } from '../src/providers.js';
 import type { EventNode, RawObs } from '../src/types.js';
@@ -102,14 +102,14 @@ function silentRevision(w: World, nowMs: number, target: EventNode, author: stri
 
 /** A derive run at `nowMs` on the data checkout `root`: the event map on disk (aggregate saved it), its partitions, the
  *  record and the manifest, as src/derive.ts writes them. */
-function deriveRun(root: string, nowMs: number, headSeq: number): void {
+function deriveRun(root: string, nowMs: number, headSeq: number, fmt: PartitionFormat = NO_PARTITION_FORMAT): void {
   const nodes = [...loadEventMap(root, { nowMs }).values()];
   const byDay = new Map<string, EventNode[]>();
   for (const n of nodes) (byDay.get(eventDayKey(n.eventTimeMs)) ?? byDay.set(eventDayKey(n.eventTimeMs), []).get(eventDayKey(n.eventTimeMs))!).push(n);
   const want = new Set(baselineDays(nowMs));
   const written = new Map<string, string>();
   for (const [day, ns] of byDay) {
-    const out = writeDayPartition(root, day, ns, { nowMs, headIngestTime: iso(nowMs), fmt: NO_PARTITION_FORMAT });
+    const out = writeDayPartition(root, day, ns, { nowMs, headIngestTime: iso(nowMs), fmt });
     if (want.has(day)) written.set(day, out.ndjson);
   }
   writeBaselineRecord(root, baselineRecord(nowMs, headSeq, written));
@@ -118,10 +118,10 @@ function deriveRun(root: string, nowMs: number, headSeq: number): void {
 
 /** The snapshot step on the checkout `root` at `nowMs` (src/live-baseline.ts main), with the Pages fallback when a
  *  `pages` fetch is given (the previous derive's deployed copies). */
-async function snapshot(root: string, dir: string, nowMs: number, pages?: typeof fetch): Promise<string[]> {
+async function snapshot(root: string, dir: string, nowMs: number, pages?: typeof fetch, fmt: PartitionFormat = NO_PARTITION_FORMAT): Promise<string[]> {
   const map = loadEventMap(root, { nowMs });
   const days = baselineDays(nowMs);
-  const texts = partitionTexts(map.values(), days, NO_PARTITION_FORMAT);
+  const texts = partitionTexts(map.values(), days, fmt);
   const record = readBaselineRecord(root);
   const prev = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8')) as { generated: number; head_seq: number };
   const recovered =
@@ -344,6 +344,40 @@ test('silentChangesAgainst: a node missing from the previous lines counts only o
 });
 
 const readLine = (n: EventNode): string => dayPartitionText([n], eventDayKey(n.eventTimeMs), NO_PARTITION_FORMAT).trimEnd();
+
+test('partition format (review_status_from): the snapshot rebuilds with the checkout\'s format and matches the record; a Pages copy written with it verifies', async () => {
+  const { w, root, snap, cleanup } = setup();
+  try {
+    // derive writes the window days from a review_status_from inside the window (partitions.ts PartitionFormat).
+    const fmt: PartitionFormat = { version: 1, review_status_from: eventDayKey(T0 - 3 * DAY) };
+    saveEventMap(root, w.map);
+    deriveRun(root, T0, w.seq, fmt);
+    const withField = baselineDays(T0).filter((d) => existsSync(dayPartitionFile(root, d)) && readFileSync(dayPartitionFile(root, d), 'utf8').includes('"review_status"'));
+    assert.ok(withField.length > 0, 'setup: some partition carries review_status');
+    const deployed = new Map<string, string>();
+    for (const d of baselineDays(T0)) if (existsSync(dayPartitionFile(root, d))) deployed.set(partitionPath(d), readFileSync(dayPartitionFile(root, d), 'utf8'));
+    for (const d of baselineDays(T0)) if (existsSync(dayPartitionFile(root, d))) unlinkSync(dayPartitionFile(root, d));
+    const nowMs = T0 + 4 * 60_000;
+
+    // The snapshot step passes loadPartitionFormat(DATA_DIR): every day verifies, with no fetch.
+    const asked: string[] = [];
+    assert.deepEqual(await snapshot(root, snap, T0 + 2 * 60_000, pagesServing(deployed, asked), fmt), []);
+    assert.deepEqual(asked, [], 'no Pages request when the rebuild is the recorded partition');
+    assert.deepEqual(check(root, snap, nowMs).previous.missing, []);
+
+    // Rebuilt without the format, the days that carry review_status differ from the record: they come from the Pages
+    // copies (written with the format), which verify against the record; without Pages they would have no baseline.
+    const recovered = await snapshot(root, snap, T0 + 2 * 60_000, pagesServing(deployed), NO_PARTITION_FORMAT);
+    assert.deepEqual(recovered.sort(), withField.sort());
+    const a = check(root, snap, nowMs);
+    assert.deepEqual(a.previous.missing, []);
+    await snapshot(root, snap, T0 + 2 * 60_000, undefined, NO_PARTITION_FORMAT);
+    const window = new Set(liveWindowDays(nowMs));
+    assert.deepEqual(check(root, snap, nowMs).previous.missing, withField.filter((d) => window.has(d)).sort());
+  } finally {
+    cleanup();
+  }
+});
 
 test('the record is used only with the manifest of its own run, and only with a snapshot', async () => {
   const { w, root, snap, target, cleanup } = setup();

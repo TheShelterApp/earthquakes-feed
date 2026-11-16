@@ -414,3 +414,17 @@ test('a day’s magnitude range counts its live events while it can change and s
   assert.deepEqual(dayMagRange(day, undefined, true), { min_mag: 1.2, max_mag: 7.7 });
   assert.deepEqual(dayMagRange([node(8.2, 'superseded')], undefined, false), { min_mag: null, max_mag: null });
 });
+
+test('a frozen day whose partition this run rewrote takes the live range of its new bytes (derive L2)', () => {
+  const node = (mag: number, state: EventNode['state']): EventNode => ({ mag, state }) as EventNode;
+  const stored = { count: 2, bytes: 1, min_mag: 2.1, max_mag: 4.4 };
+  // A revision moved an M5.6 onto the frozen day; its partition is rewritten.
+  const day = [node(2.1, 'live'), node(4.4, 'live'), node(5.6, 'live')];
+  assert.deepEqual(dayMagRange(day, stored, true, false), { min_mag: 2.1, max_mag: 4.4 }, 'bytes unchanged: the stored range');
+  assert.deepEqual(dayMagRange(day, stored, true, true), { min_mag: 2.1, max_mag: 5.6 });
+  // A day frozen before round 26 (range over every node) switches to the live range when rewritten.
+  assert.deepEqual(dayMagRange([node(8.2, 'superseded'), node(7.7, 'live')], { count: 2, bytes: 1, min_mag: 7.7, max_mag: 8.2 }, true, true), {
+    min_mag: 7.7,
+    max_mag: 7.7,
+  });
+});

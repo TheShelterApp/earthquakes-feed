@@ -120,7 +120,7 @@ function main(): void {
       }
       statsLoopMs += performance.now() - t;
     }
-    inv[day] = { ...out.stat, ...dayMagRange(nodes, inv[day], isFrozenDay(day, nowMs)) };
+    inv[day] = { ...out.stat, ...dayMagRange(nodes, inv[day], isFrozenDay(day, nowMs), out.written) };
     if (baselineWanted.has(day)) written.set(day, out.ndjson);
     if (!isFrozenDay(day, nowMs)) {
       writePagesPartition(PUBLIC_DIR, day, out.ndjson);

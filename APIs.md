@@ -13,9 +13,9 @@ archival, redaction).
 |---|---|---|---|
 | Cloudflare Pages | `https://earthquakes-feed.theshelter.app/v1/` | live feed, recent day files, manifest, live index, month index, per-hour detail | summaries + manifest + live index, deltas and month index `max-age=30` + SWR; day files `max-age=300` (today, yesterday) / `3600` (older); live index and month index day files `max-age=0, must-revalidate`; detail hours `max-age=300` |
 | Cloudflare Pages | `https://earthquakes-feed.theshelter.app/v1/stats/` | statistics: the index, 61 day tables, the year and area files (*Statistics*; since 2026-11, while `providers/stats.json` has `derive_publish: "on"`) | `max-age=0, must-revalidate` (the index names every file's `sha256`) |
-| Cloudflare Pages | `https://earthquakes-feed.theshelter.app/events/` | the unfrozen day partitions (NDJSON, the last 11 days), byte for byte the `data` branch files (since 2026-10); served as `text/plain; charset=utf-8`, brotli or gzip when the request accepts it (since 2026-10-14; the manifest's `sha256` and `bytes` name the decoded bytes) | `max-age=0, must-revalidate` |
+| Cloudflare Pages | `https://earthquakes-feed.theshelter.app/events/` | the unfrozen day partitions (NDJSON, the last 11 days), byte for byte the files derive writes (since 2026-10; from the merge of PR #154 (2026-11-16, the port of #120) their only copy until they freeze), and for one day after it freezes the day that froze last (same date); served as `text/plain; charset=utf-8`, brotli or gzip when the request accepts it (since 2026-10-14; the manifest's `sha256` and `bytes` name the decoded bytes) | `max-age=0, must-revalidate` |
 | Cloudflare Pages | `https://earthquakes-feed.theshelter.app/share/event/` | static HTML share pages of significant events, the target of `https://theshelter.app/event/<feed id>` links (*Share pages*; since 2026-11); for people and link-preview bots, not for programs | `max-age=300`; CSP, `nosniff`, `no-referrer`, `noindex` |
-| jsDelivr (branch) | `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/` | full-history partitions; **from 2026-11-04 frozen days only** (*Historical day partitions*) | ~12 h |
+| jsDelivr (branch) | `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/` | full-history partitions; **from the merge of PR #154 (2026-11-16, the port of #120), frozen days only** (*Historical day partitions*); every other path (the statistics year and area files, the index files) as before | ~12 h |
 | jsDelivr (`@sha`) | `…@<data_commit>/` | immutable frozen partitions | 1 year, immutable |
 | GitHub Releases | `archive-YYYY-MM` assets | very old months (bulk) | immutable, no CORS |
 | GitHub Releases | `remediation-YYYY` assets | complete editions of days a source's backfill could not fetch whole, or that the live layer's start left empty (*Remediation editions*) | immutable, no CORS |
@@ -36,7 +36,7 @@ The catalog. Fields:
 | `freshness.stale_after_seconds` | treat the feed as degraded past this age (default 1800) |
 | `data_commit` | git SHA for building immutable partition URLs (a frozen partition's `url` is already pinned to it) |
 | `summaries` | map of `{name: {path, url, count}}` for the 20 rolling feeds (`count` = live events in that file) |
-| `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}`; `url` is the NDJSON: the Pages copy for an unfrozen day, the immutable jsDelivr `@<data_commit>` copy for a frozen one (*Historical day partitions*). `count` is every feature of the file (all states); since round 26 (2026-10-14) `min_mag` / `max_mag` are the day's **live** events' range, recorded while the day is unfrozen and kept when it freezes (a retired event keeps its last solution: a phantom M8.2 folded into the Panama M7.7 of 2026-10-09 had kept that day at 8.2); days frozen before then keep the range over every feature. A run that rewrites a frozen day's partition (a revision moved an event onto that day) records the live range of the new bytes |
+| `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}`; `url` is the NDJSON: the Pages copy for an unfrozen day (from the merge of PR #154 (2026-11-16, the port of #120) also for the day that froze last, for a day), the immutable jsDelivr `@<data_commit>` copy for a frozen one (*Historical day partitions*). `count` is every feature of the file (all states); since round 26 (2026-10-14) `min_mag` / `max_mag` are the day's **live** events' range, recorded while the day is unfrozen and kept when it freezes (a retired event keeps its last solution: a phantom M8.2 folded into the Panama M7.7 of 2026-10-09 had kept that day at 8.2); days frozen before then keep the range over every feature. A run that rewrites a frozen day's partition (a revision moved an event onto that day) records the live range of the new bytes |
 | `archives[]` | rolled-up cold months: `{period, tag, asset, url, bytes, sha256, count, days[]}`; `count` is every line of the asset (all states). Since 2026-11 also `edition` (absent = 1), and for a re-merged month `merge_epoch`, `live`, `superseded`, `built_on`, `remediation[]`, and `previous[]` (the month's earlier assets, never deleted; see *Re-merged history*) |
 | `live` | the live index: `{path, url, head_seq, window_days}` (see *Live index* below; since 2026-10) |
 | `live_month` | the month index: `{path, url, head_seq, min_mag, window_days}` (see *Month index* below; since 2026-10-14) |
@@ -65,7 +65,7 @@ forward with the same names, plus:
 | `expires` | `generated + freshness.stale_after_seconds·1000` — past this, show "data may be delayed" |
 | `freshness.offline_after_seconds` | past this since the last successful fetch, treat the client as offline (default 2× stale) |
 | `data_commit` | always set (the data-branch commit every URL below is pinned to) |
-| `origins[]` | `{id, base, max_object_bytes?, mutable_only?}` — prefixes a `path` is appended to: `pages`, `jsdelivr-sha`, `raw-sha`, `raw-data` (head only), `release`. For a partition, `pages` serves the unfrozen days only (a frozen one is a 404 there: take `jsdelivr-sha`); from 2026-11-04 `jsdelivr-sha`, `raw-sha` and `raw-data` serve a partition only once it is frozen (*Historical day partitions*) |
+| `origins[]` | `{id, base, max_object_bytes?, mutable_only?, frozen_only?}` — prefixes a `path` is appended to: `pages`, `jsdelivr-sha`, `raw-sha`, `raw-data` (head only), `release`. For a partition, `pages` serves the unfrozen days (and, from the merge of PR #154 (2026-11-16, the port of #120), for a day, the day that froze last; an older frozen one is a 404 there: take `jsdelivr-sha`); from the merge of PR #154 (2026-11-16, the port of #120) `jsdelivr-sha`, `raw-sha` and `raw-data` serve a day partition only once it is frozen and say so with `frozen_only: true` (*Historical day partitions*); an unfrozen partition is a 404 there: take `pages`. `frozen_only` concerns the day partitions alone: every other path on those origins (the `v1/stats` year and area files iOS mirrors from `jsdelivr-sha` and `raw-sha`, the index files) is served as before |
 | `status_url` | where `/v1/status.json` lives |
 | `summaries` | v1 entries plus `bytes` and `sha256` of the file |
 | `partitions[]` | v1 entries plus `sha256`; `frozen: true` means the bytes never change again (a day is frozen once it is older than the 10 days the 5-minute run can still revise, delete or add to — see *Late publications*) |
@@ -168,9 +168,13 @@ every window event above it. Two kinds of change move no seq: a revision of a pr
 event can still change the event's compact feature through the fill-only fields (`updated`, `author`, `magAuthor`,
 `tsunami`, ...); and the onboarding of a newly added source (README) can add an event to a window day with the head of a run
 that appended nothing, which is the previous derive's. derive compares each window event's line with the one the
-previous run committed (an event with no line counts only on a day whose previous lines are known whole) and keeps such
+previous run wrote (an event with no line counts only on a day whose previous lines are known whole) and keeps such
 an event for a day in `knowledge/index/live_silent.json` with the previous run's head (`head_before`); every delta whose
-`from_seq` is at most `head_before` carries it. Events that leave the window and retired markers that stop being
+`from_seq` is at most `head_before` carries it. The previous run's lines are its day partitions rebuilt from the event
+map it read, or, for a day a failed run changed, the previous run's Pages copy, each only when its sha256 is the one
+that run recorded (*Repository size*, phase 2). A day without either (a failed derive whose Pages deploy also failed;
+the run logs a warning) has no comparison for that run: its silent changes reach the day files (step 3) but not that
+run's deltas. Events that leave the window and retired markers that stop being
 published after 48 h are not changes: the first is your time filter, the second repeats a removal you already applied.
 Replayed over the 566 real derive commits of 2026-10-04 03:04 → 10-06 02:57 UTC (246 such changes detected), a client
 polling every 15 minutes, every hour or every 8 hours held exactly the day files of each run it polled, moving after its
@@ -567,11 +571,17 @@ branch package no longer holds); the `manifest.json` committed to the `data` bra
 null`, since it cannot name the commit it is part of. `pages_url`, the
 GeoJSON day file, is unchanged.
 
-**From 2026-11-04, `@data/events/...` holds a day only once it is frozen.** The 5-minute run will stop committing
-the unfrozen days to the `data` branch (*Repository size*): a day is committed once, when it freezes (and again only
-on a rare remediation or re-roll). For an unfrozen day use the manifest: `url` / `pages_url`, or the v2 `pages`
-origin; a jsDelivr `@data` / `@<sha>` or raw.githubusercontent URL of an unfrozen day built by hand will then answer
-404 (or an old copy from jsDelivr's cache). Frozen days, `data_commit` and every other path stay as they are.
+**From the merge of PR #154 (2026-11-16, the port of #120), `@data/events/...` holds a day only once it is frozen.** The 5-minute run stops committing
+the unfrozen days to the `data` branch (*Repository size*, phase 2): a day is committed once, by the first run after it
+freezes (and again only on a rare heal, remediation or re-roll), and the first such run deletes the unfrozen days the
+branch held (history is not rewritten). For an unfrozen day use the manifest: `url` / `pages_url`, or the v2 `pages`
+origin; a jsDelivr `@data` / `@<sha>` or raw.githubusercontent URL of an unfrozen day built by hand answers 404 (or an
+old copy from jsDelivr's cache). The v2 origins that read the branch carry `frozen_only: true` (day partitions only: the
+statistics files and every other path on them are unchanged). jsDelivr `@data`
+resolves the branch to a commit it caches for up to about 12 hours, so for that long after a day freezes `@data` may
+not have it yet: the day keeps its Pages copy, and its `url` stays on it, for one day after it freezes
+(`frozen: true` from midnight; `@<data_commit>` has it from the first commit after midnight). Frozen days,
+`data_commit` and every other path stay as they are.
 
 ### `GET /v1/status.json`
 
@@ -1558,25 +1568,114 @@ about 79 % of the bytes GitHub keeps. The fix (storage option 4) takes them out 
   (*Historical day partitions*); derive's silent-change check reads the previous run's lines from the event map instead
   of the committed partitions (`src/live-baseline.ts`, beside the old check until phase 2). The commits still hold the
   partitions as before, plus the 1 KB `knowledge/index/live_baseline.json`.
-- Phase 2 (from 2026-11-04, announced above): derive stops committing the unfrozen days; a day is committed once, when
-  it freezes. The files stay on disk in the job but out of the commit (`sign-manifest.ts` hashes them for the v2
-  `sha256` and throws on a missing one; `validate.ts` and `publish-r2.ts` read them), so derive-publish's `git add -A`
-  and backfill's and archive's `git add events` must not stage them (they leave the index; history is never
-  rewritten), and the old silent-change check goes. The v2 origins `jsdelivr-sha`, `raw-sha` and `raw-data` then serve
-  frozen partitions only. Expected: about 75–85 % less growth, which the `health` log measures over a week. After that
-  a full repack by GitHub would bring the repository to about 0.8 GB; it is an owner request, and on the Free plan
-  GitHub Support may decline it.
+- Phase 2 (from the merge of PR #154 (2026-11-16, the port of #120); announced for 2026-11-04, merged after a port onto the November
+  code): derive stops committing the unfrozen days. Every writer that stages day partitions (derive-publish and backfill
+  with the pathspec `.`, archive with its paths) stages through `src/stage-data.ts`: `git add -A` of its paths, then
+  every `events/YYYY/MM/DD.ndjson` of a day not frozen at that moment leaves the index (`git rm --cached --sparse`:
+  backfill's checkout is sparse since SHLTR-149, and a backfill that commits first after the merge drops the unfrozen
+  days the branch still tracks outside its cone). Every other writer names its own paths, never `events/`
+  (`tests/stage-data.test.ts` reads every workflow and action). The files
+  stay on disk in the job for `sign-manifest.ts` (it hashes them for the v2 `sha256` and throws on a missing one),
+  `validate.ts` and `publish-r2.ts`; the first phase-2 run deletes the 11 unfrozen days from the branch (history is
+  never rewritten). A day is committed once, by the first run after it freezes: derive writes every day of the event
+  map's 45-day horizon into a checkout that lacks it, and the staging reads the clock after derive, so a day that froze
+  between the two is committed by that run. remediate commits only its index, as before. `scripts/push-data.sh`
+  stashes the untracked day partitions around its rebase: git refuses to rebase over an untracked file at a path the
+  other commit tracks, which is the first phase-2 run's case when a side-index job pushed onto the branch that still
+  holds the unfrozen days (round 27 review). The old silent-change check
+  goes: the previous run's lines come from the event-map snapshot or, for a day a failed derive changed, from that
+  derive's Pages copy, each only when its sha256 is the one `knowledge/index/live_baseline.json` records; a day with
+  neither has no baseline for that run (a warning). The day that froze last keeps its Pages copy and its `url` for one
+  day (`PAGES_PARTITION_GRACE_DAYS`, `src/partitions.ts`), since jsDelivr `@data` may not have it for about 12 hours,
+  and first-solutions reads it from the event map; a frozen day missing from the tree inside the event map's horizon
+  (no derive commit for over a day) is also rebuilt from the event map, never read as empty. The v2 origins
+  `jsdelivr-sha`, `raw-sha` and `raw-data` carry `frozen_only: true` (day partitions only; the statistics files on them
+  are unchanged). Rollback: a revert; its first run commits the unfrozen days again.
 
-Readers of the committed unfrozen partitions, and what phase 1 did with them: derive's silent-change check (switched to
-the event map, above); the first-solutions one-off slice (`FIRST_SOLUTIONS_DAYS` naming an unfrozen day: switched to
-the event map; the walk itself stops at the last frozen day); `writeDayPartition`'s byte compare (only avoids a
-rewrite); `validate.ts`, `sign-manifest.ts`, `publish-r2.ts` (they read the files derive just wrote: kept on disk);
-`scripts/first-observations.ts` (reads `events/` only for an event the observation log no longer holds, a frozen
-one). They never read an unfrozen day: backfill (days before the earliest event_map shard), archive (months over 120
-days old), onboard and heal (they write the event map), remediate (frozen days, from the Release archives), the deep
-history and the heartbeat Worker. The in-house consumers read Pages: iOS builds 437–587 take `pages_url` for every day
-that has one (all unfrozen days do), `@<data_commit>` for an older frozen day and `url` only for an unfrozen day
-without `pages_url`; the alerts gateway takes `pages_url` and falls back to `url`, checked against the signed `sha256`.
+  Rehearsed before the merge (round 27, 2026-10-14) on local copies of `data`, never pushed (`scripts/phase2/dryrun.sh`,
+  a clock of choice from `scripts/phase2/fake-clock.mjs`, a throwaway signing key), replaying production's aggregate
+  commits of 18:27–18:57 UTC as if they ran at 23:54–00:26: the first run left the 11 unfrozen days out (they left the
+  branch in its commit, 18 paths and 0.6 MB of new blobs); a day froze between derive (23:59:59) and the staging
+  (00:00:01) and was committed by that run, once; with the staging before midnight the first run after it committed
+  the day; later runs committed 6–8 paths and about 0.1 MB of new blobs each, against 4.8–7.6 MB for production's
+  derive commits of the same aggregates. validate and sign-manifest passed every run, every partition on disk was byte
+  for byte production's (136 of 136), and the silent changes equalled production's. A derive that failed: without the
+  Pages copies the next run lost a silent change of the two days the failed run changed; with them it found it.
+  `scripts/live-baseline-replay.ts` over the 115 derive commits of 10-14 10:00–18:48 UTC: 114 of 114 runs equal to the
+  committed partitions' check and to production, every window day from the snapshot; as if every previous derive had
+  failed, 113 of 113 equal, 223 of 904 window days from the Pages copies, none without a baseline (without the Pages
+  copies those 223 days had no baseline and 44 of the 113 runs missed silent changes: 13 found instead of 83).
+  The round 27 review repeated both on its own sample, at a real midnight: production's aggregate commits of 10-11
+  23:57 – 10-12 00:07 UTC replayed at their own times (the transition run: 133 of 133 partitions production's; the
+  first run after midnight committed 10-01 once, byte for byte production's frozen file, and so did a run with derive
+  at 23:59:59 and the staging at 00:00:01; the next run committed no day; the silent changes equal to production's),
+  and `live-baseline-replay.ts` over the 75 derive commits of 10-12 00:02–06:07 UTC: 72 of 72 runs equal to the old
+  check and to production; as if every previous derive had failed, 69 of 69 equal, 136 of 552 window days from the
+  Pages copies; without them 25 of the 69 runs missed silent changes (4 found instead of 60). It fixed two things: the
+  first phase-2 run's push retry (above), and a day the previous derive wrote no partition of (the new UTC day after a
+  failed derive at 00:07) counted as a day without a baseline, a warning with no effect on the deltas.
+
+  Rehearsed again on the port (2026-11-16), on local copies of `data` (a blobless, shallow fetch of the commits of
+  2026-11-15 22:00 UTC on; never pushed; a throwaway signing key), with `scripts/phase2/dryrun.sh`, which now pins the
+  manifest with `src/pin-manifest.ts` as derive-publish does, runs publish-r2 on its off path and fails when a commit
+  leaves an unfrozen day tracked. Production's aggregate commits of 2026-11-15 23:47 – 11-16 00:18 UTC at their own
+  times, from the derive commit 05fce32eb61 (23:43): the first run (the transition) deleted the 11 unfrozen days
+  (11-05 … 11-15) from the branch, 17 paths and 0.6 MB of new blobs; derive at 23:59:59 and the staging at 00:00:01
+  committed 11-05 as a new file (`A`), byte for byte production's frozen 11-05, and no later run committed it again;
+  with the staging at 23:59:59 instead, the first run after midnight committed it, the same bytes. validate,
+  pin-manifest and sign-manifest passed every run; every partition on disk was byte for byte production's (138 or 139
+  of them each run) and `live_silent.json` equalled production's but for the run time. The manifests: the grace day
+  11-04 kept its Pages `url` until midnight, then `@<data_commit>`; 11-05 kept Pages through the next day; the git
+  origins carry `frozen_only`. A derive that failed at 00:13: the next run took 11-15 and 11-16 from the previous
+  derive's Pages copies (a local server with its deploy) and found both silent changes production found at 00:13 and
+  00:18. The derive commits added 0.2–0.6 MB of new blobs (the freeze commit 2.9 MB, the day itself) against 1.8–4.1 MB
+  for production's commits of the same aggregates. `live-baseline-replay.ts` over the 49 derive commits of
+  11-15 22:03 – 11-16 01:58 UTC: 48 of 48 runs equal to the committed partitions' check and to production (9 silent
+  changes); as if every previous derive had failed, 47 of 47 equal, 65 window days from the Pages copies; without them
+  12 of the 47 runs missed silent changes (2 found instead of 15). Backfill's staging on sparse checkouts of the data
+  commit 23036ba (11-16 03:21 UTC), with backfill.yml's own line: no month checked out, exit 0, the 11 unfrozen days deleted,
+  the cursor staged; one month checked out with a day rewritten, the same plus that day; a new file outside the cone,
+  exit 1 with nothing staged. GitHub counted 6,786,555 KB on 2026-11-16 02:21 UTC, about 21 MB a day since 10-14
+  (14 MB a day over 11-12 … 11-16): the 8,000,000 KB `health` line is about 2026-12-29 at 28 MB a day, 2027-01-12 at
+  21 and 2027-02-10 at 14, without phase 2.
+
+  Growth, replayed with `scripts/repo-growth/replay.sh` (a roll-up every 12 pushes) over four 24-hour windows ending
+  18:48 UTC (the first one replayed by the round 27 review), in today's layout and in phase 2's
+  (`relayout.py --frozen-only 10`):
+
+  | Window | Pushes | Today | Phase 2 | Less | Day partitions after an all-into-one repack |
+  |---|---|---|---|---|---|
+  | to 10-11 | 634 | 12.8 MB | 6.5 MB | 49 % | 4.8 → 0.32 MB |
+  | to 10-12 | 630 | 23.9 MB | 8.9 MB | 63 % | 14.1 → 0.34 MB |
+  | to 10-13 | 616 | 27.3 MB | 10.5 MB | 61 % | 18.5 → 0.33 MB |
+  | to 10-14 (doubled dispatches 04:40–10:05) | 749 | 35.5 MB | 10.0 MB | 72 % | 23.8 → 0.30 MB |
+
+  The day partitions drop to the one day written at its freeze; what remains is mostly the event_map hour shards
+  (2.9–6.1 MB a day in both layouts, about half to 60 % of phase 2's growth), then the manifest, inventory and status
+  files. Applied to GitHub's rate (55–60 MB a day before the doubled dispatches; 6,098,544 KB at 07:17 and
+  6,150,505 KB at 19:17 UTC on 10-14, about 100 MB a day over hours that include them), phase 2 grows the repository by
+  about 15–30 MB a day: the target of 15 MB a day or less holds only at the low end. The `health` log measures it over
+  the first week; the event_map shards are the next lever if it is needed. After that a full repack by GitHub would
+  bring the repository to about 0.8 GB; it is an owner request, and on the Free plan GitHub Support may decline it.
+
+Readers of the committed unfrozen partitions, and what phases 1 and 2 did with them: derive's silent-change check
+(switched to the event map in phase 1, with the previous derive's Pages copy after a failed derive in phase 2); the
+first-solutions one-off slice (`FIRST_SOLUTIONS_DAYS` naming an unfrozen day: switched to the event map; the walk
+itself stops at the last frozen day, which from phase 2 it also reads from the event map until a grace day has
+passed); `writeDayPartition`'s byte compare (only avoids a rewrite); `validate.ts`, `sign-manifest.ts`,
+`publish-r2.ts` (they read the files derive just wrote: kept on disk); derive's statistics (`writeStats` reads the
+stats days older than the event map from the data checkout's frozen files); `stats-history.ts` and remediate's
+`late_usgs` (they read frozen days by blob from the `data` HEAD: the day that froze at midnight appears with the first
+derive commit after it; `stats-history` waits for that commit, and `late_usgs` leaves out the day before it, whose next
+day is its context, until a run after that commit);
+`scripts/first-observations.ts` (reads
+`events/` only for an event the observation log no longer holds, a frozen one). They never read an unfrozen day:
+backfill (days before the earliest event_map shard), archive (months over 120 days old), onboard and heal (they write
+the event map), remediate (frozen days, from the Release archives), the deep history and the heartbeat Worker. The
+in-house consumers read Pages: iOS builds 437–587 take `pages_url` for every day that has one (all unfrozen days do),
+`@<data_commit>` for an older frozen day and `url` only for an unfrozen day without `pages_url`; the alerts gateway
+takes `pages_url` and falls back to `url`, checked against the signed `sha256`; the iOS statistics mirror reads the
+`v1/stats` year and area files from `jsdelivr-sha` and `raw-sha`, which phase 2 does not change.
 
 ## Deep history (before 2023-07-06)
 
@@ -1825,7 +1924,9 @@ frozen days not archived yet (late ComCat):
   reading the edition instead of the archived day never drops an event or publishes one twice.
 - **Late ComCat** (`reason: "late_usgs"`): once a day the scheduled run asks ComCat (the `usgs` source) again for every
   frozen day the archive has not rolled yet, from 45 days ago to the last frozen day whose next day is frozen too
-  (12–45 days old: the live run owns the 11 newest, and mints late ComCat events of its first 7 itself), one whole-day
+  (12–45 days old: the live run owns the 11 newest, and mints late ComCat events of its first 7 itself) and on the
+  `data` branch or archived (a day that froze at midnight is committed by the first derive run after it: until then the
+  day before it waits for a later run; a day missing behind newer committed ones is a gap and holds nothing back), one whole-day
   fetch in 6-hour windows per day, at least 1.1 s apart. It compares ComCat's M4.5+ set with the `usgs` rows the day
   holds (the `usgs` raw asset its current edition was built from, else the current edition, else the frozen partition;
   ids matched through ComCat's `ids` too): the day changed when ComCat lists an M4.5+ solution the day holds no row of

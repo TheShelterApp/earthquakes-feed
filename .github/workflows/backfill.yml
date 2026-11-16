@@ -185,12 +185,16 @@ jobs:
         run: |
           git config user.name  "earthquakes-feed-bot"
           git config user.email "bot@users.noreply.github.com"
-          # A sparse checkout, so no pathspec: `git add events knowledge` exits 1 whenever a pathspec matches only paths
-          # outside the checkout (every walk with nothing to fill checks out no month: 2026-11-14 15:43Z). `-A` alone
-          # stages the changes inside the checkout; a NEW file written outside it still makes `git add` exit 1 and the
-          # step fails before anything is committed, and a rewrite of a tracked day that is not checked out is never
-          # staged (tests/backfill-sparse.test.ts).
-          git add -A
+          # Storage option 4 phase 2: never an unfrozen day partition (src/stage-data.ts). Backfill writes only days
+          # before the event map's horizon, so none is expected; the staging guarantees it, and if a backfill commits
+          # first after the phase-2 merge it also drops the unfrozen days the branch still tracks (`git rm --cached
+          # --sparse`: they sit outside this checkout). The pathspec is `.`, as in derive-publish: this is a sparse
+          # checkout, and a named pathspec that
+          # matches only paths outside it makes `git add` exit 1 (every walk with nothing to fill checks out no month:
+          # 2026-11-14 15:43Z). `.` stages the changes inside the checkout; a NEW file written outside it still makes
+          # `git add` exit 1 and the step fails before anything is committed, and a rewrite of a tracked day that is
+          # not checked out is never staged (tests/backfill-sparse.test.ts).
+          ( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/stage-data.ts . )
           git commit -m "backfill: @ $(date -u +%FT%TZ)" || { echo 'no changes'; exit 0; }
           # Fail-loud push loop (H3; tests/push-data.test.ts): a concurrent writer's commit is rebased onto, a conflict
           # aborts the rebase and fails. 6 attempts with a short randomised back-off: the lockless commit jobs

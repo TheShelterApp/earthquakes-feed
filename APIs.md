@@ -34,9 +34,9 @@ The catalog. Fields:
 | `head_seq` | global monotonic knowledge clock |
 | `event_count` | live events in the rolling window |
 | `freshness.stale_after_seconds` | treat the feed as degraded past this age (default 1800) |
-| `data_commit` | git SHA for building immutable partition URLs |
+| `data_commit` | git SHA for building immutable partition URLs (a frozen partition's `url` is already pinned to it) |
 | `summaries` | map of `{name: {path, url, count}}` for the 20 rolling feeds (`count` = live events in that file) |
-| `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}`; `url` is the NDJSON: the Pages copy for an unfrozen day, jsDelivr `@data` for a frozen one in the v1 manifest and `@<data_commit>` in the signed v2 manifest (*Historical day partitions*). `count` is every feature of the file (all states); since round 26 (2026-10-14) `min_mag` / `max_mag` are the day's **live** events' range, recorded while the day is unfrozen and kept when it freezes (a retired event keeps its last solution: a phantom M8.2 folded into the Panama M7.7 of 2026-10-09 had kept that day at 8.2); days frozen before then keep the range over every feature. A run that rewrites a frozen day's partition (a revision moved an event onto that day) records the live range of the new bytes |
+| `partitions[]` | per-day: `{date, path, url, pages_url?, count, bytes, min_mag, max_mag, frozen}`; `url` is the NDJSON: the Pages copy for an unfrozen day, the immutable jsDelivr `@<data_commit>` copy for a frozen one (*Historical day partitions*). `count` is every feature of the file (all states); since round 26 (2026-10-14) `min_mag` / `max_mag` are the day's **live** events' range, recorded while the day is unfrozen and kept when it freezes (a retired event keeps its last solution: a phantom M8.2 folded into the Panama M7.7 of 2026-10-09 had kept that day at 8.2); days frozen before then keep the range over every feature. A run that rewrites a frozen day's partition (a revision moved an event onto that day) records the live range of the new bytes |
 | `archives[]` | rolled-up cold months: `{period, tag, asset, url, bytes, sha256, count, days[]}`; `count` is every line of the asset (all states). Since 2026-11 also `edition` (absent = 1), and for a re-merged month `merge_epoch`, `live`, `superseded`, `built_on`, `remediation[]`, and `previous[]` (the month's earlier assets, never deleted; see *Re-merged history*) |
 | `live` | the live index: `{path, url, head_seq, window_days}` (see *Live index* below; since 2026-10) |
 | `live_month` | the month index: `{path, url, head_seq, min_mag, window_days}` (see *Month index* below; since 2026-10-14) |
@@ -548,7 +548,10 @@ curl -s https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/events/2
 Since 2026-10 every unfrozen day (`frozen: false`: today and the 10 days before it, the days the 5-minute run can
 still change) is also on Pages at `/events/YYYY/MM/DD.ndjson`, the bytes of the `data` branch file (the v2 manifest's
 `sha256` covers both), and its `url` names that copy (`max-age=0, must-revalidate`: an ETag check, a 304 when
-unchanged). A frozen day's `url` is jsDelivr `@data` in the v1 manifest (jsDelivr can answer 403 for a file its branch package no longer holds) and the immutable `@<data_commit>` copy in the v2 manifest. `pages_url`, the
+unchanged). A frozen day's `url` is the immutable jsDelivr `@<data_commit>` copy in both published manifests (the v2 one
+since 2026-11-15, the v1 one since 2026-11-16; before, v1 named `@data`, where jsDelivr can answer 403 for a file its
+branch package no longer holds); the `manifest.json` committed to the `data` branch keeps `@data` and `data_commit:
+null`, since it cannot name the commit it is part of. `pages_url`, the
 GeoJSON day file, is unchanged.
 
 **From 2026-11-04, `@data/events/...` holds a day only once it is frozen.** The 5-minute run will stop committing
@@ -1613,8 +1616,9 @@ does not follow era B (`DEEP_WALK_FLOOR`, *Earliest solutions*).
 An asset is never overwritten or deleted. A failed upload leaves its name behind as `unused` and the walk takes the next
 free name (`raw-usgs-2022-12.g2.ndjson.zst`); when a source joins an era, each month gets a new edition (`e2`) built
 from all its raw assets, newest month first, and the older edition stays. The index of all of it is the walk's one file
-for readers on the `data` branch: `knowledge/index/history.json` (read it through jsDelivr,
-`https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/knowledge/index/history.json`). It lists each raw asset
+for readers on the `data` branch: `knowledge/index/history.json` (read it through jsDelivr pinned to the manifest's
+`data_commit`, `https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@<data_commit>/knowledge/index/history.json`;
+jsDelivr's `@data` can answer 403 for a file its branch package no longer holds). It lists each raw asset
 (`url`, `sha256`, `bytes`, `rows`, `provider_count`, `fetched_at`) and each edition (`url`, `sha256`, `events`, `days`,
 `sources`, `built_from`); a month's current edition is its highest `edition` not `withdrawn`. A re-merged edition also
 has `merge_epoch`, `merged_from`, `lines` and `superseded` (*Re-merged history*). It changes only when the walk publishes or
@@ -2438,7 +2442,7 @@ const url = p.frozen
   : p.url;
 
 // Before 2023-07-06 (the deep history; APIs.md, Deep history): a month's current edition
-const h = await (await fetch('https://cdn.jsdelivr.net/gh/TheShelterApp/earthquakes-feed@data/knowledge/index/history.json')).json();
+const h = await (await fetch(`https://cdn.jsdelivr.net/gh/${m.data_repo}@${m.data_commit}/knowledge/index/history.json`)).json();
 const ed = h.editions.filter(e => e.period === '2022-12' && !e.withdrawn).sort((a, b) => b.edition - a.edition)[0];
 // ed.url: events-2022-12.e<N>.tar.zst, a zstd tar of DD.ndjson day files; check it against ed.sha256.
 // Keep feed.state === 'live' only: a re-merged edition also holds superseded lines (Re-merged history).

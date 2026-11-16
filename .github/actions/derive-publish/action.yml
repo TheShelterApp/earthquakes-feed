@@ -120,10 +120,12 @@ runs:
           echo 'no data-branch changes'
         fi
     - name: Pin manifest to the data commit (@sha immutable URLs)
+      # data_commit, and every frozen partition's url from jsDelivr @data to @<data_commit> (src/pin-manifest.ts), as v2.
       shell: bash
+      env:
+        PUBLIC_DIR: public
       run: |
-        SHA=$(git -C .data rev-parse HEAD)
-        node -e "const f='public/v1/manifest.json',fs=require('fs');const m=JSON.parse(fs.readFileSync(f));m.data_commit='$SHA';fs.writeFileSync(f,JSON.stringify(m,null,2));console.log('data_commit='+'$SHA'.slice(0,8))"
+        DATA_COMMIT=$(git -C .data rev-parse HEAD) npx --no-install tsx src/pin-manifest.ts
     - name: Sign v2 manifest (Ed25519 envelope pinned to the data commit)
       # Skips with a warning until FEED_SIGNING_KEY exists — v1 keeps publishing either way.
       # The tiles pointer is fetched so the manifest can vouch for the offline bundle; if the

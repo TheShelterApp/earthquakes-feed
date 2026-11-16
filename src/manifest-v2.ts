@@ -187,6 +187,19 @@ export function originsFor(dataCommit: string, r2Base?: string): OriginTemplate[
   ];
 }
 
+/** A partition's published `url` once the data commit exists: a frozen day's jsDelivr `@data` url becomes the immutable
+ *  `@<data_commit>` one (jsDelivr's `@data` branch ref stops serving files its package no longer holds: 2026-11-14, 26
+ *  of 126 frozen days answered 403); an unfrozen day's (the Pages copy) and any other url stay as they are. */
+export const pinnedPartitionUrl = (p: Pick<ManifestPartition, 'frozen' | 'url' | 'path'>, dataCommit: string): string =>
+  p.frozen && p.url.startsWith(`${JSDELIVR_BASE}@data/`) ? `${JSDELIVR_BASE}@${dataCommit}/${p.path}` : p.url;
+
+/** The v1 manifest as the derive-publish pin step publishes it (src/pin-manifest.ts): `data_commit` set and every frozen
+ *  partition's url pinned to it, as the v2 manifest does (2026-11-15 audit, FEED-DI-1). Key order is kept. */
+export function pinManifestV1(m: ManifestV1, dataCommit: string): ManifestV1 {
+  if (!/^[0-9a-f]{40}$/.test(dataCommit)) throw new Error(`manifest v1: data_commit must be a full git sha, got "${dataCommit}"`);
+  return { ...m, data_commit: dataCommit, partitions: m.partitions.map((p) => ({ ...p, url: pinnedPartitionUrl(p, dataCommit) })) };
+}
+
 export function buildManifestV2(input: BuildInput): ManifestV2 {
   const { v1, dataCommit, read } = input;
   if (!/^[0-9a-f]{40}$/.test(dataCommit)) throw new Error(`manifest v2: data_commit must be a full git sha, got "${dataCommit}"`);
@@ -201,9 +214,8 @@ export function buildManifestV2(input: BuildInput): ManifestV2 {
 
   const partitions = v1.partitions.map((p) => {
     const bytes = read(p.path, 'partition');
-    // A frozen day's `url` is the immutable one: jsDelivr's `@data` branch ref stops serving files its package no longer
-    // holds (2026-11-14: 26 of 126 frozen days answered 403), `@<data_commit>` always serves them.
-    const url = p.frozen && p.url.startsWith(`${JSDELIVR_BASE}@data/`) ? `${JSDELIVR_BASE}@${dataCommit}/${p.path}` : p.url;
+    // A frozen day's `url` is the immutable one (pinnedPartitionUrl); the pinned v1 manifest already carries it.
+    const url = pinnedPartitionUrl(p, dataCommit);
     return { ...p, url, bytes: bytes.byteLength, sha256: sha256Hex(bytes) };
   });
 

@@ -1147,6 +1147,7 @@ test('evaluateStats: through behind the last frozen day by more than 3 days (his
   const d = evaluateStats({ nowMs: NOW, v1Ok: true, pointer: POINTER, config: statsCfg('shadow'), index: statsIndex(null, ['2026-09-01', '2026-09-02']) });
   assert.deepEqual(keys(d.findings), ['feed:stats-days']);
   assert.match(d.findings[0]!.text, /2 missing day\(s\): 2026-09-01, 2026-09-02/);
+  assert.match(d.findings[0]!.text, /today counts only 30 min after 00:00 UTC/, 'derive publishes the day in progress empty before that');
   const u = evaluateStats({ nowMs: NOW, v1Ok: true, pointer: POINTER, config: statsCfg('on', true), index: { ok: false, message: 'HTTP 404 after 4 attempt(s)' } });
   assert.deepEqual([u.findings, u.unjudged], [[], ['feed:stats-through', 'feed:stats-days']]);
   assert.match(u.notes.join(), /index\.json unreadable \(HTTP 404/);

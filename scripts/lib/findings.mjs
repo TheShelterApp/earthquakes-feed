@@ -452,7 +452,8 @@ export const RULES = Object.freeze({
   }),
   'feed:stats:days': rule('feed:stats:days', {
     title: 'feed statistics days missing',
-    // The index names missing_days: a window day with neither an event-map day nor a partition on `data`.
+    // The index names missing_days: a window day with neither an event-map day nor a partition on `data` (the day in
+    // progress only after its first 30 min, STATS_TODAY_GRACE_MS: derive publishes it empty before that).
     board: 'feed', class: 'config', severity: 'P3', key: 'feed:stats-days',
   }),
   'walks': rule('walks', {

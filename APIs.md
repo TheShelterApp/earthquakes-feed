@@ -372,8 +372,8 @@ origins `jsdelivr-sha` and `raw-sha` serve them too (a mirror at `data_commit` m
 |---|---|
 | `schema_version`, `format` | `1`, `1` |
 | `generated`, `generated_iso`, `head_seq` | the run, equal to the v1 manifest's |
-| `days[]` | `{date, path, count, filtered, bytes, sha256}` for each UTC day today − 60 … today, oldest first; a day missing here is named in `missing_days` |
-| `missing_days[]` | window days with no table this run (neither in the 45-day event map nor as a partition on `data`): count them as missing, never as quiet |
+| `days[]` | `{date, path, count, filtered, bytes, sha256}` for each UTC day today − 60 … today, oldest first; a day missing here is named in `missing_days`. Today's table holds the day so far: before its first event, in the first 30 min after 00:00 UTC, it is an empty table (`count` 0), not a missing day |
+| `missing_days[]` | window days with no table this run (neither in the 45-day event map nor as a partition on `data`; today only once it is 30 min past 00:00 UTC without an event): count them as missing, never as quiet |
 | `through` | the last day the year and area files cover (the stats builder's last frozen day), or `null` before its first run |
 | `years[]` | `{year, path, bytes, sha256, first, through, complete, mirrorable}`: the current year and the two before it |
 | `area[]` | `{year, path, bytes, sha256, min_mag, records, m6, complete, mirrorable}`: one per year from 1973 |

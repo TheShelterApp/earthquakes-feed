@@ -442,7 +442,8 @@ const dayKey = (ms) => new Date(ms).toISOString().slice(0, 10);
  *   feed:stats (P2 after a 30-min hold) — derive_publish "on" and the v1 manifest has no `stats` pointer;
  *   feed:stats-through (P3, maintenance) — history_enabled and `through` null or more than lagDays behind the last
  *     frozen day (the run's day - frozenAfterDays - 1);
- *   feed:stats-days (P3) — the index names missing_days.
+ *   feed:stats-days (P3) — the index names missing_days (never the day in progress in its first 30 min: derive
+ *     publishes it empty).
  * v1 unreadable: nothing judged here (feed:freshness speaks). An index that cannot be read leaves the last two unjudged.
  * The stats builder's gate and verify markers reach the board through the walks (walk-blocked-stats, stats.yml).
  */
@@ -465,7 +466,7 @@ export function evaluateStats({ nowMs, v1Ok, pointer, config, index }) {
   const idx = index.json;
   const missing = Array.isArray(idx.missing_days) ? idx.missing_days.filter((d) => typeof d === 'string') : [];
   if (missing.length > 0) {
-    findings.push(makeFinding('feed:stats:days', { text: `the statistics index names ${missing.length} missing day(s): ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ', …' : ''} (no event-map day and no partition on data)` }));
+    findings.push(makeFinding('feed:stats:days', { text: `the statistics index names ${missing.length} missing day(s): ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ', …' : ''} (no event-map day and no partition on data; today counts only 30 min after 00:00 UTC)` }));
   }
   if (cfg.history) {
     const { frozenAfterDays, lagDays } = RULES['feed:stats:through'].limits;

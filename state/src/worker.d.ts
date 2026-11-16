@@ -32,6 +32,8 @@ export function configFrom(env: Env): {
   minProtocol: number;
   ceilings: Record<string, number>;
 };
+/** batchGet's pipe: an IdentityTransformStream where the runtime has one (Workers), a standard TransformStream otherwise. */
+export function byteStream(): { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array> };
 export function createHandler(deps?: {
   keyStore?: KeyStore;
   cache?: JwksCache | null;

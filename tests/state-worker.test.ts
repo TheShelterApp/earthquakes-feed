@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { JWKS_STALE_MS, JWKS_TTL_MS, REFETCH_MIN_MS, ROUTE_WORKFLOWS, createKeyStore, type JwksCache } from '../state/src/auth.js';
 import { KEEP_DAYS, SCHEMA, gcBegin, gcEnd, refundStored, reserve, snapshot, type Sql } from '../state/src/budget.js';
 import { BLOB_METADATA, blobKey, shaOfKey } from '../state/src/cas.js';
-import { createHandler, type Env } from '../state/src/worker.js';
+import { byteStream, createHandler, type Env } from '../state/src/worker.js';
 
 // The feed's state Worker (state/): GitHub OIDC verification and the per-route workflow policy, the CAS PUT, the
 // batchGet frames, the GC pages, the budget ledger's ceilings and the protocol gate — offline, against an in-memory R2
@@ -152,7 +152,7 @@ function fakeBudget(down = false) {
   const names: string[] = [];
   const stub = {
     reserve: async (a: Parameters<typeof reserve>[1]) => clone(reserve(sql, clone(a))),
-    refundStored: async (b: number) => refundStored(sql, b),
+    refundStored: async (b: number, at?: number) => refundStored(sql, b, at),
     gcBegin: async (a: Parameters<typeof gcBegin>[1]) => clone(gcBegin(sql, clone(a))),
     gcEnd: async (a: Parameters<typeof gcEnd>[1]) => gcEnd(sql, clone(a)),
     snapshot: async (a: Parameters<typeof snapshot>[1]) => clone(snapshot(sql, clone(a))),
@@ -334,6 +334,14 @@ test('state auth: 401 for a missing, malformed, expired, early, foreign or tampe
   const [hd, , sig] = token().split('.');
   const forged = `${hd}.${b64url(JSON.stringify(claimsFor({ workflow: 'state-gc.yml' })))}.${sig}`;
   assert.equal((await h.call('GET', '/v1/budget', { auth: forged })).status, 401);
+  // A signature segment of 1 mod 4 characters is no base64 at all: a 401, not a 500 from atob.
+  const [h5, p5] = token().split('.');
+  for (const bad of ['abcde', 'a', 'abcdefghi']) {
+    const res = await h.call('GET', '/v1/budget', { auth: `${h5}.${p5}.${bad}` });
+    assert.equal(res.status, 401, bad);
+    assert.equal(((await res.json()) as { error: string }).error, 'unauthenticated', bad);
+  }
+  assert.equal((await h.call('GET', '/v1/budget', { auth: `${h5}x.${p5}.${token().split('.')[2]}` })).status, 401, 'a header of 1 mod 4');
   // Within the 30 s skew both ways is still accepted.
   assert.equal((await h.call('GET', '/v1/budget', { auth: token({ exp: Math.floor(T0 / 1000) - 29, nbf: Math.floor(T0 / 1000) + 29 }) })).status, 200);
   // An audience given as a one-element array is the same audience.
@@ -583,6 +591,25 @@ test('state batchGet: a bucket error mid-stream leaves no trailer, so the client
   assert.match(JSON.parse(h.logs.at(-1)!).error, /^stream aborted/);
 });
 
+test('state batchGet: the pipe is the runtime\'s native IdentityTransformStream where it exists (no per-chunk JS CPU)', async () => {
+  const g = globalThis as { IdentityTransformStream?: unknown };
+  assert.equal(g.IdentityTransformStream, undefined, 'node has none: the tests use a standard TransformStream');
+  assert.ok(byteStream().writable instanceof WritableStream);
+  class FakeIdentity extends TransformStream<Uint8Array, Uint8Array> {}
+  g.IdentityTransformStream = FakeIdentity;
+  try {
+    assert.ok(byteStream() instanceof FakeIdentity);
+    // The whole route still frames through it.
+    const h = harness();
+    const shas = [h.r2.seed(gz('a'), T0), h.r2.seed(gz('b'), T0)];
+    const res = await h.call('POST', '/v1/cas:batchGet', { body: { shas } });
+    assert.equal(parseFrames(new Uint8Array(await res.arrayBuffer())).end, 2);
+    await h.settle();
+  } finally {
+    delete g.IdentityTransformStream;
+  }
+});
+
 test('state batchGet: 1..40 unique lowercase shas, else 400 before any bucket or budget work', async () => {
   const h = harness();
   const s = sha256('x');
@@ -790,6 +817,29 @@ test('state budget ledger: day rows older than KEEP_DAYS are pruned; GC passes r
   assert.equal(snapshot(sql, { nowMs: T0, ceilings }).stored_bytes, 807);
   refundStored(sql, 10_000);
   assert.equal(snapshot(sql, { nowMs: T0, ceilings }).stored_bytes, 0, 'never below zero');
+});
+
+test('state budget ledger: the pass starts at its first page\'s admission; a refund of a PUT from before the pass leaves the pass\'s count alone', () => {
+  const sql = sqliteSql();
+  const ceilings = { CLASS_A_PER_DAY: 100, CLASS_B_PER_DAY: 100, BYTES_WRITTEN_PER_DAY: 1e9, STORED_BYTES_MAX: 1e9 };
+  // A PUT reserved before the pass (its R2 write fails later).
+  reserve(sql, { nowMs: T0, cost: { classA: 1, bytes: 40 }, ceilings });
+  assert.deepEqual(gcBegin(sql, { nowMs: T0 + 1000, cursor: null, keepHash: 'h', cost: { classA: 1 }, ceilings }), { ok: true });
+  // A PUT reserved between the first page's admission and its gcEnd (after the listing ran): it must stay counted.
+  reserve(sql, { nowMs: T0 + 2000, cost: { classA: 1, bytes: 9 }, ceilings });
+  gcEnd(sql, { nowMs: T0 + 3000, cursor: null, nextCursor: 'c1', keepHash: 'h', keptBytes: 500, deletedBytes: 0 });
+  // Another PUT of the pass's window, then the failed pre-pass PUT is refunded.
+  reserve(sql, { nowMs: T0 + 4000, cost: { classA: 1, bytes: 5 }, ceilings });
+  refundStored(sql, 40, T0);
+  assert.deepEqual(gcBegin(sql, { nowMs: T0 + 5000, cursor: 'c1', keepHash: 'h', cost: { classA: 1 }, ceilings }), { ok: true });
+  gcEnd(sql, { nowMs: T0 + 5000, cursor: 'c1', nextCursor: null, keepHash: 'h', keptBytes: 100, deletedBytes: 0 });
+  assert.equal(snapshot(sql, { nowMs: T0 + 5000, ceilings }).stored_bytes, 600 + 9 + 5, 'listed + every PUT of the pass, never low');
+  // A refund of a PUT reserved within a pass does come off that pass's count.
+  assert.deepEqual(gcBegin(sql, { nowMs: T0 + 6000, cursor: null, keepHash: 'h', cost: { classA: 1 }, ceilings }), { ok: true });
+  reserve(sql, { nowMs: T0 + 7000, cost: { classA: 1, bytes: 30 }, ceilings });
+  refundStored(sql, 30, T0 + 7000);
+  gcEnd(sql, { nowMs: T0 + 8000, cursor: null, nextCursor: null, keepHash: 'h', keptBytes: 50, deletedBytes: 0 });
+  assert.equal(snapshot(sql, { nowMs: T0 + 8000, ceilings }).stored_bytes, 50);
 });
 
 // --- Logging, routing, configuration --------------------------------------------------------------------------------

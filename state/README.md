@@ -67,9 +67,12 @@ decompresses and checks the NDJSON's own sha256 and length against the generatio
 - `current`: on the first page (`cursor` null) 1..40 blobs of the live generation; on every later page it is absent or
   `[]`. The Worker refuses (409) unless `current ⊆ keep` (body `{"error", "outside": [...]}`) and every `current` blob
   exists (one HEAD each, body `{"error", "missing": [...]}`). A generation spans the 45-day map horizon (about 46
-  blobs), so the client sends the blobs of its OLDEST days, up to 40: a day's blob is never uploaded before that day,
-  so with `minAgeDays` ≥ 14 only the blobs of days older than 14 days (at most 32 of a 46-day generation) are old
-  enough to be deleted at all, and those are exactly the ones checked.
+  blobs), more than one call may check, so the client (src/state-gc.ts `collect`) sorts every blob of the current
+  generation by sha256 and splits them into chunks of 40. Every chunk but the last goes in a first-page call of its own
+  with `dryRun: true` (a separate pass that lists one page and deletes nothing: one more Class A listing and up to 40
+  HEADs, its counts not used); the last chunk goes with the real pass's first page. So every current blob is proven
+  present before anything is deleted, though only the last chunk by the deleting call itself (the writer lock keeps
+  the generation from changing in between). With about 46 blobs that is one extra dry-run call a run.
 - `cursor`: null for the first page, then the `cursor` the previous page returned. The budget ledger holds the open
   pass: a cursor that is not the one the last page returned, or a `keep` set that differs from the first page's (by
   the sha256 of the sorted list), is refused with 409 `start again with cursor null`, so no page can delete with a

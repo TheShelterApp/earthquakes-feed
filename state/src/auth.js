@@ -63,9 +63,15 @@ export class AuthError extends Error {
 const textDecoder = new TextDecoder();
 
 function base64urlBytes(s) {
-  if (!/^[A-Za-z0-9_-]*$/.test(s)) throw new AuthError(401, 'malformed token');
+  // A length of 1 mod 4 is no base64 at all (atob throws a DOMException, which would surface as a 500).
+  if (!/^[A-Za-z0-9_-]*$/.test(s) || s.length % 4 === 1) throw new AuthError(401, 'malformed token');
   const b64 = s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4);
-  const bin = atob(b64);
+  let bin;
+  try {
+    bin = atob(b64);
+  } catch {
+    throw new AuthError(401, 'malformed token');
+  }
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;

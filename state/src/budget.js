@@ -10,7 +10,8 @@
 // - Stored bytes: a running estimate of the bucket's size, refusing a PUT that would take it above the ceiling. It is
 //   raised by every PUT (an overwrite of an existing key counts again: the estimate errs high, never low), lowered by
 //   the bytes a GC page deletes, refunded when a PUT fails, and re-seeded from the listing totals of every complete GC
-//   pass (cursor null through to the page whose cursor is null) plus the bytes PUT while that pass ran.
+//   pass (cursor null through to the page whose cursor is null) plus the bytes PUT while that pass ran (counted from
+//   the first page's admission, before its listing, so no PUT of the pass's window is missed).
 // The ceilings come from the Worker's vars and are passed in on every call, so a redeploy changes them at once.
 //
 // One object (idFromName 'global'), SQLite-backed (the only kind on the Workers Free plan). A method of the object runs
@@ -147,25 +148,37 @@ export function reserve(sql, { nowMs, cost, ceilings }) {
   return { ok: true };
 }
 
-/** Give back stored bytes a reservation added for a PUT that did not store anything (R2 refused it). */
-export function refundStored(sql, bytes) {
+/**
+ * Give back stored bytes a reservation added for a PUT that did not store anything (R2 refused it). `reservedMs` is
+ * the reservation's nowMs: a PUT reserved before the open GC pass began was never counted in that pass's
+ * put_since_pass (gcBegin zeroed it), so its refund must not eat a later PUT's bytes there (the estimate would read low).
+ */
+export function refundStored(sql, bytes, reservedMs = null) {
+  const store = storeRow(sql);
+  const beforePass = store.pass_started_ms != null && reservedMs != null && reservedMs < store.pass_started_ms;
   sql.exec(
     'UPDATE store SET stored_bytes = MAX(0, stored_bytes - ?), put_since_pass = MAX(0, put_since_pass - ?) WHERE id = 1',
     bytes,
-    bytes,
+    beforePass ? 0 : bytes,
   );
 }
 
 /**
  * Admit one GC page: a page with a cursor must continue the pass the ledger holds (same cursor, same keep hash), then
  * the page's cost is reserved as in `reserve`. Returns {ok: true}, {ok: false, ceiling} or {ok: false, pass: true}.
+ *
+ * A first page (cursor null) that is admitted starts the pass here, in the same atomic call, BEFORE its listing:
+ * put_since_pass restarts at 0 and pass_started_ms is set, so every PUT reserved from now on is added on top of what
+ * the listing finds (one the listing also saw counts twice: the estimate errs high, never low).
  */
 export function gcBegin(sql, { nowMs, cursor, keepHash, cost, ceilings }) {
   if (cursor != null) {
     const store = storeRow(sql);
     if (store.pass_cursor !== cursor || store.pass_keep !== keepHash) return { ok: false, pass: true };
   }
-  return reserve(sql, { nowMs, cost, ceilings });
+  const verdict = reserve(sql, { nowMs, cost, ceilings });
+  if (verdict.ok && cursor == null) sql.exec('UPDATE store SET put_since_pass = 0, pass_started_ms = ? WHERE id = 1', nowMs);
+  return verdict;
 }
 
 /**
@@ -176,12 +189,8 @@ export function gcBegin(sql, { nowMs, cursor, keepHash, cost, ceilings }) {
 export function gcEnd(sql, { nowMs, cursor, nextCursor, keepHash, keptBytes, deletedBytes }) {
   sql.exec('UPDATE store SET stored_bytes = MAX(0, stored_bytes - ?) WHERE id = 1', deletedBytes);
   if (cursor == null) {
-    sql.exec(
-      'UPDATE store SET pass_bytes = ?, pass_started_ms = ?, put_since_pass = 0, pass_keep = ? WHERE id = 1',
-      keptBytes,
-      nowMs,
-      keepHash,
-    );
+    // The pass began in gcBegin (put_since_pass and pass_started_ms); a PUT reserved since then stays counted.
+    sql.exec('UPDATE store SET pass_bytes = ?, pass_keep = ? WHERE id = 1', keptBytes, keepHash);
   } else {
     sql.exec('UPDATE store SET pass_bytes = pass_bytes + ? WHERE id = 1', keptBytes);
   }

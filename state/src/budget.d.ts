@@ -33,7 +33,7 @@ export const SCHEMA: string[];
 export const CEILINGS: Record<keyof Ceilings, Ceiling>;
 export function utcDay(nowMs: number): string;
 export function reserve(sql: Sql, args: { nowMs: number; cost: Cost; ceilings: Ceilings }): Verdict;
-export function refundStored(sql: Sql, bytes: number): void;
+export function refundStored(sql: Sql, bytes: number, reservedMs?: number | null): void;
 export function gcBegin(
   sql: Sql,
   args: { nowMs: number; cursor: string | null; keepHash: string; cost: Cost; ceilings: Ceilings },

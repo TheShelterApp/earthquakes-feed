@@ -58,8 +58,9 @@ const encoder = new TextEncoder();
  *   per blob   `BLOB <sha> <length>\n` + <length> bytes + `\n`
  *   if absent  `MISSING <sha>\n`
  *   at the end `END <frames>\n` (frames = the number of BLOB and MISSING frames, which is the number of shas asked)
- * Each body is piped with pipeTo (preventClose), never read in a JS loop: the CPU cost stays the runtime's, not the
- * Worker's 10 ms. On any error the stream is aborted, so the client sees no trailer and fails closed.
+ * Each body is piped with pipeTo (preventClose), never read in a JS loop. `writable` is the worker's byteStream(), an
+ * IdentityTransformStream on Workers: a pipe between two native streams runs in the runtime, so a blob's bytes do not
+ * count against the Worker's 10 ms of CPU (into a standard JS TransformStream every chunk would). On any error the stream is aborted, so the client sees no trailer and fails closed.
  * Returns {found, missing, bytes}.
  */
 export async function streamBlobs(bucket, shas, writable) {

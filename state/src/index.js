@@ -17,8 +17,8 @@ export class BudgetLedger extends DurableObject {
     return reserve(this.ctx.storage.sql, args);
   }
 
-  refundStored(bytes) {
-    refundStored(this.ctx.storage.sql, bytes);
+  refundStored(bytes, reservedMs) {
+    refundStored(this.ctx.storage.sql, bytes, reservedMs);
   }
 
   gcBegin(args) {

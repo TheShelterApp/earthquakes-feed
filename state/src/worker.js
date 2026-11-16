@@ -200,12 +200,23 @@ async function handlePut(request, env, cfg, route, log, nowMs) {
   try {
     object = await putBlob(env.STATE, route.sha, request.body);
   } catch (err) {
-    await ledger(env, (b) => b.refundStored(length)).catch(() => {});
+    await ledger(env, (b) => b.refundStored(length, nowMs)).catch(() => {});
     const code = r2ErrorCode(err);
     if (code === 10037) throw new HttpError(400, 'checksum mismatch: the body is not the blob its sha256 names', { retryable: false });
     throw new HttpError(503, 'store write failed', { cause: String(err) });
   }
   return json(200, { key: object.key, size: object.size, uploaded: new Date(object.uploaded).toISOString() }, log.rid);
+}
+
+/**
+ * The batchGet response's pipe. On Workers an IdentityTransformStream: native and byte-oriented, so the R2 bodies piped
+ * into it (and the Response reading it) move without passing every chunk through JS, which a standard TransformStream
+ * would charge to the Worker's CPU (transformstream_enable_standard_constructor is on since 2022-11-30). Its writable
+ * takes the frame headers as Uint8Array. Node (the tests) has no IdentityTransformStream: a standard one there.
+ */
+export function byteStream() {
+  const Identity = globalThis.IdentityTransformStream;
+  return typeof Identity === 'function' ? new Identity() : new TransformStream();
 }
 
 async function handleBatchGet(request, env, cfg, ctx, log, nowMs, started, emit) {
@@ -216,7 +227,7 @@ async function handleBatchGet(request, env, cfg, ctx, log, nowMs, started, emit)
     b.reserve({ nowMs, cost: { classA: 0, classB: shas.length, bytes: 0 }, ceilings: cfg.ceilings }),
   );
   refusedByBudget(verdict);
-  const { readable, writable } = new TransformStream();
+  const { readable, writable } = byteStream();
   const pump = streamBlobs(env.STATE, shas, writable).then(
     (r) => {
       log.bytes = r.bytes;
@@ -250,9 +261,9 @@ async function handleGc(request, env, cfg, log, nowMs) {
   const keep = shaList(body.keep, 'keep', 1, MAX_KEEP);
   // `current` (blobs of the live generation) is proven present and inside keep on the pass's first page; later pages
   // carry no `current` and are tied to that page by the ledger (same cursor chain, same keep hash). At most MAX_CURRENT
-  // HEADs per invocation (the Free plan's subrequest limit is 50 under its stricter reading), so the client sends the
-  // generation's OLDEST days: a day's blob is never uploaded before that day, so with minAgeDays ≥ 14 only the days
-  // older than 14 days (at most 32 of the 45-day horizon's ~46) are old enough to be deleted at all.
+  // HEADs per invocation (the Free plan's subrequest limit is 50 under its stricter reading), so the client sends a
+  // larger generation in chunks of 40: each but the last in a dry-run first page of its own, the last with the real
+  // pass's first page (src/state-gc.ts collect; state/README.md).
   const current = cursor === null ? shaList(body.current, 'current', 1, MAX_CURRENT) : shaList(body.current ?? [], 'current', 0, 0);
   const minAgeDays = body.minAgeDays;
   if (!Number.isInteger(minAgeDays) || minAgeDays < MIN_AGE_DAYS || minAgeDays > 36_500) {

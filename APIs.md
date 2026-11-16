@@ -1729,7 +1729,9 @@ to the ref.
   - `POST /v1/gc` `{keep, current, cursor, minAgeDays, maxDeletes, dryRun}`: one listing page; `keep` 1–10,000 blobs,
     `current` 1–40 on the first page and none later (400 otherwise: the client checks before sending, and `state-gc`
     skips a run whose current generation names no blob, as a hold); 409 unless `current` ⊆ `keep` and every `current`
-    blob exists. The answer counts every listed key once (`kept` in keep, `young`, `capped`, `foreign`,
+    blob exists. A generation of more than 40 blobs (about 46) goes in chunks of 40 sorted by sha256: each chunk but
+    the last in a dry-run first page of its own (one more listing, its counts unused), the last with the real pass's
+    first page. The answer counts every listed key once (`kept` in keep, `young`, `capped`, `foreign`,
     `wouldDelete` with `bytesWouldDelete`); `deleted` / `bytesDeleted` are what the call removed, 0 in a dry run.
   - `GET /v1/budget`: `{day, used: {class_a, class_b, bytes_written, requests, refused}, stored_bytes,
     stored_seeded_at, gc_pass_open, ceilings: {class_a, class_b, bytes_written, stored_bytes}}`.

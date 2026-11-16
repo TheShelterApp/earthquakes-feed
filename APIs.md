@@ -1475,7 +1475,10 @@ Round 17 (LANE G) changes what the commits rewrite, never what consumers read, a
   UTC); the Resolver's equal-distance tie-break follows that order. The code before round 17 reads hour shards in name
   order (hour, then feed id): the same nodes, another order, so the rollback is `EVENT_MAP_SHARD_HOURS=24` rather than
   a revert. Replayed alone, the event_map's share of the days to 10-04, 10-05 and 10-06 falls from 13, 20
-  and 32 MB to 6, 7.5 and 10.
+  and 32 MB to 6, 7.5 and 10. A save rewrites only the days the run's map holds. Aggregate loads the event_map from a
+  floor day back and passes that floor to `saveEventMap` (`floorDay`): a day below it that a revision moved a node onto
+  (an `updatedafter` sweep reaches further back than the loaded window) is merged with its shards on disk, upserted by
+  feed id, never rewritten from the run's nodes alone, which would drop the day's other events (2026-11-15 audit).
 
 Both together replay to 45 MB a day on average over the eight days instead of 63 (23–42 % less a day, 28 % in all); at
 GitHub's 67 MB a day that is about 48 MB. What remains is about three quarters day partitions, which consumers read

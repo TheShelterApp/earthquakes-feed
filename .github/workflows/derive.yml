@@ -63,6 +63,11 @@ jobs:
     # 12, not 6: a failing Pages deploy alone runs ~3 min before erroring out. The deploy reads this budget
     # (job-timeout-minutes below, kept equal by tests/pages-deploy.test.ts) and retries only while 7 min are left.
     timeout-minutes: 12
+    # Restated in full at job level (aggregate.yml says why): the push, and an OIDC token for the state store's
+    # shadow hydrate (read only: derive's prune of the generation is a local edit, src/event-map-store.ts).
+    permissions:
+      contents: write
+      id-token: write
     steps:
       # First, so the Pages deploy (.github/actions/derive-publish) counts the job's budget from about its start.
       - name: Note the job's start
@@ -80,6 +85,26 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      - name: State shadow hydrate
+        # As in aggregate.yml (storage phase 3a): the store's days against the checkout, reported, never fatal.
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          DATA_DIR: .data
+          FEED_STATE_BACKEND: worker
+          FEED_STATE_URL: https://feed-state.theshelter.app
+          FEED_STATE_AUDIENCE: earthquakes-feed-state
+          FEED_STATE_MARKER_DIR: ${{ runner.temp }}/state-shadow
+        run: npx --no-install tsx src/event-map-store.ts hydrate
+      - name: Upload the state report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: state-shadow
+          path: ${{ runner.temp }}/state-shadow
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Snapshot the silent-change baseline
         # As in aggregate.yml (src/live-baseline.ts): nothing writes the checkout before derive here, so the snapshot is
         # the event map derive reads.

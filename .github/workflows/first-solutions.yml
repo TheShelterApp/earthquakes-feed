@@ -65,6 +65,14 @@ jobs:
       group: earthquakes-feed-history
       cancel-in-progress: false
       queue: max
+    # Restated in full at job level (a job-level block sets every permission it does not name to none): contents: write
+    # for the chunk Releases it creates and uploads to (src/first-solutions-collect.ts, FIRST_SOLUTIONS_UPLOAD), actions:
+    # read for the previous run's artifact, and an OIDC token for the state store (storage phase 3: in phase 3a it still
+    # reads the event map from the checkout; from phase 3b it hydrates it first, src/event-map-store.ts).
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

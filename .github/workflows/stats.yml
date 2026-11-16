@@ -66,8 +66,10 @@ jobs:
           fetch-depth: 1
           filter: blob:none
           persist-credentials: false
+          # The index files only (/knowledge/index/*.json: remediation, archives, history, partitions), never the
+          # event map under knowledge/index/event_map/, which the statistics never read (storage phase 3).
           sparse-checkout: |
-            knowledge/index
+            /knowledge/index/*.json
             knowledge/stats
             v1/stats
           sparse-checkout-cone-mode: false

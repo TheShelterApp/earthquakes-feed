@@ -375,7 +375,7 @@ origins `jsdelivr-sha` and `raw-sha` serve them too (a mirror at `data_commit` m
 | `days[]` | `{date, path, count, filtered, bytes, sha256}` for each UTC day today − 60 … today, oldest first; a day missing here is named in `missing_days`. Today's table holds the day so far: before its first event, in the first 30 min after 00:00 UTC, it is an empty table (`count` 0), not a missing day |
 | `missing_days[]` | window days with no table this run (neither in the 45-day event map nor as a partition on `data`; today only once it is 30 min past 00:00 UTC without an event): count them as missing, never as quiet |
 | `through` | the last day the year and area files cover (the stats builder's last frozen day), or `null` before its first run |
-| `years[]` | `{year, path, bytes, sha256, first, through, complete, mirrorable}`: the current year and the two before it |
+| `years[]` | `{year, path, bytes, sha256, first, through, complete, mirrorable}`: the current year and the two before it (in early January, until the new year's first day freezes, the year before and the two before that: the year of `through` and the two before it) |
 | `area[]` | `{year, path, bytes, sha256, min_mag, records, m6, complete, mirrorable}`: one per year from 1973 |
 | `completeness[]` | `{from, to, key, min_mag?}`: the completeness regimes (`eraB` 1973–1999 M4.5+ from USGS ComCat, `eraA` 2000 → 2023-07-06 17 sources, `archives` → 2026-07-05, `live` since). A count compared across two regimes is compared on M4.5+ only |
 | `attribution` | the licence line |
@@ -444,8 +444,8 @@ an area table's `m6` (M6+) list every row the year's reconciliation collapsed in
 above the table's floor, whatever the collapsed row's own magnitude (the live map may share a member's id rather than
 the representative's): the representative's row is always in that same table. The collapsed row is of the year or,
 across New Year, of the day before or after it (the build's context); a row of the year collapsed into a row of the
-neighbouring year is listed by the neighbouring year's table, when that year has one (year files cover the current
-year and the two before it, area files every year). Absent in year and area files of builder 2:
+neighbouring year is listed by the neighbouring year's table, when that year has one (year files cover the year of
+`through` and the two before it, area files every year). Absent in year and area files of builder 2:
 none listed.
 
 **Day table** (`v1/stats/days/YYYY-MM-DD.json`): the event table of `kind: "day"` with `date` (after `kind`),
@@ -521,7 +521,11 @@ day tables.
   below a band (ComCat's late publications, *Late publications*), `split copies` above one. A year that fails keeps its previous files (a first
   build stays absent) and is not retried until its inputs change; every real run names each year whose ledger entry
   failed in its marker `walk-blocked-stats`, which reaches the health board (`walks:stats:run`), and a run with
-  nothing blocked uploads a marker with only a `#` line, which resolves the board entry on the next health run.
+  nothing blocked uploads a marker with only a `#` line, which resolves the board entry on the next health run. A
+  ComCat count that fails (an outage: gate `error`) is no verdict on the year: it keeps its previous files, is retried
+  on the next run and is listed under *Deferred* in the run's report, not in the marker (an outage of days stops
+  `through` and shows as `feed:stats-through`). A dispatch's `years` naming a year with nothing to build (after the
+  year of `through`, or with no input on any day) gets a `::warning::STATS_YEARS` line.
 - **Ledger** `knowledge/stats/state.json` on `data` (derive reads `through` and each file's `sha256` from it):
   `{version, builder, through, generated, run_id, years: {Y: {inputs_digest, through, complete, area: {bytes, sha256,
   records, m6}, year?: {bytes, sha256}, check: {gate: ok|warn|fail|error, era, window, feed, comcat, ratio, bands},

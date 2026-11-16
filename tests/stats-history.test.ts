@@ -25,6 +25,7 @@ import {
   emptyState,
   inputLookup,
   planYear,
+  reportMarkdown,
   runStatsHistory,
   staleReason,
   stateText,
@@ -456,7 +457,7 @@ test('verify: the sample takes the last 13 months and 6 older ones; a month pass
 
 // --- the run ---
 
-function run2024(o: { state: StatsHistoryState; io: StatsIo; comcat: ComcatCount; fileExists?: (p: string) => boolean; forced?: Set<number>; maxYears?: number; mergeEpoch?: number }) {
+function run2024(o: { state: StatsHistoryState; io: StatsIo; comcat: ComcatCount; fileExists?: (p: string) => boolean; forced?: Set<number>; maxYears?: number; mergeEpoch?: number; log?: (m: string) => void }) {
   const archives = [...monthsOf(2023), ...monthsOf(2024)].map((p) => archive(p, { merge_epoch: o.mergeEpoch ?? 1, merge_rules: 3, sha256: SHA(p.slice(2, 4)) }));
   const lookup = inputLookup({ remediation: remediation([]), partitions: new Map(), archives, history: null }, 1);
   return runStatsHistory({
@@ -472,6 +473,7 @@ function run2024(o: { state: StatsHistoryState; io: StatsIo; comcat: ComcatCount
     registry,
     comcat: o.comcat,
     runId: '1',
+    ...(o.log ? { log: o.log } : {}),
   });
 }
 
@@ -525,6 +527,65 @@ test('runStatsHistory: a failed input keeps the previous files and records the e
   const g3 = await run2024({ state: { ...g.state, years: { ...g.state.years, '2024': { ...g.state.years['2024']!, inputs_digest: SHA('0') } } }, io: good, comcat: counter(1, 1, 2024) });
   assert.equal(g3.reports.find((x) => x.year === 2024), undefined, 'the failed digest is not retried');
   assert.ok(g3.blocked.some((b) => b.startsWith('stats 2024: ComCat gate failed')), 'the marker keeps alarming');
+});
+
+test('runStatsHistory: a ComCat outage (gate error) keeps the previous files and is deferred, not blocked; the next run retries', async () => {
+  const t = Date.parse('2024-06-11T05:00:00Z');
+  const io = fakeIo(new Map([['archive-2024-06/events-2024-06.tar.zst', new Map([['11.ndjson', ndjson([feat(t, 6.2)])]])]]));
+  const first = await run2024({ state: emptyState(1), io, comcat: counter(1, 1, 2024) });
+  const prevArea = first.state.years['2024']!.area!;
+  const down: ComcatCount = async () => {
+    throw new Error('HTTP 503');
+  };
+  const lines: string[] = [];
+  const r = await run2024({ state: first.state, io, comcat: down, forced: new Set([2024]), log: (m) => void lines.push(m) });
+  assert.equal(r.reports[0]!.result, 'error');
+  assert.equal(r.writes.size, 0);
+  assert.deepEqual(r.state.years['2024']!.area, prevArea, 'the previous files stay listed');
+  assert.equal(r.state.years['2024']!.check!.gate, 'error');
+  assert.equal(r.state.years['2024']!.failed_digest, undefined);
+  assert.deepEqual(r.blocked, [], 'an outage is no blocked line');
+  assert.equal(r.deferred.length, 1);
+  assert.match(r.deferred[0]!, /^stats 2024: ComCat gate error: ComCat count failed: HTTP 503/);
+  assert.ok(lines.some((l) => /^::warning::stats: 2024: ComCat gate error: .*retried on the next run$/.test(l)), lines.join('\n'));
+  assert.match(reportMarkdown(r, { dryRun: false, verify: null, ms: 0, downloads: 0 }), /Deferred \(retried on the next run\):\n\n- stats 2024: ComCat gate error/);
+  // A first build during the outage publishes nothing and is retried once ComCat answers.
+  const fresh = await run2024({ state: emptyState(1), io, comcat: down, maxYears: 1 });
+  assert.deepEqual([fresh.reports[0]!.year, fresh.reports[0]!.result, fresh.blocked.length, fresh.deferred.length], [2024, 'error', 0, 1]);
+  assert.equal(fresh.state.years['2024']!.area, undefined);
+  const back = await run2024({ state: fresh.state, io, comcat: counter(1, 1, 2024), maxYears: 1 });
+  assert.equal(back.reports.find((x) => x.year === 2024)?.result, 'built');
+  assert.deepEqual([back.blocked, back.deferred], [[], []]);
+});
+
+test('runStatsHistory: early January keeps the year files of the last year with frozen days and the two before it', async () => {
+  const io = fakeIo(new Map());
+  const first = await run2024({ state: emptyState(1), io, comcat: counter(0, 0) });
+  const yearFile = { bytes: 10, sha256: SHA('a') };
+  const old = (y: number) => ({ inputs_digest: SHA('b'), through: `${y}-12-31`, complete: true, remerged_in_memory: false, inputs: { remediation: 0, partition: 0, archive: 0, edition: 0, unmerged_months: 0 }, area: { bytes: 10, sha256: SHA('c'), records: 0, m6: 0 }, year: yearFile });
+  const state: StatsHistoryState = { ...first.state, years: { ...first.state.years, '2022': old(2022), '2021': old(2021) } };
+  // 2025-01-11: `through` is 2024-12-31, so 2024, 2023 and 2022 keep their year files until 2025's first day freezes.
+  const jan = await run2024({ state, io, comcat: counter(0, 0) });
+  assert.equal(jan.through, '2024-12-31');
+  assert.deepEqual(jan.removes, ['v1/stats/year/2021.json']);
+  assert.deepEqual(jan.state.years['2022']!.year, yearFile);
+  assert.equal(jan.state.years['2021']!.year, undefined);
+  assert.ok(jan.state.years['2021']!.area, 'the area file stays');
+});
+
+test('runStatsHistory: STATS_YEARS naming a year with nothing to build warns instead of doing nothing silently', async () => {
+  const io = fakeIo(new Map());
+  const first = await run2024({ state: emptyState(1), io, comcat: counter(0, 0) });
+  const lines: string[] = [];
+  const r = await run2024({ state: first.state, io, comcat: counter(0, 0), forced: new Set([2025, 2022]), log: (m) => void lines.push(m) });
+  assert.equal(r.reports.length, 0);
+  assert.deepEqual(lines.filter((l) => l.startsWith('::warning::STATS_YEARS')), [
+    '::warning::STATS_YEARS: 2022 has no input on any day; nothing to rebuild',
+    '::warning::STATS_YEARS: 2025 is after the last year with frozen days (2024, through 2024-12-31); nothing to rebuild',
+  ]);
+  const quiet: string[] = [];
+  await run2024({ state: first.state, io, comcat: counter(0, 0), forced: new Set([2024]), log: (m) => void quiet.push(m) });
+  assert.deepEqual(quiet.filter((l) => l.startsWith('::warning::STATS_YEARS')), [], 'a year with a plan: no warning');
 });
 
 test('runStatsHistory: a first build that fails its gate publishes nothing; max_years and the budget leave the rest stale', async () => {

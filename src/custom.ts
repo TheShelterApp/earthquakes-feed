@@ -582,13 +582,16 @@ const ipma: CustomAdapter = async (cfg) => {
 // --- Peru: IGP (one JSON file per year; fecha_utc has the date, hora_utc the time-of-day) ---
 const igp: CustomAdapter = async (cfg, nowMs, window) => {
   const endMs = window ? window.endMs : nowMs;
-  const startMs = window ? window.startMs : endMs;
+  // Live: the years of the live lookback, so on 1-2 January the previous year's file is read too (FEED-PROV-L2: before,
+  // only the current year's, and a 31 December event IGP published or revised after midnight UTC was never fetched
+  // live). aggregate keeps only the rows inside its hot window, so the older file's other rows are dropped there.
+  const startMs = window ? window.startMs : nowMs - QUERY_LOOKBACK_MS;
   const out: RawObs[] = [];
   let failed = 0;
   let lastErr: unknown = null;
   const firstYear = new Date(startMs).getUTCFullYear();
   const lastYear = new Date(endMs).getUTCFullYear();
-  // Live = current year; backfill = every year the window spans (each is one file).
+  // Every year the live lookback or the backfill window spans (each is one file).
   for (let year = firstYear; year <= lastYear; year++) {
     let list: Record<string, unknown>[] = [];
     try {

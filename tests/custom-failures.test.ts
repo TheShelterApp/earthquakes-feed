@@ -96,6 +96,22 @@ test('custom adapters: the run records a source whose every request failed as fa
   });
 });
 
+// FEED-PROV-L2: IGP's live path read only the current year's file, so on 1 January a 31 December event IGP published or
+// revised after midnight UTC was never fetched live. It now reads every year of the live lookback (2 days).
+test('igp: the live path reads the previous year\'s file in the first two days of January, the current one otherwise', async () => {
+  const dec31 = JSON.stringify([{ codigo: 'IGP/CENSIS/RS 2026-1000', fecha_utc: '2026-12-31T00:00:00', hora_utc: '1970-01-01T23:50:00', latitud: -12.1, longitud: -77.1, profundidad: 30, magnitud: 4.0, referencia: 'Lima' }]);
+  await serve({ '/2026': dec31 }, async (base, asked) => {
+    // 2027-01-01 00:30Z: the 2027 file does not exist yet (404); the 2026 one holds the event.
+    const rows = await CUSTOM_ADAPTERS.igp!(cfgOf('igp', base), Date.parse('2027-01-01T00:30:00Z'));
+    assert.deepEqual(rows.map((o) => o.providerEventId), ['IGP/CENSIS/RS 2026-1000']);
+    assert.deepEqual([...new Set(asked)], ['/2026', '/2027']);
+  });
+  await serve({ '/2027': '[]' }, async (base, asked) => {
+    await CUSTOM_ADAPTERS.igp!(cfgOf('igp', base), Date.parse('2027-01-03T00:30:00Z'));
+    assert.deepEqual(asked, ['/2027'], 'from 3 January on, one file');
+  });
+});
+
 test('ign: a file without a readable dias30 is an error, not an empty list', async () => {
   await serve({ '/a.js': 'var dias3 = {"features": []};' }, async (base) => {
     await assert.rejects(CUSTOM_ADAPTERS.ign!(cfgOf('ign', `${base}a.js`), NOW), /^Error: ign: no dias30 object in the answer/);

@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs';
 import { request as httpsRequest } from 'node:https';
 import { dirname, resolve } from 'node:path';
 import { type TLSSocket, rootCertificates } from 'node:tls';
-import { gunzipSync, strFromU8, unzipSync, unzlibSync } from 'fflate';
+import { gunzipSync, inflateSync } from 'node:zlib';
+import { strFromU8, unzipSync } from 'fflate';
 import { QUERY_LOOKBACK_MS, REGISTRY_PATH } from './config.js';
 import type { ProviderConfig, RawObs } from './types.js';
 import { flattenScalars, knownAliasIdsOf, num, parseUtcMs } from './util.js';
@@ -19,6 +20,8 @@ interface GetOpts {
   ca?: readonly string[];
   /** The whole call, every attempt and backoff included (default 45 s): no attempt starts or runs past it. */
   deadlineMs?: number;
+  /** The most the body may hold once decoded (default MAX_BODY_BYTES): past it the request is aborted. */
+  maxBytes?: number;
 }
 
 /** Certificate-chain errors of a pinned fetch: the pins no longer complete the host's chain. */
@@ -41,6 +44,34 @@ export const isPinnedCertError = (message: string | null | undefined): boolean =
 
 /** Default bound on one getText call, all attempts included (FEED-SEC-1). */
 export const GET_DEADLINE_MS = 45_000;
+
+/** The most one getText or getBinary body may hold, decoded (FEED-PROV-L5; before, a source could answer with any size
+ *  and the run held all of it, a gzip body inflated without a bound). The largest real answers, measured 2026-11-16:
+ *  PHIVOLCS's page 1.9 MB, AEC's file 0.76 MB, IMO's 30-day backfill window 0.6 MB, IGP's year file 0.58 MB; IMO's
+ *  window over a Reykjanes-sized swarm month (tens of thousands of M >= 1 events at about 400 B each) stays under it too.
+ *  A body past it fails the request like any other error. */
+export const MAX_BODY_BYTES = 32 * 1024 * 1024;
+const bodyTooLarge = (maxBytes: number): Error => new Error(`body over ${maxBytes} bytes: aborted (MAX_BODY_BYTES)`);
+
+/** A fetch body read with a running byte count (decoded bytes: fetch inflates a compressed body as it reads), cancelled
+ *  past `maxBytes`. */
+async function readCapped(res: Response, maxBytes: number): Promise<Uint8Array> {
+  if (!res.body) return new Uint8Array(0);
+  const reader = res.body.getReader();
+  const parts: Uint8Array[] = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.byteLength;
+    if (n > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw bodyTooLarge(maxBytes);
+    }
+    parts.push(value);
+  }
+  return Buffer.concat(parts, n);
+}
 
 /** The leaf certificate each pinned host presented in this process, by host name: status.json shows its expiry (FEED-SEC-1;
  *  TMD's leaf expires 2026-10-09 01:59 UTC). Read from every pinned response whose chain verified. */
@@ -66,15 +97,18 @@ export function pinnedCa(cfg: Pick<ProviderConfig, 'id' | 'tlsIntermediates'>, r
   return pems;
 }
 
-function once(url: string, timeoutMs: number, ua: string, ca: readonly string[] | undefined): Promise<string> {
+function once(url: string, timeoutMs: number, ua: string, ca: readonly string[] | undefined, maxBytes: number): Promise<string> {
   if (!ca) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     return fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'user-agent': ua, accept: '*/*' } })
       .then(async (res) => {
-        const body = await res.text();
-        if (res.status >= 200 && res.status < 300) return body;
-        throw new Error(`HTTP ${res.status}`);
+        if (res.status < 200 || res.status >= 300) {
+          await res.body?.cancel().catch(() => undefined);
+          throw new Error(`HTTP ${res.status}`);
+        }
+        // UTF-8, as res.text() decodes (a leading BOM dropped, a bad sequence replaced).
+        return new TextDecoder().decode(await readCapped(res, maxBytes));
       })
       .finally(() => clearTimeout(timer));
   }
@@ -94,7 +128,12 @@ function once(url: string, timeoutMs: number, ua: string, ca: readonly string[] 
         // Collect raw bytes — some gov CDNs (e.g. PHIVOLCS) return content-encoding: gzip
         // regardless of Accept-Encoding, so decode by the header rather than assuming utf8.
         const chunks: Buffer[] = [];
-        res.on('data', (c: Buffer) => chunks.push(c));
+        let received = 0;
+        res.on('data', (c: Buffer) => {
+          received += c.length;
+          if (received > maxBytes) res.destroy(bodyTooLarge(maxBytes));
+          else chunks.push(c);
+        });
         res.on('error', (e) => {
           clearTimeout(deadline);
           reject(e);
@@ -106,10 +145,12 @@ function once(url: string, timeoutMs: number, ua: string, ca: readonly string[] 
           try {
             let buf: Uint8Array = Buffer.concat(chunks);
             const enc = String(res.headers['content-encoding'] ?? '').toLowerCase();
-            if (enc.includes('gzip')) buf = gunzipSync(buf);
-            else if (enc.includes('deflate')) buf = unzlibSync(buf);
+            // The inflated size is bounded too: a small gzip body can decode to gigabytes.
+            if (enc.includes('gzip')) buf = gunzipSync(buf, { maxOutputLength: maxBytes });
+            else if (enc.includes('deflate')) buf = inflateSync(buf, { maxOutputLength: maxBytes });
             resolvePromise(strFromU8(buf));
           } catch (e) {
+            if ((e as { code?: string } | null)?.code === 'ERR_BUFFER_TOO_LARGE') return reject(bodyTooLarge(maxBytes));
             reject(e instanceof Error ? e : new Error(String(e)));
           }
         });
@@ -133,7 +174,7 @@ function once(url: string, timeoutMs: number, ua: string, ca: readonly string[] 
 
 export async function getText(url: string, opts: GetOpts = {}): Promise<string> {
   // National-agency endpoints commonly UA-gate non-browser clients — default to a browser UA.
-  const { timeoutMs = 10_000, retries = 1, ua = BROWSER_UA, ca, deadlineMs = GET_DEADLINE_MS } = opts;
+  const { timeoutMs = 10_000, retries = 1, ua = BROWSER_UA, ca, deadlineMs = GET_DEADLINE_MS, maxBytes = MAX_BODY_BYTES } = opts;
   const startedAt = Date.now();
   const left = (): number => deadlineMs - (Date.now() - startedAt);
   let lastErr: unknown = new Error('no attempt');
@@ -143,7 +184,7 @@ export async function getText(url: string, opts: GetOpts = {}): Promise<string> 
       break;
     }
     try {
-      return await once(url, Math.min(timeoutMs, left()), ua, ca);
+      return await once(url, Math.min(timeoutMs, left()), ua, ca, maxBytes);
     } catch (e) {
       lastErr = e;
     }
@@ -153,16 +194,19 @@ export async function getText(url: string, opts: GetOpts = {}): Promise<string> 
 }
 
 /** Fetch a binary body (for zip bundles). S3/CDN endpoints — valid TLS, no UA gating. */
-async function getBinary(url: string, opts: { timeoutMs?: number; retries?: number } = {}): Promise<Uint8Array> {
-  const { timeoutMs = 15_000, retries = 2 } = opts;
+async function getBinary(url: string, opts: { timeoutMs?: number; retries?: number; maxBytes?: number } = {}): Promise<Uint8Array> {
+  const { timeoutMs = 15_000, retries = 2, maxBytes = MAX_BODY_BYTES } = opts;
   let lastErr: unknown = new Error('no attempt');
   for (let attempt = 0; attempt <= retries; attempt++) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'user-agent': BROWSER_UA, accept: '*/*' } });
-      if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}`);
-      return new Uint8Array(await res.arrayBuffer());
+      if (res.status < 200 || res.status >= 300) {
+        await res.body?.cancel().catch(() => undefined);
+        throw new Error(`HTTP ${res.status}`);
+      }
+      return await readCapped(res, maxBytes);
     } catch (e) {
       lastErr = e;
     } finally {

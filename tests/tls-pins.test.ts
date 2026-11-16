@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { rootCertificates } from 'node:tls';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { CERT_HINT, PIN_HINT, getText, isPinnedCertError, pinnedCa, pinnedLeaf } from '../src/custom.js';
 import { loadRegistry } from '../src/providers.js';
 
@@ -178,6 +179,35 @@ test('pinned fetch: the leaf a pinned host presented is kept by host name (statu
     assert.equal(leaf.notAfterMs, Date.parse(new X509Certificate(chain.leaf).validTo));
     assert.equal(leaf.issuer, 'Feed Test Intermediate');
     assert.equal(leaf.subject, 'localhost');
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
+test('pinned fetch: a body past maxBytes is aborted, also once inflated; a gzip body under it decodes (FEED-PROV-L5)', async (t) => {
+  const chain = makeChain();
+  if (!chain) {
+    t.skip('openssl CLI not available');
+    return;
+  }
+  const server = createServer({ key: chain.leafKey, cert: chain.leaf }, (req, res) => {
+    if (req.url === '/big') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('x'.repeat(5_000));
+      return;
+    }
+    // PHIVOLCS answers gzip whatever the request asks: the size that counts is the inflated one.
+    res.writeHead(200, { 'content-type': 'text/plain', 'content-encoding': 'gzip' });
+    res.end(gzipSync(Buffer.alloc(req.url === '/bomb' ? 5_000 : 800, 0x61)));
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  const port = (server.address() as AddressInfo).port;
+  const opts = { ca: [chain.int, chain.root], retries: 0, timeoutMs: 5_000, maxBytes: 1_000 };
+  try {
+    await assert.rejects(getText(`https://localhost:${port}/big`, opts), (e: Error) => /body over 1000 bytes/.test(e.message) && !isPinnedCertError(e.message));
+    await assert.rejects(getText(`https://localhost:${port}/bomb`, opts), (e: Error) => /body over 1000 bytes/.test(e.message) && !isPinnedCertError(e.message));
+    assert.equal(await getText(`https://localhost:${port}/small`, opts), 'a'.repeat(800));
   } finally {
     server.closeAllConnections();
     await new Promise<void>((r) => server.close(() => r()));

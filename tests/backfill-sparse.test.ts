@@ -52,7 +52,7 @@ function gitEnv(home: string): NodeJS.ProcessEnv {
 
 /** A `data` branch with the index files, two event-map shards (the live window starts 2026-10-01) and three partitions;
  *  `clone(patterns)` makes a blobless, depth-1, sparse clone of it as actions/checkout does. */
-function setup() {
+function setup(extraFiles: Record<string, string> = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'backfill-sparse-'));
   const e = gitEnv(dir);
   writeFileSync(join(dir, 'gitconfig'), '[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = data\n[uploadpack]\n\tallowFilter = true\n\tallowAnySHA1InWant = true\n');
@@ -68,6 +68,7 @@ function setup() {
     'events/2026/08/31.ndjson': '{"x":1}\n',
     'events/2026/09/15.ndjson': '{"x":2}\n',
     'events/2026/10/02.ndjson': '{"x":3}\n',
+    ...extraFiles,
   };
   for (const [rel, text] of Object.entries(files)) {
     mkdirSync(dirname(join(origin, rel)), { recursive: true });
@@ -85,6 +86,14 @@ function setup() {
     return work;
   };
   return { dir, e, git, clone };
+}
+
+/** The stage-data line of backfill.yml's commit step, run on the checkout `data` (the workflow's own pathspecs). */
+function stageLine(s: ReturnType<typeof setup>, data: string) {
+  const yml = readFileSync(join(ROOT, '.github/workflows/backfill.yml'), 'utf8');
+  const line = yml.split('\n').map((l) => l.trim()).find((l) => !l.startsWith('#') && l.includes('src/stage-data.ts'))!;
+  const pathspecs = line.replace(/^.*src\/stage-data\.ts /, '').replace(/ \)$/, '').split(' ');
+  return spawnSync(process.execPath, ['--import', 'tsx', 'src/stage-data.ts', ...pathspecs], { cwd: ROOT, env: { ...s.e, DATA_DIR: data }, encoding: 'utf8' });
 }
 
 const backfill = (s: ReturnType<typeof setup>, data: string, extra: Record<string, string>) =>
@@ -142,12 +151,10 @@ test('backfill.yml commit step on a sparse checkout: stages the changes inside i
   const yml = readFileSync(join(ROOT, '.github/workflows/backfill.yml'), 'utf8');
   const lines = yml.split('\n').map((l) => l.trim()).filter((l) => !l.startsWith('#'));
   assert.equal(lines.find((l) => /^git add\b/.test(l)), undefined, 'no git add of its own');
-  const stageLine = lines.find((l) => l.includes('src/stage-data.ts'));
-  assert.equal(stageLine, '( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/stage-data.ts . )');
-  const pathspecs = stageLine!.replace(/^.*src\/stage-data\.ts /, '').replace(/ \)$/, '').split(' ');
+  const stageCall = lines.find((l) => l.includes('src/stage-data.ts'));
+  assert.equal(stageCall, '( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/stage-data.ts . )');
   const s = setup();
-  const add = (cwd: string) =>
-    spawnSync(process.execPath, ['--import', 'tsx', 'src/stage-data.ts', ...pathspecs], { cwd: ROOT, env: { ...s.e, DATA_DIR: cwd }, encoding: 'utf8' });
+  const add = (cwd: string) => stageLine(s, cwd);
   const staged = (cwd: string) => s.git(cwd, 'diff', '--cached', '--name-only').split('\n').filter(Boolean);
 
   // A walk with nothing to fill: only the index files, the cursor rewritten.
@@ -181,4 +188,40 @@ test('backfill.yml commit step on a sparse checkout: stages the changes inside i
   writeFileSync(join(trunc, 'events/2026/08/31.ndjson'), '');
   add(trunc);
   assert.deepEqual(staged(trunc), []);
+});
+
+test('backfill.yml commit step, the phase-2 transition on a sparse checkout: the unfrozen days the branch still tracks leave it, outside the cone, with nothing checked out', () => {
+  // Until the first phase-2 commit the branch tracks the 11 unfrozen days. A backfill admitted to the writer lock before
+  // the first derive after the merge stages with them outside its cone (skip-worktree entries): `git rm --cached` refuses
+  // those without --sparse, which would fail the commit step after the walk did its work.
+  const now = Date.now();
+  const today = new Date(now).toISOString().slice(0, 10);
+  const yesterday = new Date(now - DAY).toISOString().slice(0, 10);
+  const path = (d: string) => `events/${d.slice(0, 4)}/${d.slice(5, 7)}/${d.slice(8, 10)}.ndjson`;
+  const s = setup({ [path(today)]: '{"x":7}\n', [path(yesterday)]: '{"x":8}\n' });
+  const staged = (cwd: string) => s.git(cwd, 'diff', '--cached', '--name-status').split('\n').filter(Boolean).sort();
+
+  // Nothing to fill: only the index files checked out, the cursor rewritten.
+  const walk = s.clone(['/knowledge/index/*.json']);
+  assert.equal(existsSync(join(walk, path(today))), false, 'setup: the unfrozen days are outside the cone');
+  assert.match(s.git(walk, 'ls-files', '-t', '--', path(today)), /^S /, 'setup: a skip-worktree entry');
+  // Why --sparse: the plain removal is refused on such an entry.
+  const plain = spawnSync('git', ['rm', '--cached', '-q', '--', path(today)], { cwd: walk, env: s.e, encoding: 'utf8' });
+  assert.notEqual(plain.status, 0);
+  assert.match(plain.stderr, /--sparse/);
+  writeFileSync(join(walk, 'knowledge/index/backfill.json'), '{"targetStart":"2023-07-06","providers":{"usgs":{}}}\n');
+  const r = stageLine(s, walk);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /2 of them leave the data branch with this commit/);
+  assert.deepEqual(staged(walk), [`D\t${path(today)}`, `D\t${path(yesterday)}`, 'M\tknowledge/index/backfill.json'].sort());
+  assert.equal(s.git(walk, 'ls-files', '--', 'events/' + today.slice(0, 4)).includes(path(today)), false, 'no longer tracked');
+  s.git(walk, 'commit', '-q', '-m', 'backfill');
+  assert.deepEqual(s.git(walk, 'ls-tree', '-r', '--name-only', 'HEAD', '--', 'events').split('\n').filter(Boolean), ['events/2026/08/31.ndjson', 'events/2026/09/15.ndjson', 'events/2026/10/02.ndjson']);
+
+  // A window run (one month checked out, a day rewritten in it) does the same; the frozen day is committed.
+  const win = s.clone(['/knowledge/index/*.json', '/events/2026/09/']);
+  writeFileSync(join(win, 'events/2026/09/15.ndjson'), '{"x":2}\n{"x":9}\n');
+  const rw = stageLine(s, win);
+  assert.equal(rw.status, 0, rw.stdout + rw.stderr);
+  assert.deepEqual(staged(win), [`D\t${path(today)}`, `D\t${path(yesterday)}`, 'M\tevents/2026/09/15.ndjson'].sort());
 });

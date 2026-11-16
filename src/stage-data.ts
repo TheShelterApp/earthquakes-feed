@@ -15,7 +15,8 @@ import { isFrozenDay } from './partitions.js';
  *
  * So every writer that stages day partitions (derive-publish, backfill, archive) stages through this file:
  * 1. `git add -A -- <pathspecs>`, as before;
- * 2. every `events/YYYY/MM/DD.ndjson` in the index whose day is not frozen NOW leaves the index (`git rm --cached`): the
+ * 2. every `events/YYYY/MM/DD.ndjson` in the index whose day is not frozen NOW leaves the index (`git rm --cached
+ *    --sparse`, so an entry outside a sparse checkout's cone leaves it too): the
  *    file stays on disk, and one the previous commit held is deleted from the branch by this commit (the first run with
  *    phase 2 deletes the 11 unfrozen days; history is never rewritten);
  * 3. a check that nothing staged names an unfrozen day.
@@ -89,7 +90,11 @@ export function stageData(root: string, pathspecs: string[], nowMs: number, git:
       }
     })();
     if (hasHead) leftBranch = lines(git(['ls-tree', '-r', '--name-only', '-z', 'HEAD', '--', ...keptOut]), '\0').sort();
-    git(['rm', '--cached', '-q', '--', ...keptOut]);
+    // --sparse: in a sparse checkout (backfill.yml) the unfrozen days the branch still tracks before the first phase-2
+    // commit sit outside the cone as skip-worktree entries, and `git rm --cached` refuses those without it ("Use the
+    // --sparse option"); on a full checkout (derive-publish, archive) it changes nothing. Whichever writer commits first
+    // after the merge, no unfrozen day stays tracked.
+    git(['rm', '--cached', '--sparse', '-q', '--', ...keptOut]);
   }
   const staged = lines(git(['diff', '--cached', '--name-status', '--no-renames', '--', 'events'])).map((l) => {
     const [status, path] = l.split('\t');

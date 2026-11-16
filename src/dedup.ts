@@ -2721,7 +2721,14 @@ export class Resolver {
     const [survivor, loser] = this.survivorFirst(x, y);
     const frozen = loser.provenance.map((r) => ({ ...r }));
     for (const r of loser.provenance) {
-      if (!survivor.provenance.some((s) => s.provider === r.provider && s.nativeId === r.nativeId)) survivor.provenance.push(r);
+      const i = survivor.provenance.findIndex((s) => s.provider === r.provider && s.nativeId === r.nativeId);
+      if (i < 0) survivor.provenance.push(r);
+      // Both hold the row (an anomaly the alias map normally prevents): the copy the provider updated last wins, as in
+      // isOlderThanStored; later reports reached only the node its alias resolved to, which can be the loser. A row
+      // without a stamp never replaces one (two unstamped rows keep the survivor's). reposition below re-derives `chosen`.
+      else if (r.providerUpdatedMs != null && (survivor.provenance[i]!.providerUpdatedMs == null || r.providerUpdatedMs > survivor.provenance[i]!.providerUpdatedMs!)) {
+        survivor.provenance[i] = r;
+      }
     }
     for (const k of loser.aliases) if (!survivor.aliases.includes(k)) survivor.aliases.push(k);
     for (const [k, v] of this.alias) if (v === loser.feedId) this.alias.set(k, survivor.feedId);

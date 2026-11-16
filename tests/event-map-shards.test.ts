@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { eventDayKey, loadEventMap, pruneEventMapShards, saveEventMap } from '../src/bitemporal.js';
 import { dataPaths } from '../src/config.js';
-import { SENTINEL_FILE, canonicalDay, emptyGeneration, eventMapShardHours, liveFloor, moveToDayLayout, writeGeneration } from '../src/event-map-store.js';
+import { SENTINEL_FILE, canonicalDay, emptyGeneration, eventMapShardHours, liveFloor, liveFloorOf, moveToDayLayout, writeGeneration } from '../src/event-map-store.js';
 import type { EventNode } from '../src/types.js';
 
 // The event map's files. Round 17 (LANE G) wrote shards of one UTC hour of each event-day (`YYYY-MM-DD-HH.ndjson`),
@@ -238,6 +238,9 @@ test('fail closed: no map and no generation throws; the generation names the day
     assert.equal(liveFloor(r, Date.parse('2026-10-06T00:00:00Z'), { EVENT_MAP_BOOTSTRAP: '1' }), '2026-10-06');
     writeGeneration(r, emptyGeneration());
     assert.equal(loadEventMap(r).size, 0);
+    // The explicit empty generation of a fresh or reset branch starts the live floor at today too (backfill and archive
+    // run before the first aggregate run has written a day).
+    assert.deepEqual(liveFloorOf(r, Date.parse('2026-10-06T00:00:00Z'), {}), { day: '2026-10-06', source: 'empty-generation' });
     // A generation day missing from the checkout throws, within the load's window; a day before the window does not count.
     const entry = { sha256: 'a'.repeat(64), bytes: 1, nodes: 1, blob: 'b'.repeat(64), blob_bytes: 1 };
     writeGeneration(r, { ...emptyGeneration(), days: { '2026-09-01': entry, [DAY]: entry } });

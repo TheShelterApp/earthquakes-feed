@@ -284,13 +284,15 @@ export function moveToDayLayout(root: string): string[] {
 // ---------------------------------------------------------------------------------------------------------------------
 // The live floor
 
-export type FloorSource = 'generation' | 'checkout' | 'tree' | 'bootstrap';
+export type FloorSource = 'generation' | 'checkout' | 'tree' | 'empty-generation' | 'bootstrap';
 
 /**
  * The live pipeline's first event-day: backfill fills strictly before it, onboarding at and after it, archive never
  * archives a month that reaches it. In order: the generation's oldest day; the checkout's oldest event-map file; on a
  * sparse checkout (backfill.yml) the oldest event-map name in git's tree; otherwise it throws: a floor read as "today"
- * would let backfill write the days the live pipeline owns. EVENT_MAP_BOOTSTRAP=1 (a fresh data branch) answers today.
+ * would let backfill write the days the live pipeline owns. Two explicit starts answer today: a generation that exists
+ * and names no day while no event-map file exists anywhere (the empty generation scripts/bootstrap-data-branch.sh and
+ * reset-data-branch.sh write: a fresh branch until its first aggregate run), and EVENT_MAP_BOOTSTRAP=1.
  */
 export function liveFloorOf(root: string, nowMs: number = Date.now(), env: NodeJS.ProcessEnv = process.env): { day: string; source: FloorSource } {
   const gen = readGeneration(root);
@@ -302,6 +304,7 @@ export function liveFloorOf(root: string, nowMs: number = Date.now(), env: NodeJ
     const tree = [...daysOfNames(treeNames(root, 'knowledge/index/event_map')).keys()];
     if (tree.length) return { day: tree[0]!, source: 'tree' };
   }
+  if (gen && genDays.length === 0) return { day: dayKey(nowMs), source: 'empty-generation' };
   if (env.EVENT_MAP_BOOTSTRAP === '1') return { day: dayKey(nowMs), source: 'bootstrap' };
   throw new Error(
     'event map: no live floor (no generation day, no event-map file in the checkout or in git): refusing to read it as today, ' +

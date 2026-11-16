@@ -1775,7 +1775,9 @@ to the ref.
     writes, starts a fresh branch).
   - The floor merge of `saveEventMap` never writes a generation day from moved nodes alone.
   - `liveFloor` (backfill's floor, onboard's live day, archive's refusal) takes the generation's oldest day, else the
-    checkout's oldest file, else the oldest name in git's tree (backfill's sparse checkout), else it throws.
+    checkout's oldest file, else the oldest name in git's tree (backfill's sparse checkout); an empty generation with
+    no event-map file anywhere (a fresh or reset branch before its first aggregate run) or `EVENT_MAP_BOOTSTRAP=1`
+    gives today; anything else throws.
   - first-solutions stops on a missing map instead of finishing a day empty.
 - *Permissions*: `id-token: write` is held at job level only, by exactly these jobs (tests/stage-data.test.ts names
   them): aggregate, derive.yml, first-solutions' collect, `state-gc.yml`, `state-backup.yml`, `state-rehearsal.yml` and

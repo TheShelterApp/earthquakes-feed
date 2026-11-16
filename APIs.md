@@ -600,7 +600,10 @@ providers/tls/README.md).
 **Failing and silent sources.** A provider whose fetch failed has `ok: false` and is in `degraded`. An FDSN answer of
 HTTP 204 is an empty success; HTTP 404 is an empty success only for a source whose query asks `nodata=404` (none does
 today) and an error otherwise, because it means the query path is gone (before 2026-10-04 every 404 counted as empty).
-A source can also answer `ok` with no rows while it has stopped publishing: since 2026-10-04 each run records per
+A custom adapter that asks several files (IPMA's two areas, IGP's year files, BMKG's two lists, CSN's day pages, CWA's
+two bundles) fails when every one of them failed, with `<id>: every request failed (<n>; last: <error>)`; some failing
+leaves the others' rows, `ok`. IGN fails when its file holds no readable `dias30`. Before 2026-11-16 all of these read as
+`ok` with no rows, which only the silence below noticed (FEED-PROV-L3). A source can also answer `ok` with no rows while it has stopped publishing: since 2026-10-04 each run records per
 source the last run whose answer had rows (`knowledge/index/provider_activity.json`, seeded once from the status
 history), and a source with no rows for longer than its activity budget is **silent**: listed in `silent` (by id:
 `last_non_empty_at`, null when none was seen since `counted_from`; `silent_hours`; `budget_hours`) and counted in

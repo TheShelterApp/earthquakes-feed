@@ -240,6 +240,14 @@ export interface Window {
 }
 export type CustomAdapter = (cfg: ProviderConfig, nowMs: number, window?: Window) => Promise<RawObs[]>;
 
+/** The error of a multi-request adapter (IPMA, IGP, BMKG, CSN, CWA) whose every request failed. It throws, so the run
+ *  records the source as failed (ok: false, the error in status.json; the breaker and the health board see it at once)
+ *  instead of ok with no rows, which only the silent-provider budget (12 h) noticed (FEED-PROV-L3). Some requests failing
+ *  still keeps the others' rows, as before. */
+export function everyRequestFailed(id: string, requests: number, last: unknown): Error {
+  return new Error(`${id}: every request failed (${requests}; last: ${last instanceof Error ? last.message : String(last)})`);
+}
+
 // --- Turkey: AFAD (UTC timestamps without a zone suffix, dense down to ~M0.6) ---
 /** AFAD apiv2 `event/filter` records. `date` and `lastUpdateDate` are UTC written without a zone suffix
  *  ("2026-09-30T19:19:18"), and the `start` / `end` query bounds are read in the same frame. Until 2026-10-01 this
@@ -541,11 +549,16 @@ const mexico: CustomAdapter = async (cfg) => {
 // --- Portugal + Azores: IPMA (UTC times; areas 3=Azores, 7=mainland; magnitud -99 = none) ---
 const ipma: CustomAdapter = async (cfg) => {
   const out: RawObs[] = [];
-  for (const area of ['3', '7']) {
+  const areas = ['3', '7'];
+  let failed = 0;
+  let lastErr: unknown = null;
+  for (const area of areas) {
     let list: Record<string, unknown>[] = [];
     try {
       list = (JSON.parse(await getText(`${cfg.base}${area}.json`, { timeoutMs: 12_000, retries: 1 })) as { data?: Record<string, unknown>[] }).data ?? [];
-    } catch {
+    } catch (e) {
+      failed++;
+      lastErr = e;
       continue;
     }
     for (const e of list) {
@@ -562,6 +575,7 @@ const ipma: CustomAdapter = async (cfg) => {
       });
     }
   }
+  if (failed === areas.length) throw everyRequestFailed(cfg.id, failed, lastErr);
   return out.filter((o) => o.providerEventId);
 };
 
@@ -570,13 +584,19 @@ const igp: CustomAdapter = async (cfg, nowMs, window) => {
   const endMs = window ? window.endMs : nowMs;
   const startMs = window ? window.startMs : endMs;
   const out: RawObs[] = [];
+  let failed = 0;
+  let lastErr: unknown = null;
+  const firstYear = new Date(startMs).getUTCFullYear();
+  const lastYear = new Date(endMs).getUTCFullYear();
   // Live = current year; backfill = every year the window spans (each is one file).
-  for (let year = new Date(startMs).getUTCFullYear(); year <= new Date(endMs).getUTCFullYear(); year++) {
+  for (let year = firstYear; year <= lastYear; year++) {
     let list: Record<string, unknown>[] = [];
     try {
       const j = JSON.parse(await getText(`${cfg.base}${year}`, { timeoutMs: 15_000, retries: 2 }));
       list = Array.isArray(j) ? j : [];
-    } catch {
+    } catch (e) {
+      failed++;
+      lastErr = e;
       continue;
     }
     for (const e of list) {
@@ -596,6 +616,7 @@ const igp: CustomAdapter = async (cfg, nowMs, window) => {
       });
     }
   }
+  if (failed === lastYear - firstYear + 1) throw everyRequestFailed(cfg.id, failed, lastErr);
   return out.filter((o) => o.providerEventId);
 };
 
@@ -695,13 +716,14 @@ function jsonObjectAfter(src: string, marker: string): string | null {
 // --- Spain: IGN (JS-wrapped GeoJSON; `dias30` = 30-day superset; `fecha` is UTC) ---
 const ign: CustomAdapter = async (cfg) => {
   const js = await getText(cfg.base, { timeoutMs: 15_000, retries: 2 });
+  // A file without a readable `dias30` is a failed fetch, not an empty list (FEED-PROV-L3: it read as ok with 0 rows).
   const objText = jsonObjectAfter(js, 'dias30');
-  if (!objText) return [];
+  if (!objText) throw new Error(`${cfg.id}: no dias30 object in the answer (${js.length} bytes)`);
   let fc: { features?: { geometry?: { coordinates?: number[] }; properties?: Record<string, unknown> }[] };
   try {
     fc = JSON.parse(objText);
-  } catch {
-    return [];
+  } catch (e) {
+    throw new Error(`${cfg.id}: dias30 does not parse: ${e instanceof Error ? e.message : String(e)}`);
   }
   const out: RawObs[] = [];
   for (const f of fc.features ?? []) {
@@ -757,13 +779,18 @@ const bmkg: CustomAdapter = async (cfg) => {
   const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
   const out: RawObs[] = [];
   const seen = new Set<string>();
-  for (const file of ['gempaterkini.json', 'gempadirasakan.json']) {
+  const files = ['gempaterkini.json', 'gempadirasakan.json'];
+  let failed = 0;
+  let lastErr: unknown = null;
+  for (const file of files) {
     let list: Record<string, unknown>[] = [];
     try {
       const j = JSON.parse(await getText(`${cfg.base}${file}`, { timeoutMs: 12_000, retries: 2, ua: UA })) as { Infogempa?: { gempa?: unknown } };
       const g = j.Infogempa?.gempa;
       list = Array.isArray(g) ? (g as Record<string, unknown>[]) : g ? [g as Record<string, unknown>] : [];
-    } catch {
+    } catch (e) {
+      failed++;
+      lastErr = e;
       continue;
     }
     for (const e of list) {
@@ -783,6 +810,7 @@ const bmkg: CustomAdapter = async (cfg) => {
       });
     }
   }
+  if (failed === files.length) throw everyRequestFailed(cfg.id, failed, lastErr);
   return out;
 };
 
@@ -907,6 +935,9 @@ const csn: CustomAdapter = async (cfg, nowMs, window) => {
   } else {
     days.push(nowMs, nowMs - DAY);
   }
+  // One day page missing (today's just after midnight UTC) leaves the others' rows; all of them failing is an error.
+  let failed = 0;
+  let lastErr: unknown = null;
   for (const dms of days) {
     const d = new Date(dms);
     const y = d.getUTCFullYear();
@@ -915,7 +946,9 @@ const csn: CustomAdapter = async (cfg, nowMs, window) => {
     let html: string;
     try {
       html = await getText(`${cfg.base}${y}/${mm}/${y}${mm}${dd}.html`, { timeoutMs: 12_000, retries: 1 });
-    } catch {
+    } catch (e) {
+      failed++;
+      lastErr = e;
       continue;
     }
     for (const row of html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)) {
@@ -939,6 +972,7 @@ const csn: CustomAdapter = async (cfg, nowMs, window) => {
       });
     }
   }
+  if (days.length && failed === days.length) throw everyRequestFailed(cfg.id, failed, lastErr);
   return out;
 };
 
@@ -948,11 +982,16 @@ const cwa: CustomAdapter = async (cfg) => {
   const seen = new Set<string>();
   // BOTH bundles: E-A0015 = significant/felt, E-A0016 = small-area minor (only place the
   // frequent small quakes appear). Each is ~16 per-event XML files.
-  for (const file of ['E-A0015-001.zip', 'E-A0016-001.zip']) {
+  const bundles = ['E-A0015-001.zip', 'E-A0016-001.zip'];
+  let failed = 0;
+  let lastErr: unknown = null;
+  for (const file of bundles) {
     let files: Record<string, Uint8Array>;
     try {
       files = unzipSync(await getBinary(`${cfg.base}${file}`, { timeoutMs: 20_000, retries: 2 }));
-    } catch {
+    } catch (e) {
+      failed++;
+      lastErr = e;
       continue;
     }
     for (const name of Object.keys(files)) {
@@ -978,6 +1017,7 @@ const cwa: CustomAdapter = async (cfg) => {
       });
     }
   }
+  if (failed === bundles.length) throw everyRequestFailed(cfg.id, failed, lastErr);
   return out.filter((o) => o.providerEventId);
 };
 

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { REPO, dataPaths, envNumber } from './config.js';
+import { liveFloor } from './event-map-store.js';
 import { withinShrinkTolerance } from './gh.js';
 import { type ReleaseIo, archiveLogFiles, ghReleaseIo, loadLogArchives, saveLogArchives } from './log-archive.js';
 import { loadInventory, saveInventory } from './partitions.js';
@@ -200,12 +201,6 @@ function eventMonths(eventsDir: string): Map<string, { days: string[]; files: st
   return months;
 }
 
-function shardDays(root: string): Set<string> {
-  const dir = dataPaths(root).eventMapDir;
-  if (!existsSync(dir)) return new Set();
-  return new Set(readdirSync(dir).filter((f) => f.endsWith('.ndjson')).map((f) => f.slice(0, 10)));
-}
-
 /** Map ingest YYYY-MM -> its observation-log files (knowledge/observations/ingest=YYYY/MM/DD/HH.ndjson). */
 function observationMonths(obsDir: string): Map<string, { files: string[]; days: string[]; monthDir: string }> {
   const months = new Map<string, { files: string[]; days: string[]; monthDir: string }>();
@@ -302,7 +297,9 @@ export function runArchive(root: string, nowMs: number, io: ArchiveIo, opts: Arc
   const months = eventMonths(dataPaths(root).eventsDir);
   const archives = loadArchives(root);
   const inv = loadInventory(root);
-  const shards = shardDays(root);
+  // The live pipeline's first day (src/event-map-store.ts liveFloor: the generation, else the event-map files; it throws
+  // when it has neither, so a run never archives without knowing where the live window starts).
+  const floor = liveFloor(root, nowMs);
   const staging = mkdtempSync(join(tmpdir(), 'efd-archive-'));
   let archived = 0;
   const archivedMonths: string[] = [];
@@ -320,9 +317,9 @@ export function runArchive(root: string, nowMs: number, io: ArchiveIo, opts: Arc
       if (days.some((d) => d >= cutoff)) continue;
       const entry = archives.list.find((a) => a.period === month);
       if (entry && !entry.needs_reroll) continue;
-      // Safety: 45-day shard horizon << 120-day archive horizon, so this must hold.
-      if (days.some((d) => shards.has(d))) {
-        console.error(`::error::refusing to archive ${month}: a live event_map shard exists`);
+      // Safety: 45-day event-map horizon << 120-day archive horizon, so this must hold.
+      if (days.some((d) => d >= floor)) {
+        console.error(`::error::refusing to archive ${month}: it reaches the live event map (from ${floor})`);
         continue;
       }
 

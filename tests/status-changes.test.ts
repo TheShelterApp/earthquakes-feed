@@ -9,6 +9,7 @@ import { geohashEncode } from '../src/geohash.js';
 import { appendChanges, mirrorChangeLog, nodeToChangeRecord, type ChangeRecord } from '../src/changes.js';
 import { enrichStatusV2, updateProviderHealth, type AggregateStatus } from '../src/status-v2.js';
 import type { EventNode, ProvenanceRow } from '../src/types.js';
+import { emptyGeneration, writeGeneration } from '../src/event-map-store.js';
 
 // --- geohash: bit-exact with ShelterShared / @shelter/domain (same anchors) ---
 test('geohashEncode matches the cross-language golden anchors', () => {
@@ -144,6 +145,9 @@ test('derive mirrors the day\'s change-log to Pages on a run that appends nothin
     const tmp = join(root, 'tmp');
     mkdirSync(join(data, 'changes'), { recursive: true });
     mkdirSync(tmp);
+    // A fresh data branch's state (scripts/bootstrap-data-branch.sh): an empty generation, no event-map day. Without it
+    // derive refuses to read the missing event map as empty (storage phase 3).
+    writeGeneration(data, emptyGeneration());
     // derive names the day from its own clock: seed the day at the spawn and the day two minutes later, so a UTC
     // midnight while it runs cannot make the test flake.
     const seeded = new Map<string, string>();

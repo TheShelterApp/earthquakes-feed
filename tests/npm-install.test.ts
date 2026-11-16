@@ -35,3 +35,15 @@ test('package-lock: every integrity is sha512, except the documented sha1 of the
   assert.equal(Buffer.from(SIGNING_SHA1.slice(5), 'base64').toString('hex'), '831e0caa5d56e861133c233e28d8180339991bf3');
   assert.match(read('.npmrc'), /831e0caa5d56e861133c233e28d8180339991bf3/, '.npmrc names the sha1 to check');
 });
+
+// FEED-SEC-3: no dependency's install script runs, in CI (whose jobs later hold the Cloudflare, R2 and signing secrets)
+// or locally. A new package with an install script must be looked at: does it work without it?
+test('.npmrc: install scripts off; only the reviewed packages have one; the root package has no pre/post scripts', () => {
+  assert.match(read('.npmrc'), /^ignore-scripts=true$/m);
+  const withScript = lockPackages().filter(([, e]) => e.hasInstallScript).map(([k]) => k).sort();
+  assert.deepEqual(withScript, ['node_modules/esbuild', 'node_modules/fsevents', 'node_modules/workerd']);
+  // `npm run x` and `npm test` still run x with ignore-scripts, but never prex/postx (nor prepare/install hooks).
+  const scripts = Object.keys((JSON.parse(read('package.json')) as { scripts: Record<string, string> }).scripts);
+  const hooks = scripts.filter((s) => /^(pre|post)/.test(s) || ['install', 'prepare', 'prepublish', 'prepack', 'postpack'].includes(s));
+  assert.deepEqual(hooks, [], 'a lifecycle script would be skipped silently');
+});

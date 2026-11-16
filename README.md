@@ -316,7 +316,8 @@ drain a queue that got too long: `gh run cancel <id>` for the surplus runs (neve
 
 ## Run locally
 
-Requires Node 22+.
+Requires Node 22+. `.npmrc` turns dependency install scripts off (`ignore-scripts=true`, as in every workflow's
+`npm ci`); nothing here needs them, and `validate.yml` checks esbuild, tsx and wrangler without them.
 
 ```bash
 npm install

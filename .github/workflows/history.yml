@@ -36,9 +36,14 @@ on:
 # Runs never overlap, so the index each run reads is the one the previous run committed (or, when that
 # commit failed, the next run adopts the uploaded assets). A dry run stays in the group too: it asks the same hosts
 # as the walk and first-solutions (which shares the group), and one request at a time per host holds only inside it.
+# `queue: max` (as in remerge.yml): GitHub otherwise keeps one pending run or job per group and a newer arrival cancels
+# it, so a history run or first-solutions collect job waiting for the group was cancelled by the next one to arrive
+# (scripts/walk-fallback.mjs records three runs cancelled that way; 2026-11-15 audit, FEED-WF-1). first-solutions.yml's
+# collect job sets it too, so the shared group behaves the same whichever workflow queues first.
 concurrency:
   group: earthquakes-feed-history
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read

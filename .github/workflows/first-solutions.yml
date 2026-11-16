@@ -58,9 +58,13 @@ jobs:
     timeout-minutes: 45
     # The deep-history walk (history.yml, workflow-level group `earthquakes-feed-history`) asks the same hosts (ComCat
     # first): sharing its group, the two never run at once, so each host still gets at most one request a second.
+    # `queue: max` on both sides (see history.yml): a waiting history run or collect job is never cancelled by a newer
+    # arrival of the other (2026-11-15 audit, FEED-WF-1). The workflow-level group above keeps GitHub's default: a
+    # cancelled pending tick is taken over by the next tick through its cursor and artifact.
     concurrency:
       group: earthquakes-feed-history
       cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

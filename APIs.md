@@ -1682,7 +1682,9 @@ hour. A cron-started first-solutions run queued behind the Worker's and then hel
 across history's turn: 10 of the 48 Worker-started history runs waited 2.2–31 minutes (9 behind a cron-started or
 delayed first-solutions run, 1 behind a cron-started history run), and GitHub, which keeps one pending run or job per
 group, cancelled 3 cron-started runs while they waited. Replayed without those deliveries, the same 48 hours have no
-wait and no cancellation in the group. The fallback for a Worker outage is `walk-fallback.yml`
+wait and no cancellation in the group. Since the 2026-11-15 audit both sides of the group (history.yml's workflow-level
+group and the `collect` job's) set `queue: max`, so a run or job that waits for the group is kept until its turn, in
+arrival order, instead of being cancelled by the next one to arrive. The fallback for a Worker outage is `walk-fallback.yml`
 (`scripts/walk-fallback.mjs`): on its `:29` and `:50` crons it reads the walk's newest `workflow_dispatch` run and
 dispatches the walk as the Worker does only when that run is more than 2 h 5 min old (two missed ticks; the Worker
 missed 1 of 48 first-solutions ticks in those 48 hours, 10-06 19:48, and a single miss costs one hour of the walk). It

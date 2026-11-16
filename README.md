@@ -224,9 +224,13 @@ HTML bulletin is read by a custom adapter (hypocentre parameters only).
   gzip assets of the `logs-YYYY-MM` releases ([APIs.md](APIs.md#run-logs)). The `health`
   workflow logs the repository's size and files `feed:repo-size` above 8 GB (5.48 GB on 2026-10-04, 5.64 GB on
   2026-10-06, about 67 MB a day: GitHub keeps about one compressed copy of every large file a commit rewrites, see
-  [APIs.md](APIs.md#repository-size); `scripts/repo-growth/` measures it). `event_map` is sharded by
-  event-day and UTC hour (`YYYY-MM-DD-HH.ndjson` since round 17) and pruned to a 45-day dedup horizon; identity older than that lives in the
-  frozen day partitions. Every source with a time-range query reached the target
+  [APIs.md](APIs.md#repository-size); `scripts/repo-growth/` measures it). `event_map` is one file per
+  event-day (`YYYY-MM-DD.ndjson`; round 17's hour shards are moved back by the first storage-phase-3 run) and pruned to
+  a 45-day dedup horizon; identity older than that lives in the frozen day partitions. Storage phase 3 moves it out of
+  git: its days live as content-addressed blobs in the state store (the `earthquakes-feed-state` Worker in front of one
+  R2 bucket, GitHub OIDC, no static secret), named by `knowledge/index/generation.json`, which every aggregate and
+  derive commit carries ([APIs.md](APIs.md#repository-size), phase 3); in phase 3a git still tracks the day files and the
+  store is written and shadow-verified. Every source with a time-range query reached the target
   (2023-07-06) in July 2026 except ISC, whose walk is paused; a backfilled row is the
   source's solution when it was fetched, while the log holds each report as first seen
   since 2026-07-05 (`scripts/first-observations.ts`; [APIs.md](APIs.md#history-and-backfill)). A source that answers
@@ -286,7 +290,9 @@ waits in the same queue as everyone else: on 2026-11-08 a loop of 47 `backfill.y
 apart) queued ahead of every aggregate run and the live manifest went 1 h 47 min stale (SHLTR-149;
 `npx tsx scripts/writer-group-sim.ts incident` replays it). Since then:
 
-- **The lock is job-level, behind a gate.** `backfill.yml`, `archive.yml` and `derive.yml` start with a `gate` job
+- **The lock is job-level, behind a gate.** `backfill.yml`, `archive.yml`, `derive.yml` and `state-gc.yml` (which commits
+  nothing but holds the group so that no aggregate persists the event map while the state store's GC applies its keep
+  set) start with a `gate` job
   outside every group ([`scripts/writer-queue.mjs`](scripts/writer-queue.mjs)): it counts the writer runs created before
   its own that wait for the group or are about to enter it (aggregate included) and lets the writing job join only while
   fewer than 2 do. A refused dispatch fails in seconds with an `::error::` naming what waits; a refused scheduled run
@@ -326,8 +332,10 @@ npm install
 npm test          # identity / dedup / swarm-guard / revision tests
 npm run typecheck
 
-# Run the pipeline against a scratch dir (hits live public APIs, read-only):
-DATA_DIR=.data npm run aggregate                 # fetch → dedup → append log
+# Run the pipeline against a scratch dir (hits live public APIs, read-only). A fresh dir has no event map, which the
+# readers refuse to take as empty (storage phase 3): EVENT_MAP_BOOTSTRAP=1 starts one, as the data branch's empty
+# knowledge/index/generation.json does.
+EVENT_MAP_BOOTSTRAP=1 DATA_DIR=.data npm run aggregate   # fetch → dedup → append log
 DATA_DIR=.data PUBLIC_DIR=public npm run derive  # summaries + day files + partitions + live and month index + detail hours + manifest
 DATA_DIR=.data PUBLIC_DIR=public npm run validate
 ```
@@ -345,6 +353,10 @@ variable.
    point your domain at it, and add repo secrets `CF_API_TOKEN` + `CF_ACCOUNT_ID`.
 3. **Enable Actions.** `aggregate` (with its derive steps) runs on a cron. Because GitHub throttles low-activity
    schedules, an external 5-minute heartbeat (`workflow_dispatch`) is recommended for tight freshness.
+4. **The state store** (storage phase 3, optional in phase 3a: without it the state steps report errors and the feed
+   runs on): deploy the state Worker (`state/`, its README) with your own repository id and domain, and point
+   `FEED_STATE_URL` in the workflows at it; `bash scripts/phase3/dryrun.sh` rehearses a cycle with a local directory
+   as the store (`FEED_STATE_BACKEND=fs:<dir>`).
 
 ### The heartbeat Worker (`heartbeat/`)
 
@@ -479,6 +491,11 @@ hundred, the board is not written at all: exit 3). The label `health:p1` … `he
 | `feed:stats` | P2 (after 30 min) | `providers/stats.json` says `derive_publish: "on"` and the live v1 manifest has no `stats` pointer | derive's `::warning::stats dropped: …` says why; the live feed is unaffected and the app keeps its last verified statistics |
 | `feed:stats-through` | P3 | With `history_enabled`, the statistics index's `through` null or more than 3 days behind the last frozen day | The stats builder's runs (`stats.yml`) and its ComCat gate |
 | `feed:stats-days` | P3 | The statistics index names `missing_days` | A window day with neither an event-map day nor a partition on `data`; today only once 30 min past 00:00 UTC without an event (ingest stalled or every provider failing: see `feed:freshness` and the `feed:source:<id>` rows) |
+| `feed:state-shadow` | P2 | Storage phase 3a: a state step that did not succeed in one of the newest 3 aggregate (or `derive.yml`) runs of the last 2 h (artifact `state-shadow`): the shadow hydrate found the store's event map differing from the checkout's, a store request failed (token, budget, the Worker down), or persist failed (its generation then stays as it was) | The run's "State shadow hydrate" / "State persist" step and its summary; the feed is unaffected (git is still the truth); phase 3b waits for 24 h without this row ([APIs.md](APIs.md#repository-size)) |
+| `feed:state-gc` | P2 | No completed `state-gc.yml` run (dry or not) in 3 days, or none on record | Dispatch `state-gc.yml` (`dry_run` first); its log names the keep set and what it would delete |
+| `feed:state-backup` | P2; P1 past 7 days | The newest daily state in a `state-YYYY-MM` Release is over 36 h old (its 00:00 UTC), or no backup on record | `state-backup.yml`'s run; it catches up 25 days, and GC keeps every day it has not copied |
+| `feed:state-budget` | P2 | The state Worker's `GET /v1/budget`: today's Class A or B operations, bytes written or stored bytes over 70 % of its free-tier ceiling | What spends them (the Worker's request log); at a ceiling the store refuses until 00:00 UTC |
+| `feed:repo-growth` | P3 | The repository's `size` grew more than 10 MB a day since the newest daily sample at least 6 days old (artifact `repo-size-samples`) | What grows ([APIs.md](APIs.md#repository-size)): the data tree notes of `feed:size` |
 | `walks:<workflow>:<source>` | P3 | A line of the newest blocked marker of `history`, `first-solutions`, `backfill`, `archive`, `remerge` or `stats` (a year that failed its ComCat gate or its build, a failed verify, a month that cannot be re-rolled or merged, a source failing for days), if under 26 h old (`run` for a line about the walk itself) | The walk run's warning; the row resolves with the walk's next run that names it no more (each run states every standing block), at the latest 26 h after the last marker |
 | `platform:api` | P2 | `/v1/health` not 200 `ok: true` after 3 tries over 60 s, or `sessionKeySource: "ephemeral"` | The API Worker; an ephemeral key means its session signing secret is missing (random 401s in the app) |
 | `platform:api:envelope` | P3 | `providerTokenEnvelope: "missing"` | Account deletion cannot revoke at Apple until the envelope key is set |
@@ -486,7 +503,7 @@ hundred, the board is not written at all: exit 3). The label `health:p1` … `he
 | `config:bundle` | P3 / P2 / P1 | The older of the config bundle's data copy and the signed policy over 5 / 10 / 25 days (the bundle expires at 30); or the copy's version behind `/healthz` for 24 h (a partial publish) | Rerun the config bundle's refresh, then check the copy reaches the host's version |
 | `config:bundle:staging`, `config:bundle:dev` | P3 | That environment's bundle, by the `expiresAt` its config Worker's `/healthz` serves: under 25 days left (no refresh for over 5 of its 30), or expired; a host without `expiresAt` is not judged | Rerun the config refresh for that environment (the config repo's `publish.yml`, which refreshes every environment twice a week) |
 | `platform:cf-usage` | P2 / P1 | Only with `CF_ANALYTICS_TOKEN`: Workers requests or D1 rows written at 80 % (or a projected 100 %) / 95 % of the free daily caps | What spends them; the caps reset at 00:00 UTC |
-| `watcher:<name>` | P3 (2nd run) | The monitoring itself: an evaluator without findings, a refused token, a usage query that failed, a GitHub read of the feed job (`feed-github`), board comments `reconcile` could not post (`reconcile`), no selftest for 35 days (`selftest-overdue`) | The job's log; the frozen rows wait for it; `selftest-overdue`: run the selftest |
+| `watcher:<name>` | P3 (2nd run) | The monitoring itself: an evaluator without findings, a refused token, a usage query that failed, a GitHub read of the feed job (`feed-github`), the state Worker's budget unreadable (`feed-state`), board comments `reconcile` could not post (`reconcile`), no selftest for 35 days (`selftest-overdue`) | The job's log; the frozen rows wait for it; `selftest-overdue`: run the selftest |
 
 **Silences.** The repository variable `HEALTH_SILENCES` mutes a key's comments and pings until a date, with no commit:
 `key=until,reason;…`, where `key` is exact or a prefix ending in `*` and `until` is `YYYY-MM-DD` (the end of that UTC day)
@@ -549,8 +566,9 @@ copyrightable expression) and honor removal requests reactively — see
 
 Live end-to-end: 42 sources, stateful field-level dedup (superset model — every source
 field preserved), bitemporal log, 20 rolling feeds, per-day partitions + Pages day
-files, manifest, CI, and Cloudflare Pages serving. `event_map` is sharded by day and hour and
-pruned to a 45-day dedup horizon, with older identity preserved in the day partitions.
+files, manifest, CI, and Cloudflare Pages serving. `event_map` is one file per event-day, mirrored to the state store
+(storage phase 3a: dual-write, shadow-verified), and pruned to a 45-day dedup horizon, with older identity preserved in
+the day partitions.
 
 Running in production: `updatedafter` revision + `includedeleted` tombstone sweeps (the
 ComCat revision sweep also adds events ComCat published days after their origin, inside the

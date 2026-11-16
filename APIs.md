@@ -1939,7 +1939,9 @@ step changes nothing in production: no job calls the new routes, `MIN_PROTOCOL` 
 unchanged apart from the priority lanes above. Its gate is `state-rehearsal.yml` on staging: R2's create-only
 precondition, two racing writers (exactly one 412), the ambiguous-answer reconcile, the reflog repair and at most 5
 store operations per ref PUT, each reported in the job summary. If the race shows R2's conditional put is not atomic,
-the refs move to a row of the Worker's Durable Object (`REF_BACKEND = "do"`) behind the same API.
+the refs move to a row of the Worker's Durable Object (`REF_BACKEND = "do"`) behind the same API; if the binding does
+not honour the configured create-only form, `CREATE_ONLY_FORM` moves to the form the probe proved (or `"off"`, with
+every lane bootstrapped by the runbook).
 
 ## Deep history (before 2023-07-06)
 

@@ -216,6 +216,7 @@ function harness(opts: { staging?: boolean; env?: Partial<Env>; jwks?: () => Pro
     ALLOW_ANY_REF: opts.staging ? '1' : '0',
     MIN_PROTOCOL: '1',
     REF_BACKEND: 'r2',
+    CREATE_ONLY_FORM: 'headers',
     ...CEILINGS,
     STATE: r2,
     BUDGET: budget.ns,
@@ -869,7 +870,7 @@ test('state log: one JSON line per request with route, workflow, run, status and
 });
 
 test('state config: a missing or malformed var answers 500 for every request', async () => {
-  for (const env of [{ REPOSITORY_ID: '' }, { CLASS_B_PER_DAY: 'lots' }, { MIN_PROTOCOL: '0' }, { ENVIRONMENT: 'prod' }, { REF_BACKEND: 'kv' }]) {
+  for (const env of [{ REPOSITORY_ID: '' }, { CLASS_B_PER_DAY: 'lots' }, { MIN_PROTOCOL: '0' }, { ENVIRONMENT: 'prod' }, { REF_BACKEND: 'kv' }, { CREATE_ONLY_FORM: 'maybe' }]) {
     const h = harness({ env });
     assert.equal((await h.call('GET', '/v1/budget')).status, 500, JSON.stringify(env));
   }
@@ -902,13 +903,13 @@ test('state wrangler.toml: production and staging, custom domains only, R2 + SQL
   const p = vars(top);
   const s = vars(staging);
   assert.deepEqual(
-    { ENVIRONMENT: p.ENVIRONMENT, REPOSITORY_ID: p.REPOSITORY_ID, AUDIENCE: p.AUDIENCE, ALLOW_ANY_REF: p.ALLOW_ANY_REF, MIN_PROTOCOL: p.MIN_PROTOCOL, REF_BACKEND: p.REF_BACKEND },
-    { ENVIRONMENT: 'production', REPOSITORY_ID: '1289538519', AUDIENCE: 'earthquakes-feed-state', ALLOW_ANY_REF: '0', MIN_PROTOCOL: '1', REF_BACKEND: 'r2' },
+    { ENVIRONMENT: p.ENVIRONMENT, REPOSITORY_ID: p.REPOSITORY_ID, AUDIENCE: p.AUDIENCE, ALLOW_ANY_REF: p.ALLOW_ANY_REF, MIN_PROTOCOL: p.MIN_PROTOCOL, REF_BACKEND: p.REF_BACKEND, CREATE_ONLY_FORM: p.CREATE_ONLY_FORM },
+    { ENVIRONMENT: 'production', REPOSITORY_ID: '1289538519', AUDIENCE: 'earthquakes-feed-state', ALLOW_ANY_REF: '0', MIN_PROTOCOL: '1', REF_BACKEND: 'r2', CREATE_ONLY_FORM: 'headers' },
   );
   // Step 4.0 is additive: MIN_PROTOCOL stays 1 on both until 4.3's flip.
   assert.deepEqual(
-    { ENVIRONMENT: s.ENVIRONMENT, REPOSITORY_ID: s.REPOSITORY_ID, AUDIENCE: s.AUDIENCE, ALLOW_ANY_REF: s.ALLOW_ANY_REF, MIN_PROTOCOL: s.MIN_PROTOCOL, REF_BACKEND: s.REF_BACKEND },
-    { ENVIRONMENT: 'staging', REPOSITORY_ID: '1289538519', AUDIENCE: 'earthquakes-feed-state-staging', ALLOW_ANY_REF: '1', MIN_PROTOCOL: '1', REF_BACKEND: 'r2' },
+    { ENVIRONMENT: s.ENVIRONMENT, REPOSITORY_ID: s.REPOSITORY_ID, AUDIENCE: s.AUDIENCE, ALLOW_ANY_REF: s.ALLOW_ANY_REF, MIN_PROTOCOL: s.MIN_PROTOCOL, REF_BACKEND: s.REF_BACKEND, CREATE_ONLY_FORM: s.CREATE_ONLY_FORM },
+    { ENVIRONMENT: 'staging', REPOSITORY_ID: '1289538519', AUDIENCE: 'earthquakes-feed-state-staging', ALLOW_ANY_REF: '1', MIN_PROTOCOL: '1', REF_BACKEND: 'r2', CREATE_ONLY_FORM: 'headers' },
   );
   // Never pay: the R2 free tier is per account, so production's and staging's ceilings together stay inside it.
   const n = (v: string | undefined) => Number(v);

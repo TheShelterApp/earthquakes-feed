@@ -43,13 +43,23 @@ export const REFLOG_PREFIX = 'gen/';
 export const PROBE_PREFIX = 'rehearsal/';
 
 /**
- * The create-only precondition of a put on the R2 binding. The binding documents `onlyIf` as an R2Conditional or a
- * Headers object with every conditional header but If-Range; `If-None-Match: *` (create only when no object exists) is
- * not spelled out for the binding, so the staging rehearsal proves it (create twice: the second must answer null) and
- * also probes R2Conditional's `etagDoesNotMatch: "*"`. If neither holds, the bootstrap of a lane is the runbook's
- * (state/README.md), and the reflog keeps its create-only intent only as far as the swap's own CAS guarantees it.
+ * The create-only precondition of a put on the R2 binding, in the form the var CREATE_ONLY_FORM names. The binding
+ * documents `onlyIf` as an R2Conditional or a Headers object with every conditional header but If-Range; neither
+ * `If-None-Match: *` ("headers", the default) nor R2Conditional `etagDoesNotMatch: "*"` ("conditional") is spelled out
+ * for "create only when no object exists", so the staging rehearsal probes both (create twice: the second must answer
+ * null) and reports which one the configured form is. If the configured form does not hold, CREATE_ONLY_FORM moves to
+ * the one that did; if neither holds, to "off": every create-only put is then a plain put (undefined here), so the
+ * reflog repair rewrites the current ref's entry with its same bytes, the new entry is written by the swap's winner
+ * alone (the swap's CAS, and checkCreate on a create, keep its slot to one writer of that seq), and a lane's first ref
+ * is written by the runbook bootstrap (state/README.md), never by two jobs at once. The Durable Object fallback
+ * (REF_BACKEND = "do") does not depend on it for the ref (its create is the SQLite row's), only for the reflog.
  */
-export const createOnly = () => new Headers({ 'if-none-match': '*' });
+export const CREATE_ONLY_FORMS = ['headers', 'conditional', 'off'];
+export function createOnly(form = 'headers') {
+  if (form === 'conditional') return { etagDoesNotMatch: '*' };
+  if (form === 'off') return undefined;
+  return new Headers({ 'if-none-match': '*' });
+}
 
 const WRITER = /^([A-Za-z0-9._-]+\.ya?ml)\/([0-9]{1,20})-([0-9]{1,6})\/([A-Za-z0-9._-]{1,64})\/([0-9a-f]{16,64})$/;
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
@@ -190,8 +200,8 @@ export function preconditionOf(headers) {
 // ---------------------------------------------------------------------------------------------------------------------
 // Where the ref lives
 
-/** The R2 ref store: the ref object in the bucket, swapped by R2's conditional put. */
-export function r2RefStore(bucket) {
+/** The R2 ref store: the ref object in the bucket, swapped by R2's conditional put (a create: `form`'s create-only). */
+export function r2RefStore(bucket, form = 'headers') {
   return {
     kind: 'r2',
     async get(lane) {
@@ -201,7 +211,7 @@ export function r2RefStore(bucket) {
     /** The swap: {etag} of the new ref, or null when the precondition no longer holds. */
     async swap(lane, pre, text, ref) {
       const o = await bucket.put(refKey(lane), text, {
-        onlyIf: pre.create ? createOnly() : { etagMatches: pre.etag },
+        onlyIf: pre.create ? createOnly(form) : { etagMatches: pre.etag },
         httpMetadata: { contentType: 'application/json' },
         customMetadata: reflogMetadata(ref),
       });
@@ -269,14 +279,17 @@ export function refSwapSql(sql, { lane, expect, text, etag, nowMs }) {
 // ---------------------------------------------------------------------------------------------------------------------
 // The routes' work, after authentication, the protocol gate and the budget reservation
 
-/** A put that only creates: true when it wrote, false when an object was already there. */
-async function putCreateOnly(bucket, key, text, ref) {
+/** A reflog put that only creates: 'created', 'exists' (an object was already there), or 'written' when the form is
+ *  "off" (a plain put: whether the key existed is not known). */
+async function putCreateOnly(bucket, key, text, ref, form) {
+  const onlyIf = createOnly(form);
   const o = await bucket.put(key, text, {
-    onlyIf: createOnly(),
+    ...(onlyIf ? { onlyIf } : {}),
     httpMetadata: { contentType: 'application/json' },
     customMetadata: reflogMetadata(ref),
   });
-  return o != null;
+  if (!onlyIf) return 'written';
+  return o != null ? 'created' : 'exists';
 }
 
 /**
@@ -333,14 +346,15 @@ async function checkCreate(bucket, lane, ref) {
 }
 
 /**
- * PUT /v1/refs/<lane>: the six steps above over `store` (r2RefStore or doRefStore) and `bucket`. `ref` is the parsed
- * body, `text` its canonical bytes. Returns {etag, reflog: {previous: 'none' | 'present' | 'repaired', entry: 'created'
- * | 'exists'}}; throws RefError 412 (with the current body and its ETag; `at`: 'read' or 'swap', the check that
+ * PUT /v1/refs/<lane>: the six steps above over `store` (r2RefStore or doRefStore) and `bucket`, the reflog written in
+ * create-only `form` (CREATE_ONLY_FORM). `ref` is the parsed body, `text` its canonical bytes. Returns {etag, reflog:
+ * {previous: 'none' | 'present' | 'repaired' | 'rewritten', entry: 'created' | 'exists' | 'written'}} ('rewritten' and
+ * 'written': form "off", the puts were plain); throws RefError 412 (with the current body and its ETag; `at`: 'read' or 'swap', the check that
  * refused), 409 (not the successor of the current ref, or of the reflog's last entry on a create; or the generation
  * blob is missing). `entry: 'exists'` means the swap happened but the reflog slot of the new seq was already taken: a
  * second writer of the same seq (the CAS was not atomic) or an entry left by a lost ref; the Worker logs it as an error.
  */
-export async function putRef({ store, bucket, lane, pre, text, ref }) {
+export async function putRef({ store, bucket, lane, pre, text, ref, form = 'headers' }) {
   const cur = await store.get(lane);
   if (pre.create ? cur != null : !cur || cur.etag !== pre.etag) throw conflict(cur, 'read');
   let curRef = null;
@@ -356,10 +370,10 @@ export async function putRef({ store, bucket, lane, pre, text, ref }) {
   }
   if (!(await bucket.head(blobKey(ref.generation)))) throw new RefError(409, 'the generation blob is missing from the store', { generation: ref.generation });
   let previous = 'none';
-  if (curRef) previous = (await putCreateOnly(bucket, reflogKey(lane, curRef.seq), cur.text, curRef)) ? 'repaired' : 'present';
+  if (curRef) previous = { created: 'repaired', exists: 'present', written: 'rewritten' }[await putCreateOnly(bucket, reflogKey(lane, curRef.seq), cur.text, curRef, form)];
   const swapped = await store.swap(lane, pre, text, ref);
   if (!swapped) throw conflict(await store.get(lane), 'swap');
-  const entry = (await putCreateOnly(bucket, reflogKey(lane, ref.seq), text, ref)) ? 'created' : 'exists';
+  const entry = await putCreateOnly(bucket, reflogKey(lane, ref.seq), text, ref, form);
   return { etag: swapped.etag, reflog: { previous, entry } };
 }
 
@@ -399,19 +413,20 @@ export async function reflogPage(bucket, lane, after, limit) {
 }
 
 /**
- * Staging's rehearsal probes (state-rehearsal.yml on a rehearsal lane only; production has no such route):
+ * Staging's rehearsal probes (state-rehearsal.yml on a rehearsal lane only; production has no such route). Every answer
+ * carries `worker`: {create_only, ref_backend}, the configuration the rehearsal judges the other rows by.
  * - `create-only`: put one key under rehearsal/<lane>/ twice with the create-only precondition in the given form
- *   ("headers": If-None-Match: *, the form the Worker uses; "conditional": R2Conditional etagDoesNotMatch "*"), and
- *   report what the binding did each time ("created" / "refused" / "error: …"). 2 Class A.
+ *   ("headers": If-None-Match: *; "conditional": R2Conditional etagDoesNotMatch "*"), and report what the binding did
+ *   each time ("created" / "refused" / "error: …"). 2 Class A.
  * - `drop-reflog`: delete gen/<lane>/<seq> (a crash between swap and reflog write, staged), so the next PUT's repair
  *   is observable. DeleteObject is free.
  */
-export async function probe(bucket, lane, body) {
+export async function probe(bucket, lane, body, worker = {}) {
   if (body.op === 'create-only') {
     const form = body.form;
     if (form !== 'headers' && form !== 'conditional') throw new RefError(400, 'form must be headers or conditional');
     const key = `${PROBE_PREFIX}${lane}/create-only-${form}`;
-    const onlyIf = form === 'headers' ? createOnly() : { etagDoesNotMatch: '*' };
+    const onlyIf = createOnly(form);
     const results = [];
     for (const n of [1, 2]) {
       try {
@@ -422,12 +437,12 @@ export async function probe(bucket, lane, body) {
       }
     }
     const kept = await bucket.get(key);
-    return { op: 'create-only', form, first: results[0], second: results[1], kept: kept ? await kept.text() : null };
+    return { op: 'create-only', form, first: results[0], second: results[1], kept: kept ? await kept.text() : null, worker };
   }
   if (body.op === 'drop-reflog') {
     if (!isSeq(body.seq)) throw new RefError(400, 'seq must be an integer');
     await bucket.delete(reflogKey(lane, body.seq));
-    return { op: 'drop-reflog', seq: body.seq };
+    return { op: 'drop-reflog', seq: body.seq, worker };
   }
   throw new RefError(400, 'op must be create-only or drop-reflog');
 }

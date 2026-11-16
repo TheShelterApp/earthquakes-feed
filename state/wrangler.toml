@@ -37,6 +37,10 @@ MIN_PROTOCOL = "1"
 # of the BudgetLedger Durable Object), the fallback if the staging race rehearsal shows R2's onlyIf is not an atomic
 # compare-and-swap. Same HTTP API either way; switching moves no ref (state/README.md "Ref backend").
 REF_BACKEND = "r2"
+# The form of R2's create-only precondition (src/refs.js createOnly): "headers" (If-None-Match: *), "conditional"
+# (R2Conditional etagDoesNotMatch "*"), or "off" (plain puts; lanes then bootstrapped by the runbook). Set to the form
+# the staging rehearsal proved (state/README.md, the 4.0 gate).
+CREATE_ONLY_FORM = "headers"
 # Hard daily ceilings (src/budget.js): 429 {"error":"budget"} above them, so the store stays inside the R2 free tier
 # (10 GB-month, 1M Class A and 10M Class B a month, shared with the platform's ~0.4 GB) whatever a client does.
 # 20,000 Class A a day is at most 620k in a 31-day month; 200,000 Class B at most 6.2M. The feed's own use is about
@@ -77,6 +81,7 @@ AUDIENCE = "earthquakes-feed-state-staging"
 ALLOW_ANY_REF = "1"
 MIN_PROTOCOL = "1"
 REF_BACKEND = "r2"
+CREATE_ONLY_FORM = "headers"
 # The R2 free tier is per ACCOUNT, so staging's ceilings add to production's: a tenth of production's, which keeps the
 # sum inside the free tier (22,000 Class A a day = 682k in 31 days < 1M; 220,000 Class B = 6.82M < 10M; 6.25 GiB stored).
 # Staging holds synthetic data only.

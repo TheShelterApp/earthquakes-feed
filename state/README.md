@@ -147,12 +147,13 @@ version the writer read) or `If-None-Match: *` (the lane's first ref, the bootst
 4. HEADs the generation blob `cas/sha256/…/<generation>`: absent is 409 (blobs first, then the ref, invariant 2);
 5. repairs the reflog entry of the CURRENT seq, create-only (a Worker that died between its swap and its reflog write
    left it missing; an entry that exists is never rewritten);
-6. swaps: `STATE.put(refs/<lane>, body, {onlyIf: {etagMatches}})` (a create: `If-None-Match: *`); a null answer (another
+6. swaps: `STATE.put(refs/<lane>, body, {onlyIf: {etagMatches}})` (a create: create-only); a null answer (another
    writer swapped between steps 2 and 6) is 412, its body re-read;
 7. writes the reflog entry of the NEW seq, create-only.
 
-Answers: 200 `{"lane", "seq", "generation", "etag", "reflog": {"previous": "none"|"present"|"repaired", "entry":
-"created"|"exists"}}` with the new `ETag`; 412 `{"error", "current": <ref>|null, "etag", "at": "read"|"swap"}` (`at`:
+"Create-only" is the form `CREATE_ONLY_FORM` names (below). Answers: 200 `{"lane", "seq", "generation", "etag",
+"reflog": {"previous": "none"|"present"|"repaired"|"rewritten", "entry": "created"|"exists"|"written"}}` with the new
+`ETag` (`rewritten`/`written`: `CREATE_ONLY_FORM = "off"`, plain puts); 412 `{"error", "current": <ref>|null, "etag", "at": "read"|"swap"}` (`at`:
 which check refused; the client fails closed, it never rebases); 409, 400, 428, 426 as above. `entry: "exists"` means the
 swap happened but the new seq's reflog slot was already taken: two writers of one seq (the CAS was not atomic) or an
 entry left by a lost ref. The answer stays 200 (the ref did move), the Worker logs an error and counts it in the day's
@@ -180,7 +181,20 @@ else is someone else's write: a 412, fail closed.
 `{"op":"create-only","form":"headers"|"conditional"}` puts `rehearsal/<lane>/create-only-<form>` twice with the
 binding's create-only precondition (`If-None-Match: *` as Headers, the form the Worker uses; or R2Conditional
 `etagDoesNotMatch: "*"`) and answers what happened each time; `{"op":"drop-reflog","seq":n}` deletes one reflog entry,
-so the rehearsal can watch the next PUT repair it.
+so the rehearsal can watch the next PUT repair it. Every probe answer also carries `"worker": {"create_only",
+"ref_backend"}`, the configuration the rehearsal judges its rows by.
+
+### Create-only form (`CREATE_ONLY_FORM`)
+
+The binding documents `onlyIf` as an R2Conditional or a Headers object, but spells out neither form for "create only
+when no object exists", which the reflog (steps 5 and 7) and a lane's first ref (step 6 under `"r2"`) rely on. The var
+picks the form: `"headers"` (`If-None-Match: *`, the default), `"conditional"` (R2Conditional `etagDoesNotMatch: "*"`),
+or `"off"`. The rehearsal probes both forms and fails the configured one if the binding does not honour it, naming the
+form that held (or `"off"` when neither did); the remedy is this var, never `REF_BACKEND = "do"`, whose reflog stays in
+R2 with the same form. With `"off"` every create-only put is a plain put: the repair rewrites the current entry with its
+same bytes, the new entry is written by the swap's winner alone (the swap's compare-and-swap, and the create rule of
+step 3, keep each seq to one writer), a taken slot can no longer be detected, and under `"r2"` two racing creates could
+both win, so every lane's first ref is written by the runbook bootstrap below.
 
 ### Ref backend (`REF_BACKEND`)
 
@@ -211,8 +225,9 @@ A switch back is the same steps the other way. Both backends, and a create after
 A lane's first ref is written once with `If-None-Match: *` (seq 1, parent null). The Worker refuses a second create
 itself (its GET sees the ref), so only two creates that race could both pass if the binding ignored the create-only
 precondition. The
-rehearsal proves the precondition (`create-only` probe, two racing creates); if it shows R2 does not honour it, every
-lane is bootstrapped by this runbook instead of by a job: dispatch the lane's seeding step (4.1: the first shadow write;
+rehearsal proves the precondition (`create-only` probe, two racing creates); if it shows R2 honours neither form
+(`CREATE_ONLY_FORM = "off"`) or two racing creates both won, every lane is bootstrapped by this runbook instead of by a
+job: dispatch the lane's seeding step (4.1: the first shadow write;
 4.3: `scripts/phase4/seed.ts`) **only while the lane's writers cannot run** (the writer group idle for `main`, the
 lane's own workflow disabled for the lockless lanes), then check with `GET /v1/refs/<lane>` that `seq` and `writer` are
 the seeding run's before re-enabling the writers.
@@ -416,18 +431,20 @@ has one row per check with what was expected and what the binding did):
 
 | Check | Holds when | If not |
 |---|---|---|
-| R2 create-only, `If-None-Match: *` (and `etagDoesNotMatch "*"`, for information) | created, then refused, the first body kept | WARN: bootstrap every lane by the runbook above |
+| R2 create-only, both forms (`info`, except the configured one) | the configured `CREATE_ONLY_FORM`: created, then refused, the first body kept | FAIL: set `CREATE_ONLY_FORM` to the form that held (`"off"` if none), rehearse again |
+| Worker configuration | `REF_BACKEND`, `CREATE_ONLY_FORM` (`info`) | WARN with `"off"`: the runbook bootstrap |
 | create twice | the second is 412 with the first ref | FAIL |
-| two racing creates | one 200, one 412 | WARN: the runbook bootstrap |
-| two racing writers on one ref, 6 rounds | every round one 200 and one 412 naming the winner; no reflog slot taken twice | FAIL: `REF_BACKEND = "do"`, rehearse again |
+| two racing creates | one 200, one 412 | WARN under `"r2"`: the runbook bootstrap; FAIL under `"do"` |
+| two racing writers on one ref, 6 rounds | every round one 200 and one 412 naming the winner; no reflog slot taken twice | FAIL: two 200s, a 412 naming another ref or a taken slot → `REF_BACKEND = "do"`; an error in a round → dispatch again |
 | racers that met at the conditional put | at least one 412 came from the put itself (`at: "swap"`) | WARN: the race was not exercised, dispatch again |
 | ambiguous outcome: answer dropped / never sent / a real 5 ms abort | `reconciled` / `retried` / any landed outcome, and the ref is ours | FAIL |
-| a stale writer after another's swap | 412, fail closed | FAIL |
-| reflog repair, then create-only | `repaired`, then `present` | FAIL |
+| a stale writer after another's swap, its 412 seen / its answer lost | the Worker's 412 (`at`) / a RefConflict from the re-read: fail closed | FAIL |
+| reflog repair, then create-only | `repaired`, then `present` (`"off"`: `rewritten` twice) | FAIL: the create-only form, not the Durable Object |
 | reflog complete | entries 1..seq, the last = the ref | FAIL |
 | refused: no precondition, seq skip, missing blob, protocol 1, non-canonical body, restore by the rehearsal | 428, 409, 409, 426, 400, 403 | FAIL |
 | store operations per ref PUT | ≤ 5 on every PUT | FAIL |
-| budget ledger | ref conflicts counted, meta bytes held | FAIL |
+| budget ledger | the day's `ref_conflicts` and `meta_bytes` moved during the run by at least this run's seen 412s and landed ref and reflog bytes | FAIL (WARN when the UTC day turned) |
 
-A FAIL exits 1. `POST /v1/cas:batchPut` (≤ 16 blobs in one request) is not built in 4.0: it would ship only if the
+The summary ends with what each WARN or FAIL calls for (its remedy, one paragraph each). A step that cannot go on (a
+setup PUT refused) ends the table with a `rehearsal aborted` FAIL row instead of losing it. A FAIL exits 1. `POST /v1/cas:batchPut` (≤ 16 blobs in one request) is not built in 4.0: it would ship only if the
 rehearsal showed its CPU under 10 ms, and without it a run is about 10 requests, which is affordable.

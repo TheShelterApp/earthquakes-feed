@@ -421,8 +421,9 @@ export interface RefSwap {
   etag: string;
   /** previous: whether the replaced ref's reflog entry was there ('present'), had to be written ('repaired'), or there
    *  was none ('none'); entry: the new seq's entry 'created', or 'exists' (its slot was taken: putRef then throws
-   *  ReflogCollision, so a RefSwap a caller holds never says 'exists'). */
-  reflog: { previous: 'none' | 'present' | 'repaired'; entry: 'created' | 'exists' };
+   *  ReflogCollision, so a RefSwap a caller holds never says 'exists'). With CREATE_ONLY_FORM "off" the Worker's puts
+   *  are plain: 'rewritten' (the current entry put again, its same bytes) and 'written' (not known to have been free). */
+  reflog: { previous: 'none' | 'present' | 'repaired' | 'rewritten'; entry: 'created' | 'exists' | 'written' };
   /** The bucket and ref-store operations the Worker made (x-feed-state-store-ops; null when the backend has none). */
   storeOps: number | null;
   ledgerCalls: number | null;

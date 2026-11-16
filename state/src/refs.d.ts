@@ -11,7 +11,8 @@ export const REF_PREFIX: string;
 export const REFLOG_PREFIX: string;
 export const PROBE_PREFIX: string;
 export const REFS_SCHEMA: string;
-export function createOnly(): Headers;
+export const CREATE_ONLY_FORMS: string[];
+export function createOnly(form?: 'headers' | 'conditional' | 'off'): Headers | { etagDoesNotMatch: string } | undefined;
 export class RefError extends Error {
   constructor(status: number, message: string, extra?: Record<string, unknown>);
   status: number;

@@ -11,7 +11,7 @@ import { SCHEMA, gcBegin, gcEnd, migrate, reflogCollision, refundRef, refundStor
 import { blobKey } from '../state/src/cas.js';
 import { REFS_SCHEMA, canonicalJson as workerCanonical, parseRefBody, refGetSql, refSwapSql, reflogKey } from '../state/src/refs.js';
 import { createHandler, type Env } from '../state/src/worker.js';
-import { RACE_ROUNDS, observationsMarkdown, rehearseRefs } from '../src/state-rehearsal.js';
+import { RACE_ROUNDS, observationsMarkdown, rehearseRefs, type Observation } from '../src/state-rehearsal.js';
 import {
   FsBackend,
   RefConflict,
@@ -194,7 +194,7 @@ function fakeLedger() {
 
 const CEILINGS = { CLASS_A_PER_DAY: '20000', CLASS_B_PER_DAY: '200000', BYTES_WRITTEN_PER_DAY: '1073741824', STORED_BYTES_MAX: '6442450944' };
 
-function harness(opts: { staging?: boolean; refBackend?: 'r2' | 'do'; atomic?: boolean; env?: Partial<Env>; policy?: Policy } = {}) {
+function harness(opts: { staging?: boolean; refBackend?: 'r2' | 'do'; createOnly?: 'headers' | 'conditional' | 'off'; atomic?: boolean; env?: Partial<Env>; policy?: Policy } = {}) {
   const r2 = new FakeR2();
   r2.atomic = opts.atomic ?? true;
   const ledger = fakeLedger();
@@ -209,6 +209,7 @@ function harness(opts: { staging?: boolean; refBackend?: 'r2' | 'do'; atomic?: b
     ALLOW_ANY_REF: opts.staging ? '1' : '0',
     MIN_PROTOCOL: '1',
     REF_BACKEND: opts.refBackend ?? 'r2',
+    CREATE_ONLY_FORM: opts.createOnly ?? 'headers',
     ...CEILINGS,
     STATE: r2,
     BUDGET: ledger.ns,
@@ -706,13 +707,31 @@ test('state refs (directory backend): the same rules, create-only reflog, repair
 
 const rehearsalWho: Who = { workflow: 'state-rehearsal.yml', ref: 'refs/heads/feed/state-protocol2', event: 'workflow_dispatch', runId: '777', attempt: '1' };
 
+/** The rehearsal's verdicts that gate (an `info` row only reports). */
+const flagged = (obs: Observation[]) => obs.filter((o) => o.verdict === 'warn' || o.verdict === 'fail');
+/** A bucket whose put treats the create-only forms as `mode` says: 'ignore' (a plain put) or 'throw'. */
+function createOnlyAs(h: ReturnType<typeof harness>, forms: { headers?: 'ignore' | 'throw'; conditional?: 'ignore' | 'throw' }) {
+  const put = h.r2.put.bind(h.r2);
+  h.r2.put = (async (key: string, value: never, opts: { onlyIf?: unknown } = {}) => {
+    const f = opts.onlyIf instanceof Headers && opts.onlyIf.get('if-none-match') === '*' ? 'headers' : (opts.onlyIf as { etagDoesNotMatch?: string } | undefined)?.etagDoesNotMatch === '*' ? 'conditional' : null;
+    const mode = f ? forms[f] : undefined;
+    if (mode === 'throw') throw new TypeError(`onlyIf: unsupported ${f}`);
+    return put(key, value, mode === 'ignore' ? { ...opts, onlyIf: undefined } : opts);
+  }) as typeof h.r2.put;
+}
+const rehearseOn = (h: ReturnType<typeof harness>, run: string, wrapAll?: (f: typeof fetch) => typeof fetch) =>
+  rehearseRefs({ make: (wrap) => h.client(rehearsalWho, wrap && wrapAll ? (f) => wrap(wrapAll(f)) : (wrap ?? wrapAll)), writer: (step) => h.writer(rehearsalWho, step), run });
+
 for (const refBackend of ['r2', 'do'] as const) {
   test(`state rehearsal refs (${refBackend}, atomic R2): every 4.0 property holds`, async () => {
     const h = harness({ staging: true, refBackend });
-    const obs = await rehearseRefs({ make: (wrap) => h.client(rehearsalWho, wrap), writer: (step) => h.writer(rehearsalWho, step), run: 'abc12345' });
-    assert.deepEqual(obs.filter((o) => o.verdict !== 'ok'), []);
+    const obs = await rehearseOn(h, 'abc12345');
+    assert.deepEqual(flagged(obs), []);
     assert.ok(obs.length >= 15);
     assert.ok(obs.some((o) => o.check.startsWith(`two racing writers on one ref (${RACE_ROUNDS} rounds)`)));
+    assert.deepEqual(obs.find((o) => o.check === 'Worker configuration')?.observed, `REF_BACKEND = "${refBackend}", CREATE_ONLY_FORM = "headers"`);
+    assert.match(obs.find((o) => o.check === 'a stale writer after another swap')!.observed, /^412 \(at: read\)/, 'the real 412, seen');
+    assert.match(obs.find((o) => o.check === 'budget ledger')!.observed, /ref conflicts \+\d+, meta bytes \+\d+/);
     assert.match(observationsMarkdown(obs), /Every property of the 4\.0 gate held/);
     // Rehearsal keys stay in their own namespace.
     for (const k of h.r2.objects.keys()) assert.match(k, /^(cas\/sha256\/|refs\/rehearsal-abc12345-|gen\/rehearsal-abc12345-|rehearsal\/rehearsal-abc12345-)/);
@@ -721,25 +740,81 @@ for (const refBackend of ['r2', 'do'] as const) {
 
 test('state rehearsal refs: a non-atomic R2 conditional put fails the race check and names the Durable Object fallback', async () => {
   const h = harness({ staging: true, atomic: false });
-  const obs = await rehearseRefs({ make: (wrap) => h.client(rehearsalWho, wrap), writer: (step) => h.writer(rehearsalWho, step), run: 'def67890' });
-  const failed = obs.filter((o) => o.verdict === 'fail').map((o) => o.check);
-  assert.ok(failed.some((c) => c.startsWith('two racing writers')), failed.join('; '));
+  const obs = await rehearseOn(h, 'def67890');
+  const failed = obs.filter((o) => o.verdict === 'fail');
+  assert.ok(failed.some((o) => o.check.startsWith('two racing writers') && o.remedy === 'do'), failed.map((o) => o.check).join('; '));
   assert.match(observationsMarkdown(obs), /REF_BACKEND = "do"/);
   // The same non-atomic bucket with the refs in the Durable Object: the races hold.
   const d = harness({ staging: true, atomic: false, refBackend: 'do' });
-  const obs2 = await rehearseRefs({ make: (wrap) => d.client(rehearsalWho, wrap), writer: (step) => d.writer(rehearsalWho, step), run: 'def67891' });
+  const obs2 = await rehearseOn(d, 'def67891');
   assert.ok(!obs2.some((o) => o.check.startsWith('two racing writers') && o.verdict !== 'ok'));
 });
 
-test('state rehearsal refs: a binding that ignores create-only is a warning that names the runbook bootstrap', async () => {
+test('state rehearsal refs: a binding that ignores create-only fails the configured form with its own remedy (never the DO); "off" passes on the runbook', async () => {
   const h = harness({ staging: true });
-  const put = h.r2.put.bind(h.r2);
-  h.r2.put = (async (key: string, value: never, opts: { onlyIf?: unknown } = {}) => {
-    const create = opts.onlyIf instanceof Headers || (opts.onlyIf as { etagDoesNotMatch?: string } | undefined)?.etagDoesNotMatch === '*';
-    return put(key, value, create ? { ...opts, onlyIf: undefined } : opts);
-  }) as typeof h.r2.put;
-  const obs = await rehearseRefs({ make: (wrap) => h.client(rehearsalWho, wrap), writer: (step) => h.writer(rehearsalWho, step), run: 'aaa00000' });
-  const warned = obs.filter((o) => o.verdict === 'warn').map((o) => o.check);
-  assert.ok(warned.some((c) => c.includes('If-None-Match')), warned.join('; '));
-  assert.match(observationsMarkdown(obs), /runbook bootstrap/);
+  createOnlyAs(h, { headers: 'ignore', conditional: 'ignore' });
+  const obs = await rehearseOn(h, 'aaa00000');
+  const bad = flagged(obs);
+  assert.ok(bad.some((o) => o.check.includes('If-None-Match') && o.verdict === 'fail' && o.remedy === 'create-only'), bad.map((o) => o.check).join('; '));
+  assert.ok(bad.some((o) => o.check.startsWith('reflog repair') && o.remedy === 'create-only'), 'the reflog row names the form, not the DO');
+  assert.ok(!bad.some((o) => o.remedy === 'do'));
+  const md = observationsMarkdown(obs);
+  assert.match(md, /set CREATE_ONLY_FORM = "off"/);
+  assert.doesNotMatch(md, /REF_BACKEND = "do"/);
+  // Deployed with CREATE_ONLY_FORM = "off" on the same binding: no FAIL; the racing creates and the configuration are
+  // warnings that name the runbook bootstrap; the dropped reflog entry still comes back.
+  const off = harness({ staging: true, createOnly: 'off' });
+  createOnlyAs(off, { headers: 'ignore', conditional: 'ignore' });
+  const obs2 = await rehearseOn(off, 'aaa00001');
+  assert.deepEqual(obs2.filter((o) => o.verdict === 'fail'), []);
+  assert.ok(flagged(obs2).every((o) => o.remedy === 'runbook'), flagged(obs2).map((o) => o.check).join('; '));
+  assert.ok(obs2.some((o) => o.check === 'reflog complete' && o.verdict === 'ok'));
+  assert.match(observationsMarkdown(obs2), /runbook bootstrap/);
+});
+
+test('state rehearsal refs: a binding that honours only the conditional form names it; deployed with it, every property holds', async () => {
+  const h = harness({ staging: true });
+  createOnlyAs(h, { headers: 'ignore' });
+  const obs = await rehearseOn(h, 'bbb00000');
+  assert.match(observationsMarkdown(obs), /set CREATE_ONLY_FORM = "conditional"/);
+  assert.doesNotMatch(observationsMarkdown(obs), /REF_BACKEND = "do"/);
+  const c = harness({ staging: true, createOnly: 'conditional' });
+  createOnlyAs(c, { headers: 'ignore' });
+  assert.deepEqual(flagged(await rehearseOn(c, 'bbb00001')), []);
+});
+
+test('state rehearsal refs: a binding that throws on the configured form still writes its table, ending on an aborted row', async () => {
+  const h = harness({ staging: true });
+  createOnlyAs(h, { headers: 'throw' });
+  const obs = await rehearseOn(h, 'ccc00000');
+  assert.ok(obs.some((o) => o.check.includes('If-None-Match') && o.verdict === 'fail'));
+  assert.ok(obs.at(-1)!.check === 'rehearsal aborted' && obs.at(-1)!.remedy === 'create-only', JSON.stringify(obs.at(-1)));
+  assert.match(observationsMarkdown(obs), /set CREATE_ONLY_FORM = "conditional"/);
+});
+
+test('state rehearsal refs: a transient error in a race round asks for another dispatch, not the Durable Object; a ledger that did not move fails', async () => {
+  const h = harness({ staging: true });
+  let failed = false;
+  const flaky = (f: typeof fetch): typeof fetch => (async (input: string | URL | Request, init?: RequestInit) => {
+    if (!failed && init?.method === 'PUT' && typeof init.body === 'string' && init.body.includes('/race-3-1/')) {
+      failed = true;
+      return new Response('{"error":"store write failed"}', { status: 503 });
+    }
+    return f(input, init);
+  }) as typeof fetch;
+  const obs = await rehearseOn(h, 'ddd00000', flaky);
+  const race = obs.find((o) => o.check.startsWith('two racing writers'))!;
+  assert.deepEqual([race.verdict, race.remedy], ['fail', 'redispatch']);
+  assert.match(race.observed, /1 error\(s\): round 3: /);
+  assert.doesNotMatch(observationsMarkdown(obs), /REF_BACKEND = "do"/);
+  assert.match(observationsMarkdown(obs), /dispatch the rehearsal again/);
+  // A ledger whose counters never move (a reading frozen before the run) fails the budget row, whatever its size.
+  const d = harness({ staging: true });
+  const frozen = await d.client(rehearsalWho).budget();
+  const obs2 = await rehearseRefs({
+    make: (wrap) => Object.assign(d.client(rehearsalWho, wrap), { budget: async () => ({ ...frozen, used: { ...frozen.used, ref_conflicts: 99 }, meta_bytes: 99_999 }) }),
+    writer: (step) => d.writer(rehearsalWho, step),
+    run: 'ddd00001',
+  });
+  assert.equal(obs2.find((o) => o.check === 'budget ledger')!.verdict, 'fail');
 });

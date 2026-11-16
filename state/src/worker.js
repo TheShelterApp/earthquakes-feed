@@ -42,6 +42,7 @@ import {
   streamBlobs,
 } from './cas.js';
 import {
+  CREATE_ONLY_FORMS,
   MAX_REFLOG_PAGE,
   MAX_REF_BYTES,
   REF_PROTOCOL,
@@ -97,6 +98,8 @@ export function configFrom(env) {
   }
   const refBackend = String(env.REF_BACKEND ?? '');
   if (refBackend !== 'r2' && refBackend !== 'do') problems.push('REF_BACKEND');
+  const createOnlyForm = String(env.CREATE_ONLY_FORM ?? '');
+  if (!CREATE_ONLY_FORMS.includes(createOnlyForm)) problems.push('CREATE_ONLY_FORM');
   if (!env.STATE) problems.push('STATE');
   if (!env.BUDGET) problems.push('BUDGET');
   if (problems.length) throw new HttpError(500, `misconfigured: ${problems.join(', ')}`);
@@ -107,6 +110,7 @@ export function configFrom(env) {
     staging: environment === 'staging',
     minProtocol,
     refBackend,
+    createOnlyForm,
     ceilings,
   };
 }
@@ -391,7 +395,7 @@ function countedBucket(bucket, log) {
 
 /** The ref store REF_BACKEND names, over the counted bucket (r2) or the ledger object with its calls counted (do). */
 function refStoreFor(env, cfg, bucket, log) {
-  if (cfg.refBackend === 'r2') return r2RefStore(bucket);
+  if (cfg.refBackend === 'r2') return r2RefStore(bucket, cfg.createOnlyForm);
   const store = doRefStore(budgetStub(env));
   const count =
     (fn) =>
@@ -459,7 +463,7 @@ async function handleRefPut(request, env, cfg, route, claims, text, log, nowMs) 
   const bucket = countedBucket(env.STATE, log);
   let result;
   try {
-    result = await putRef({ store: refStoreFor(env, cfg, bucket, log), bucket, lane: route.lane, pre, text, ref });
+    result = await putRef({ store: refStoreFor(env, cfg, bucket, log), bucket, lane: route.lane, pre, text, ref, form: cfg.createOnlyForm });
   } catch (err) {
     if (err instanceof RefError) {
       await ledger(env, log, (b) => b.refundRef({ nowMs, metaBytes, conflict: err.status === 412 })).catch(() => {});
@@ -510,7 +514,7 @@ async function handleProbe(request, env, cfg, route, log, nowMs) {
     b.reserve({ nowMs, cost: { classA: 2, classB: 1, bytes: 0, metaBytes: 64 }, ceilings: cfg.ceilings, priority: log.priority }),
   );
   refusedByBudget(verdict);
-  return json(200, await probe(countedBucket(env.STATE, log), route.lane, body), log.rid);
+  return json(200, await probe(countedBucket(env.STATE, log), route.lane, body, { create_only: cfg.createOnlyForm, ref_backend: cfg.refBackend }), log.rid);
 }
 
 /** The priority lane of a caller (budget.js): the home repository's feed workflows are critical. */

@@ -14,6 +14,7 @@ export interface Env {
   ALLOW_ANY_REF: string;
   MIN_PROTOCOL: string;
   REF_BACKEND: string;
+  CREATE_ONLY_FORM: string;
   CLASS_A_PER_DAY: string;
   CLASS_B_PER_DAY: string;
   BYTES_WRITTEN_PER_DAY: string;
@@ -33,6 +34,7 @@ export function configFrom(env: Env): {
   staging: boolean;
   minProtocol: number;
   refBackend: 'r2' | 'do';
+  createOnlyForm: 'headers' | 'conditional' | 'off';
   ceilings: Record<string, number>;
 };
 /** batchGet's pipe: an IdentityTransformStream where the runtime has one (Workers), a standard TransformStream otherwise. */

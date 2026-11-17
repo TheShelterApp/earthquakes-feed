@@ -57,7 +57,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: /knowledge/index/*.json
           sparse-checkout-cone-mode: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -71,7 +71,7 @@ jobs:
           BACKFILL_ENDTIME: ${{ inputs.endtime }}
           BACKFILL_PROVIDERS: ${{ inputs.providers }}
         run: npx --no-install tsx src/backfill.ts
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: backfill-plan
           path: backfill-plan.json
@@ -100,7 +100,7 @@ jobs:
             .nvmrc
             scripts/writer-queue.mjs
           sparse-checkout-cone-mode: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
       - name: Count the writer queue
@@ -140,7 +140,7 @@ jobs:
           fetch-depth: 1
           sparse-checkout: /knowledge/index/*.json
           sparse-checkout-cone-mode: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -222,7 +222,7 @@ jobs:
         run: '[ -f backfill-blocked.txt ] || echo "# nothing blocked: run ${{ github.run_id }}" > backfill-blocked.txt'
       - name: Upload the blocked marker (read by the health workflow)
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: walk-blocked-backfill
           path: backfill-blocked.txt

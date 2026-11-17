@@ -64,7 +64,7 @@ jobs:
         with:
           persist-credentials: false
           sparse-checkout: scripts
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
       # The `:25` cron skips its checks when a workflow_dispatch health run was CREATED in the last 20 min, running or
@@ -104,7 +104,7 @@ jobs:
           sparse-checkout: |
             scripts
             providers
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
       - name: Judge the feed (findings for the "[health] feed" board)
@@ -117,7 +117,7 @@ jobs:
           # feed:state-budget are notes only; APIs.md "Repository size").
           FEED_STATE_BACKEND: ${{ vars.FEED_STATE_BACKEND || 'worker' }}
         run: node scripts/feed-health.mjs --findings findings/feed.json --samples samples/repo-size.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: findings-feed
           path: findings/feed.json
@@ -126,7 +126,7 @@ jobs:
           overwrite: true
       # feed:repo-growth's daily repository-size sample series: written about once a day (no file otherwise), read back
       # by the next runs; 30 days keep a 7-day growth line through a month of health outages.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: repo-size-samples
           path: samples/repo-size.json
@@ -149,7 +149,7 @@ jobs:
         with:
           persist-credentials: false
           sparse-checkout: scripts
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
       - name: Judge the alert pipeline (findings for the "[health] alert pipeline" board)
@@ -163,7 +163,7 @@ jobs:
           # '1' on a selftest run (the dispatch input, or the monthly cron): the finding alerts:selftest (P1).
           WATCHDOG_SELFTEST: ${{ needs.gate.outputs.selftest }}
         run: node scripts/alerts-watchdog.mjs --findings findings/alerts.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: findings-alerts
           path: findings/alerts.json
@@ -187,12 +187,12 @@ jobs:
         with:
           persist-credentials: false
           sparse-checkout: scripts
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
       - name: Judge api.theshelter.app, config.theshelter.app and the config bundle (findings for the "[health] platform" board)
         run: node scripts/platform-watchdog.mjs --findings findings/platform.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: findings-platform
           path: findings/platform.json
@@ -222,12 +222,12 @@ jobs:
         with:
           persist-credentials: false
           sparse-checkout: scripts
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
       # This run's findings-<evaluator> artifacts, as findings/<evaluator>.json; one that is missing (its job failed)
       # is simply absent.
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: findings-*
           path: findings

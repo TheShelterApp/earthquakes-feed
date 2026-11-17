@@ -411,8 +411,11 @@ which the pin test (`tests/workflow-actions.test.ts`) requires. It leaves `@thes
 hand, `.npmrc`) and `@types/node` majors (they follow `.nvmrc`'s Node 22). A Dependabot pull request runs
 `validate.yml` like any other, under the same `.npmrc` (`ignore-scripts=true`): a new dependency with an install
 script fails `tests/npm-install.test.ts` on purpose. Merge only a green one, after reading the release notes of a
-major; nothing deploys from a pull request. Security alerts, security updates and secret scanning are switched on in
-the repository's settings (Settings → Advanced Security), not in this file.
+major; nothing deploys from a pull request. This file schedules version updates only. The rest lives in the
+repository's settings (Settings → Advanced Security), not here: Dependabot alerts are on; Dependabot security updates,
+secret scanning and push protection are an owner step (off on 2026-11-17; `gh api repos/TheShelterApp/earthquakes-feed`
+shows them under `security_and_analysis`). Until they are on, nothing opens a security-update pull request or blocks a
+pushed secret.
 
 ## Health watchdogs (`.github/workflows/health.yml`)
 

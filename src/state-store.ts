@@ -44,7 +44,10 @@ import { dirname, join, relative, sep } from 'node:path';
  *   request the client should not have sent (kind client) · 401 bad or missing token · 403 a workflow the route does
  *   not allow · 426 protocol too old · 429 {"error":"budget"} a free-tier ceiling is reached (never retried: the store
  *   refuses until 00:00 UTC) · 500 {"error":"misconfigured: …"} a deploy error (never retried, kind config) · other
- *   429 and 5xx: retried, after the answer's Retry-After when it names at most 60 s (a longer one ends the retries).
+ *   429 and 5xx: retried, after the answer's Retry-After when it names at most 60 s (a longer one ends the retries) ·
+ *   503 {"error":"unavailable"}: the Worker's isolate has no GitHub signing key yet (GitHub's JWKS unreachable and no
+ *   copy in its isolate, colo cache or bucket); retried after at most KEYS_UNAVAILABLE_WAIT_MS whatever Retry-After says
+ *   (that isolate fetches again within seconds, and the next attempt may reach another isolate), inside the deadline.
  *   A Cloudflare error 1027 (the account's daily Workers requests are used up) is kind `quota`, never retried (it
  *   lasts until 00:00 UTC); a platform 429 that outlives the retries is kind `quota` too (feed:state-quota).
  *
@@ -80,6 +83,13 @@ export const REQUEST_TIMEOUT_MS = 20_000;
 export const MAX_ATTEMPTS = 4;
 /** A Retry-After longer than this is not waited for: the request fails (retryable) and the step decides. */
 export const RETRY_AFTER_MAX_MS = 60_000;
+/**
+ * The wait before retrying a 503 {"error":"unavailable"} (the Worker had no GitHub signing key: state/src/auth.js).
+ * Older Workers answered it with Retry-After: 30, which phase 3a's retry budget (5 s) never waited for, so a cold
+ * isolate failed the whole shadow step (runs 43907386794, 43964170954 on 2026-11-16); a keyless isolate fetches again
+ * after 2 s, so a short wait is enough, and the step's deadline still bounds it.
+ */
+export const KEYS_UNAVAILABLE_WAIT_MS = 3_000;
 /** At most this much sleeping between the attempts of one request (backoff and Retry-After together): a request's
  *  retries stay inside its step's time budget (the writer jobs' steps run a few minutes). */
 export const RETRY_BUDGET_MS = 90_000;
@@ -858,7 +868,8 @@ export class WorkerBackend implements StateBackend, StateRefs {
   /**
    * One request with the retry policy: a network error, a timeout, a 5xx or a 429 that is not the budget's are tried
    * again (at most `attempts` in all), after the answer's Retry-After when it names at most RETRY_AFTER_MAX_MS
-   * (longer: no more attempts), otherwise after a jittered backoff, and never sleeping more than `retryBudgetMs` in
+   * (longer: no more attempts; a 503 `unavailable`, no signing key yet, after at most KEYS_UNAVAILABLE_WAIT_MS),
+   * otherwise after a jittered backoff, and never sleeping more than `retryBudgetMs` in
    * all. A 500 `misconfigured` (a deploy error) and any other status are final. `read` turns a 200 into the result and
    * may throw a retryable StateStoreError (a stream cut short). With a deadline, no attempt starts or waits past it and
    * a running attempt's timeout is cut to it.
@@ -929,6 +940,11 @@ export class WorkerBackend implements StateBackend, StateRefs {
           // outlives the retries (feed:state-quota), so health tells it from a Worker that is down.
           last = new StateStoreError(what, res.status === 429 ? 'quota' : 'transport', res.status, true);
           const ra = retryAfterMs(res.headers.get('retry-after'));
+          if (res.status === 503 && err === 'unavailable') {
+            // No signing key in the Worker's isolate yet: worth another attempt within seconds, not after Retry-After.
+            asked = Math.min(ra ?? KEYS_UNAVAILABLE_WAIT_MS, KEYS_UNAVAILABLE_WAIT_MS);
+            continue;
+          }
           if (ra != null && ra > RETRY_AFTER_MAX_MS) {
             stop = `: the store asks to retry after ${Math.round(ra / 1000)} s, over ${RETRY_AFTER_MAX_MS / 1000} s`;
             break;

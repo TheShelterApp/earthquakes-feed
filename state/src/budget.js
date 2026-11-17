@@ -30,6 +30,11 @@
 // object); swapping a ref overwrites one object of at most 4 KiB per lane, which is not counted again. A ref PUT that
 // is refused after its reservation (412, 409) gives its meta bytes back and, on a 412, counts a `ref_conflicts`.
 //
+// The JWKS copy (auth.js JWKS_BUCKET_KEY): the key store's bucket GET (a cold isolate) and PUT (at most one an hour per
+// isolate, in practice about one a colo a day) happen before the token is verified, so no route reserves them; `charge`
+// adds them to the day's counters afterwards and refuses nothing (they happened). Its bytes are written, not stored: one
+// object of a few KB overwritten in place (as a ref swap's overwrite), so the stored estimate leaves it out.
+//
 // One object (idFromName 'global'), SQLite-backed (the only kind on the Workers Free plan). A method of the object runs
 // alone and every statement here is synchronous, so each call is one atomic read-check-write. Cost (account-wide free
 // limits, shared with the heartbeat ledger and the alerts gateway: rows written 100,000/day, rows read 5,000,000/day):
@@ -216,6 +221,27 @@ export function reserve(sql, { nowMs, cost, ceilings, priority = 'critical' }) {
     );
   }
   return { ok: true };
+}
+
+/**
+ * Count operations the Worker already made outside any reservation (the JWKS copy in the bucket, auth.js): Class A,
+ * Class B and bytes written are added to the day's row; nothing is refused and `requests` is not counted (it was no
+ * route of its own). cost: {classA, classB, bytes}.
+ */
+export function charge(sql, { nowMs, cost }) {
+  const classA = cost.classA ?? 0;
+  const classB = cost.classB ?? 0;
+  const written = cost.bytes ?? 0;
+  if (!(classA || classB || written)) return;
+  sql.exec(
+    `INSERT INTO days (day, class_a, class_b, bytes_written) VALUES (?, ?, ?, ?)
+     ON CONFLICT (day) DO UPDATE SET class_a = class_a + excluded.class_a, class_b = class_b + excluded.class_b,
+       bytes_written = bytes_written + excluded.bytes_written`,
+    utcDay(nowMs),
+    classA,
+    classB,
+    written,
+  );
 }
 
 /**

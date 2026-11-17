@@ -8,9 +8,12 @@
 # main commit the Worker came from.
 #
 # Usage, from any checkout of this repository whose HEAD is origin/main:
-#   bash heartbeat/deploy.sh            # deploys
-#   bash heartbeat/deploy.sh --dry-run  # builds and checks, uploads nothing
-# Wrangler must already be logged in to the Cloudflare account that owns the Worker (check `wrangler whoami` first).
+#   FEED_HEARTBEAT_CF_EMAIL=<the Cloudflare login's email> bash heartbeat/deploy.sh   # deploys
+#   bash heartbeat/deploy.sh --dry-run  # builds and checks, uploads nothing, needs no login
+# A real deploy refuses unless `wrangler whoami` names FEED_HEARTBEAT_CF_EMAIL (as state/deploy.sh does): a wrangler
+# logged in to another account would otherwise create a second heartbeat there, and two heartbeats dispatch every
+# workflow twice (the dispatch ledger is per account). Wrangler reads its login from its usual place; a profile kept
+# elsewhere is selected by the caller's environment (for example XDG_CONFIG_HOME), which this script passes through.
 set -euo pipefail
 
 die() { echo "heartbeat/deploy.sh: $*" >&2; exit 1; }
@@ -30,4 +33,11 @@ msg="main $(git rev-parse --short=10 HEAD)"
 if [ "${1:-}" = "--dry-run" ]; then
   exec "$wrangler" deploy --dry-run
 fi
+[ $# -eq 0 ] || die "unknown argument: $1 (usage: bash heartbeat/deploy.sh [--dry-run])"
+
+[ -n "${FEED_HEARTBEAT_CF_EMAIL:-}" ] || die "set FEED_HEARTBEAT_CF_EMAIL to the email of the Cloudflare account that owns the Worker"
+who="$("$wrangler" whoami 2>&1)" || die "wrangler whoami failed: log in first (wrangler login)"
+grep -qiF -- "$FEED_HEARTBEAT_CF_EMAIL" <<<"$who" || die "wrangler is not logged in as $FEED_HEARTBEAT_CF_EMAIL: check the profile (wrangler whoami)"
+
+echo "heartbeat/deploy.sh: deploying from $msg"
 exec "$wrangler" deploy --message "$msg"

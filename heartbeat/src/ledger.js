@@ -11,15 +11,16 @@
 // - A dispatch that fails (GitHub non-2xx, network error, timeout) releases its claim, so a later activation of the
 //   same minute (a duplicate, or a Cloudflare retry of the failed invocation) may retry it. GitHub may rarely have
 //   created a run despite a 5xx; a second run of a minute is the lesser harm than a lost tick.
-// - An activation more than ACCEPT_MINUTES late is refused as stale: every workflow runs at least hourly, so a newer
-//   activation of the same workflow has superseded it, and a catch-up burst cannot queue a backlog of old ticks.
+// - An activation more than ACCEPT_MINUTES late is refused as stale: an hourly workflow's newer activation has
+//   superseded it, a daily one's (state-backup, state-gc) GitHub cron is its fallback, and a catch-up burst cannot queue
+//   a backlog of old ticks.
 // - Rows are kept KEEP_MINUTES (longer than ACCEPT_MINUTES), so every minute that can still be claimed has its row:
-//   duplicates are refused exactly; the table holds about 57 rows (19 an hour, 3 hours).
+//   duplicates are refused exactly; the table holds about 57 rows (19 an hour, 3 hours; a daily dispatch adds one).
 //
 // Cost on the Workers Free plan (account-wide, shared with the alerts gateway: DO rows written 100,000/day, rows read
 // 5,000,000/day, requests 100,000/day). Measured in workerd: a claim writes 2 rows (the insert and the one row pruned)
-// and reads 3, a duplicate writes 0 and reads 2, a release writes 1. 19 dispatches an hour = about 912 rows written,
-// 1,400 rows read and 456 requests a day (twice the reads and requests while Cloudflare doubles the activations).
+// and reads 3, a duplicate writes 0 and reads 2, a release writes 1. 19 dispatches an hour and 3 a day = about 918 rows
+// written, 1,400 rows read and 459 requests a day (twice the reads and requests while Cloudflare doubles the activations).
 //
 // Pure functions over a `sql.exec(query, ...bindings)` handle (the Durable Object's `ctx.storage.sql`), so the tests
 // run them on node:sqlite; heartbeat/src/index.js wraps them in the Durable Object class.

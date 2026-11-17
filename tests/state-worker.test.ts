@@ -7,8 +7,23 @@ import { join } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { JWKS_STALE_MS, JWKS_TTL_MS, REFETCH_MIN_MS, createKeyStore, workflowsFor, type JwksCache } from '../state/src/auth.js';
-import { KEEP_DAYS, gcBegin, gcEnd, migrate, refundStored, reserve, snapshot, type Sql } from '../state/src/budget.js';
+import {
+  BUCKET_READ_MIN_MS,
+  BUCKET_RESTAMP_MS,
+  BUCKET_WRITE_MIN_MS,
+  JWKS_BUCKET_KEY,
+  JWKS_STALE_MS,
+  JWKS_TTL_MS,
+  KEYLESS_REFETCH_MS,
+  KEYLESS_RETRY_DELAY_MS,
+  REFETCH_MIN_MS,
+  createKeyStore,
+  workflowsFor,
+  type JwksBucket,
+  type JwksCache,
+  type JwksCost,
+} from '../state/src/auth.js';
+import { KEEP_DAYS, charge, gcBegin, gcEnd, migrate, refundStored, reserve, snapshot, type Sql } from '../state/src/budget.js';
 import { BLOB_METADATA, blobKey, shaOfKey } from '../state/src/cas.js';
 import { byteStream, createHandler, type Env } from '../state/src/worker.js';
 
@@ -98,7 +113,7 @@ class FakeR2 {
     this.ops.get++;
     if (this.ops.get > this.failGetAfter) throw new Error('get: We encountered an internal error. Please try again. (10001)');
     const o = this.objects.get(key);
-    return o ? { key, size: o.bytes.byteLength, uploaded: o.uploaded, body: new Response(o.bytes.slice()).body! } : null;
+    return o ? { key, size: o.bytes.byteLength, uploaded: o.uploaded, customMetadata: o.customMetadata, body: new Response(o.bytes.slice()).body! } : null;
   }
   async head(key: string) {
     this.ops.head++;
@@ -153,6 +168,7 @@ function fakeBudget(down = false) {
   const names: string[] = [];
   const stub = {
     reserve: async (a: Parameters<typeof reserve>[1]) => clone(reserve(sql, clone(a))),
+    charge: async (a: Parameters<typeof charge>[1]) => charge(sql, clone(a)),
     refundStored: async (b: number, at?: number) => refundStored(sql, b, at),
     gcBegin: async (a: Parameters<typeof gcBegin>[1]) => clone(gcBegin(sql, clone(a))),
     gcEnd: async (a: Parameters<typeof gcEnd>[1]) => gcEnd(sql, clone(a)),
@@ -185,7 +201,12 @@ type Body = NonNullable<RequestInit['body']>;
 
 const CEILINGS = { CLASS_A_PER_DAY: '20000', CLASS_B_PER_DAY: '200000', BYTES_WRITTEN_PER_DAY: '1073741824', STORED_BYTES_MAX: '6442450944' };
 
-function harness(opts: { staging?: boolean; env?: Partial<Env>; jwks?: () => Promise<unknown>; budgetDown?: boolean } = {}) {
+/**
+ * The Worker over the fakes. The JWKS copy in the bucket (auth.js JWKS_BUCKET_KEY) is off unless `jwksBucket`: with
+ * it, the first request of a harness adds a GET and a PUT of that key to the bucket and the ledger, which the tests of
+ * the routes' own operations do not count.
+ */
+function harness(opts: { staging?: boolean; env?: Partial<Env>; jwks?: () => Promise<unknown>; budgetDown?: boolean; jwksBucket?: boolean } = {}) {
   let t = T0;
   tokenClock = T0;
   const r2 = new FakeR2();
@@ -206,9 +227,13 @@ function harness(opts: { staging?: boolean; env?: Partial<Env>; jwks?: () => Pro
     },
     cache,
     now: () => t,
+    // The keyless retry's pause moves the Worker's clock (not the token clock: the token stays valid).
+    sleep: async (ms: number) => {
+      t += ms;
+    },
   });
   const logs: string[] = [];
-  const handle = createHandler({ keyStore, now: () => t, log: (l) => void logs.push(l) });
+  const handle = createHandler({ keyStore, now: () => t, log: (l) => void logs.push(l), ...(opts.jwksBucket ? {} : { jwksBucket: () => null }) });
   const env: Env = {
     ENVIRONMENT: opts.staging ? 'staging' : 'production',
     REPOSITORY_ID: REPO_ID,
@@ -465,7 +490,8 @@ test('state auth: JWKS refresh after the TTL, stale-if-error, unknown kid refetc
   h.advance(JWKS_STALE_MS);
   const res = await h.call('GET', '/v1/budget', { auth: fresh() });
   assert.equal(res.status, 503);
-  assert.equal(res.headers.get('retry-after'), '30');
+  // Keyless: Retry-After 3 s, the key store's keyless refetch interval plus a second (not the minute of a known key).
+  assert.equal(res.headers.get('retry-after'), '3');
   // A fresh isolate with GitHub down and nothing cached: 503.
   const cold = harness({
     jwks: async () => {
@@ -487,6 +513,439 @@ test('state auth: a new isolate takes the JWKS from the Cache API instead of fet
   await mk().keyFor('k1', 'https://feed-state.theshelter.app/.jwks-cache/github-actions');
   await mk().keyFor('k1', 'https://feed-state.theshelter.app/.jwks-cache/github-actions');
   assert.equal(fetches, 1);
+});
+
+// --- The JWKS copy in the bucket and the keyless retry (2026-11-17) ---------------------------------------------------
+// On 2026-11-16 aggregate runs 43907386794 and 43964170954 got 503 {"error":"unavailable"}: a cold isolate whose colo
+// cache had no copy and whose one GitHub fetch failed had no key, and the 60 s throttle made its next requests 503 too.
+
+/** The R2 subset the key store uses, with its calls counted. */
+function fakeJwksBucket() {
+  const objects = new Map<string, { text: string; customMetadata: Record<string, string> }>();
+  const ops = { get: 0, put: 0 };
+  const bucket: JwksBucket = {
+    get: async (key: string) => {
+      ops.get++;
+      const o = objects.get(key);
+      return o ? { size: Buffer.byteLength(o.text), body: new Response(o.text).body, customMetadata: { ...o.customMetadata } } : null;
+    },
+    put: async (key: string, value: string, o: { customMetadata?: Record<string, string> }) => {
+      ops.put++;
+      objects.set(key, { text: value, customMetadata: { ...o.customMetadata } });
+    },
+  };
+  return { bucket, objects, ops };
+}
+
+/** One isolate's key store over a shared bucket: a fake GitHub (`up`, and the document it serves), a fake clock that
+ *  the keyless pause moves, the meter's charges and the events of the last keyFor. */
+function isolate(opts: {
+  bucket: JwksBucket;
+  cache?: JwksCache;
+  clock: { t: number };
+  github: { up: boolean; doc?: unknown; gate?: Promise<void> };
+  defer?: boolean;
+}) {
+  let fetches = 0;
+  const sleeps: number[] = [];
+  const charges: JwksCost[] = [];
+  const deferred: Promise<unknown>[] = [];
+  const store = createKeyStore({
+    fetchJwks: async () => {
+      fetches++;
+      // A slow GitHub: the fetch answers when the test opens the gate.
+      if (opts.github.gate) await opts.github.gate;
+      if (!opts.github.up) throw new Error('fetch failed: connect timeout');
+      return opts.github.doc ?? JWKS;
+    },
+    cache: opts.cache ?? fakeCache(),
+    now: () => opts.clock.t,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      opts.clock.t += ms;
+    },
+  });
+  let events: string[] = [];
+  const key = (kid = 'k1') => {
+    events = [];
+    return store.keyFor(kid, 'https://feed-state.theshelter.app/.jwks-cache/github-actions', {
+      bucket: opts.bucket,
+      meter: (c) => void charges.push(c),
+      events,
+      ...(opts.defer ? { defer: (p: Promise<unknown>) => void deferred.push(p) } : {}),
+    });
+  };
+  return {
+    key,
+    /** Run what the requests deferred (ctx.waitUntil). */
+    settle: async () => {
+      while (deferred.length) await Promise.all(deferred.splice(0));
+    },
+    get fetches() {
+      return fetches;
+    },
+    sleeps,
+    charges,
+    get events() {
+      return events;
+    },
+  };
+}
+
+const status = async (p: Promise<unknown>): Promise<number | 'ok'> =>
+  p.then(
+    () => 'ok' as const,
+    (e: unknown) => (e as { status: number }).status,
+  );
+
+test('state auth: a cold isolate with GitHub down verifies with the bucket copy and puts it back into the colo cache', async () => {
+  const { bucket, objects, ops } = fakeJwksBucket();
+  const clock = { t: T0 };
+  // A warm isolate fetched the keys and wrote the bucket copy (no copy known: written at once, awaited without defer).
+  const warm = isolate({ bucket, clock, github: { up: true } });
+  assert.equal(await status(warm.key()), 'ok');
+  assert.deepEqual(warm.events, ['bucket-miss', 'github', 'bucket-write']);
+  const copy = objects.get(JWKS_BUCKET_KEY)!;
+  assert.equal(copy.customMetadata.fetched_ms, String(T0));
+  assert.equal(copy.customMetadata.sha256, sha256(copy.text));
+  assert.deepEqual(JSON.parse(copy.text), JWKS);
+  assert.deepEqual(warm.charges, [{ classA: 1, classB: 1, bytes: Buffer.byteLength(copy.text) }]);
+
+  // Two hours later (the copy is past its TTL, inside the stale window), a cold isolate on a colo whose cache lost the
+  // copy, and GitHub down: the bucket copy verifies. One GitHub attempt only (a usable copy keeps the minute throttle).
+  clock.t = T0 + 2 * 3_600_000;
+  const colo = fakeCache();
+  const cold = isolate({ bucket, cache: colo, clock, github: { up: false } });
+  assert.equal(await status(cold.key()), 'ok');
+  assert.deepEqual(cold.events, ['bucket', 'github-failed']);
+  assert.equal(cold.fetches, 1);
+  assert.deepEqual(cold.sleeps, []);
+  assert.deepEqual(cold.charges, [{ classA: 0, classB: 1, bytes: 0 }]);
+  // Its next requests need neither the bucket nor (inside the minute) GitHub.
+  for (let i = 0; i < 5; i++) assert.equal(await status(cold.key()), 'ok');
+  assert.equal(cold.fetches, 1);
+  assert.equal(ops.get, 2, 'one bucket read per cold isolate');
+  // The colo's cache got the copy back: the next cold isolate there reads neither the bucket nor GitHub's failure twice.
+  assert.equal(colo.size(), 1);
+  const next = isolate({ bucket, cache: colo, clock, github: { up: false } });
+  assert.equal(await status(next.key()), 'ok');
+  assert.equal(ops.get, 2);
+  assert.deepEqual(next.events, ['cache', 'github-failed']);
+
+  // The bucket copy obeys the same 7-day bound: older than that and GitHub still down, nothing verifies (503).
+  clock.t = T0 + JWKS_STALE_MS;
+  const late = isolate({ bucket, clock, github: { up: false } });
+  assert.equal(await status(late.key()), 503);
+  assert.equal(late.fetches, 2, 'keyless: the in-request second attempt');
+});
+
+test('state auth: keyless (no bucket copy, GitHub down) retries in the request, then refetches after seconds, not a minute', async () => {
+  const { bucket, objects, ops } = fakeJwksBucket();
+  const clock = { t: T0 };
+  const github = { up: false };
+  const ks = isolate({ bucket, clock, github });
+  // Attempt 1 fails, a pause of KEYLESS_RETRY_DELAY_MS, attempt 2 fails: 503.
+  assert.equal(await status(ks.key()), 503);
+  assert.equal(ks.fetches, 2);
+  assert.deepEqual(ks.sleeps, [KEYLESS_RETRY_DELAY_MS]);
+  assert.deepEqual(ks.events, ['bucket-miss', 'github-failed', 'github-failed']);
+  // Inside KEYLESS_REFETCH_MS: no fetch, and no second bucket read inside BUCKET_READ_MIN_MS.
+  clock.t += KEYLESS_REFETCH_MS - 1;
+  assert.equal(await status(ks.key()), 503);
+  assert.equal(ks.fetches, 2);
+  // GitHub is back 3 s after the first failure: the next request fetches (no minute's wait) and verifies.
+  github.up = true;
+  clock.t = T0 + 3_000;
+  assert.ok(3_000 < BUCKET_READ_MIN_MS && 3_000 >= KEYLESS_REFETCH_MS + KEYLESS_RETRY_DELAY_MS);
+  assert.equal(await status(ks.key()), 'ok');
+  assert.equal(ks.fetches, 3);
+  assert.equal(ops.get, 1);
+  assert.deepEqual(ks.events, ['github', 'bucket-write']);
+  assert.ok(objects.has(JWKS_BUCKET_KEY), 'the first good fetch leaves a copy for the next cold isolate');
+});
+
+test('state auth: concurrent keyless requests share one fetch', async () => {
+  const { bucket } = fakeJwksBucket();
+  const clock = { t: T0 };
+  const ks = isolate({ bucket, clock, github: { up: true } });
+  const all = await Promise.all(Array.from({ length: 5 }, () => status(ks.key())));
+  assert.deepEqual(all, ['ok', 'ok', 'ok', 'ok', 'ok']);
+  assert.equal(ks.fetches, 1);
+});
+
+test('state auth: concurrent cold requests wait for the one bucket read instead of going keyless to a GitHub that is down', async () => {
+  const { bucket, ops } = fakeJwksBucket();
+  const clock = { t: T0 };
+  // A copy written two hours ago (past its TTL, inside the stale window).
+  const warm = isolate({ bucket, clock, github: { up: true } });
+  assert.equal(await status(warm.key()), 'ok');
+  clock.t = T0 + 2 * 3_600_000;
+  const cold = isolate({ bucket, clock, github: { up: false } });
+  const all = await Promise.all(Array.from({ length: 5 }, () => status(cold.key())));
+  assert.deepEqual(all, ['ok', 'ok', 'ok', 'ok', 'ok']);
+  assert.equal(ops.get, 2, 'one read for the five (the warm isolate made the other)');
+  // One GitHub attempt for the stale copy, shared, and never the keyless retry or its pause.
+  assert.equal(cold.fetches, 1);
+  assert.deepEqual(cold.sleeps, []);
+});
+
+test('state auth: a bucket read that threw is tried again after KEYLESS_REFETCH_MS, not BUCKET_READ_MIN_MS', async () => {
+  const { bucket, ops } = fakeJwksBucket();
+  const clock = { t: T0 };
+  const warm = isolate({ bucket, clock, github: { up: true } });
+  assert.equal(await status(warm.key()), 'ok');
+  let broken = true;
+  const flaky: JwksBucket = {
+    get: async (key) => {
+      if (broken) {
+        ops.get++;
+        throw new Error('R2 internal error');
+      }
+      return bucket.get(key);
+    },
+    put: bucket.put,
+  };
+  clock.t = T0 + 2 * 3_600_000;
+  const cold = isolate({ bucket: flaky, clock, github: { up: false } });
+  assert.equal(await status(cold.key()), 503);
+  assert.deepEqual(cold.events, ['bucket-failed', 'github-failed', 'github-failed']);
+  broken = false;
+  clock.t += KEYLESS_REFETCH_MS;
+  assert.ok(KEYLESS_REFETCH_MS < BUCKET_READ_MIN_MS);
+  assert.equal(await status(cold.key()), 'ok');
+  // The copy is usable, so GitHub (failed 2 s ago) waits for the minute's throttle.
+  assert.deepEqual(cold.events, ['bucket']);
+  assert.equal(ops.get, 3);
+});
+
+test('state auth: a keyless fetch that fails after a concurrent request adopted a copy is not retried in the request', async () => {
+  const { bucket, objects } = fakeJwksBucket();
+  const clock = { t: T0 };
+  let fetches = 0;
+  const sleeps: number[] = [];
+  let fail: (e: Error) => void = () => {};
+  const ks = createKeyStore({
+    // The first fetch hangs until the test fails it; any later one fails at once (GitHub down).
+    fetchJwks: () => {
+      fetches++;
+      return fetches === 1 ? new Promise((_, reject) => (fail = reject)) : Promise.reject(new Error('fetch failed'));
+    },
+    now: () => clock.t,
+    sleep: async (ms) => void sleeps.push(ms),
+  });
+  const key = () => ks.keyFor('k1', undefined, { bucket });
+  // A: no copy anywhere, so keyless; its GitHub fetch hangs.
+  const a = status(key());
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(fetches, 1);
+  // Meanwhile another isolate wrote the bucket copy, and B (past the read throttle) adopts it.
+  const writer = isolate({ bucket, clock, github: { up: true } });
+  assert.equal(await status(writer.key()), 'ok');
+  assert.ok(objects.size === 1);
+  clock.t += BUCKET_READ_MIN_MS;
+  assert.equal(await status(key()), 'ok', 'B: the fresh bucket copy');
+  fail(new Error('fetch failed: connect timeout'));
+  assert.equal(await a, 'ok', 'A: served from the copy B adopted');
+  assert.equal(fetches, 1, 'no in-request retry once a usable copy is held');
+  assert.deepEqual(sleeps, []);
+});
+
+test('state auth: with a bucket the unknown-kid throttle is unchanged: one refetch a minute, no bucket read for a made-up kid', async () => {
+  const { bucket, ops } = fakeJwksBucket();
+  const clock = { t: T0 };
+  const github: { up: boolean; doc?: unknown } = { up: true };
+  const ks = isolate({ bucket, clock, github });
+  assert.equal(await status(ks.key()), 'ok');
+  assert.equal(ks.fetches, 1);
+  for (let i = 0; i < 10; i++) assert.equal(await status(ks.key(`x${i}`)), 401);
+  assert.equal(ks.fetches, 1, 'no refetch inside the minute');
+  clock.t += REFETCH_MIN_MS;
+  for (let i = 0; i < 10; i++) assert.equal(await status(ks.key(`y${i}`)), 401);
+  assert.equal(ks.fetches, 2, 'one refetch a minute');
+  assert.equal(ops.get, 1, 'only the cold start read the bucket');
+  assert.deepEqual(ks.sleeps, [], 'a known key set never takes the keyless retry');
+  // GitHub rotated: the refetch a minute later picks up k2.
+  github.doc = { keys: [...JWKS.keys, jwkOf(other.publicKey, 'k2')] };
+  clock.t += REFETCH_MIN_MS;
+  assert.equal(await status(ks.key('k2')), 'ok');
+});
+
+test('state auth: an unknown kid GitHub could not be asked about is a retryable 503, not a final 401', async () => {
+  const { bucket } = fakeJwksBucket();
+  const clock = { t: T0 };
+  const github: { up: boolean; doc?: unknown } = { up: true };
+  const rotated = { keys: [...JWKS.keys, jwkOf(other.publicKey, 'k2')] };
+
+  // A cold isolate adopts a FRESH bucket copy written before GitHub published k2, and GitHub is unreachable: the copy
+  // lacks k2, so the request asks GitHub, fails, and answers 503 (the client retries), never 401.
+  const warm = isolate({ bucket, clock, github });
+  assert.equal(await status(warm.key()), 'ok');
+  clock.t += 10 * 60_000;
+  github.up = false;
+  const cold = isolate({ bucket, clock, github });
+  assert.equal(await status(cold.key('k2')), 503);
+  assert.deepEqual(cold.events, ['bucket', 'github-failed']);
+  // Inside the minute's throttle the last fetch is still the failed one: 503 again, and no second fetch.
+  assert.equal(await status(cold.key('k2')), 503);
+  assert.equal(cold.fetches, 1);
+  // GitHub is back with k2 a minute later: verified.
+  github.up = true;
+  github.doc = rotated;
+  clock.t += REFETCH_MIN_MS;
+  assert.equal(await status(cold.key('k2')), 'ok');
+
+  // A warm isolate whose stale copy predates k2, GitHub down: 503, not 401.
+  github.doc = undefined;
+  const stale = isolate({ bucket: fakeJwksBucket().bucket, clock, github });
+  assert.equal(await status(stale.key()), 'ok');
+  clock.t += JWKS_TTL_MS + 1;
+  github.up = false;
+  assert.equal(await status(stale.key('k2')), 503);
+
+  // GitHub answering without the kid is final: 401, inside the throttle too.
+  github.up = true;
+  clock.t += REFETCH_MIN_MS;
+  assert.equal(await status(stale.key('made-up')), 401);
+  assert.equal(await status(stale.key('made-up-2')), 401);
+});
+
+test('state Worker: an unknown kid after a failed JWKS fetch answers 503 unavailable with Retry-After 3', async () => {
+  let up = true;
+  const h = harness({
+    jwks: async () => {
+      if (!up) throw new Error('fetch failed');
+      return JWKS;
+    },
+  });
+  assert.equal((await h.call('GET', '/v1/budget')).status, 200);
+  up = false;
+  h.advance(REFETCH_MIN_MS);
+  const res = await h.call('GET', '/v1/budget', { auth: token({}, { kid: 'k2' }, other.privateKey) });
+  assert.equal(res.status, 503);
+  assert.equal(res.headers.get('retry-after'), '3');
+  assert.deepEqual(await res.json(), { error: 'unavailable', reason: 'unknown kid, signing keys unconfirmed' });
+});
+
+/** A Cache API fake that counts its puts (each one a subrequest). */
+function countingCache() {
+  const c = fakeCache();
+  let puts = 0;
+  return {
+    cache: { match: c.match, put: async (k: string, r: Response) => (puts++, c.put(k, r)) } as JwksCache,
+    size: () => c.size(),
+    get puts() {
+      return puts;
+    },
+  };
+}
+
+test('state auth: stale-while-revalidate: a usable copy holding the kid serves at once, GitHub is asked after the answer', async () => {
+  const { bucket, ops } = fakeJwksBucket();
+  const clock = { t: T0 };
+  const warm = isolate({ bucket, clock, github: { up: true } });
+  assert.equal(await status(warm.key()), 'ok');
+  clock.t = T0 + 2 * 3_600_000;
+
+  // GitHub slow, then answering: the request does not wait for it.
+  let open: () => void = () => {};
+  const github: { up: boolean; gate?: Promise<void> } = { up: true, gate: new Promise<void>((r) => (open = r)) };
+  const colo = countingCache();
+  const cold = isolate({ bucket, cache: colo.cache, clock, github, defer: true });
+  assert.equal(await status(cold.key()), 'ok', 'served before GitHub answered');
+  assert.deepEqual(cold.events, ['bucket', 'revalidate']);
+  assert.equal(cold.fetches, 1);
+  assert.deepEqual(cold.charges, [], 'metered once, after the revalidation');
+  // Requests meanwhile share the one fetch and do not wait either.
+  for (let i = 0; i < 3; i++) assert.equal(await status(cold.key()), 'ok');
+  assert.equal(cold.fetches, 1);
+  open();
+  await cold.settle();
+  // One cache.put (GitHub's copy, not the bucket copy as well) and one charge for the request's bucket GET.
+  assert.equal(colo.puts, 1);
+  assert.deepEqual(cold.charges, [{ classA: 0, classB: 1, bytes: 0 }]);
+  assert.equal(ops.get, 2);
+  // The isolate now holds GitHub's fresh copy: no further fetch inside the TTL.
+  github.gate = undefined;
+  clock.t += REFETCH_MIN_MS;
+  assert.equal(await status(cold.key()), 'ok');
+  assert.equal(cold.fetches, 1);
+
+  // GitHub down: still served at once; after the answer the colo cache gets the bucket copy (one put), one charge.
+  const colo2 = countingCache();
+  const down = isolate({ bucket, cache: colo2.cache, clock, github: { up: false }, defer: true });
+  assert.equal(await status(down.key()), 'ok');
+  await down.settle();
+  assert.equal(down.fetches, 1);
+  assert.deepEqual(down.sleeps, []);
+  assert.equal(colo2.puts, 1);
+  assert.equal(colo2.size(), 1);
+  assert.equal(down.charges.length, 1);
+  // Inside the minute's throttle a later request neither fetches nor writes the cache again.
+  assert.equal(await status(down.key()), 'ok');
+  await down.settle();
+  assert.equal(down.fetches, 1);
+  assert.equal(colo2.puts, 1);
+
+  // An unknown kid still waits for GitHub (after a rotation the new key is needed now): 503 here, GitHub down.
+  clock.t += REFETCH_MIN_MS;
+  assert.equal(await status(down.key('k2')), 503);
+  assert.equal(down.fetches, 2);
+
+  // A copy past the stale window is never served, revalidated or not.
+  clock.t = T0 + JWKS_STALE_MS;
+  const late = isolate({ bucket, clock, github: { up: false }, defer: true });
+  assert.equal(await status(late.key()), 503);
+});
+
+test('state auth: the bucket copy is rewritten when it changed or aged a day, at most once an hour per isolate', async () => {
+  const { bucket, objects, ops } = fakeJwksBucket();
+  const clock = { t: T0 };
+  const github: { up: boolean; doc?: unknown } = { up: true };
+  const ks = isolate({ bucket, clock, github });
+  assert.equal(await status(ks.key()), 'ok');
+  assert.equal(ops.put, 1);
+  // Every TTL refetch of the same document: no rewrite until the copy is BUCKET_RESTAMP_MS old.
+  for (let h = 1; h < 24; h++) {
+    clock.t = T0 + h * JWKS_TTL_MS;
+    assert.equal(await status(ks.key()), 'ok');
+  }
+  assert.equal(ks.fetches, 24);
+  assert.equal(ops.put, 1);
+  clock.t = T0 + BUCKET_RESTAMP_MS;
+  assert.equal(await status(ks.key()), 'ok');
+  assert.equal(ops.put, 2);
+  assert.equal(objects.get(JWKS_BUCKET_KEY)!.customMetadata.fetched_ms, String(T0 + BUCKET_RESTAMP_MS));
+  // A rotation inside the hour of the last write waits for the hour; then it is written.
+  github.doc = { keys: [...JWKS.keys, jwkOf(other.publicKey, 'k2')] };
+  clock.t += REFETCH_MIN_MS;
+  assert.equal(await status(ks.key('k2')), 'ok');
+  assert.equal(ops.put, 2);
+  // The next TTL refetch is past the hour: written.
+  clock.t += JWKS_TTL_MS;
+  assert.ok(clock.t - (T0 + BUCKET_RESTAMP_MS) >= BUCKET_WRITE_MIN_MS);
+  assert.equal(await status(ks.key('k2')), 'ok');
+  assert.equal(ops.put, 3);
+  assert.deepEqual(JSON.parse(objects.get(JWKS_BUCKET_KEY)!.text), github.doc);
+});
+
+test('state Worker: the JWKS copy is read and written through the bucket binding, charged to the ledger and logged', async () => {
+  const h = harness({ jwksBucket: true });
+  const first = await h.call('GET', '/v1/budget');
+  assert.equal(first.status, 200);
+  await h.settle();
+  const copy = h.r2.objects.get(JWKS_BUCKET_KEY)!;
+  assert.equal(copy.customMetadata?.fetched_ms, String(T0));
+  assert.equal(copy.httpMetadata?.contentType, 'application/json');
+  const line = JSON.parse(h.logs.at(-1)!) as Record<string, unknown>;
+  assert.equal(line.jwks, 'bucket-miss,github,bucket-write');
+  assert.equal(line.jwks_ops, 2);
+  // The ledger counted the GET (Class B) and the PUT (Class A, its bytes written), and no request of its own.
+  const snap = (await (await h.call('GET', '/v1/budget')).json()) as { used: { class_a: number; class_b: number; bytes_written: number; requests: number } };
+  assert.deepEqual(snap.used, { class_a: 1, class_b: 1, bytes_written: copy.bytes.byteLength, requests: 0, refused: 0, refused_critical: 0, ref_conflicts: 0, reflog_collisions: 0 });
+  // A warm isolate touches neither the bucket nor the ledger for its keys.
+  assert.equal(JSON.parse(h.logs.at(-1)!).jwks, undefined);
+  // GC never lists the copy: it lives outside cas/.
+  assert.ok(!JWKS_BUCKET_KEY.startsWith('cas/'));
 });
 
 // --- PUT -----------------------------------------------------------------------------------------------------------

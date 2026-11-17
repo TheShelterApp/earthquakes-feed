@@ -1742,7 +1742,11 @@ to the ref.
     free-tier ceiling) and 500 `misconfigured` (a deploy error). The client (`src/state-store.ts`) retries network
     errors, any other 5xx and any other 429, at most 4 attempts with jittered backoff (or the answer's Retry-After when
     it is at most 60 s; a longer one ends the retries) and at most 90 s of waiting in all, a 20 s timeout each; it
-    never retries a 4xx, the budget or a 500 `misconfigured`. Phase 3a's shadow steps use a tighter policy
+    never retries a 4xx, the budget or a 500 `misconfigured`. A 503 `{"error":"unavailable"}` (the Worker's isolate
+    has no GitHub signing key: GitHub's JWKS unreachable and no copy in the isolate, the colo cache or the bucket) is
+    retried after at most 3 s whatever its Retry-After (`KEYS_UNAVAILABLE_WAIT_MS`; the Worker refetches a keyless
+    isolate's keys within 2 s), inside the step's deadline: with Retry-After 30 a shadow step used to give up at once
+    (runs 43907386794 and 43964170954, 2026-11-16). Phase 3a's shadow steps use a tighter policy
     (`SHADOW_RETRY_POLICY`): 2 attempts of at most 15 s, 5 s of backoff, and a deadline over the whole step, OIDC token
     requests included (hydrate 30 s, persist 60 s), so a hanging store adds at most about 90 s to an aggregate run; each
     step writes a `killed` marker when it starts, which its report overwrites, so a step its timeout kills still reads
@@ -1812,7 +1816,9 @@ GC and the backup complete with an `off` marker, and health judges none of `feed
 5. Merge the switch commit (`|| 'worker'`). The next aggregate run persists all 46 days, the one after
    compares them (its shadow hydrate).
 6. After that first persist, dispatch `state-backup.yml` and `state-gc.yml` (`dry_run`, the default) and check both
-   green; the scheduled runs (00:41 and 03:23 UTC) take over.
+   green; the scheduled runs take over: the heartbeat Worker's dispatches (state-backup at 00:31 and 06:31,
+   state-gc at 03:33 UTC; GitHub delivered neither job's cron on 2026-11-16 or 11-17), with the crons (00:41 and 03:23
+   UTC) as the fallback.
 Switching the store off again in phase 3a is `gh variable set FEED_STATE_BACKEND --body off`; from phase 3b the store
 is required (3b removes the kill switch).
 
@@ -1840,7 +1846,8 @@ prune, validate, stage-data, a closing shadow hydrate and an authoritative one) 
 
   It deletes only blobs older than 30 days, at most 600 per listing page, and nothing at all without a readable backup
   marker. A dispatch defaults to `dry_run`; the scheduled run follows `STATE_GC_SCHEDULED` (`dry-run` until the first
-  dry runs' counts are reviewed, then `delete` by a commit). `feed:state-gc` (P2) fires after 3 days without a
+  dry runs' counts are reviewed, then `delete` by a commit). The scheduled run is the heartbeat Worker's daily dispatch
+  at 03:33 UTC with `tick=1` (which counts as scheduled), or the 03:23 cron when GitHub delivers it. `feed:state-gc` (P2) fires after 3 days without a
   completed run.
 - `state-backup.yml` copies each day's state to a draft Release `state-YYYY-MM`, published once the month is over and
   complete. The state of day D is the generation at the last data commit before 00:00 UTC of D, that commit's
@@ -1853,7 +1860,11 @@ prune, validate, stage-data, a closing shadow hydrate and an authoritative one) 
   repository's `main` counts, for GC and for health alike: the repository is public, and a pull request's run (a
   fork's included) can upload an artifact of any name. A marker that names no day (no generation yet, or the store
   off) holds GC (nothing deleted) and is aged by its own date in health.
-  `feed:state-backup` is P2 past 36 h and P1 past 7 days.
+  `feed:state-backup` is P2 past 36 h and P1 past 7 days. The heartbeat Worker dispatches it twice a day, at 00:31 and
+  06:31 UTC, so one lost dispatch or failed run is retried hours before the P2 line (12:00 UTC of the next day); the
+  00:41 cron is the fallback, and a later run of the day finds every day done. 00:31 leaves the 23:55 aggregate run,
+  if it queued behind the writer group, time to push midnight's last commit before the day's archive, which is never
+  replaced.
 - `state-rehearsal.yml` (dispatch, any branch, staging only, synthetic data only) runs the client's whole path:
   persist, a shadow and an authoritative hydrate, a restore from a backup archive, a GC dry run and the budget.
 

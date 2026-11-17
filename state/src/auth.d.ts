@@ -6,6 +6,12 @@ export const SKEW_S: number;
 export const JWKS_TTL_MS: number;
 export const JWKS_STALE_MS: number;
 export const REFETCH_MIN_MS: number;
+export const KEYLESS_REFETCH_MS: number;
+export const KEYLESS_RETRY_DELAY_MS: number;
+export const JWKS_BUCKET_KEY: string;
+export const BUCKET_READ_MIN_MS: number;
+export const BUCKET_WRITE_MIN_MS: number;
+export const BUCKET_RESTAMP_MS: number;
 /** One (repository_id, workflow) pair: repository HOME is the Worker's REPOSITORY_ID, else a numeric id string. */
 export interface Pair {
   repository: string;
@@ -50,14 +56,37 @@ export interface JwksCache {
   match(key: string): Promise<Response | undefined>;
   put(key: string, response: Response): Promise<void>;
 }
-export interface KeyStore {
-  keyFor(kid: string, cacheKey?: string): Promise<CryptoKey>;
+/** The subset of the R2 binding the key store uses for its copy of the JWKS (JWKS_BUCKET_KEY). */
+export interface JwksBucket {
+  get(key: string): Promise<{ size: number; body: ReadableStream | null; customMetadata?: Record<string, string> } | null>;
+  put(key: string, value: string, opts: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> }): Promise<unknown>;
 }
-export function createKeyStore(deps?: { fetchJwks?: () => Promise<unknown>; cache?: JwksCache | null; now?: () => number }): KeyStore;
+/** The bucket operations one keyFor caused (metered apart from any route's reservation). */
+export interface JwksCost {
+  classA: number;
+  classB: number;
+  bytes: number;
+}
+/** keyFor's per-request deps. */
+export interface KeyStoreRequest {
+  bucket?: JwksBucket | null;
+  meter?: (cost: JwksCost) => unknown;
+  defer?: (p: Promise<unknown>) => void;
+  events?: string[];
+}
+export interface KeyStore {
+  keyFor(kid: string, cacheKey?: string, store?: KeyStoreRequest): Promise<CryptoKey>;
+}
+export function createKeyStore(deps?: {
+  fetchJwks?: (timeoutMs?: number) => Promise<unknown>;
+  cache?: JwksCache | null;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}): KeyStore;
 export function bearerToken(request: Request): string;
 export function verifyToken(
   token: string,
-  opts: { audience: string; repositoryIds: string[]; keyStore: KeyStore; cacheKey?: string; nowMs: number },
+  opts: { audience: string; repositoryIds: string[]; keyStore: KeyStore; cacheKey?: string; nowMs: number; store?: KeyStoreRequest },
 ): Promise<Record<string, unknown>>;
 export function authorize(
   claims: Record<string, unknown>,

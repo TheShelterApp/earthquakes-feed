@@ -67,7 +67,8 @@ test('walk-fallback: the walks have no cron of their own; walk-fallback.yml hold
 
 test('walk-fallback: it dispatches a walk exactly as the heartbeat Worker does', () => {
   for (const [workflow, w] of Object.entries(WALKS)) {
-    assert.equal(workflowFor(w.heartbeatMinute), workflow, `the Worker dispatches ${workflow} at :${w.heartbeatMinute}`);
+    // Hourly: the same minute of every UTC hour.
+    for (let hour = 0; hour < 24; hour++) assert.equal(workflowFor(w.heartbeatMinute, hour), workflow, `the Worker dispatches ${workflow} at ${hour}:${w.heartbeatMinute}`);
     const inputs = inputsFor(workflow);
     assert.deepEqual(dispatchBody(workflow), inputs ? { ref: 'main', inputs } : { ref: 'main' });
   }

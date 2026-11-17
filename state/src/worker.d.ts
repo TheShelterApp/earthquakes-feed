@@ -45,7 +45,10 @@ export function createHandler(deps?: {
   now?: () => number;
   log?: (line: string) => void;
   policy?: Policy;
+  jwksBucket?: (env: Env) => unknown;
 }): Handler;
+/** The Retry-After (seconds) of the 503 a keyless isolate answers. */
+export const KEYLESS_RETRY_AFTER_S: number;
 
 declare const worker: { fetch(request: Request, env: Env, ctx: Ctx): Promise<Response> };
 export default worker;

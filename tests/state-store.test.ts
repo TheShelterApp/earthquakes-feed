@@ -8,6 +8,7 @@ import { gzipSync } from 'node:zlib';
 import {
   BATCH_MAX,
   FsBackend,
+  KEYS_UNAVAILABLE_WAIT_MS,
   STATE_USER_AGENT,
   StateStoreError,
   WorkerBackend,
@@ -24,6 +25,7 @@ import {
   sha256Hex,
   type GcRequest,
 } from '../src/state-store.js';
+import { SHADOW_RETRY_POLICY, SHADOW_STEP_DEADLINE_MS } from '../src/event-map-store.js';
 
 // The state store client (src/state-store.ts) against a local fake of the state Worker that implements its HTTP
 // contract (routes, headers, statuses, the batchGet framing), and the directory backend. No network beyond 127.0.0.1.
@@ -220,7 +222,7 @@ test('state client: 5xx, a non-budget 429 and a cut stream are retried (at most 
       if (s.url.startsWith('/v1/cas/sha256/') && failures < 2) {
         failures++;
         res.writeHead(failures === 1 ? 503 : 429, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ error: failures === 1 ? 'unavailable' : 'slow down' }));
+        res.end(JSON.stringify({ error: failures === 1 ? 'store write failed' : 'slow down' }));
         return true;
       }
       return false;
@@ -464,23 +466,51 @@ test('state client: a GC or budget answer that is not the Worker\'s shape is an 
   assert.equal(kind(() => parseBudget({ ...BUDGET, ceilings: { ...BUDGET.ceilings, class_a: 0 } })), 'integrity');
 });
 
+test('state client: phase 3a\'s shadow policy retries a keyless 503 after 3 s inside the step deadline (runs 43907386794, 43964170954)', async () => {
+  // 2 attempts, 5 s of retry budget: a Retry-After of 30 s used to end the step at the first 503.
+  let n = 0;
+  const w = fakeWorker({
+    before: (s, res) => {
+      if (s.method !== 'GET' || n++ >= 1) return false;
+      res.writeHead(503, { 'content-type': 'application/json', 'retry-after': '30' });
+      res.end(JSON.stringify({ error: 'unavailable', reason: 'signing keys unavailable' }));
+      return true;
+    },
+  });
+  const base = await w.start();
+  try {
+    const sleeps: number[] = [];
+    const policy = { ...SHADOW_RETRY_POLICY, deadlineMs: Date.now() + SHADOW_STEP_DEADLINE_MS.hydrate };
+    const be = new WorkerBackend({ baseUrl: base, ...quick, ...policy, sleep: async (ms) => void sleeps.push(ms) });
+    assert.deepEqual(await be.budget(), BUDGET);
+    assert.deepEqual(sleeps, [3_000]);
+    assert.ok(KEYS_UNAVAILABLE_WAIT_MS <= SHADOW_RETRY_POLICY.retryBudgetMs);
+    // The deadline still rules: with less than 3 s left, no second attempt.
+    n = 0;
+    const late = new WorkerBackend({ baseUrl: base, ...quick, ...SHADOW_RETRY_POLICY, deadlineMs: Date.now() + 2_000, sleep: async (ms) => void sleeps.push(ms) });
+    await assert.rejects(late.budget(), (e: unknown) => e instanceof StateStoreError && e.retryable && /HTTP 503 unavailable after 1 attempt: the step's deadline leaves no room for another attempt/.test(e.message));
+  } finally {
+    await w.stop();
+  }
+});
+
 test('state client: Retry-After up to 60 s is honoured within the retry budget; a longer one ends the retries', async () => {
   assert.equal(retryAfterMs('30'), 30_000);
   assert.equal(retryAfterMs(null), null);
   assert.equal(retryAfterMs('soon'), null);
   assert.equal(retryAfterMs(new Date(Date.parse('2026-11-16T00:00:45Z')).toUTCString(), Date.parse('2026-11-16T00:00:00Z')), 45_000);
-  const answering = (status: number, retryAfter: string | null, failures: number) => {
+  const answering = (status: number, retryAfter: string | null, failures: number, error = 'store write failed') => {
     let n = 0;
     return fakeWorker({
       before: (s, res) => {
         if (s.method !== 'GET' || n++ >= failures) return false;
         res.writeHead(status, { 'content-type': 'application/json', ...(retryAfter ? { 'retry-after': retryAfter } : {}) });
-        res.end(JSON.stringify({ error: 'unavailable' }));
+        res.end(JSON.stringify({ error }));
         return true;
       },
     });
   };
-  // The Worker's 503 when no GitHub signing key can be had: Retry-After 30, waited exactly.
+  // A 503 asking for 30 s: waited exactly.
   const a = answering(503, '30', 2);
   const ba = await a.start();
   try {
@@ -490,6 +520,17 @@ test('state client: Retry-After up to 60 s is honoured within the retry budget; 
     assert.deepEqual(sleeps, [30_000, 30_000]);
   } finally {
     await a.stop();
+  }
+  // The Worker's 503 when no GitHub signing key can be had (older Workers: Retry-After 30): retried after 3 s.
+  const k = answering(503, '30', 2, 'unavailable');
+  const bk = await k.start();
+  try {
+    const sleeps: number[] = [];
+    const be = new WorkerBackend({ baseUrl: bk, ...quick, sleep: async (ms) => void sleeps.push(ms) });
+    assert.deepEqual(await be.budget(), BUDGET);
+    assert.deepEqual(sleeps, [KEYS_UNAVAILABLE_WAIT_MS, KEYS_UNAVAILABLE_WAIT_MS]);
+  } finally {
+    await k.stop();
   }
   // With a retry budget of 60 s, a third wait of 30 s (90 s in all) is not made.
   const b = answering(503, '30', 3);

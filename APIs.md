@@ -1742,7 +1742,11 @@ to the ref.
     free-tier ceiling) and 500 `misconfigured` (a deploy error). The client (`src/state-store.ts`) retries network
     errors, any other 5xx and any other 429, at most 4 attempts with jittered backoff (or the answer's Retry-After when
     it is at most 60 s; a longer one ends the retries) and at most 90 s of waiting in all, a 20 s timeout each; it
-    never retries a 4xx, the budget or a 500 `misconfigured`. Phase 3a's shadow steps use a tighter policy
+    never retries a 4xx, the budget or a 500 `misconfigured`. A 503 `{"error":"unavailable"}` (the Worker's isolate
+    has no GitHub signing key: GitHub's JWKS unreachable and no copy in the isolate, the colo cache or the bucket) is
+    retried after at most 3 s whatever its Retry-After (`KEYS_UNAVAILABLE_WAIT_MS`; the Worker refetches a keyless
+    isolate's keys within 2 s), inside the step's deadline: with Retry-After 30 a shadow step used to give up at once
+    (runs 43907386794 and 43964170954, 2026-11-16). Phase 3a's shadow steps use a tighter policy
     (`SHADOW_RETRY_POLICY`): 2 attempts of at most 15 s, 5 s of backoff, and a deadline over the whole step, OIDC token
     requests included (hydrate 30 s, persist 60 s), so a hanging store adds at most about 90 s to an aggregate run; each
     step writes a `killed` marker when it starts, which its report overwrites, so a step its timeout kills still reads

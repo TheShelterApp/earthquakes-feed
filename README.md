@@ -374,7 +374,8 @@ failed dispatch releases its claim so a later activation of the minute may retry
 skipped as stale, and an unreachable ledger never stops a dispatch. Each activation logs `dispatch …` or
 `skip …: duplicate|stale` (`wrangler tail`).
 **Deploy it only from `main`:** `bash heartbeat/deploy.sh` refuses unless the checkout is exactly
-`origin/main` with no local change under `heartbeat/`, and tags the version with the main commit
+`origin/main` with no local change under `heartbeat/` and `wrangler whoami` names `FEED_HEARTBEAT_CF_EMAIL` (a
+heartbeat on another account would dispatch every workflow a second time), and tags the version with the main commit
 (`wrangler deployments list` lists oldest first; the active version is the last entry). A change
 to the Worker goes through a pull request like any other code and is deployed after the merge.
 

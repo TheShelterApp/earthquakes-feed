@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -358,4 +361,80 @@ test('heartbeat: the ledger is one SQLite-backed Durable Object, exported by the
   assert.match(entry, /^export \{ default \} from '\.\/worker\.js';$/m);
   assert.match(entry, /^export class DispatchLedger extends DurableObject \{$/m);
   assert.match(entry, /ctx\.storage\.sql\.exec\(SCHEMA\)/);
+});
+
+test('heartbeat deploy.sh: deploys only from origin/main, and only as the expected Cloudflare account', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'heartbeat-deploy-'));
+  const e: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: dir,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: join(dir, 'gitconfig'),
+    GIT_AUTHOR_NAME: 't',
+    GIT_AUTHOR_EMAIL: 't@example.com',
+    GIT_COMMITTER_NAME: 't',
+    GIT_COMMITTER_EMAIL: 't@example.com',
+    FAKE_WRANGLER_LOG: join(dir, 'wrangler.log'),
+  };
+  delete e.FEED_HEARTBEAT_CF_EMAIL;
+  writeFileSync(join(dir, 'gitconfig'), '[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n');
+  const git = (...args: string[]): string => execFileSync('git', args, { cwd: work, env: e, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const origin = join(dir, 'origin.git');
+  const work = join(dir, 'work');
+  execFileSync('git', ['init', '-q', '--bare', origin], { env: e });
+  execFileSync('git', ['init', '-q', work], { env: e });
+  mkdirSync(join(work, 'heartbeat'));
+  copyFileSync(here('../heartbeat/deploy.sh'), join(work, 'heartbeat/deploy.sh'));
+  writeFileSync(join(work, '.gitignore'), 'node_modules/\n');
+  mkdirSync(join(work, 'node_modules/.bin'), { recursive: true });
+  const fake = join(work, 'node_modules/.bin/wrangler');
+  writeFileSync(
+    fake,
+    '#!/usr/bin/env bash\nprintf \'%s|\' "$@" >> "$FAKE_WRANGLER_LOG"; echo >> "$FAKE_WRANGLER_LOG"\n' +
+      'if [ "$1" = whoami ]; then echo "You are logged in with an OAuth Token, associated with the email owner@example.com."; fi\n',
+  );
+  chmodSync(fake, 0o755);
+  git('add', '.');
+  git('commit', '-q', '-m', 'seed');
+  git('remote', 'add', 'origin', origin);
+  git('push', '-q', 'origin', 'main');
+  const run = (args: string[], extra: NodeJS.ProcessEnv = {}) => {
+    const r = spawnSync('bash', ['heartbeat/deploy.sh', ...args], { cwd: work, env: { ...e, ...extra }, encoding: 'utf8' });
+    return { status: r.status, err: r.stderr };
+  };
+  const calls = (): string[] => {
+    try {
+      return readFileSync(e.FAKE_WRANGLER_LOG!, 'utf8').trim().split('\n').filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  const sha = git('rev-parse', '--short=10', 'HEAD').trim();
+
+  // No account given, or another account logged in: refused before any deploy (a second heartbeat on another account
+  // would dispatch every workflow twice: the dispatch ledger is per account).
+  let res = run([]);
+  assert.notEqual(res.status, 0);
+  assert.match(res.err, /set FEED_HEARTBEAT_CF_EMAIL/);
+  res = run([], { FEED_HEARTBEAT_CF_EMAIL: 'someone@else.example' });
+  assert.notEqual(res.status, 0);
+  assert.match(res.err, /not logged in as someone@else\.example/);
+  assert.ok(!calls().some((c) => c.startsWith('deploy|')));
+  assert.notEqual(run(['--force'], { FEED_HEARTBEAT_CF_EMAIL: 'owner@example.com' }).status, 0);
+
+  // The expected account: deployed, tagged with the main commit. A dry run needs no login.
+  res = run([], { FEED_HEARTBEAT_CF_EMAIL: 'owner@example.com' });
+  assert.equal(res.status, 0, res.err);
+  assert.equal(calls().at(-1), `deploy|--message|main ${sha}|`);
+  res = run(['--dry-run']);
+  assert.equal(res.status, 0, res.err);
+  assert.equal(calls().at(-1), 'deploy|--dry-run|');
+
+  // A commit ahead of origin/main: refused, wrangler never runs.
+  const before = calls().length;
+  writeFileSync(join(work, 'heartbeat/x.txt'), 'x');
+  git('add', 'heartbeat/x.txt');
+  git('commit', '-q', '-m', 'local');
+  assert.match(run([], { FEED_HEARTBEAT_CF_EMAIL: 'owner@example.com' }).err, /is not origin\/main/);
+  assert.equal(calls().length, before);
 });

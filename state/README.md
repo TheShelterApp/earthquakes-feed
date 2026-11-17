@@ -235,8 +235,9 @@ the seeding run's before re-enabling the writers.
 **Errors shared by every route.** 401 `{"error": "unauthenticated", "reason"}` (no, malformed or invalid token);
 403 `{"error": "forbidden", "reason"}` (a valid token of this repository that this route does not admit); 503
 `{"error": "unavailable", "reason": "signing keys unavailable"}` with `Retry-After: 3` when no GitHub signing key can be
-had (GitHub unreachable and no copy in the isolate, the colo cache or the bucket: below; the client retries it after at
-most 3 s whatever the header says, so an older Worker's `Retry-After: 30` is treated alike);
+had (GitHub unreachable and no copy in the isolate, the colo cache or the bucket), or when the token's `kid` is not in
+the copy and GitHub could not be asked (below); the client retries it after at most 3 s whatever the header says, so an
+older Worker's `Retry-After: 30` is treated alike;
 429 `{"error": "budget", "ceiling": "class_a" | "class_b" | "bytes_written" | "stored_bytes"}` above a ceiling (the
 client never retries a budget 429; a zone rate-limit 429 is `text/plain` with `Retry-After` and is retried after it);
 503 `{"error": "budget ledger unavailable"}` (retryable: an unmetered request is never let through); 404 for any other
@@ -278,7 +279,10 @@ and the minute's refetch throttle then answered 503 to every other request of th
   the write runs after the answer (`ctx.waitUntil`);
 - with no usable key at all (keyless), a failed fetch is retried once in the same request after 0.75 s (3 s timeout),
   and the next request may fetch again 2 s later instead of a minute later; concurrent requests share one fetch. The
-  unknown-`kid` throttle of a known key set is unchanged. Only a truly keyless isolate answers 503.
+  unknown-`kid` throttle of a known key set is unchanged;
+- an unknown `kid` is a 401 only when the isolate's last GitHub fetch succeeded (GitHub itself does not list it). After
+  a failed fetch it is a 503 `unavailable` (reason `unknown kid, signing keys unconfirmed`): a copy can predate a key
+  rotation (a bucket copy is rewritten at most once an hour per isolate), and the client retries a 503 but never a 401.
 
 These bucket operations happen before the token is verified, so no route reserves them: the Worker charges them to the
 ledger's day row after the answer (`charge`: Class A, Class B and bytes written, never refused, no `requests`), and

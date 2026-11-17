@@ -752,6 +752,62 @@ test('state auth: with a bucket the unknown-kid throttle is unchanged: one refet
   assert.equal(await status(ks.key('k2')), 'ok');
 });
 
+test('state auth: an unknown kid GitHub could not be asked about is a retryable 503, not a final 401', async () => {
+  const { bucket } = fakeJwksBucket();
+  const clock = { t: T0 };
+  const github: { up: boolean; doc?: unknown } = { up: true };
+  const rotated = { keys: [...JWKS.keys, jwkOf(other.publicKey, 'k2')] };
+
+  // A cold isolate adopts a FRESH bucket copy written before GitHub published k2, and GitHub is unreachable: the copy
+  // lacks k2, so the request asks GitHub, fails, and answers 503 (the client retries), never 401.
+  const warm = isolate({ bucket, clock, github });
+  assert.equal(await status(warm.key()), 'ok');
+  clock.t += 10 * 60_000;
+  github.up = false;
+  const cold = isolate({ bucket, clock, github });
+  assert.equal(await status(cold.key('k2')), 503);
+  assert.deepEqual(cold.events, ['bucket', 'github-failed']);
+  // Inside the minute's throttle the last fetch is still the failed one: 503 again, and no second fetch.
+  assert.equal(await status(cold.key('k2')), 503);
+  assert.equal(cold.fetches, 1);
+  // GitHub is back with k2 a minute later: verified.
+  github.up = true;
+  github.doc = rotated;
+  clock.t += REFETCH_MIN_MS;
+  assert.equal(await status(cold.key('k2')), 'ok');
+
+  // A warm isolate whose stale copy predates k2, GitHub down: 503, not 401.
+  github.doc = undefined;
+  const stale = isolate({ bucket: fakeJwksBucket().bucket, clock, github });
+  assert.equal(await status(stale.key()), 'ok');
+  clock.t += JWKS_TTL_MS + 1;
+  github.up = false;
+  assert.equal(await status(stale.key('k2')), 503);
+
+  // GitHub answering without the kid is final: 401, inside the throttle too.
+  github.up = true;
+  clock.t += REFETCH_MIN_MS;
+  assert.equal(await status(stale.key('made-up')), 401);
+  assert.equal(await status(stale.key('made-up-2')), 401);
+});
+
+test('state Worker: an unknown kid after a failed JWKS fetch answers 503 unavailable with Retry-After 3', async () => {
+  let up = true;
+  const h = harness({
+    jwks: async () => {
+      if (!up) throw new Error('fetch failed');
+      return JWKS;
+    },
+  });
+  assert.equal((await h.call('GET', '/v1/budget')).status, 200);
+  up = false;
+  h.advance(REFETCH_MIN_MS);
+  const res = await h.call('GET', '/v1/budget', { auth: token({}, { kid: 'k2' }, other.privateKey) });
+  assert.equal(res.status, 503);
+  assert.equal(res.headers.get('retry-after'), '3');
+  assert.deepEqual(await res.json(), { error: 'unavailable', reason: 'unknown kid, signing keys unconfirmed' });
+});
+
 test('state auth: the bucket copy is rewritten when it changed or aged a day, at most once an hour per isolate', async () => {
   const { bucket, objects, ops } = fakeJwksBucket();
   const clock = { t: T0 };

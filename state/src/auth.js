@@ -42,10 +42,12 @@
 //
 // Refetching: with a usable key copy (fresh or stale) the network is asked at most once per REFETCH_MIN_MS per isolate,
 // whether the copy is old or a token names a kid the copy lacks (GitHub rotated its key), so a flood of tokens with
-// made-up kids costs one JWKS fetch a minute. With NO usable key at all (keyless: nothing in the isolate, the cache or
+// made-up kids costs one JWKS fetch a minute. An unknown kid is a 401 only when the isolate's last fetch succeeded (GitHub
+// itself lacks the kid); after a failed one it is a 503 like a keyless isolate's (the copy may predate a rotation, and
+// the client retries a 503 but never a 401). With NO usable key at all (keyless: nothing in the isolate, the cache or
 // the bucket, or all older than the stale window) the isolate cannot serve anything, so a throttle buys nothing: a
 // failed fetch is retried once in the same request after KEYLESS_RETRY_DELAY_MS, and the next request may fetch again
-// after KEYLESS_REFETCH_MS. Concurrent requests of an isolate share one fetch. Only a truly keyless state answers 503.
+// after KEYLESS_REFETCH_MS. Concurrent requests of an isolate share one fetch.
 //
 // Cost: the bucket reads and writes happen before the token is verified (the key is needed to verify it), so they are
 // metered apart from any route's reservation: the caller's `meter` gets the operations once per request (the Worker
@@ -273,6 +275,8 @@ export function createKeyStore({ fetchJwks = fetchJwksFromGitHub, cache = null, 
   /** @type {{keys: Map<string, CryptoKey>, fetchedMs: number, text: string} | null} */
   let current = null;
   let lastAttemptMs = -Infinity;
+  /** Whether the isolate's last GitHub fetch succeeded (an unknown kid is final only then). */
+  let lastAttemptOk = false;
   let cacheChecked = false;
   /** The next instant a bucket read may start (BUCKET_READ_MIN_MS after one that answered, KEYLESS_REFETCH_MS after
    *  one that threw). */
@@ -413,10 +417,16 @@ export function createKeyStore({ fetchJwks = fetchJwksFromGitHub, cache = null, 
   /** One GitHub fetch: the copy, or a throw. */
   async function attempt(timeoutMs) {
     lastAttemptMs = now();
-    const text = JSON.stringify(await fetchJwks(timeoutMs));
-    const copy = await copyOf(text, now());
-    if (!copy) throw new Error('JWKS without a usable RS256 key');
-    return copy;
+    try {
+      const text = JSON.stringify(await fetchJwks(timeoutMs));
+      const copy = await copyOf(text, now());
+      if (!copy) throw new Error('JWKS without a usable RS256 key');
+      lastAttemptOk = true;
+      return copy;
+    } catch (err) {
+      lastAttemptOk = false;
+      throw err;
+    }
   }
 
   /** Fetch from GitHub (twice when keyless), then refresh the colo cache and, when due, the bucket copy. */
@@ -455,7 +465,8 @@ export function createKeyStore({ fetchJwks = fetchJwksFromGitHub, cache = null, 
     }
   }
 
-  /** The verification key for kid, or an AuthError (401 unknown kid, 503 no keys at all). */
+  /** The verification key for kid, or an AuthError (401 unknown kid, 503 no keys at all or an unknown kid GitHub could
+   *  not be asked about). */
   async function keyFor(kid, cacheKey, store = {}) {
     try {
       if (!cacheChecked || !fresh(current)) {
@@ -490,7 +501,13 @@ export function createKeyStore({ fetchJwks = fetchJwksFromGitHub, cache = null, 
       if (usable(current)) {
         const key = current.keys.get(kid);
         if (key) return key;
-        throw new AuthError(401, 'unknown kid');
+        // An unknown kid is final (401) only when GitHub's latest answer lacks it: the isolate's last fetch (this
+        // request's, a shared one, or one inside the minute's throttle) succeeded. When it failed, the copy may simply
+        // predate a rotation (a cache or bucket copy can be an hour behind GitHub even while fresh), so the answer is
+        // the keyless 503: the client retries a real token instead of failing its run on a 401 it never retries. A
+        // made-up kid still costs at most one fetch a minute.
+        if (lastAttemptOk) throw new AuthError(401, 'unknown kid');
+        throw new AuthError(503, 'unknown kid, signing keys unconfirmed');
       }
       throw new AuthError(503, 'signing keys unavailable');
     } finally {

@@ -32,8 +32,9 @@
 // Why the bucket copy: on 2026-11-16 aggregate runs 43907386794 and 43964170954 got 503 {"error":"unavailable"}: a cold
 // isolate whose colo's Cache API copy had been evicted, and whose one GitHub fetch (5 s timeout) failed, had no key at
 // all, and the 60 s refetch throttle then made every other request of that isolate 503 too (both PUTs of one run). A
-// cold isolate now reads the bucket copy (one Class B GET, at most once per BUCKET_READ_MIN_MS per isolate) before it
-// asks GitHub, and puts what it found back into the colo's cache. After a successful fetch the isolate rewrites the
+// cold isolate now reads the bucket copy (one Class B GET, at most once per BUCKET_READ_MIN_MS per isolate, or
+// KEYLESS_REFETCH_MS after a read that threw; concurrent cold requests share one read) before it asks GitHub, and puts
+// what it found back into the colo's cache. After a successful fetch the isolate rewrites the
 // bucket copy when it differs from the copy it knows of, when it knows of none, or when the known copy's fetchedMs is
 // older than BUCKET_RESTAMP_MS (so its stale window keeps meaning "GitHub served this within 7 days"), and never more
 // than once per BUCKET_WRITE_MIN_MS per isolate: about one Class A PUT per colo a day. The bucket is written only with
@@ -265,14 +266,19 @@ const realSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * keyFor(kid, cacheKey, store): store holds the request's deps, all optional: bucket (the R2 binding holding
  * JWKS_BUCKET_KEY, or null), meter({classA, classB, bytes}) (called at most once per keyFor with the bucket operations
  * it caused), defer(promise) (ctx.waitUntil: the bucket write runs after the answer; without it, it is awaited), events
- * (an array the store appends what it did to: cache, bucket, bucket-miss, github, github-failed, bucket-write).
+ * (an array the store appends what it did to: cache, bucket, bucket-miss, bucket-failed, github, github-failed,
+ * bucket-write).
  */
 export function createKeyStore({ fetchJwks = fetchJwksFromGitHub, cache = null, now = Date.now, sleep = realSleep } = {}) {
   /** @type {{keys: Map<string, CryptoKey>, fetchedMs: number, text: string} | null} */
   let current = null;
   let lastAttemptMs = -Infinity;
   let cacheChecked = false;
-  let bucketReadMs = -Infinity;
+  /** The next instant a bucket read may start (BUCKET_READ_MIN_MS after one that answered, KEYLESS_REFETCH_MS after
+   *  one that threw). */
+  let bucketNextMs = -Infinity;
+  /** The shared bucket read of concurrent cold requests. */
+  let bucketRead = null;
   let bucketWriteMs = -Infinity;
   /** The bucket copy as this isolate last saw it (its read or write, or the colo cache's note): {sha, fetchedMs}, or
    *  {sha: null} when the bucket had none. null: unknown. */
@@ -340,27 +346,41 @@ export function createKeyStore({ fetchJwks = fetchJwksFromGitHub, cache = null, 
     }
   }
 
+  /** {copy (or null), answered: false when the read threw}. */
   async function fromBucket(bucket) {
     unmetered.classB += 1;
     try {
       const obj = await bucket.get(JWKS_BUCKET_KEY);
       if (!obj) {
         stored = { sha: null, fetchedMs: null };
-        return null;
+        return { copy: null, answered: true };
       }
       if (obj.size > MAX_JWKS_BYTES) {
         await obj.body?.cancel?.().catch(() => {});
-        return null;
+        return { copy: null, answered: true };
       }
       const text = await new Response(obj.body).text();
       const fetchedMs = Number(obj.customMetadata?.fetched_ms);
       const copy = await copyOf(text, fetchedMs);
       if (copy) stored = { sha: await sha256Hex(text), fetchedMs };
-      return copy;
+      return { copy, answered: true };
     } catch (err) {
       console.error(JSON.stringify({ t: 'feed-state', event: 'jwks-bucket-read-failed', error: String(err) }));
-      return null;
+      return { copy: null, answered: false };
     }
+  }
+
+  /** One bucket read, shared by the concurrent requests that wait for it; adopts the copy and puts it into the colo
+   *  cache. A read that answered (a copy or none) is not repeated for BUCKET_READ_MIN_MS; one that threw (a transient
+   *  R2 error) may be tried again after KEYLESS_REFETCH_MS, so it does not leave 10 s of keyless requests behind it. */
+  async function readBucket(bucket, cacheKey, store) {
+    const started = now();
+    const { copy, answered } = await fromBucket(bucket);
+    bucketNextMs = started + (answered ? BUCKET_READ_MIN_MS : KEYLESS_REFETCH_MS);
+    if (adopt(copy)) {
+      note(store, 'bucket');
+      await toCache(cacheKey, copy);
+    } else if (!copy) note(store, answered ? 'bucket-miss' : 'bucket-failed');
   }
 
   /** Rewrite the bucket copy after a successful fetch, when it is due (see the header). Returns {done} (the write in
@@ -405,7 +425,9 @@ export function createKeyStore({ fetchJwks = fetchJwksFromGitHub, cache = null, 
     try {
       copy = await attempt(JWKS_FETCH_TIMEOUT_MS);
     } catch (err) {
-      if (!keyless) throw err;
+      // No in-request retry with a usable copy, including one a concurrent request adopted meanwhile (the cache or the
+      // bucket): the request is served from it, and the minute's throttle holds.
+      if (!keyless || usable(current)) throw err;
       note(store, 'github-failed');
       console.error(JSON.stringify({ t: 'feed-state', event: 'jwks-fetch-failed', keyless: true, attempt: 1, error: String(err) }));
       await sleep(KEYLESS_RETRY_DELAY_MS);
@@ -440,14 +462,16 @@ export function createKeyStore({ fetchJwks = fetchJwksFromGitHub, cache = null, 
         cacheChecked = true;
         if (adopt(await fromCache(cacheKey))) note(store, 'cache');
       }
-      // A cold isolate whose colo has no usable copy: the bucket's last good copy, before GitHub.
-      if (!usable(current) && store.bucket && now() - bucketReadMs >= BUCKET_READ_MIN_MS) {
-        bucketReadMs = now();
-        const copy = await fromBucket(store.bucket);
-        if (adopt(copy)) {
-          note(store, 'bucket');
-          await toCache(cacheKey, copy);
-        } else if (!copy) note(store, 'bucket-miss');
+      // A cold isolate whose colo has no usable copy: the bucket's last good copy, before GitHub. Concurrent cold requests
+      // share one read: a request arriving while it runs waits for it instead of deciding it is keyless and starting a
+      // GitHub fetch with its in-request retry (about 9 s with GitHub down) beside a copy that lands in milliseconds.
+      if (!usable(current) && store.bucket) {
+        if (!bucketRead && now() >= bucketNextMs) {
+          bucketRead = readBucket(store.bucket, cacheKey, store).finally(() => {
+            bucketRead = null;
+          });
+        }
+        if (bucketRead) await bucketRead;
       }
       const known = current?.keys.get(kid);
       if (fresh(current) && known) return known;

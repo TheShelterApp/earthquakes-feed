@@ -270,8 +270,9 @@ The Worker verifies (401 on any failure):
 and the minute's refetch throttle then answered 503 to every other request of that isolate (both PUTs of one run). So:
 - the bucket keeps the last good JWKS document at `meta/jwks/github-actions.json` (custom metadata `fetched_ms`, the
   instant GitHub served it, and `sha256`), outside `cas/`, so GC never lists or deletes it, and no route writes `meta/`;
-- an isolate with no usable copy after the Cache API reads it (one GET, at most once per 10 s per isolate) before it
-  asks GitHub, and puts what it found back into the colo's cache; the 7-day stale bound counts from `fetched_ms`;
+- an isolate with no usable copy after the Cache API reads it (one GET, at most once per 10 s per isolate, or 2 s
+  after a read that failed; concurrent cold requests wait for the one read instead of going to GitHub keyless) before
+  it asks GitHub, and puts what it found back into the colo's cache; the 7-day stale bound counts from `fetched_ms`;
 - after a successful fetch an isolate rewrites it when it differs from the copy the isolate knows of, when it knows of
   none, or when the known copy is a day old, at most once an hour per isolate (in practice about one PUT a colo a day);
   the write runs after the answer (`ctx.waitUntil`);
@@ -370,7 +371,7 @@ The feed's own use: about 1,500 requests a day (about 288 aggregate runs, each o
 roughly 1-2 % of every ceiling. The ledger writes one day row per authenticated request (the account's Durable Object
 limit is 100,000 rows written a day, shared with the heartbeat ledger and the alerts gateway); an unauthenticated request
 never reaches a reservation or a blob. The one exception is bounded per isolate: an isolate with no signing key reads
-the JWKS copy (and charges that GET) at most once per 10 s, whoever's token arrives.
+the JWKS copy (and charges that GET) at most once per 10 s (2 s after a read that failed), whoever's token arrives.
 
 **The Workers request cap is shared.** Workers Free allows 100,000 requests a day per account, and the platform's API
 budgets most of it. When the account hits the cap, Cloudflare answers Error 1027 until 00:00 UTC: in phase 3a the
@@ -385,7 +386,8 @@ One JSON line per request (Workers Logs, kept 3 days; `wrangler tail` live):
 `{"t":"feed-state","rid","method","route","path","workflow","run_id","run_attempt","repository_id","priority","lane",
 "seq","restore_of","reflog","probe","sha","n","bytes","missing","deleted","dry_run","ops","ledger","status","ms","error",
 "cause","jwks","jwks_ops"}` (fields that do not apply are absent; `jwks` lists what the key store did beyond its
-isolate copy, e.g. `bucket-miss,github,bucket-write`, `bucket,github-failed`, `cache` or `github-failed,github-failed`,
+isolate copy, e.g. `bucket-miss,github,bucket-write`, `bucket,github-failed`, `cache`, `bucket-failed` (the read threw)
+or `github-failed,github-failed`,
 and `jwks_ops` its bucket operations; `repository_id` only for a peer repository; `reflog` is
 `<previous>/<entry>` of a ref PUT). A batchGet logs when its
 stream ends. The token, the claims other than the run and workflow, and the request bodies are never logged. A failed

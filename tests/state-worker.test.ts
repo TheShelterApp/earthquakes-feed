@@ -655,6 +655,83 @@ test('state auth: concurrent keyless requests share one fetch', async () => {
   assert.equal(ks.fetches, 1);
 });
 
+test('state auth: concurrent cold requests wait for the one bucket read instead of going keyless to a GitHub that is down', async () => {
+  const { bucket, ops } = fakeJwksBucket();
+  const clock = { t: T0 };
+  // A copy written two hours ago (past its TTL, inside the stale window).
+  const warm = isolate({ bucket, clock, github: { up: true } });
+  assert.equal(await status(warm.key()), 'ok');
+  clock.t = T0 + 2 * 3_600_000;
+  const cold = isolate({ bucket, clock, github: { up: false } });
+  const all = await Promise.all(Array.from({ length: 5 }, () => status(cold.key())));
+  assert.deepEqual(all, ['ok', 'ok', 'ok', 'ok', 'ok']);
+  assert.equal(ops.get, 2, 'one read for the five (the warm isolate made the other)');
+  // One GitHub attempt for the stale copy, shared, and never the keyless retry or its pause.
+  assert.equal(cold.fetches, 1);
+  assert.deepEqual(cold.sleeps, []);
+});
+
+test('state auth: a bucket read that threw is tried again after KEYLESS_REFETCH_MS, not BUCKET_READ_MIN_MS', async () => {
+  const { bucket, ops } = fakeJwksBucket();
+  const clock = { t: T0 };
+  const warm = isolate({ bucket, clock, github: { up: true } });
+  assert.equal(await status(warm.key()), 'ok');
+  let broken = true;
+  const flaky: JwksBucket = {
+    get: async (key) => {
+      if (broken) {
+        ops.get++;
+        throw new Error('R2 internal error');
+      }
+      return bucket.get(key);
+    },
+    put: bucket.put,
+  };
+  clock.t = T0 + 2 * 3_600_000;
+  const cold = isolate({ bucket: flaky, clock, github: { up: false } });
+  assert.equal(await status(cold.key()), 503);
+  assert.deepEqual(cold.events, ['bucket-failed', 'github-failed', 'github-failed']);
+  broken = false;
+  clock.t += KEYLESS_REFETCH_MS;
+  assert.ok(KEYLESS_REFETCH_MS < BUCKET_READ_MIN_MS);
+  assert.equal(await status(cold.key()), 'ok');
+  // The copy is usable, so GitHub (failed 2 s ago) waits for the minute's throttle.
+  assert.deepEqual(cold.events, ['bucket']);
+  assert.equal(ops.get, 3);
+});
+
+test('state auth: a keyless fetch that fails after a concurrent request adopted a copy is not retried in the request', async () => {
+  const { bucket, objects } = fakeJwksBucket();
+  const clock = { t: T0 };
+  let fetches = 0;
+  const sleeps: number[] = [];
+  let fail: (e: Error) => void = () => {};
+  const ks = createKeyStore({
+    // The first fetch hangs until the test fails it; any later one fails at once (GitHub down).
+    fetchJwks: () => {
+      fetches++;
+      return fetches === 1 ? new Promise((_, reject) => (fail = reject)) : Promise.reject(new Error('fetch failed'));
+    },
+    now: () => clock.t,
+    sleep: async (ms) => void sleeps.push(ms),
+  });
+  const key = () => ks.keyFor('k1', undefined, { bucket });
+  // A: no copy anywhere, so keyless; its GitHub fetch hangs.
+  const a = status(key());
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(fetches, 1);
+  // Meanwhile another isolate wrote the bucket copy, and B (past the read throttle) adopts it.
+  const writer = isolate({ bucket, clock, github: { up: true } });
+  assert.equal(await status(writer.key()), 'ok');
+  assert.ok(objects.size === 1);
+  clock.t += BUCKET_READ_MIN_MS;
+  assert.equal(await status(key()), 'ok', 'B: the fresh bucket copy');
+  fail(new Error('fetch failed: connect timeout'));
+  assert.equal(await a, 'ok', 'A: served from the copy B adopted');
+  assert.equal(fetches, 1, 'no in-request retry once a usable copy is held');
+  assert.deepEqual(sleeps, []);
+});
+
 test('state auth: with a bucket the unknown-kid throttle is unchanged: one refetch a minute, no bucket read for a made-up kid', async () => {
   const { bucket, ops } = fakeJwksBucket();
   const clock = { t: T0 };

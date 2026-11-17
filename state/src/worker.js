@@ -16,7 +16,8 @@
 // request validation → the budget reservation (budget.js, Durable Object BUDGET) → the bucket (binding STATE).
 // Order matters for cost: an unauthenticated request never reaches a route's reservation or the blobs, so a flood costs
 // Worker requests only (account-wide 100,000/day on Workers Free; the zone's rate limits sit in front); the one
-// exception is bounded per isolate: the JWKS copy's GET (and its charge) at most once per 10 s while it has no key.
+// exception is bounded per isolate: the JWKS copy's GET (and its charge) at most once per 10 s (2 s after a failed
+// read) while it has no key.
 //
 // One structured JSON line per request (route, workflow, run_id, run_attempt, lane, n, bytes, status, ms, error, ops,
 // ledger, jwks, jwks_ops), never the token; every response carries x-request-id (the cf-ray when there is one), which

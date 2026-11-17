@@ -400,6 +400,20 @@ the next run; and a statistics index more than 3 days behind is `feed:stats-thro
 the Worker would need a free minute for each (`workflowFor` is hour-aware since the state jobs moved to it, but `:41` is
 backfill's and `:43` would sit beside it).
 
+### Dependency updates (`.github/dependabot.yml`)
+
+Dependabot proposes version updates every Monday for npm (the root `package.json`, the only one: `heartbeat/` and
+`state/` have none and bundle from the root `node_modules`) and for the workflows' actions: one pull request per
+ecosystem holding every minor and patch update, a pull request of its own for each major, at most 3 open per
+ecosystem, and nothing released less than 7 days ago (`cooldown`; security updates are never delayed). Actions stay
+pinned by full commit SHA: Dependabot moves the SHA and the `# vX.Y.Z` comment together, in every workflow at once,
+which the pin test (`tests/workflow-actions.test.ts`) requires. It leaves `@theshelter/signing` alone (re-pinned by
+hand, `.npmrc`) and `@types/node` majors (they follow `.nvmrc`'s Node 22). A Dependabot pull request runs
+`validate.yml` like any other, under the same `.npmrc` (`ignore-scripts=true`): a new dependency with an install
+script fails `tests/npm-install.test.ts` on purpose. Merge only a green one, after reading the release notes of a
+major; nothing deploys from a pull request. Security alerts, security updates and secret scanning are switched on in
+the repository's settings (Settings → Advanced Security), not in this file.
+
 ## Health watchdogs (`.github/workflows/health.yml`)
 
 The heartbeat Worker dispatches `health.yml` every 15 minutes (:07, :22, :37, :52). The workflow's own `:25` cron is

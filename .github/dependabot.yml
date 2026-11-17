@@ -1,0 +1,53 @@
+# Dependabot version updates (owner decision 2026-11-17; README.md, Dependency updates). Security updates and
+# alerts are switched on in the repository's settings, not here; this file only schedules version updates.
+#
+# One weekly pull request per ecosystem for every minor and patch update together; a major update gets its own pull
+# request, read like any other (release notes, then the PR's validate run). `cooldown` waits 7 days after a release
+# before proposing it, so a hijacked or broken release is usually yanked before it reaches a PR (version updates only:
+# a security update is never delayed). tests/workflow-actions.test.ts checks this file's shape.
+version: 2
+updates:
+  # The only package.json is the root one: heartbeat/ and state/ are Workers bundled by wrangler from the root
+  # node_modules, with no package.json of their own (a new one needs its directory here; the test fails until then).
+  # Dependabot's lockfile update and the PR's `npm ci` run under the repository's .npmrc: ignore-scripts=true, and
+  # the GitLab registry for the @theshelter scope. A new dependency with an install script fails
+  # tests/npm-install.test.ts on the PR, by design (look at it: does it work without the script?).
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    groups:
+      npm-minor-and-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
+    ignore:
+      # Our own package, published to the GitLab registry with only a sha1 shasum: a new version is pinned and
+      # checked by hand (.npmrc says how; tests/npm-install.test.ts holds the pin).
+      - dependency-name: "@theshelter/signing"
+      # The types follow the Node major of .nvmrc (22); a new major comes with a Node upgrade, not on its own.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+
+  # directory "/" covers .github/workflows (and a root action.yml). The repository's composite action,
+  # .github/actions/derive-publish, uses no other action, so it needs no entry (the test fails if it ever does).
+  # Every action stays pinned by its full commit SHA: Dependabot replaces the SHA with the new release's and updates
+  # the "# vX.Y.Z" version comment on the same line (GitHub docs, "Secure use reference", checked 2026-11-17; a SHA on no
+  # tag would move to the latest commit, which none of ours is). Dependabot raises no alert for a SHA-pinned action,
+  # only for a tag-pinned one, so a fixed action reaches us through these weekly updates. The pin test
+  # (tests/workflow-actions.test.ts) rejects a tag pin and an action pinned differently in two files.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    groups:
+      actions-minor-and-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]

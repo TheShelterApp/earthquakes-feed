@@ -25,21 +25,26 @@ test('heartbeat: the hour, minute by minute', () => {
   assert.equal(minutes.filter((m) => workflowFor(m, 9) != null).length, 19);
 });
 
-test('heartbeat: the day: state-backup at 00:11 and state-gc at 03:33 UTC, on minutes no hourly workflow uses', () => {
+test('heartbeat: the day: state-backup at 00:31 and 06:31, state-gc at 03:33 UTC, on minutes no hourly workflow uses', () => {
   const at = (workflow: string): string[] =>
     hours.flatMap((h) => minutes.filter((m) => workflowFor(m, h) === workflow).map((m) => `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`));
-  assert.deepEqual(at('state-backup.yml'), ['00:11']);
+  assert.deepEqual(at('state-backup.yml'), ['00:31', '06:31']);
   assert.deepEqual(at('state-gc.yml'), ['03:33']);
-  // Every other hour is the plain hour; hours 0 and 3 have one dispatch more, and every hourly workflow keeps its minutes.
+  // Every other hour is the plain hour; hours 0, 3 and 6 have one dispatch more, and every hourly workflow keeps its minutes.
   for (const h of hours) {
-    assert.equal(minutes.filter((m) => workflowFor(m, h) != null).length, h === 0 || h === 3 ? 20 : 19, `hour ${h}`);
+    assert.equal(minutes.filter((m) => workflowFor(m, h) != null).length, h === 0 || h === 3 || h === 6 ? 20 : 19, `hour ${h}`);
     for (const w of ['aggregate.yml', 'health.yml', 'backfill.yml', 'first-solutions.yml', 'history.yml']) assert.deepEqual(minutesOf(w, h), minutesOf(w), `${w} at hour ${h}`);
   }
   // A daily minute is free in every hour: no hourly workflow loses a tick to it, and (workflow, minute) stays one claim.
   for (const [, m] of DAILY) assert.equal(workflowFor(m, 9), null, `minute ${m} is unused by the hourly fan-out`);
-  // 00:11 leaves the backup 11 minutes after midnight's last aggregate commit; GC runs after the backup.
-  const [backup, gc] = DAILY;
-  assert.ok(backup![0] * 60 + backup![1] < gc![0] * 60 + gc![1]);
+  // 00:31 leaves the 23:55 aggregate run (queued behind the writer group) 31 minutes to push midnight's last commit
+  // before the first archive of the day, which is never replaced; GC runs after that backup.
+  const at0 = (w: string): number[] => DAILY.filter(([, , x]) => x === w).map(([h, m]) => h * 60 + m);
+  const backups = at0('state-backup.yml');
+  assert.ok(backups[0]! >= 30 && backups[0]! < at0('state-gc.yml')[0]!);
+  // feed:state-backup goes P2 when the newest day is 36 h old, i.e. at 12:00 UTC of the next day: one lost dispatch or
+  // failed run of the first backup is retried by the second, hours before that line (a backup takes minutes).
+  assert.ok(backups[1]! <= 12 * 60 - 4 * 60, 'the second backup leaves hours before 12:00 UTC');
 });
 
 test('heartbeat: history gets its own minute, away from the writers and from first-solutions', () => {
@@ -59,15 +64,25 @@ test('heartbeat: only first-solutions and state-gc are dispatched with inputs (G
 
 test('heartbeat: the daily state jobs are dispatched once on their minute; their GitHub crons stay as the fallback', async () => {
   const h = harness();
-  await h.activate(['2026-11-17T00:11:22Z', '2026-11-17T00:11:51Z', '2026-11-17T01:11:22Z', '2026-11-17T03:33:22Z', '2026-11-17T03:33:51Z', '2026-11-17T04:33:22Z']);
+  await h.activate([
+    '2026-11-17T00:31:22Z',
+    '2026-11-17T00:31:51Z',
+    '2026-11-17T01:31:22Z',
+    '2026-11-17T03:33:22Z',
+    '2026-11-17T03:33:51Z',
+    '2026-11-17T04:33:22Z',
+    '2026-11-17T06:31:22Z',
+    '2026-11-17T06:31:51Z',
+  ]);
   assert.deepEqual(
     h.calls.map((c) => [c.workflow, c.body]),
     [
       ['state-backup.yml', { ref: 'main' }],
       ['state-gc.yml', { ref: 'main', inputs: { tick: '1' } }],
+      ['state-backup.yml', { ref: 'main' }],
     ],
   );
-  assert.equal(h.logs.filter((l) => l.endsWith(': duplicate')).length, 2);
+  assert.equal(h.logs.filter((l) => l.endsWith(': duplicate')).length, 3);
   assert.deepEqual(h.failures, []);
 
   // state-gc declares `tick`, and a tick is the scheduled run (STATE_GC_SCHEDULED; a refused gate is a warning), never

@@ -362,7 +362,8 @@ variable.
 ### The heartbeat Worker (`heartbeat/`)
 
 A cron-only Cloudflare Worker that dispatches `aggregate` (every 5 min), `health` (every 15 min),
-`backfill`, `first-solutions` and `history` (hourly), and the state store's daily `state-backup` (00:11 UTC) and
+`backfill`, `first-solutions` and `history` (hourly), and the state store's `state-backup` (00:31 and 06:31 UTC: the second retries a lost first
+dispatch or failed run before `feed:state-backup`'s P2 line at 12:00 UTC of the next day) and
 `state-gc` (03:33 UTC, with `tick=1`: the scheduled run) through the Actions API with a fine-grained
 `GH_PAT` (Actions: write). The two daily jobs keep their own GitHub crons (00:41, 03:23) as the fallback for a Worker
 outage; GitHub delivered neither on 2026-11-16 or 11-17. It has no HTTP surface (`workers_dev = false`, `preview_urls = false`).

@@ -19,8 +19,8 @@
 //
 // Cost on the Workers Free plan (account-wide, shared with the alerts gateway: DO rows written 100,000/day, rows read
 // 5,000,000/day, requests 100,000/day). Measured in workerd: a claim writes 2 rows (the insert and the one row pruned)
-// and reads 3, a duplicate writes 0 and reads 2, a release writes 1. 19 dispatches an hour and 2 a day = about 916 rows
-// written, 1,400 rows read and 458 requests a day (twice the reads and requests while Cloudflare doubles the activations).
+// and reads 3, a duplicate writes 0 and reads 2, a release writes 1. 19 dispatches an hour and 3 a day = about 918 rows
+// written, 1,400 rows read and 459 requests a day (twice the reads and requests while Cloudflare doubles the activations).
 //
 // Pure functions over a `sql.exec(query, ...bindings)` handle (the Durable Object's `ctx.storage.sql`), so the tests
 // run them on node:sqlite; heartbeat/src/index.js wraps them in the Durable Object class.

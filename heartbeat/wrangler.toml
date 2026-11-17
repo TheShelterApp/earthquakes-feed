@@ -10,7 +10,7 @@ preview_urls = false
 
 # GitHub throttles/delays low-activity scheduled workflows, so this external tick
 # drives them reliably: aggregate every 5 min, health every 15 min, hourly backfill (:41),
-# first-solutions (:48) and history (:26), and daily state-backup (00:11 UTC) and state-gc (03:33 UTC).
+# first-solutions (:48) and history (:26), state-backup (00:31 and 06:31 UTC) and state-gc (03:33 UTC).
 # health's own hourly GitHub cron was delivered ~20x per 48h with 2-4.5h gaps, so a
 # 28-minute Pages outage went entirely unreported (see src/worker.js).
 # ONE per-minute cron (not three): the account is capped at 5 cron triggers on the
@@ -23,7 +23,7 @@ crons = ["* * * * *"]
 
 # The dispatch ledger (src/ledger.js): one SQLite-backed Durable Object that lets exactly one cron activation dispatch
 # each (workflow, minute) — Cron Triggers fired twice a minute during the 2026-10-14 Cloudflare incident. SQLite-backed
-# (the only kind on the Workers Free plan); about 916 rows written and 458 requests a day.
+# (the only kind on the Workers Free plan); about 918 rows written and 459 requests a day.
 [[durable_objects.bindings]]
 name = "DISPATCH_LEDGER"
 class_name = "DispatchLedger"

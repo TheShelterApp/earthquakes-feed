@@ -10,7 +10,7 @@ import type { EventNode } from './types.js';
 /**
  * Static share pages (share links, 2026-11; APIs.md, Share pages): `share/event/<feed id>.html` for every significant
  * live event of the detail window, plus the same page under each retired id whose live survivor has one, and
- * `share/event/404.html`, the generic page Cloudflare Pages answers (status 404) for every other path under
+ * `share/event/404.html`, the generic (fallback) page Cloudflare Pages answers (status 404) for every other path under
  * `share/event/`. The site `theshelter.app` maps `/event/:id` to `/share/event/:id` here with one static `_redirects`
  * rule, so a shared link gets a rich preview with no code running anywhere (no Worker or Function invocation).
  *
@@ -320,14 +320,22 @@ const STORE_BADGE = `<p class="store"><a href="${APP_STORE_URL}"><img src="${SIT
 const LEGAL_FOOTER = `<footer class="wrap"><a href="${SITE_ORIGIN}/privacy">Privacy</a> · <a href="${SITE_ORIGIN}/support">Support</a> · <a href="${SITE_ORIGIN}/terms">Terms</a></footer>`;
 
 /**
- * `share/event/404.html`: what every id without a page gets (an older or smaller event, a mistyped or crafted id). It
- * says nothing about the id: no date, no id, nothing a crafted link could put on a preview. Served at any id, so every
- * link is absolute.
+ * `share/event/404.html`: what every id without a page gets (an event below the bar, older than the window or past the
+ * cap; a mistyped or crafted id). An honest fallback (owner decision 2026-11-17): the link is real for almost everyone
+ * who follows it, so the page says the earthquake is in the app, why the web has no page for it, and offers the App
+ * Store and the site, instead of a "not found". It says nothing about the id: no date, no id, nothing a crafted link
+ * could put on a preview (a crafted id gets the same page). Served at any id, so every link is absolute.
  */
+export const NOT_FOUND_TITLE = `This earthquake is in the ${SITE_NAME} app`;
+export const NOT_FOUND_DESCRIPTION = `The ${SITE_NAME} app shows every earthquake in its feed, small ones too. Get it on the App Store.`;
+
 export function notFoundPageHtml(): string {
-  const title = `An earthquake on ${SITE_NAME}`;
-  const description = 'Follow earthquakes around the world and near you in Shelter.';
+  const title = NOT_FOUND_TITLE;
+  const description = NOT_FOUND_DESCRIPTION;
   const image = ogImageUrl('generic');
+  const imageAlt = 'An earthquake';
+  // APP_STORE_URL is the link every share page and the stories pages carry; it answers 404 until the store page is live
+  // (the site's landing links the store itself until then), and goes live with it unchanged.
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -347,12 +355,12 @@ export function notFoundPageHtml(): string {
 <meta property="og:image:type" content="image/png">
 <meta property="og:image:width" content="${OG_IMAGE_WIDTH}">
 <meta property="og:image:height" content="${OG_IMAGE_HEIGHT}">
-<meta property="og:image:alt" content="${title}">
+<meta property="og:image:alt" content="${imageAlt}">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="${title}">
 <meta name="twitter:description" content="${description}">
 <meta name="twitter:image" content="${image}">
-<meta name="twitter:image:alt" content="${title}">
+<meta name="twitter:image:alt" content="${imageAlt}">
 <style>${PAGE_CSS}</style>
 </head>
 <body>
@@ -361,10 +369,11 @@ ${BRAND_HEADER}
 <article class="card">
 <p class="label">Earthquake</p>
 <h1>${title}</h1>
-<p class="text">This link has no page here. Pages cover about the last ${EVENT_MAP_HORIZON_DAYS} days: earthquakes of magnitude 4 and above, felt earthquakes and those with a tsunami flag or an impact alert. Shelter shows the latest earthquakes around the world.</p>
-<p class="open"><a class="button" href="${SITE_ORIGIN}/">Get Shelter</a></p>
+<p class="text">The web has a detailed page only for significant earthquakes of about the last ${EVENT_MAP_HORIZON_DAYS} days: magnitude 4 and above, felt ones, and those with a tsunami flag or an impact alert. The ${SITE_NAME} app shows every earthquake in its feed, small ones too, around the world and near you.</p>
+<p class="text">With ${SITE_NAME} on your iPhone, the link you were sent opens in the app.</p>
+<p class="open"><a class="button" href="${APP_STORE_URL}">Get ${SITE_NAME} on the App Store</a></p>
+<p class="source"><a href="${SITE_ORIGIN}/">More about ${SITE_NAME} at theshelter.app</a></p>
 </article>
-${STORE_BADGE}
 </main>
 ${LEGAL_FOOTER}
 </body>

@@ -14,18 +14,38 @@
 //
 // Every route: a GitHub OIDC token (auth.js) → the route's (repository_id, workflow) pairs → (writes and gc) the protocol gate →
 // request validation → the budget reservation (budget.js, Durable Object BUDGET) → the bucket (binding STATE).
-// Order matters for cost: an unauthenticated request never reaches the Durable Object or the bucket, so a flood costs
-// Worker requests only (account-wide 100,000/day on Workers Free; the zone's rate limits sit in front).
+// Order matters for cost: an unauthenticated request never reaches a route's reservation or the blobs, so a flood costs
+// Worker requests only (account-wide 100,000/day on Workers Free; the zone's rate limits sit in front); the one
+// exception is bounded per isolate: the JWKS copy's GET (and its charge) at most once per 10 s while it has no key.
 //
 // One structured JSON line per request (route, workflow, run_id, run_attempt, lane, n, bytes, status, ms, error, ops,
-// ledger), never the token; every response carries x-request-id (the cf-ray when there is one), which the client logs on
-// failure. A ref route's answer also carries x-feed-state-store-ops (bucket and ref-store operations it made) and
-// x-feed-state-ledger-calls (budget ledger calls), so the rehearsal can prove the subrequest bound.
+// ledger, jwks, jwks_ops), never the token; every response carries x-request-id (the cf-ray when there is one), which
+// the client logs on failure. A ref route's answer also carries x-feed-state-store-ops (bucket and ref-store operations
+// it made) and x-feed-state-ledger-calls (budget ledger calls), so the rehearsal can prove the subrequest bound.
 //
 // Priority lanes (budget.js): aggregate, derive and the restore reserve on the `critical` lane (refused above 95 % of a
 // ceiling); every other workflow on `background` (above 60 %).
+//
+// The JWKS (auth.js): a cold isolate may read GitHub's keys from the bucket's copy (JWKS_BUCKET_KEY) and an isolate
+// that fetched them may rewrite that copy, both before the token is verified. Those operations are not part of any
+// route's reservation: the key store hands them to `meter` once per request, which charges them to the ledger's day
+// row after the answer (budget.js charge: counted, never refused, because they already happened), and the log line
+// names them (`jwks`: what the key store did, `jwks_ops`: its bucket operations). They are not in
+// x-feed-state-store-ops, which counts a ref route's own operations. A keyless 503 answers Retry-After: 3, the key
+// store's keyless refetch interval (KEYLESS_REFETCH_MS) plus a second.
 
-import { AuthError, DEFAULT_POLICY, LANES, REHEARSAL_LANE, authorize, bearerToken, createKeyStore, knownRepositories, verifyToken } from './auth.js';
+import {
+  AuthError,
+  DEFAULT_POLICY,
+  KEYLESS_REFETCH_MS,
+  LANES,
+  REHEARSAL_LANE,
+  authorize,
+  bearerToken,
+  createKeyStore,
+  knownRepositories,
+  verifyToken,
+} from './auth.js';
 import {
   MAX_BATCH,
   MAX_BLOB_BYTES,
@@ -64,6 +84,8 @@ const MAX_BATCH_BODY = 8 * 1024;
 const MAX_GC_BODY = 1024 * 1024;
 const MAX_PROBE_BODY = 1024;
 const CEILING_VARS = ['CLASS_A_PER_DAY', 'CLASS_B_PER_DAY', 'BYTES_WRITTEN_PER_DAY', 'STORED_BYTES_MAX'];
+/** The Retry-After of a keyless 503: the key store fetches again KEYLESS_REFETCH_MS after a failure. */
+export const KEYLESS_RETRY_AFTER_S = Math.ceil(KEYLESS_REFETCH_MS / 1000) + 1;
 /** The workflows of this repository that reserve on the critical lane; every other caller is background. */
 export const CRITICAL_WORKFLOWS = ['aggregate.yml', 'derive.yml', 'state-restore.yml'];
 
@@ -528,10 +550,44 @@ function priorityOf(claims, workflow, homeId) {
 }
 
 /**
- * The request handler. deps (tests): keyStore, cache (Cache API or null), now() → epoch ms, log(line), policy (the
- * (repository_id, workflow) pairs, auth.js DEFAULT_POLICY).
+ * The key store's per-request deps (auth.js keyFor): the bucket that holds the JWKS copy, the deferral of its write,
+ * and the meter that charges its operations to the ledger after the answer (never refused: they happened already).
  */
-export function createHandler({ keyStore, cache = null, now = Date.now, log: writeLog = (l) => console.log(l), policy = DEFAULT_POLICY } = {}) {
+function jwksDeps(env, ctx, bucket, log, now) {
+  const defer = ctx && typeof ctx.waitUntil === 'function' ? (p) => ctx.waitUntil(p) : null;
+  const events = [];
+  log.jwks_events = events;
+  return {
+    bucket: bucket ?? null,
+    events,
+    ...(defer ? { defer } : {}),
+    meter: (cost) => {
+      log.jwks_ops = cost.classA + cost.classB;
+      const charge = (async () => {
+        try {
+          await budgetStub(env).charge({ nowMs: now(), cost });
+        } catch (err) {
+          console.error(JSON.stringify({ t: 'feed-state', event: 'jwks-charge-failed', rid: log.rid, cost, error: String(err) }));
+        }
+      })();
+      if (defer) defer(charge);
+    },
+  };
+}
+
+/**
+ * The request handler. deps (tests): keyStore, cache (Cache API or null), now() → epoch ms, log(line), policy (the
+ * (repository_id, workflow) pairs, auth.js DEFAULT_POLICY), jwksBucket(env) → the bucket holding the JWKS copy (default
+ * env.STATE; null keeps the key store to the isolate, the cache and GitHub).
+ */
+export function createHandler({
+  keyStore,
+  cache = null,
+  now = Date.now,
+  log: writeLog = (l) => console.log(l),
+  policy = DEFAULT_POLICY,
+  jwksBucket = (env) => env.STATE,
+} = {}) {
   const keys = keyStore ?? createKeyStore({ cache, now });
   return async function handle(request, env, ctx) {
     const started = now();
@@ -545,6 +601,9 @@ export function createHandler({ keyStore, cache = null, now = Date.now, log: wri
       log.status = status;
       log.ms = now() - since;
       delete log.deferred;
+      const events = log.jwks_events;
+      delete log.jwks_events;
+      if (events?.length) log.jwks = events.join(',');
       writeLog(JSON.stringify(log));
     };
     let response;
@@ -562,6 +621,7 @@ export function createHandler({ keyStore, cache = null, now = Date.now, log: wri
         keyStore: keys,
         cacheKey: `${url.origin}/.jwks-cache/github-actions`,
         nowMs: now(),
+        store: jwksDeps(env, ctx, jwksBucket(env), log, now),
       });
       log.run_id = claims.run_id ?? null;
       log.run_attempt = claims.run_attempt ?? null;
@@ -598,7 +658,7 @@ export function createHandler({ keyStore, cache = null, now = Date.now, log: wri
       if (err instanceof AuthError) {
         log.error = err.reason;
         const error = { 401: 'unauthenticated', 403: 'forbidden', 503: 'unavailable' }[err.status];
-        response = json(err.status, { error, reason: err.reason }, rid, err.status === 503 ? { 'retry-after': '30' } : {});
+        response = json(err.status, { error, reason: err.reason }, rid, err.status === 503 ? { 'retry-after': String(KEYLESS_RETRY_AFTER_S) } : {});
       } else if (err instanceof RefError) {
         log.error = err.message;
         const etag = err.status === 412 && err.extra.etag ? { etag: err.extra.etag, 'x-feed-state-etag': err.extra.etag } : {};

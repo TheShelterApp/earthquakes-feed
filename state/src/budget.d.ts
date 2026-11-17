@@ -38,6 +38,7 @@ export const SCHEMA: string[];
 export const ADDED_COLUMNS: [string, string, string][];
 export const LANE_SHARES: Record<Priority, number>;
 export function migrate(sql: Sql, extra?: string[]): void;
+export function charge(sql: Sql, args: { nowMs: number; cost: Cost }): void;
 export function refundRef(sql: Sql, args: { nowMs: number; metaBytes: number; conflict: boolean }): void;
 export function reflogCollision(sql: Sql, args: { nowMs: number }): void;
 export const CEILINGS: Record<keyof Ceilings, Ceiling>;

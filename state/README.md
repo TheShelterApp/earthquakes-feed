@@ -234,7 +234,9 @@ the seeding run's before re-enabling the writers.
 
 **Errors shared by every route.** 401 `{"error": "unauthenticated", "reason"}` (no, malformed or invalid token);
 403 `{"error": "forbidden", "reason"}` (a valid token of this repository that this route does not admit); 503
-`{"error": "unavailable"}` with `Retry-After: 30` when no GitHub signing key can be had (GitHub down and no cached key);
+`{"error": "unavailable", "reason": "signing keys unavailable"}` with `Retry-After: 3` when no GitHub signing key can be
+had (GitHub unreachable and no copy in the isolate, the colo cache or the bucket: below; the client retries it after at
+most 3 s whatever the header says, so an older Worker's `Retry-After: 30` is treated alike);
 429 `{"error": "budget", "ceiling": "class_a" | "class_b" | "bytes_written" | "stored_bytes"}` above a ceiling (the
 client never retries a budget 429; a zone rate-limit 429 is `text/plain` with `Retry-After` and is retried after it);
 503 `{"error": "budget ledger unavailable"}` (retryable: an unmetered request is never let through); 404 for any other
@@ -255,12 +257,31 @@ The Worker verifies (401 on any failure):
   `kid` is present;
 - the signature, with GitHub's key for that `kid` from the hard-coded
   `https://token.actions.githubusercontent.com/.well-known/jwks` (imported as RSASSA-PKCS1-v1_5/SHA-256; cached per
-  isolate and in the Cache API for 1 h, an older copy used for up to 7 days while GitHub cannot be reached; the JWKS is
-  fetched at most once a minute per isolate, also when a token names an unknown `kid`, so made-up kids cost nothing);
+  isolate and in the Cache API for 1 h, an older copy used for up to 7 days while GitHub cannot be reached; with a
+  usable copy the JWKS is fetched at most once a minute per isolate, also when a token names an unknown `kid`, so
+  made-up kids cost nothing; see "The JWKS copy" below for a cold isolate);
 - `iss` = `https://token.actions.githubusercontent.com`, `aud` = `AUDIENCE`, `exp` > now − 30 s, `nbf` ≤ now + 30 s, `iat`
   (if present) ≤ now + 30 s, and `repository_id` = `REPOSITORY_ID` (1289538519, the numeric id of
   TheShelterApp/earthquakes-feed: it survives a rename or a transfer, so no owner, repository or `sub` string is ever
   matched) or a peer repository that one of the pairs below names (none in 4.0).
+
+**The JWKS copy** (since 2026-11-17). On 2026-11-16 aggregate runs 43907386794 and 43964170954 got 503
+`unavailable`: a cold isolate whose colo had evicted the Cache API copy, and whose one GitHub fetch failed, had no key,
+and the minute's refetch throttle then answered 503 to every other request of that isolate (both PUTs of one run). So:
+- the bucket keeps the last good JWKS document at `meta/jwks/github-actions.json` (custom metadata `fetched_ms`, the
+  instant GitHub served it, and `sha256`), outside `cas/`, so GC never lists or deletes it, and no route writes `meta/`;
+- an isolate with no usable copy after the Cache API reads it (one GET, at most once per 10 s per isolate) before it
+  asks GitHub, and puts what it found back into the colo's cache; the 7-day stale bound counts from `fetched_ms`;
+- after a successful fetch an isolate rewrites it when it differs from the copy the isolate knows of, when it knows of
+  none, or when the known copy is a day old, at most once an hour per isolate (in practice about one PUT a colo a day);
+  the write runs after the answer (`ctx.waitUntil`);
+- with no usable key at all (keyless), a failed fetch is retried once in the same request after 0.75 s (3 s timeout),
+  and the next request may fetch again 2 s later instead of a minute later; concurrent requests share one fetch. The
+  unknown-`kid` throttle of a known key set is unchanged. Only a truly keyless isolate answers 503.
+
+These bucket operations happen before the token is verified, so no route reserves them: the Worker charges them to the
+ledger's day row after the answer (`charge`: Class A, Class B and bytes written, never refused, no `requests`), and
+logs them on the request's line (`jwks`, `jwks_ops`). They are not in `x-feed-state-store-ops`.
 
 Then it authorises (403): `ref_type` = `branch`, `runner_environment` = `github-hosted`, `event_name` ∈ {`schedule`,
 `workflow_dispatch`} (no `push`, no `pull_request`), `ref` = `refs/heads/main` unless `ALLOW_ANY_REF` (staging), and
@@ -337,7 +358,9 @@ The two environments together stay inside the account's free tier with room for 
 estimate is raised by every PUT (an overwrite counts again: it errs high), lowered by what GC deletes, refunded when R2
 refuses a PUT, and re-seeded at the end of every complete GC pass from what the pass listed and kept plus what was PUT
 meanwhile plus `meta_bytes`: the ref and reflog bytes (outside `cas/`, so never listed by GC), kept in their own counter
-that only a refund lowers until 4.2's reflog retention. If GC stops, the estimate climbs by the day's writes until PUTs
+that only a refund lowers until 4.2's reflog retention. The JWKS copy (above) is charged after the fact (`charge`: its GET
+Class B, its PUT Class A and bytes written) and left out of the stored estimate: one object of a few KB, overwritten in
+place. If GC stops, the estimate climbs by the day's writes until PUTs
 are refused; `feed:state-budget` (above 60 % of a ceiling, where background work is refused) and `feed:state-gc` (no
 successful GC in 3 days) fire long before. The ledger's new columns are added in place (`ALTER TABLE … ADD COLUMN`,
 a no-op once present), so a rollback to a protocol-1 version still reads every row; that version's re-seed leaves the
@@ -346,7 +369,8 @@ meta bytes out (the estimate then reads low by them: tens of kB a day).
 The feed's own use: about 1,500 requests a day (about 288 aggregate runs, each one or two batchGets and a few PUTs),
 roughly 1-2 % of every ceiling. The ledger writes one day row per authenticated request (the account's Durable Object
 limit is 100,000 rows written a day, shared with the heartbeat ledger and the alerts gateway); an unauthenticated request
-never reaches the ledger or the bucket.
+never reaches a reservation or a blob. The one exception is bounded per isolate: an isolate with no signing key reads
+the JWKS copy (and charges that GET) at most once per 10 s, whoever's token arrives.
 
 **The Workers request cap is shared.** Workers Free allows 100,000 requests a day per account, and the platform's API
 budgets most of it. When the account hits the cap, Cloudflare answers Error 1027 until 00:00 UTC: in phase 3a the
@@ -360,10 +384,14 @@ page is never retried; a platform 429 that outlives the retries is `quota` too),
 One JSON line per request (Workers Logs, kept 3 days; `wrangler tail` live):
 `{"t":"feed-state","rid","method","route","path","workflow","run_id","run_attempt","repository_id","priority","lane",
 "seq","restore_of","reflog","probe","sha","n","bytes","missing","deleted","dry_run","ops","ledger","status","ms","error",
-"cause"}` (fields that do not apply are absent; `repository_id` only for a peer repository; `reflog` is
+"cause","jwks","jwks_ops"}` (fields that do not apply are absent; `jwks` lists what the key store did beyond its
+isolate copy, e.g. `bucket-miss,github,bucket-write`, `bucket,github-failed`, `cache` or `github-failed,github-failed`,
+and `jwks_ops` its bucket operations; `repository_id` only for a peer repository; `reflog` is
 `<previous>/<entry>` of a ref PUT). A batchGet logs when its
 stream ends. The token, the claims other than the run and workflow, and the request bodies are never logged. A failed
-JWKS fetch logs `{"t":"feed-state","event":"jwks-fetch-failed"}`.
+JWKS fetch logs `{"t":"feed-state","event":"jwks-fetch-failed","keyless"}` (the first of a keyless request's two
+attempts with `"attempt":1`); a failed read or write of the bucket copy `jwks-bucket-read-failed` /
+`jwks-bucket-write-failed`, and a charge the ledger refused `jwks-charge-failed`.
 
 ## Owner setup (one time, per environment)
 

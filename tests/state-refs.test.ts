@@ -758,7 +758,8 @@ for (const refBackend of ['r2', 'do'] as const) {
     assert.match(obs.find((o) => o.check === 'budget ledger')!.observed, /ref conflicts \+\d+, meta bytes \+\d+/);
     assert.match(observationsMarkdown(obs), /Every property of the 4\.0 gate held/);
     // Rehearsal keys stay in their own namespace.
-    for (const k of h.r2.objects.keys()) assert.match(k, /^(cas\/sha256\/|refs\/rehearsal-abc12345-|gen\/rehearsal-abc12345-|rehearsal\/rehearsal-abc12345-)/);
+    // Besides the rehearsal's keys, only the Worker's own copy of GitHub's JWKS (auth.js JWKS_BUCKET_KEY).
+    for (const k of h.r2.objects.keys()) assert.match(k, /^(cas\/sha256\/|refs\/rehearsal-abc12345-|gen\/rehearsal-abc12345-|rehearsal\/rehearsal-abc12345-|meta\/jwks\/github-actions\.json$)/);
   });
 }
 

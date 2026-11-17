@@ -282,11 +282,26 @@ and the minute's refetch throttle then answered 503 to every other request of th
   unknown-`kid` throttle of a known key set is unchanged;
 - an unknown `kid` is a 401 only when the isolate's last GitHub fetch succeeded (GitHub itself does not list it). After
   a failed fetch it is a 503 `unavailable` (reason `unknown kid, signing keys unconfirmed`): a copy can predate a key
-  rotation (a bucket copy is rewritten at most once an hour per isolate), and the client retries a 503 but never a 401.
+  rotation (a bucket copy is rewritten at most once an hour per isolate), and the client retries a 503 but never a 401;
+- stale-while-revalidate: a usable copy past its 1 h that holds the token's `kid` serves the request at once, and the
+  isolate asks GitHub after the answer (`ctx.waitUntil`, the same minute's throttle). The bucket copy is restamped about
+  once a day, so a cold isolate that adopts it is usually past the hour, and asking first held the request up to 5 s
+  whenever GitHub was slow, inside the client's attempt timeout (which covers a batchGet's whole stream). An unknown
+  `kid` and a keyless isolate still wait for GitHub.
 
 These bucket operations happen before the token is verified, so no route reserves them: the Worker charges them to the
 ledger's day row after the answer (`charge`: Class A, Class B and bytes written, never refused, no `requests`), and
 logs them on the request's line (`jwks`, `jwks_ops`). They are not in `x-feed-state-store-ops`.
+
+Subrequests of the JWKS path (`waitUntil` work counts toward the invocation too). A warm isolate: none. A cold isolate
+whose colo cache has the copy: one (`cache.match`), plus the revalidation's GitHub fetch and `cache.put` once the copy
+is past its hour (3). A cold isolate on a colo-cache miss with a bucket copy: `cache.match`, `bucket.get`, then (after
+the answer) the GitHub fetch, the bucket `put` only when a rewrite is due, one `cache.put` (GitHub's copy, or the bucket
+copy when the fetch failed) and one ledger `charge`: at most 6. Keyless (no bucket copy): `cache.match`, `bucket.get`,
+two GitHub fetches, the bucket `put`, `cache.put` and `charge`: at most 7. A 40-blob batchGet (about 41 of its own)
+stays under 50 either way; a GC first page (44 of its own: `gcBegin`, 40 HEADs, a list, a delete, `gcEnd`) reaches 50
+or 51 on such a cold isolate, which matters only if R2 and Durable Object calls count against the 50 (the open rehearsal
+item under "Verify"; the 4.0 table's `x-feed-state-store-ops` does not include these).
 
 Then it authorises (403): `ref_type` = `branch`, `runner_environment` = `github-hosted`, `event_name` ∈ {`schedule`,
 `workflow_dispatch`} (no `push`, no `pull_request`), `ref` = `refs/heads/main` unless `ALLOW_ANY_REF` (staging), and
@@ -390,13 +405,13 @@ One JSON line per request (Workers Logs, kept 3 days; `wrangler tail` live):
 `{"t":"feed-state","rid","method","route","path","workflow","run_id","run_attempt","repository_id","priority","lane",
 "seq","restore_of","reflog","probe","sha","n","bytes","missing","deleted","dry_run","ops","ledger","status","ms","error",
 "cause","jwks","jwks_ops"}` (fields that do not apply are absent; `jwks` lists what the key store did beyond its
-isolate copy, e.g. `bucket-miss,github,bucket-write`, `bucket,github-failed`, `cache`, `bucket-failed` (the read threw)
-or `github-failed,github-failed`,
+isolate copy, e.g. `bucket-miss,github,bucket-write`, `bucket,github-failed`, `cache`, `bucket-failed` (the read threw),
+`bucket,revalidate` (served from a stale copy, GitHub asked after the answer) or `github-failed,github-failed`,
 and `jwks_ops` its bucket operations; `repository_id` only for a peer repository; `reflog` is
 `<previous>/<entry>` of a ref PUT). A batchGet logs when its
 stream ends. The token, the claims other than the run and workflow, and the request bodies are never logged. A failed
 JWKS fetch logs `{"t":"feed-state","event":"jwks-fetch-failed","keyless"}` (the first of a keyless request's two
-attempts with `"attempt":1`); a failed read or write of the bucket copy `jwks-bucket-read-failed` /
+attempts with `"attempt":1`, a revalidation's with `"revalidate":true`); a failed read or write of the bucket copy `jwks-bucket-read-failed` /
 `jwks-bucket-write-failed`, and a charge the ledger refused `jwks-charge-failed`.
 
 ## Owner setup (one time, per environment)
@@ -465,8 +480,11 @@ After every deploy (production host shown; staging the same with its host):
 
 To rehearse on staging (not covered offline): the binding's error on a wrong `sha256` (expected `… (10037)`, mapped to
 400), whether R2 binding calls count against the 50 or the 1,000 subrequest limit (a batchGet of 40 and a GC first page
-of 40 HEADs stay under either), and the CPU time of a 40-blob batchGet and of a 1,000-key GC page (`wrangler tail`
-shows `cpuTime`; Workers Free allows 10 ms per request).
+of 40 HEADs stay under either on a warm isolate; a cold isolate's JWKS path adds up to 7, above, which takes a GC
+first page to 50-51 under the stricter reading. A rehearsal cannot force the colo-cache miss of that worst case, so it
+settles which limit applies: if R2 and Durable Object calls count against the 50, lower the Worker's `MAX_CURRENT` and
+the client's `BATCH_MAX` to 36 together, client first), and the CPU time of a 40-blob batchGet and of a 1,000-key GC
+page (`wrangler tail` shows `cpuTime`; Workers Free allows 10 ms per request).
 
 **The 4.0 gate** (`src/state-rehearsal.ts` `rehearseRefs`, fresh `rehearsal-<run>-*` lanes each run; the job summary
 has one row per check with what was expected and what the binding did):

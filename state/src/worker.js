@@ -572,6 +572,8 @@ function jwksDeps(env, ctx, bucket, log, now) {
         }
       })();
       if (defer) defer(charge);
+      // Returned too: a stale-while-revalidate fetch meters from inside its own deferred task and awaits the charge.
+      return charge;
     },
   };
 }

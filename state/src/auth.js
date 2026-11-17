@@ -47,11 +47,15 @@
 // the client retries a 503 but never a 401). With NO usable key at all (keyless: nothing in the isolate, the cache or
 // the bucket, or all older than the stale window) the isolate cannot serve anything, so a throttle buys nothing: a
 // failed fetch is retried once in the same request after KEYLESS_RETRY_DELAY_MS, and the next request may fetch again
-// after KEYLESS_REFETCH_MS. Concurrent requests of an isolate share one fetch.
+// after KEYLESS_REFETCH_MS. Concurrent requests of an isolate share one fetch. A usable copy past its TTL that holds the
+// token's kid is served at once and refreshed after the answer (stale-while-revalidate, through the request's `defer`),
+// so a slow GitHub no longer holds a request whose key is already known; an unknown kid and a keyless isolate wait.
+// A bucket copy the request adopted goes into the colo cache once, unless the request's own fetch replaced it.
 //
 // Cost: the bucket reads and writes happen before the token is verified (the key is needed to verify it), so they are
 // metered apart from any route's reservation: the caller's `meter` gets the operations once per request (the Worker
-// charges them to the budget ledger's day row, budget.js charge) and `defer` runs the bucket write after the answer.
+// charges them to the budget ledger's day row, budget.js charge; after a revalidation, from inside its deferred task)
+// and `defer` runs the bucket write after the answer.
 
 export const ISSUER = 'https://token.actions.githubusercontent.com';
 export const JWKS_URL = 'https://token.actions.githubusercontent.com/.well-known/jwks';
@@ -269,7 +273,7 @@ const realSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * JWKS_BUCKET_KEY, or null), meter({classA, classB, bytes}) (called at most once per keyFor with the bucket operations
  * it caused), defer(promise) (ctx.waitUntil: the bucket write runs after the answer; without it, it is awaited), events
  * (an array the store appends what it did to: cache, bucket, bucket-miss, bucket-failed, github, github-failed,
- * bucket-write).
+ * bucket-write, revalidate).
  */
 export function createKeyStore({ fetchJwks = fetchJwksFromGitHub, cache = null, now = Date.now, sleep = realSleep } = {}) {
   /** @type {{keys: Map<string, CryptoKey>, fetchedMs: number, text: string} | null} */
@@ -374,17 +378,26 @@ export function createKeyStore({ fetchJwks = fetchJwksFromGitHub, cache = null, 
     }
   }
 
-  /** One bucket read, shared by the concurrent requests that wait for it; adopts the copy and puts it into the colo
-   *  cache. A read that answered (a copy or none) is not repeated for BUCKET_READ_MIN_MS; one that threw (a transient
-   *  R2 error) may be tried again after KEYLESS_REFETCH_MS, so it does not leave 10 s of keyless requests behind it. */
-  async function readBucket(bucket, cacheKey, store) {
+  /** One bucket read, shared by the concurrent requests that wait for it; adopts the copy and returns it (null when it
+   *  adopted nothing). A read that answered (a copy or none) is not repeated for BUCKET_READ_MIN_MS; one that threw (a
+   *  transient R2 error) may be tried again after KEYLESS_REFETCH_MS, so it does not leave 10 s of keyless requests
+   *  behind it. */
+  async function readBucket(bucket, store) {
     const started = now();
     const { copy, answered } = await fromBucket(bucket);
     bucketNextMs = started + (answered ? BUCKET_READ_MIN_MS : KEYLESS_REFETCH_MS);
     if (adopt(copy)) {
       note(store, 'bucket');
-      await toCache(cacheKey, copy);
-    } else if (!copy) note(store, answered ? 'bucket-miss' : 'bucket-failed');
+      return copy;
+    }
+    if (!copy) note(store, answered ? 'bucket-miss' : 'bucket-failed');
+    return null;
+  }
+
+  /** Put a bucket copy the request adopted into the colo cache, unless a GitHub fetch has replaced it since (that fetch
+   *  cached its own copy): one cache.put per request either way. */
+  async function settleColo(cacheKey, colo) {
+    if (colo && current === colo) await toCache(cacheKey, colo);
   }
 
   /** Rewrite the bucket copy after a successful fetch, when it is due (see the header). Returns {done} (the write in
@@ -454,20 +467,43 @@ export function createKeyStore({ fetchJwks = fetchJwksFromGitHub, cache = null, 
     await toCache(cacheKey, copy);
   }
 
+  /** Hand the bucket operations not yet metered to the request's meter; returns what the meter returns (the charge in
+   *  flight, so a deferred revalidation can await it). */
   function flushMeter(store) {
-    if (!(unmetered.classA || unmetered.classB)) return;
+    if (!(unmetered.classA || unmetered.classB)) return undefined;
     const cost = unmetered;
     unmetered = { classA: 0, classB: 0, bytes: 0 };
     try {
-      store?.meter?.(cost);
+      return store?.meter?.(cost);
     } catch (err) {
       console.error(JSON.stringify({ t: 'feed-state', event: 'jwks-meter-failed', error: String(err) }));
+      return undefined;
+    }
+  }
+
+  /** The background half of stale-while-revalidate (run under store.defer): the shared fetch, then the colo cache (the
+   *  bucket copy if the fetch failed) and one charge for every bucket operation of the request. */
+  async function revalidate(fetching, cacheKey, colo, store) {
+    try {
+      await fetching;
+    } catch (err) {
+      console.error(JSON.stringify({ t: 'feed-state', event: 'jwks-fetch-failed', keyless: false, revalidate: true, error: String(err) }));
+    }
+    await settleColo(cacheKey, colo);
+    try {
+      await flushMeter(store);
+    } catch {
+      // The meter logs its own failures (worker.js jwks-charge-failed).
     }
   }
 
   /** The verification key for kid, or an AuthError (401 unknown kid, 503 no keys at all or an unknown kid GitHub could
    *  not be asked about). */
   async function keyFor(kid, cacheKey, store = {}) {
+    /** A bucket copy this request adopted that the colo cache does not hold yet. */
+    let colo = null;
+    /** Whether a deferred revalidation meters the request's bucket operations (instead of the finally below). */
+    let meterLater = false;
     try {
       if (!cacheChecked || !fresh(current)) {
         cacheChecked = true;
@@ -477,17 +513,43 @@ export function createKeyStore({ fetchJwks = fetchJwksFromGitHub, cache = null, 
       // share one read: a request arriving while it runs waits for it instead of deciding it is keyless and starting a
       // GitHub fetch with its in-request retry (about 9 s with GitHub down) beside a copy that lands in milliseconds.
       if (!usable(current) && store.bucket) {
-        if (!bucketRead && now() >= bucketNextMs) {
-          bucketRead = readBucket(store.bucket, cacheKey, store).finally(() => {
+        const mine = !bucketRead && now() >= bucketNextMs;
+        if (mine) {
+          bucketRead = readBucket(store.bucket, store).finally(() => {
             bucketRead = null;
           });
         }
-        if (bucketRead) await bucketRead;
+        const read = bucketRead;
+        if (read) {
+          const adopted = await read;
+          if (mine) colo = adopted;
+        }
       }
       const known = current?.keys.get(kid);
-      if (fresh(current) && known) return known;
+      if (fresh(current) && known) {
+        await settleColo(cacheKey, colo);
+        return known;
+      }
       const keyless = !usable(current);
-      if (inflight || now() - lastAttemptMs >= (keyless ? KEYLESS_REFETCH_MS : REFETCH_MIN_MS)) {
+      const due = now() - lastAttemptMs >= (keyless ? KEYLESS_REFETCH_MS : REFETCH_MIN_MS);
+      // Stale-while-revalidate: a usable copy that holds the token's kid serves at once, and GitHub is asked after the
+      // answer (ctx.waitUntil, the same throttle). Asking first held the request up to JWKS_FETCH_TIMEOUT_MS whenever
+      // GitHub was slow, inside the client's attempt timeout, which also covers a batchGet's whole stream; the bucket
+      // copy is restamped about once a day, so a cold isolate that adopts it is usually past the TTL. An unknown kid
+      // still waits for GitHub (above all after a rotation).
+      if (known && !keyless && store.defer) {
+        if (!inflight && due) {
+          note(store, 'revalidate');
+          // The fetch's bucket write is awaited inside the deferred task rather than deferred again.
+          inflight = refresh(cacheKey, { ...store, defer: null }, false).finally(() => {
+            inflight = null;
+          });
+          meterLater = true;
+          store.defer(revalidate(inflight, cacheKey, colo, store));
+        } else await settleColo(cacheKey, colo);
+        return known;
+      }
+      if (inflight || due) {
         inflight ??= refresh(cacheKey, store, keyless).finally(() => {
           inflight = null;
         });
@@ -498,6 +560,7 @@ export function createKeyStore({ fetchJwks = fetchJwksFromGitHub, cache = null, 
           console.error(JSON.stringify({ t: 'feed-state', event: 'jwks-fetch-failed', keyless, error: String(err) }));
         }
       }
+      await settleColo(cacheKey, colo);
       if (usable(current)) {
         const key = current.keys.get(kid);
         if (key) return key;
@@ -511,7 +574,7 @@ export function createKeyStore({ fetchJwks = fetchJwksFromGitHub, cache = null, 
       }
       throw new AuthError(503, 'signing keys unavailable');
     } finally {
-      flushMeter(store);
+      if (!meterLater) flushMeter(store);
     }
   }
 

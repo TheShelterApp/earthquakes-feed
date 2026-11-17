@@ -70,7 +70,7 @@ export interface JwksCost {
 /** keyFor's per-request deps. */
 export interface KeyStoreRequest {
   bucket?: JwksBucket | null;
-  meter?: (cost: JwksCost) => void;
+  meter?: (cost: JwksCost) => unknown;
   defer?: (p: Promise<unknown>) => void;
   events?: string[];
 }

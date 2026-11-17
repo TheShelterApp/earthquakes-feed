@@ -4,14 +4,16 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { ACCEPT_MINUTES, KEEP_MINUTES, SCHEMA, claimMinute, releaseMinute, type Sql } from '../heartbeat/src/ledger.js';
-import worker, { inputsFor, workflowFor } from '../heartbeat/src/worker.js';
+import worker, { DAILY, inputsFor, workflowFor } from '../heartbeat/src/worker.js';
 
 // The heartbeat Worker's fan-out (heartbeat/src/worker.js): one per-minute cron, at most one workflow per minute, and
 // exactly one dispatch per (workflow, intended minute) through the dispatch ledger (heartbeat/src/ledger.js).
 
 const here = (rel: string): string => fileURLToPath(new URL(rel, import.meta.url));
 const minutes = Array.from({ length: 60 }, (_, m) => m);
-const minutesOf = (workflow: string): number[] => minutes.filter((m) => workflowFor(m) === workflow);
+const hours = Array.from({ length: 24 }, (_, h) => h);
+/** The minutes of an hour without a daily dispatch (09 UTC) a workflow is dispatched at. */
+const minutesOf = (workflow: string, hour = 9): number[] => minutes.filter((m) => workflowFor(m, hour) === workflow);
 
 test('heartbeat: the hour, minute by minute', () => {
   assert.deepEqual(minutesOf('aggregate.yml'), [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]);
@@ -20,7 +22,24 @@ test('heartbeat: the hour, minute by minute', () => {
   assert.deepEqual(minutesOf('first-solutions.yml'), [48]);
   assert.deepEqual(minutesOf('history.yml'), [26]);
   // 19 dispatches an hour, every other minute does nothing.
-  assert.equal(minutes.filter((m) => workflowFor(m) != null).length, 19);
+  assert.equal(minutes.filter((m) => workflowFor(m, 9) != null).length, 19);
+});
+
+test('heartbeat: the day: state-backup at 00:11 and state-gc at 03:33 UTC, on minutes no hourly workflow uses', () => {
+  const at = (workflow: string): string[] =>
+    hours.flatMap((h) => minutes.filter((m) => workflowFor(m, h) === workflow).map((m) => `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`));
+  assert.deepEqual(at('state-backup.yml'), ['00:11']);
+  assert.deepEqual(at('state-gc.yml'), ['03:33']);
+  // Every other hour is the plain hour; hours 0 and 3 have one dispatch more, and every hourly workflow keeps its minutes.
+  for (const h of hours) {
+    assert.equal(minutes.filter((m) => workflowFor(m, h) != null).length, h === 0 || h === 3 ? 20 : 19, `hour ${h}`);
+    for (const w of ['aggregate.yml', 'health.yml', 'backfill.yml', 'first-solutions.yml', 'history.yml']) assert.deepEqual(minutesOf(w, h), minutesOf(w), `${w} at hour ${h}`);
+  }
+  // A daily minute is free in every hour: no hourly workflow loses a tick to it, and (workflow, minute) stays one claim.
+  for (const [, m] of DAILY) assert.equal(workflowFor(m, 9), null, `minute ${m} is unused by the hourly fan-out`);
+  // 00:11 leaves the backup 11 minutes after midnight's last aggregate commit; GC runs after the backup.
+  const [backup, gc] = DAILY;
+  assert.ok(backup![0] * 60 + backup![1] < gc![0] * 60 + gc![1]);
 });
 
 test('heartbeat: history gets its own minute, away from the writers and from first-solutions', () => {
@@ -32,9 +51,34 @@ test('heartbeat: history gets its own minute, away from the writers and from fir
   assert.ok(m! + 20 < minutesOf('first-solutions.yml')[0]!);
 });
 
-test('heartbeat: only first-solutions is dispatched with inputs (GitHub refuses inputs a workflow does not declare)', () => {
+test('heartbeat: only first-solutions and state-gc are dispatched with inputs (GitHub refuses inputs a workflow does not declare)', () => {
   assert.deepEqual(inputsFor('first-solutions.yml'), { tick: '1' });
-  for (const w of ['history.yml', 'aggregate.yml', 'backfill.yml', 'health.yml']) assert.equal(inputsFor(w), null, w);
+  assert.deepEqual(inputsFor('state-gc.yml'), { tick: '1' });
+  for (const w of ['history.yml', 'aggregate.yml', 'backfill.yml', 'health.yml', 'state-backup.yml']) assert.equal(inputsFor(w), null, w);
+});
+
+test('heartbeat: the daily state jobs are dispatched once on their minute; their GitHub crons stay as the fallback', async () => {
+  const h = harness();
+  await h.activate(['2026-11-17T00:11:22Z', '2026-11-17T00:11:51Z', '2026-11-17T01:11:22Z', '2026-11-17T03:33:22Z', '2026-11-17T03:33:51Z', '2026-11-17T04:33:22Z']);
+  assert.deepEqual(
+    h.calls.map((c) => [c.workflow, c.body]),
+    [
+      ['state-backup.yml', { ref: 'main' }],
+      ['state-gc.yml', { ref: 'main', inputs: { tick: '1' } }],
+    ],
+  );
+  assert.equal(h.logs.filter((l) => l.endsWith(': duplicate')).length, 2);
+  assert.deepEqual(h.failures, []);
+
+  // state-gc declares `tick`, and a tick is the scheduled run (STATE_GC_SCHEDULED; a refused gate is a warning), never
+  // the dispatch's dry_run default. state-backup takes no inputs. Both keep their crons.
+  const gc = readFileSync(here('../.github/workflows/state-gc.yml'), 'utf8');
+  assert.match(gc, /\n {6}tick:\n {8}description: /);
+  assert.ok(gc.includes("STATE_GC_DRY_RUN: ${{ (github.event_name == 'schedule' || inputs.tick == '1') && 'scheduled' || (inputs.dry_run && '1' || '') }}"));
+  assert.ok(gc.includes("RETRIED: ${{ (github.event_name == 'schedule' || inputs.tick == '1') && 'true' || '' }}"));
+  assert.match(gc, /schedule:\n {4}- cron: '23 3 \* \* \*'\n {2}workflow_dispatch:/);
+  const backup = readFileSync(here('../.github/workflows/state-backup.yml'), 'utf8');
+  assert.match(backup, /schedule:\n {4}- cron: '41 0 \* \* \*'\n {2}workflow_dispatch:\n\n/);
 });
 
 test('heartbeat: a history dispatch is a plain workflow_dispatch on main, and the workflow itself reads the enabled flag', async () => {
@@ -270,7 +314,7 @@ test('heartbeat ledger: every minute still claimable keeps its row; older rows a
   const start = Date.parse('2026-10-14T00:00:00Z') / 60_000;
   // A day of dispatch minutes, each claimed on time.
   for (let m = start; m < start + 1440; m++) {
-    const workflow = workflowFor(m % 60);
+    const workflow = workflowFor(m % 60, Math.floor(m / 60) % 24);
     if (workflow) assert.equal(claimMinute(sql, workflow, m, m * 60_000 + 22_000), 'claimed');
   }
   const end = start + 1440;
@@ -279,7 +323,7 @@ test('heartbeat ledger: every minute still claimable keeps its row; older rows a
   assert.ok(rows.length <= (KEEP_MINUTES / 60) * 19 + 1, String(rows.length));
   // Every claimable minute (not older than ACCEPT_MINUTES) is still refused as a duplicate, older ones as stale.
   for (let m = end - ACCEPT_MINUTES - 30; m < end; m++) {
-    const workflow = workflowFor(m % 60);
+    const workflow = workflowFor(m % 60, Math.floor(m / 60) % 24);
     if (!workflow) continue;
     const verdict = claimMinute(sql, workflow, m, end * 60_000);
     assert.equal(verdict, m >= end - ACCEPT_MINUTES ? 'duplicate' : 'stale', `minute ${m - start}`);

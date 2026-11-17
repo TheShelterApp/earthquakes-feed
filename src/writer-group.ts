@@ -437,8 +437,9 @@ export function rng(seed: number): () => number {
 export interface WeekInput {
   startMs: number;
   days: number;
-  /** The workflow (file name) the heartbeat dispatches at a UTC minute (heartbeat/src/worker.js workflowFor). */
-  heartbeat: (minute: number) => string | null;
+  /** The workflow (file name) the heartbeat dispatches at a UTC minute of a UTC hour (heartbeat/src/worker.js
+   *  workflowFor); the week counts only the writer workflows it models (not health, state-backup or state-gc). */
+  heartbeat: (minute: number, hour: number) => string | null;
   /** Seconds from the scheduled minute to the run's creation (the Worker's dispatch and GitHub's intake). */
   dispatchLagMs: number;
   /** GitHub's delivered scheduled runs per workflow (ms epoch), e.g. the week the replay measured. */
@@ -495,7 +496,7 @@ export function syntheticArrivals(w: WeekInput, design: Design): Arrival[] {
   };
   let n = 0;
   for (let t = w.startMs; t < w.startMs + w.days * 86_400_000; t += 60_000) {
-    const wf = w.heartbeat(new Date(t).getUTCMinutes());
+    const wf = w.heartbeat(new Date(t).getUTCMinutes(), new Date(t).getUTCHours());
     if (wf && wf !== 'health.yml') add(wf, t + w.dispatchLagMs, n++);
   }
   for (const [wf, times] of Object.entries(w.cronAt)) for (const t of times) add(wf, t, n++);

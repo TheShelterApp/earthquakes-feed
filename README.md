@@ -362,8 +362,10 @@ variable.
 ### The heartbeat Worker (`heartbeat/`)
 
 A cron-only Cloudflare Worker that dispatches `aggregate` (every 5 min), `health` (every 15 min),
-`backfill`, `first-solutions` and `history` (hourly) through the Actions API with a fine-grained
-`GH_PAT` (Actions: write). It has no HTTP surface (`workers_dev = false`, `preview_urls = false`).
+`backfill`, `first-solutions` and `history` (hourly), and the state store's daily `state-backup` (00:11 UTC) and
+`state-gc` (03:33 UTC, with `tick=1`: the scheduled run) through the Actions API with a fine-grained
+`GH_PAT` (Actions: write). The two daily jobs keep their own GitHub crons (00:41, 03:23) as the fallback for a Worker
+outage; GitHub delivered neither on 2026-11-16 or 11-17. It has no HTTP surface (`workers_dev = false`, `preview_urls = false`).
 Cron Triggers are not exactly-once (on 2026-10-14 the one `* * * * *` trigger fired twice a minute, 30 s apart, and every
 workflow was dispatched twice), so each activation first claims its (workflow, intended UTC minute) in a dispatch
 ledger, one SQLite-backed Durable Object (`heartbeat/src/ledger.js`): exactly one activation per minute dispatches, a
@@ -393,7 +395,8 @@ GitHub's late or dropped deliveries delay them (accepted, 2026-11-15 audit, FEED
 late-ComCat refresh asks again for every frozen day 12–45 days old, so a day stays in its window for 33 daily runs; the
 refill queue and the saturated days persist in `remediation.json` until a run takes them; a re-merge month waits for
 the next run; and a statistics index more than 3 days behind is `feed:stats-through` (P3, below). Covering them from
-the Worker would need hour-aware dispatch (`workflowFor` takes only the minute, and `:41` is backfill's).
+the Worker would need a free minute for each (`workflowFor` is hour-aware since the state jobs moved to it, but `:41` is
+backfill's and `:43` would sit beside it).
 
 ## Health watchdogs (`.github/workflows/health.yml`)
 

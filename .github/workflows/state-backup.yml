@@ -8,7 +8,9 @@ name: state-backup
 # day this backup has not copied). GitHub does not count Release assets in the repository's size.
 #
 # Not a writer of `data`: it reads past commits through the API and writes Releases only, so it needs no writer lock.
-# After 00:00 UTC, so the day's state exists; any later run of the day finds it done.
+# After 00:00 UTC, so the day's state exists; any later run of the day finds it done. The heartbeat Worker dispatches
+# it daily at 00:11 UTC (heartbeat/src/worker.js); the cron below is the fallback for a Worker outage (GitHub
+# delivered it on neither 2026-11-16 nor 11-17, and feed:state-backup goes P2 at 36 h).
 on:
   schedule:
     - cron: '41 0 * * *'

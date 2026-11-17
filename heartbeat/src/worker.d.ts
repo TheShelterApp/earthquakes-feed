@@ -15,8 +15,10 @@ export interface Env {
   DISPATCH_LEDGER: LedgerNamespace;
 }
 
-/** The workflow file to dispatch for a UTC minute (0-59), or null. */
-export function workflowFor(minute: number): string | null;
+/** The daily dispatches: [UTC hour, minute, workflow]. */
+export const DAILY: readonly (readonly [number, number, string])[];
+/** The workflow file to dispatch at a UTC minute (0-59) of a UTC hour (0-23), or null. */
+export function workflowFor(minute: number, hour: number): string | null;
 /** The `inputs` of that workflow's dispatch, or null for none. */
 export function inputsFor(workflow: string): Record<string, string> | null;
 /** The intended UTC minute of an activation, in epoch minutes. */

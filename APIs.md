@@ -1816,7 +1816,8 @@ GC and the backup complete with an `off` marker, and health judges none of `feed
 5. Merge the switch commit (`|| 'worker'`). The next aggregate run persists all 46 days, the one after
    compares them (its shadow hydrate).
 6. After that first persist, dispatch `state-backup.yml` and `state-gc.yml` (`dry_run`, the default) and check both
-   green; the scheduled runs (00:41 and 03:23 UTC) take over.
+   green; the scheduled runs take over: the heartbeat Worker's dispatches at 00:11 and 03:33 UTC (GitHub delivered
+   neither job's cron on 2026-11-16 or 11-17), with the crons (00:41 and 03:23 UTC) as the fallback.
 Switching the store off again in phase 3a is `gh variable set FEED_STATE_BACKEND --body off`; from phase 3b the store
 is required (3b removes the kill switch).
 
@@ -1844,7 +1845,8 @@ prune, validate, stage-data, a closing shadow hydrate and an authoritative one) 
 
   It deletes only blobs older than 30 days, at most 600 per listing page, and nothing at all without a readable backup
   marker. A dispatch defaults to `dry_run`; the scheduled run follows `STATE_GC_SCHEDULED` (`dry-run` until the first
-  dry runs' counts are reviewed, then `delete` by a commit). `feed:state-gc` (P2) fires after 3 days without a
+  dry runs' counts are reviewed, then `delete` by a commit). The scheduled run is the heartbeat Worker's daily dispatch
+  at 03:33 UTC with `tick=1` (which counts as scheduled), or the 03:23 cron when GitHub delivers it. `feed:state-gc` (P2) fires after 3 days without a
   completed run.
 - `state-backup.yml` copies each day's state to a draft Release `state-YYYY-MM`, published once the month is over and
   complete. The state of day D is the generation at the last data commit before 00:00 UTC of D, that commit's
@@ -1857,7 +1859,8 @@ prune, validate, stage-data, a closing shadow hydrate and an authoritative one) 
   repository's `main` counts, for GC and for health alike: the repository is public, and a pull request's run (a
   fork's included) can upload an artifact of any name. A marker that names no day (no generation yet, or the store
   off) holds GC (nothing deleted) and is aged by its own date in health.
-  `feed:state-backup` is P2 past 36 h and P1 past 7 days.
+  `feed:state-backup` is P2 past 36 h and P1 past 7 days. The heartbeat Worker dispatches it daily at 00:11 UTC; the
+  00:41 cron is the fallback, and a second run of the day finds every day done.
 - `state-rehearsal.yml` (dispatch, any branch, staging only, synthetic data only) runs the client's whole path:
   persist, a shadow and an authoritative hydrate, a restore from a backup archive, a GC dry run and the budget.
 

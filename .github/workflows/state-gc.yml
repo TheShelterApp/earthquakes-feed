@@ -12,11 +12,20 @@ name: state-gc
 #
 # Dry run: a dispatch defaults to dry_run (every page listed, what would go counted, nothing deleted); the scheduled
 # run follows STATE_GC_SCHEDULED in src/state-gc.ts ('dry-run' for the first weeks of phase 3a).
+#
+# Schedule: the heartbeat Worker dispatches it daily at 03:33 UTC with `tick=1` (heartbeat/src/worker.js), which makes
+# the run the scheduled run (STATE_GC_SCHEDULED, a refused gate only a warning), whatever dry_run says. The cron below
+# is the fallback for a Worker outage: GitHub delivered it on neither 2026-11-16 nor 11-17. A day with both runs is
+# harmless: they queue in the writer group, and the second pass finds nothing new to delete.
 on:
   schedule:
     - cron: '23 3 * * *'
   workflow_dispatch:
     inputs:
+      tick:
+        description: 'Set to 1 by the heartbeat Worker: the run is the scheduled run (STATE_GC_SCHEDULED decides, dry_run is ignored)'
+        required: false
+        default: ''
       dry_run:
         description: 'List and count only, delete nothing'
         type: boolean
@@ -58,8 +67,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           WRITER_WORKFLOW: state-gc.yml
           FORCE: ${{ inputs.force && 'true' || '' }}
-          # A refused scheduled run is a warning: tomorrow's run collects the same blobs.
-          RETRIED: ${{ github.event_name == 'schedule' && 'true' || '' }}
+          # A refused scheduled run (the cron, or the heartbeat's tick) is a warning: tomorrow's run collects the same blobs.
+          RETRIED: ${{ (github.event_name == 'schedule' || inputs.tick == '1') && 'true' || '' }}
         run: node scripts/writer-queue.mjs gate
 
   gc:
@@ -95,7 +104,7 @@ jobs:
           FEED_STATE_BACKEND: ${{ vars.FEED_STATE_BACKEND || 'worker' }}
           FEED_STATE_URL: https://feed-state.theshelter.app
           FEED_STATE_AUDIENCE: earthquakes-feed-state
-          STATE_GC_DRY_RUN: ${{ github.event_name == 'schedule' && 'scheduled' || (inputs.dry_run && '1' || '') }}
+          STATE_GC_DRY_RUN: ${{ (github.event_name == 'schedule' || inputs.tick == '1') && 'scheduled' || (inputs.dry_run && '1' || '') }}
           STATE_GC_MARKER_DIR: state-gc-out
         run: npx --no-install tsx src/state-gc.ts
       # Only after a run that completed: the health workflow files feed:state-gc (P2) when the newest is 3 days old.

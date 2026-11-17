@@ -321,9 +321,11 @@ const LEGAL_FOOTER = `<footer class="wrap"><a href="${SITE_ORIGIN}/privacy">Priv
 
 /**
  * `share/event/404.html`: what every id without a page gets (an event below the bar, older than the window or past the
- * cap; a mistyped or crafted id). An honest fallback (owner decision 2026-11-17): the link is real for almost everyone
- * who follows it, so the page says the earthquake is in the app, why the web has no page for it, and offers the App
- * Store and the site, instead of a "not found". It says nothing about the id: no date, no id, nothing a crafted link
+ * cap; a mistyped or crafted id). A fallback pointing to the app (owner decision 2026-11-17): the link is real for most
+ * who follow it, so the page says the earthquake is in the app, why the web has no page for it, and offers the App
+ * Store and the site, instead of a "not found". Not true of every link: one past the app's own resolve window, a
+ * tombstone or a crafted id lands here too and the app then says "no longer available" (APIs.md, Share pages); the
+ * page cannot tell them apart, since it reads nothing from the URL. It says nothing about the id: no date, no id, nothing a crafted link
  * could put on a preview (a crafted id gets the same page). Served at any id, so every link is absolute.
  */
 export const NOT_FOUND_TITLE = `This earthquake is in the ${SITE_NAME} app`;

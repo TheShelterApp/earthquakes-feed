@@ -282,11 +282,16 @@ tombstone, a magnitude revised below 4.0); a link then shows the fallback page.
 
 **The fallback page** (`share/event/404.html`, `notFoundPageHtml`; owner decision 2026-11-17). Most links that reach it
 are real: an event below the bar (under M4.0 as shown, no felt report, no tsunami flag, no PAGER alert), older than the
-window, past the cap, or too new for the last derive. So it is an honest pointer to the app, not a "not found":
+45-day window, past the cap, or too new for the last derive. So it is a pointer to the app, not a "not found". Its
+headline is true for most links, not every one: a link past the app's own resolve window (*Resolving a shared id*,
+step 5: an M < 5 older than 61 days, an M5–6 older than the current year and the two before it), a tombstone, or a
+mistyped or crafted id lands here too, and the app then says the event is no longer available (the page cannot tell
+these apart: it reads nothing from the URL; the copy is the owner's choice). It says
 "This earthquake is in the Shelter app"; the web has a detailed page only for significant earthquakes of about the last
 45 days (`EVENT_MAP_HORIZON_DAYS`), the app shows every earthquake in its feed; with the app installed the link opens
 in it; a "Get Shelter on the App Store" button (`https://apps.apple.com/app/id6767608845`, the link every share page
-carries; it answers 404 until the store page is live and needs no change then), a link to `https://theshelter.app/`,
+carries; it answers 404 until the store page is live and needs no change then: an open owner item, checked at release,
+since the button is the page's main action), a link to `https://theshelter.app/`,
 the Smart App Banner without an `app-argument`, `og:image` `generic.png`, `noindex`, the same stylesheet and headers as
 an event page (the CSP allows no script). The page is one constant: it shows no id, no date, no year and nothing else
 taken from the URL, so a crafted link gets the same page and can put nothing on a preview; every link is absolute (it

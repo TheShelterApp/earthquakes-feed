@@ -254,12 +254,42 @@ test('the generic page shows no id, no date and no year; no script; the hashed s
   const html = notFoundPageHtml();
   assert.ok(!html.includes('efd_'));
   assert.ok(!/\b(19|20)\d\d\b/.test(html.replace(/https?:\/\/[^"\s]*/g, '')), 'no year outside URLs');
-  assert.ok(!/<script/i.test(html) && !/\sstyle=/i.test(html));
+  assert.ok(!/<script/i.test(html) && !/\sstyle=/i.test(html) && !/\son[a-z]+\s*=/i.test(html), 'no script, no style attribute, no handler');
+  assert.ok(!/<(form|iframe|object|embed|base)\b/i.test(html));
   assert.deepEqual([...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((m) => m[1]), [PAGE_CSS]);
-  assert.ok(html.includes('<title>An earthquake on Shelter</title>'));
   assert.ok(html.includes('<meta name="apple-itunes-app" content="app-id=6767608845">'), 'the banner without an app-argument');
-  assert.ok(html.includes('https://theshelter.app/og/event/generic.png'));
+  assert.ok(html.includes('<meta property="og:image" content="https://theshelter.app/og/event/generic.png">'));
+  assert.ok(html.includes('<meta name="robots" content="noindex">'));
   assert.ok(!html.includes('rel="canonical"') && !html.includes('og:url'));
+  // The page is one constant: no argument, the same bytes every call, so nothing of a URL or an id can reach it.
+  assert.equal(notFoundPageHtml.length, 0);
+  assert.equal(notFoundPageHtml(), html);
+});
+
+// Owner decision 2026-11-17: an honest fallback ("this earthquake is in the app"), not a "not found", for every link
+// without a page (below the bar, past the window or the cap, or crafted). English only, like the site.
+test('the generic page: the app fallback copy, the App Store button, the site home, every link absolute', () => {
+  const html = notFoundPageHtml();
+  assert.ok(html.includes('<title>This earthquake is in the Shelter app</title>'));
+  assert.ok(html.includes('<h1>This earthquake is in the Shelter app</h1>'));
+  assert.ok(html.includes('<meta property="og:title" content="This earthquake is in the Shelter app">'));
+  const description = 'The Shelter app shows every earthquake in its feed, small ones too. Get it on the App Store.';
+  assert.ok(html.includes(`<meta name="description" content="${description}">`) && html.includes(`<meta property="og:description" content="${description}">`));
+  assert.ok(html.includes('The web has a detailed page only for significant earthquakes of about the last 45 days: magnitude 4 and above'));
+  assert.ok(html.includes('The Shelter app shows every earthquake in its feed, small ones too, around the world and near you.'));
+  assert.ok(html.includes('<p class="open"><a class="button" href="https://apps.apple.com/app/id6767608845">Get Shelter on the App Store</a></p>'));
+  assert.ok(html.includes('<a href="https://theshelter.app/">More about Shelter at theshelter.app</a>'));
+  assert.ok(!/not found|no page here|no longer/i.test(html), 'no "not found" wording');
+  assert.ok(!/[^\x20-\x7E\n·]/u.test(html), 'English, ASCII and the middle dot only');
+  // Served at any /share/event/<id>: a relative link would resolve against the id's path.
+  const links = [...html.matchAll(/\s(?:href|src)="([^"]*)"/g)].map((m) => m[1]!);
+  assert.ok(links.length >= 6);
+  for (const href of links) assert.match(href, /^https:\/\/(theshelter\.app|apps\.apple\.com)\//, href);
+  // The fixed copy needs no escaping (it is not escaped), and the CSP the page is served with allows no script.
+  for (const [, v] of html.matchAll(/\scontent="([^"]*)"/g)) assert.equal(v, v!.replace(/[&<>']/g, ''), v);
+  assert.doesNotMatch(SHARE_CSP, /script-src/);
+  assert.match(SHARE_CSP, /^default-src 'none';/);
+  assert.equal(sharePageProblem(html, true), null);
 });
 
 test('plan: significant live events of the window, retired ids under their final survivor, the cap most significant first', () => {

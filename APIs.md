@@ -277,9 +277,27 @@ decimal), or `felt` ≥ 1, or a tsunami flag, or a PAGER alert (`alert` green, y
 also written under each **retired** id whose final live survivor has a page, so a link shared before a fold keeps its
 preview; its canonical URL is the survivor's. At most `SHARE_PAGE_CAP` = 5,000 pages, the most significant first (PAGER
 level, tsunami flag, magnitude, felt reports, then the newer event), an event always with all its retired ids. Every
-other path under `/share/event/` gets `share/event/404.html` with status 404: "An earthquake on Shelter", which shows no
-id, no date and nothing else a crafted link could put on a preview. The ids are case-sensitive (Pages paths are): a lower-case id answers the same generic 404 page, so a link must carry the id as the feed wrote it (the app emits canonical upper-case links). A page leaves with its event (after about 45 days, a
-tombstone, a magnitude revised below 4.0); a link then shows the generic page.
+other path under `/share/event/` gets `share/event/404.html` with status 404, the **fallback page** (below). The ids are case-sensitive (Pages paths are): a lower-case id answers the same fallback page, so a link must carry the id as the feed wrote it (the app emits canonical upper-case links). A page leaves with its event (after about 45 days, a
+tombstone, a magnitude revised below 4.0); a link then shows the fallback page.
+
+**The fallback page** (`share/event/404.html`, `notFoundPageHtml`; owner decision 2026-11-17). Most links that reach it
+are real: an event below the bar (under M4.0 as shown, no felt report, no tsunami flag, no PAGER alert), older than the
+45-day window, past the cap, or too new for the last derive. So it is a pointer to the app, not a "not found". Its
+headline is true for most links, not every one: a link past the app's own resolve window (*Resolving a shared id*,
+step 5: an M < 5 older than 61 days, an M5–6 older than the current year and the two before it), a tombstone, or a
+mistyped or crafted id lands here too, and the app then says the event is no longer available (the page cannot tell
+these apart: it reads nothing from the URL; the copy is the owner's choice). It says
+"This earthquake is in the Shelter app"; the web has a detailed page only for significant earthquakes of about the last
+45 days (`EVENT_MAP_HORIZON_DAYS`), the app shows every earthquake in its feed; with the app installed the link opens
+in it; a "Get Shelter on the App Store" button (`https://apps.apple.com/app/id6767608845`, the link every share page
+carries; it answers 404 until the store page is live and needs no change then: an open owner item, checked at release,
+since the button is the page's main action), a link to `https://theshelter.app/`,
+the Smart App Banner without an `app-argument`, `og:image` `generic.png`, `noindex`, the same stylesheet and headers as
+an event page (the CSP allows no script). The page is one constant: it shows no id, no date, no year and nothing else
+taken from the URL, so a crafted link gets the same page and can put nothing on a preview; every link is absolute (it
+is served at any id's path). English only, like the site. It stays Pages' not-found page for `/share/event/`, so the
+status stays **404** (*Limits*: some preview bots draw no card for it; those that do show the fallback's title,
+description and the generic card).
 
 **What a page shows**, only from the feed's event, never from the URL: the magnitude (`M 6.4`), the place, the origin
 time in UTC (`9 November 2026, 03:34 UTC`), the depth, the number of agencies that reported it, the chosen agency's own
@@ -308,7 +326,7 @@ blocks every script on purpose, Cloudflare's injected ones included: never add `
 **Checks.** A share page never stops the live feed. The page check (`sharePageProblem` in `src/share-pages.ts`) rejects a
 page holding a script, a `style` attribute on an element (escaped text that reads `style=` is fine), a stylesheet other
 than the hashed one, or, for an event page, no canonical `https://theshelter.app/event/<feed id>` and banner for it;
-the generic page must also name no feed id and show no year. derive leaves out an event whose page the check rejects,
+the fallback page must also name no feed id and show no year. derive leaves out an event whose page the check rejects,
 with its retired ids (`::warning::share page <id> left out: <why>`); a throw in the page writer, or a rejected generic
 page, drops the run's share pages (`::warning::share pages dropped`) and the links get Pages' plain 404 until the next
 run. `validate.ts` (the deploy gate) fails only on more than 5,000 pages or a `_headers` without the hashed CSP; it
@@ -316,9 +334,11 @@ re-runs the page check on the deployed files and warns on a page the check rejec
 missing generic page, and it warns when the deploy's other files plus the full cap would pass 75 % of Pages' 20,000
 files.
 
-**Limits.** The generic page answers with status 404 (`share/event/404.html` is Pages' not-found page for the
-directory). Some link-preview bots (Telegram, iMessage, Facebook) draw no card for a 404 and cache that, so a link
-shared before its event has a page (an event in its first minutes, before the next derive) may keep no preview there.
+**Limits.** The fallback page answers with status 404 (`share/event/404.html` is Pages' not-found page for the
+directory; a static Pages file cannot choose its status). A person's browser shows the page whatever the status. Some
+link-preview bots (Telegram, iMessage, Facebook) draw no card for a 404 and cache that, so a link without a page (and
+one shared before its event has a page: an event in its first minutes, before the next derive) may keep no preview
+there; bots that read a 404's tags show the fallback's title and the generic card.
 Pages treats a project without a top-level `404.html` as a single-page app; the nested `share/event/404.html` lookup was
 checked on wrangler's Pages asset server, and an unknown `/share/event/efd_…` on a Pages preview deployment must answer
 the generic page before the site's `/event/*` redirect relies on it.
@@ -326,7 +346,7 @@ the generic page before the site's `/event/*` redirect relies on it.
 Measured on `data` ba509fd5a33 (2026-11-09 04:47 UTC, the 46 event-map days): 3,437 pages (3,040 live events, 397
 retired ids; the cap left none out; the page check rejected none), 138 of them with the coordinates instead of the
 place; 17.2 MB in all (6.2 MB gzip, 4.9 MB brotli), a page 4,750–5,268 bytes (median 5,047), the generic page 4,229
-bytes. Writing and checking them adds about 0.4 s to derive (0.5 s with `moved`). The deploy grows from about 1,330 to about 4,770 files (24 % of the 20,000 a
+bytes (the fallback page 4,429 bytes since 2026-11-17). Writing and checking them adds about 0.4 s to derive (0.5 s with `moved`). The deploy grows from about 1,330 to about 4,770 files (24 % of the 20,000 a
 Pages deploy may hold; about 6,330 at the cap).
 
 #### Resolving a shared id

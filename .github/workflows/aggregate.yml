@@ -95,8 +95,8 @@ jobs:
         # The days that differ from the generation plus a rotating sample of 4 (every day about hourly; usually one
         # request of about 1.2 MB), in batches of at most 2.5 MB, 3 in flight, each retried on its own for the blobs it
         # has not yet received (src/state-store.ts getBlobs). Phase 3a's policy (src/event-map-store.ts
-        # SHADOW_RETRY_POLICY): 4 short attempts a batch (5 s + 2 s a MB) and a 30 s deadline over the whole step, so a
-        # hanging store costs this 5-minute job seconds, not minutes; this timeout is only the backstop (a step it kills
+        # SHADOW_RETRY_POLICY): 4 short attempts a batch (5 s + 2 s a MB) and a 30 s deadline over the store requests
+        # (from the first, after the local comparison), so a hanging store costs this 5-minute job seconds, not minutes; this timeout is only the backstop (a step it kills
         # leaves its "killed" marker, which health reads as a failed step).
         timeout-minutes: 2
         env:

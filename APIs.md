@@ -1768,8 +1768,9 @@ to the ref.
     isolate's keys within 2 s), inside the step's deadline: with Retry-After 30 a shadow step used to give up at once
     (runs 43907386794 and 43964170954, 2026-11-16). Phase 3a's shadow steps use a tighter policy
     (`SHADOW_RETRY_POLICY`): 2 attempts of at most 15 s (a hydrate batch: 4, below), 8 s of backoff, and a deadline over
-    the whole step, OIDC token requests included (hydrate 30 s, persist 60 s), so a hanging store adds at most about
-    90 s to an aggregate run; each step writes a `killed` marker when it starts, which its report overwrites, so a step
+    the step's store requests, OIDC token requests included (hydrate 30 s, persist 60 s), so a hanging store adds at
+    most about 90 s to an aggregate run. A hydrate's deadline starts at its first store request, after the local
+    comparison of the checkout (about 78 MB canonicalized; the marker summary names those ms as `of it local`); each step writes a `killed` marker when it starts, which its report overwrites, so a step
     its timeout kills still reads as failed. It mints a fresh OIDC token unless the cached one has more than 60 s left
     (concurrent requests share one token request). `FsBackend` is the same contract on a directory (tests,
     `scripts/phase3/dryrun.sh`, a disaster replay).

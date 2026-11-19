@@ -279,6 +279,33 @@ test('shadow hydrate: verified blobs compared with the checkout; mismatches repo
   }
 });
 
+test('hydrate builds a backend given as a factory only when its local work is done and a fetch is due (the step deadline starts there)', async () => {
+  const r = dataRoot();
+  const dir = tmp();
+  try {
+    const be = new FsBackend(dir);
+    await persist(r, be, { cutoffDay: CUTOFF });
+    let built = 0;
+    const factory = (): FsBackend => {
+      built++;
+      return be;
+    };
+    // Nothing differs and no sample: no store request, so no backend (and no deadline) at all.
+    const quiet = await hydrate(r, factory, { mode: 'shadow', sample: 0 });
+    assert.deepEqual([quiet.fetched, built], [[], 0]);
+    // The sample: one backend, built once for the whole fetch.
+    const sampled = await hydrate(r, factory, { mode: 'shadow', sample: 2 });
+    assert.deepEqual([sampled.fetched.length, sampled.mismatches, built], [2, [], 1]);
+    assert.ok(sampled.localMs >= 0);
+    // Authoritative with every day already on disk: nothing to fetch, no backend.
+    const auth = await hydrate(r, factory, { mode: 'authoritative' });
+    assert.deepEqual([auth.written.length, auth.fetched, built], [2, [], 1]);
+  } finally {
+    rmSync(r, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('hydrate fails closed on a missing or corrupt blob; another gzip of the same NDJSON hydrates (the blob is keyed by its gzip)', async () => {
   const r = dataRoot();
   const dir = tmp();
@@ -383,7 +410,7 @@ test('the steps: markers for the health workflow; the store off, a mismatch or a
     assert.equal(marker('persist').run_id, '42');
     assert.equal(await main(['hydrate'], env({ FEED_STATE_BACKEND: `fs:${dir}` })), 0);
     assert.deepEqual([marker('hydrate').ok, marker('hydrate').mode, marker('hydrate').mismatches], [true, 'shadow', []]);
-    assert.match(String(marker('hydrate').summary), /^2 day\(s\) compared with the checkout; 2 fetched and verified \(0 changed, 2 sampled: 2026-11-14 2026-11-15\), 0\.0 MB in 1 batch\(es\)/);
+    assert.match(String(marker('hydrate').summary), /^2 day\(s\) compared with the checkout; 2 fetched and verified \(0 changed, 2 sampled: 2026-11-14 2026-11-15\), 0\.0 MB in 1 batch\(es\) from .* in \d+ ms \(\d+ ms of it local\)/);
     const m = loadEventMap(r);
     m.get('efd_a')!.lastSeq = 4;
     saveEventMap(r, m);

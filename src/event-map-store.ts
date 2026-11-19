@@ -72,8 +72,10 @@ export const PUT_CONCURRENCY = 4;
  * store must not stretch the 5-minute aggregate job (the client's defaults allow ~87 s per request: 4 × 20 s plus
  * backoff). Two attempts of at most 15 s for a PUT, up to BATCH_ATTEMPTS (4) for each hydrate batch with a timeout
  * scaled to its bytes (src/state-store.ts batchTimeoutMs: 5.6 s for one day, 10 s for a full 2.5 MB batch), 8 s of
- * backoff per request, and a deadline over the whole step, the OIDC token requests included: hydrate 30 s, persist (the
- * first run's 46 PUTs) 60 s, so a hung store costs a run at most ~90 s. A shadow hydrate fetches about 1.2 MB (the
+ * backoff per request, and a deadline over the step's store requests, the OIDC token requests included: hydrate 30 s,
+ * persist (the first run's 46 PUTs) 60 s, so a hung store costs a run at most ~90 s. hydrate's 30 s start after its
+ * local comparison (canonicalizing the checkout's ~78 MB of days, a second or more on a busy runner: main builds the
+ * backend when the fetch starts, and the marker summary names the local ms), so the store requests have all of it. A shadow hydrate fetches about 1.2 MB (the
  * sample of 4 days and the rare day that differs: one request), so 30 s holds three or four attempts of it; even a
  * full 46-day fetch (12.2 MB, 6 batches in two waves) holds a stalled batch's retry. A step cut by its deadline reports
  * a transport error (feed:state-shadow).
@@ -509,6 +511,8 @@ export interface HydrateReport {
   sampled: string[];
   /** The batchGet batches the fetch was planned into (each one request unless retried). */
   batches: number;
+  /** ms of local work (reading and canonicalizing the checkout's days) before the first store request. */
+  localMs: number;
   headSeq: number | null;
 }
 
@@ -555,10 +559,17 @@ export async function fetchGenerationDays(backend: StateBackend, g: Generation, 
  */
 export async function hydrate(
   root: string,
-  backend: StateBackend,
+  backend: StateBackend | (() => StateBackend),
   opts: { mode: HydrateMode; env?: NodeJS.ProcessEnv; sample?: number; rotation?: number },
 ): Promise<HydrateReport> {
   const env = opts.env ?? process.env;
+  const t0 = Date.now();
+  // `backend` may be a factory, called once the local work is done: main builds the backend there, so the step's
+  // deadline starts with the store requests and the canonicalization of ~78 MB of checkout does not eat into it.
+  const connect = (): StateBackend => {
+    report.localMs = Date.now() - t0;
+    return typeof backend === 'function' ? backend() : backend;
+  };
   const gen = readGeneration(root);
   const report: HydrateReport = {
     mode: opts.mode,
@@ -571,6 +582,7 @@ export async function hydrate(
     changed: [],
     sampled: [],
     batches: 0,
+    localMs: 0,
     headSeq: gen?.generation.head_seq ?? null,
   };
   const dir = dataPaths(root).eventMapDir;
@@ -600,7 +612,7 @@ export async function hydrate(
       if (c.nodes === e.nodes && Buffer.byteLength(c.text) === e.bytes && sha256Hex(c.text) === e.sha256) have.set(day, c.text);
     }
     const missing = only(new Set(days.filter((d) => !have.has(d))));
-    const fetched = Object.keys(missing.days).length ? await fetchGenerationDays(backend, missing, stats) : new Map<string, string>();
+    const fetched = Object.keys(missing.days).length ? await fetchGenerationDays(connect(), missing, stats) : new Map<string, string>();
     report.blobBytes = Object.values(missing.days).reduce((n, e) => n + e.blob_bytes, 0);
     report.fetched = [...fetched.keys()];
     report.batches = stats.batches;
@@ -634,7 +646,7 @@ export async function hydrate(
   const changed = new Set(report.changed);
   report.sampled = shadowSample(days, opts.rotation ?? shadowRotation(env), opts.sample ?? SHADOW_SAMPLE_DAYS).filter((d) => !changed.has(d));
   const want = only(new Set([...report.changed, ...report.sampled]));
-  const texts = Object.keys(want.days).length ? await fetchGenerationDays(backend, want, stats) : new Map<string, string>();
+  const texts = Object.keys(want.days).length ? await fetchGenerationDays(connect(), want, stats) : new Map<string, string>();
   report.fetched = [...texts.keys()];
   report.blobBytes = Object.values(want.days).reduce((n, e) => n + e.blob_bytes, 0);
   report.batches = stats.batches;
@@ -848,15 +860,18 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
   }
   if (cmd === 'hydrate') {
     try {
-      const r = await hydrate(root, backend, { mode, env });
+      // The step's deadline (stepPolicy) starts when the store requests do, after hydrate's local comparison: the
+      // backend is built again there with a policy from that instant (the first one above checked the configuration).
+      const first = backend;
+      const r = await hydrate(root, () => backendFromEnv(env, { policy: stepPolicy('hydrate', mode, Date.now())! }) ?? first, { mode, env });
       const ms = Date.now() - t0;
       const mb = `${(r.blobBytes / 1e6).toFixed(1)} MB in ${r.batches} batch(es)`;
       const summary = r.noGeneration
         ? `no generation.json in the checkout yet (before the first persist): nothing to ${mode === 'shadow' ? 'compare' : 'hydrate'}`
         : mode === 'shadow'
           ? `${r.days} day(s) compared with the checkout; ${r.fetched.length} fetched and verified (${r.changed.length} changed, ${r.sampled.length} sampled: ${r.sampled.join(' ') || 'none'}), ` +
-            `${mb} from ${backend.label} in ${ms} ms; ${r.mismatches.length ? `${r.mismatches.length} MISMATCH(ES) with the checkout` : 'identical to the checkout'} (generation at seq ${r.headSeq})`
-          : `${r.written.length} day(s) written, ${r.fetched.length} fetched (${mb}) from ${backend.label} (the rest already identical on disk) in ${ms} ms (generation at seq ${r.headSeq})`;
+            `${mb} from ${backend.label} in ${ms} ms (${r.localMs} ms of it local); ${r.mismatches.length ? `${r.mismatches.length} MISMATCH(ES) with the checkout` : 'identical to the checkout'} (generation at seq ${r.headSeq})`
+          : `${r.written.length} day(s) written, ${r.fetched.length} fetched (${mb}) from ${backend.label} (the rest already identical on disk) in ${ms} ms (${r.localMs} ms of it local; generation at seq ${r.headSeq})`;
       report({ step: 'hydrate', ok: r.mismatches.length === 0, mode, ...common, summary, mismatches: r.mismatches }, env);
       return 0;
     } catch (e) {

@@ -1,0 +1,64 @@
+name: health-liveness
+
+# Health's own liveness (owner decision 2026-11-19; scripts/health-liveness.mjs, README "Health watchdogs"): the
+# dead-man switch Healthchecks.io was to be (dropped: its sign-up email never arrived). health.yml has no way to report
+# that it stopped running, so this workflow reads its runs from outside, on a GitHub cron of its own, independent of the
+# heartbeat Worker that dispatches health: no completed health run for 45 min dispatches health.yml once (self-heal);
+# for 90 min, one comment on the "[health] platform" board mentions HEALTH_MENTION (a GitHub Mobile push), once per
+# outage, and that run is red (the failed-run email, once).
+#
+# GitHub delivers this repository's crons late or not at all (backfill, derive and health each got 4 scheduled runs in
+# the 24 hours to 2026-10-01 16:40 UTC, APIs.md), so the schedule is frequent: a delivery is a ~20 s run that reads one
+# listing and, nearly always, does nothing, and the decision is idempotent (no second dispatch while a health run created
+# in the last 45 min exists, the outage marker in the comment), so extra deliveries add nothing. Never at minute 0,
+# where GitHub's scheduler is busiest. Manual check: gh workflow run health-liveness.yml (dry run by default).
+on:
+  schedule:
+    - cron: '3,13,23,33,43,53 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: decide and print, dispatch and comment nothing'
+        type: boolean
+        default: true
+
+# One check at a time; a newer delivery waiting replaces the pending one (both would decide the same).
+concurrency:
+  group: health-liveness
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  liveness:
+    # Pinned, not ubuntu-latest (as health.yml).
+    runs-on: ubuntu-24.04
+    # One listing, at most one dispatch, one comment listing, a user lookup and one comment (each 20 s at most, reads
+    # tried three times).
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # health.yml's runs, and its dispatch (a workflow_dispatch event from the GITHUB_TOKEN starts a run).
+      actions: write
+      # The platform board's comments: read them (the outage marker), post the outage comment, and unlock and lock
+      # the board around it when GitHub refuses the bot's comment on a locked issue.
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # scripts/health-boards.json names the platform board; the script imports reconcile.mjs and scripts/lib.
+          sparse-checkout: scripts
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - name: Check that health runs; dispatch it, or mention the owner
+        env:
+          # GITHUB_TOKEN, never the owner's PAT: GitHub never notifies a user of their own comment, so a mention posted
+          # as the owner would push nothing to the owner's phone.
+          GH_TOKEN: ${{ github.token }}
+          # One GitHub user's login (README "Who is told"); unset, the comment goes out without a mention.
+          HEALTH_MENTION: ${{ vars.HEALTH_MENTION }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+        run: node scripts/health-liveness.mjs

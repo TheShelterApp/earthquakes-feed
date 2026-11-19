@@ -366,7 +366,9 @@ A cron-only Cloudflare Worker that dispatches `aggregate` (every 5 min), `health
 dispatch or failed run before `feed:state-backup`'s P2 line at 12:00 UTC of the next day) and
 `state-gc` (03:33 UTC, with `tick=1`: the scheduled run) through the Actions API with a fine-grained
 `GH_PAT` (Actions: write). The two daily jobs keep their own GitHub crons (00:41, 03:23) as the fallback for a Worker
-outage; GitHub delivered neither on 2026-11-16 or 11-17. It has no HTTP surface (`workers_dev = false`, `preview_urls = false`).
+outage; GitHub delivered neither on 2026-11-16 or 11-17. Health has no such fallback of its own beyond its `:25` cron:
+`health-liveness.yml` dispatches it when no health run completed for 45 minutes and mentions the owner after 90
+(*Health watchdogs*, Liveness). It has no HTTP surface (`workers_dev = false`, `preview_urls = false`).
 Cron Triggers are not exactly-once (on 2026-10-14 the one `* * * * *` trigger fired twice a minute, 30 s apart, and every
 workflow was dispatched twice), so each activation first claims its (workflow, intended UTC minute) in a dispatch
 ledger, one SQLite-backed Durable Object (`heartbeat/src/ledger.js`): exactly one activation per minute dispatches, a
@@ -423,7 +425,7 @@ The heartbeat Worker dispatches `health.yml` every 15 minutes (:07, :22, :37, :5
 the fallback for a Worker outage: it runs its checks only when no dispatched health run was created in the last 20
 minutes (one that was cancelled or skipped does not count). One health run runs at a time (concurrency group
 `health`). Every threshold is in one table, `RULES` in [`scripts/lib/findings.mjs`](scripts/lib/findings.mjs)
-(alerting plan of 2026-10-22, Phase 1a).
+(alerting plan of 2026-10-22, Phase 1a). `health-liveness.yml` watches health itself from outside (*Liveness*, below).
 
 - **`gate`** ([`scripts/reconcile.mjs`](scripts/reconcile.mjs) `--gate`): the fallback cron's skip, and the selftest.
 - **Three evaluators**, run from GitHub on purpose, so they keep working when Cloudflare is the thing that broke. Each
@@ -454,8 +456,8 @@ minutes (one that was cancelled or skipped does not count). One health run runs 
 
 | Level | Meaning | Run | Board |
 |---|---|---|---|
-| P1 page | Alerts are not reaching users, or will stop within hours or days | Red on every run while it holds | Silent row |
-| P2 urgent | Redundancy lost, or a symptom a fallback still covers | Red during its first hour, then green with `::error::` | Silent row |
+| P1 page | Alerts are not reaching users, or will stop within hours or days | Red on every run while it holds | With `HEALTH_MENTION`: a comment that mentions the owner when it opens, rises or escalates, one without a mention when it resolves; else a silent row |
+| P2 urgent | Redundancy lost, or a symptom a fallback still covers | Red during its first hour, then green with `::error::` | As P1 |
 | P3 ticket | Act within days, or one external source has been out long enough to matter | Green with `::warning::` | One comment when it enters, one when it escalates |
 | P4 info | Normal churn, or a condition below its line | Green | The job summary only |
 
@@ -475,17 +477,22 @@ label listings both answered without it. Two issues
 with a board's title: the numbered one (else the lower number) is the board, it continues from the newer state marker
 of the two, and the other is retired (renamed "… (duplicate of #N)", unlabelled, unpinned and closed). Once a day the pins and locks are checked again (`GITHUB_TOKEN` may lack the right to pin, which is a warning; the
 three boards take all three of the repository's pin slots). Each body lists the open rows, the rows still confirming or
-holding, the shadow rules and a "Last 7 days" table (red runs, comments, push transitions, shadow would-notify), and
+holding, the shadow rules and a "Last 7 days" table (red runs, comments, mentions, shadow would-notify), and
 the alert-pipeline board the last selftest; it ends in a hidden `<!-- health-state v1 … -->` marker: the memory across
 runs, so do not edit a body by hand (a broken marker starts the board empty). A body that would pass GitHub's limit
 drops its log rows first, then shortens texts and lists fewer rows; the marker keeps every open row (over about a
 hundred, the board is not written at all: exit 3). The label `health:p1` … `health:ok` is the board's worst open row.
-- **Comments** only when a P3 enters and when it stays open past its rule's age line (the escalation, on a run where
-  its finding is present). P1/P2 rows, a rise into P1/P2 (`config:bundle` by age, the promotion below), members leaving
-  and resolutions are silent edits: the red run is the P1/P2 alarm, and it reaches the owner only. A comment goes out
-  before the body that records it: one GitHub refuses is an `::error::`, rolled back and posted by the next run
-  (`watcher:reconcile`), and a body that is not saved afterwards can repeat a comment, never lose one. A board locked
-  against the bot is unlocked around its comment or body edit and locked again.
+- **Comments**, at most one per board per run with one item per key: when a P3 enters and when it stays open past its
+  rule's age line (the escalation, on a run where its finding is present). P1/P2 (owner decision 2026-11-19): with the
+  repository variable `HEALTH_MENTION`, a key that opens at P1/P2, rises into P1/P2 (`config:bundle` by age, the
+  promotion below) or escalates while P1/P2 gets an item too, and the comment's first line mentions the owner
+  (``@login P1 `alerts:degraded` opened``: what GitHub Mobile shows). Once per key per transition, never per run; a
+  silence or an inhibition holds it back like any comment. A mentioned key that resolves gets one item without a
+  mention. Without `HEALTH_MENTION`, P1/P2 rows and rises are silent edits and the red run is their alarm, as before.
+  Members leaving and the other resolutions are silent edits. A comment goes out before the body that records it: one
+  GitHub refuses is an `::error::`, rolled back (its mention too) and posted by the next run (`watcher:reconcile`), and
+  a body that is not saved afterwards can repeat a comment, never lose one. A board locked against the bot is unlocked
+  around its comment or body edit and locked again.
 - **Holds.** A condition below its line is a P4 sample. Depending on the rule, a key enters after 2 runs in a row, on 4
   of the last 8 runs or after a 24 h hold, and resolves after 2 healthy runs (4 when it entered on the ratio). Runs
   count by time: a run less than 10 minutes after the previous one (a rerun, an extra dispatch) shares its sample slot,
@@ -514,7 +521,7 @@ hundred, the board is not written at all: exit 3). The label `health:p1` … `he
 | `alerts:degraded` | P1; P3 when forced | The degradation ladder is active | Relieve the budget cause; a forced override is a reminder to lift it |
 | `alerts:policy` | P1 | The compiled fallback policy runs instead of the signed one | Republish or repair the signed alerts policy |
 | `alerts:apns` | P1 / P2 / P3 | P1: APNs not configured, `apns.problems` not empty, or split mode without production; also when today's fan-out jobs sent 0 with 3 or more pushes failed or queued for retry. P2: at least 20 pushes failed today and they are half or more of today's sent + failed (queued retries left out), or today's last fan-out job ended failed (its deadline passed before every shard reported). P3: today's `skipped_no_key` or `retry_dropped_budget` above 0 | The gateway's APNs keys for the environment named; for the delivery rules, the APNs provider key, Apple's status and the gateway's fan-out shards |
-| `alerts:selftest` | P1 | The selftest (below) | Expected; never stored on a board |
+| `alerts:selftest` | P1 | The selftest (below) | Expected; never stored on a board (with `HEALTH_MENTION`, its comment mentions the owner: the push works) |
 | `feed:writer-queue` | P2 | More than 3 runs wait for (or are about to enter) the `earthquakes-feed-writer` group, or the older live manifest is over 15 min old while any does (unfinished runs older than 6 h are GitHub's ghosts and do not count) | [Writer group](#writer-group): cancel the surplus runs (`gh run cancel <id>`), pace the dispatches; usually a burst dispatched with `force=true` |
 | `feed:freshness` | P2 (unreachable: 2nd run) | The older of the live `v1` and `v2` manifests past `stale_after_seconds` (1,800 s), confirmed by a re-read 60 s later; or a manifest unreachable | The aggregate runs, the heartbeat Worker and its `GH_PAT`, the Pages deploy; `v1` fresh and `v2` stale means signing stopped |
 | `feed:status` | P3 (2nd run) | `v1/status.json` unreadable | The per-source rows are frozen meanwhile: the aggregate runs' Pages publish |
@@ -541,24 +548,60 @@ hundred, the board is not written at all: exit 3). The label `health:p1` … `he
 | `platform:cf-usage` | P2 / P1 | Only with `CF_ANALYTICS_TOKEN`: Workers requests or D1 rows written at 80 % (or a projected 100 %) / 95 % of the free daily caps | What spends them; the caps reset at 00:00 UTC |
 | `watcher:<name>` | P3 (2nd run) | The monitoring itself: an evaluator without findings, a refused token, a usage query that failed, a GitHub read of the feed job (`feed-github`), the state Worker's budget unreadable (`feed-state`), board comments `reconcile` could not post (`reconcile`), no selftest for 35 days (`selftest-overdue`) | The job's log; the frozen rows wait for it; `selftest-overdue`: run the selftest |
 
-**Silences.** The repository variable `HEALTH_SILENCES` mutes a key's comments and pings until a date, with no commit:
+**Silences.** The repository variable `HEALTH_SILENCES` mutes a key's comments and mentions until a date, with no commit:
 `key=until,reason;…`, where `key` is exact or a prefix ending in `*` and `until` is `YYYY-MM-DD` (the end of that UTC day)
 or an ISO time with a zone (at most 20 entries). A silence lifts early when the key's severity rises, and it does not
 change a red run; an expired or malformed entry is named in the run's warnings. For example
 `gh variable set HEALTH_SILENCES --body 'feed:source:tmd=2026-11-01,new certificate chain' -R TheShelterApp/earthquakes-feed`.
 
-**Who is told.**
+**Who is told** (owner decision 2026-11-19: Healthchecks.io is dropped, its sign-up email never arrived; the push
+channel is GitHub Mobile, free and already on the owner's phone).
+- **A P1/P2 mention**: with `HEALTH_MENTION` set to the owner's GitHub login, the board comment of a P1/P2 that opens,
+  rises or escalates, the selftest's comment and the liveness check's outage comment start with `@<login>`, and GitHub
+  Mobile pushes the mention. The comments are posted with the workflow's `GITHUB_TOKEN` (author `github-actions[bot]`),
+  never with the owner's PAT: GitHub never notifies a user of their own comment, so a mention posted as the owner would
+  push nothing. The variable must be one user's login: a team, a list or an organization mentions no one (a warning on
+  the run). The boards are public, so a mention shows the login on a public issue; it carries only what the board
+  already shows (severity, key, condition, the run's link).
 - **A red run** sends GitHub's failed-workflow email (Settings → Notifications → Actions) to whoever GitHub notifies for
   that run: for the runs the heartbeat dispatches, the account that owns its `GH_PAT` (another account's PAT reroutes the
   email); for the cron runs, the last person who edited the cron line.
-- **A board comment** notifies whoever subscribed to that board or watches the repository: subscribe to the three boards
-  once they exist. Only P3 entries and escalations comment, so a P1 reaches the owner alone (the red run).
-- **No push channel for now** (owner decision 2026-10-22): `reconcile` computes the Healthchecks.io pings (`gh-detect`,
-  `gh-deliver`, `gh-redundancy`, `gh-feed`, `gh-platform`, `gh-capacity`, `gh-aging`, `health-watchdog`, `selftest`) but
-  skips them while the `HC_PING_KEY` secret is unset.
+- **A board comment** notifies whoever subscribed to that board or watches the repository (subscribe to the three
+  boards to get the P3 comments too). Once mentioned, the owner is
+  subscribed to that board (participating), so its later comments, P3 ones too, reach the owner's GitHub inbox; GitHub
+  Mobile pushes only what its push settings allow (below).
+
+**Owner setup** (once; the owner runs these, not a workflow):
+1. `gh variable set HEALTH_MENTION --body nickaroot -R TheShelterApp/earthquakes-feed` (the owner's user login, without
+   `@`; `gh variable delete HEALTH_MENTION -R TheShelterApp/earthquakes-feed` turns the mentions off).
+2. GitHub Mobile, signed in as that user: Profile → Settings → Notifications → push notifications on, with **Direct
+   mentions** on; if "Working hours" is set, a P1 outside them waits until they start, so leave it off for a P1 to wake
+   the owner. On the phone itself (iOS Settings → Notifications → GitHub) notifications must be allowed, and allowed by
+   any Focus the owner sleeps in.
+3. On github.com: Settings → Notifications → "Participating, @mentions and custom": "On GitHub" on (the inbox GitHub
+   Mobile reads), email optional; under Actions, "Only notify for failed workflows" keeps the red-run email.
+4. Prove it: `gh workflow run health.yml -f watchdog_selftest=true -R TheShelterApp/earthquakes-feed`. The run must be
+   red, the "[health] alert pipeline" board gets ``@nickaroot P1 `alerts:selftest` (the selftest)``, and the phone shows
+   the push within a minute or two. The liveness path: `gh workflow run health-liveness.yml -R
+   TheShelterApp/earthquakes-feed` is a dry run that prints what it would do (`-f dry_run=false` acts, which only
+   matters while health is down).
+
+**Liveness** ([`scripts/health-liveness.mjs`](scripts/health-liveness.mjs), `health-liveness.yml`): the dead-man switch.
+When health stops (the Worker down or its `GH_PAT` refused, and GitHub not delivering the `:25` cron), nothing turns red
+and the boards just stop changing. `health-liveness.yml` runs on a GitHub cron of its own (every 10 minutes, never at
+minute 0; GitHub delivers this repository's crons late or not at all, so it is frequent and idempotent) and reads
+health.yml's runs: the last completed run that judged (success, failure or timed_out; not cancelled, skipped or a
+startup failure) over 45 minutes old dispatches `health.yml` once (not again while a health run created in the last 45
+minutes exists); over 90 minutes, one comment on the "[health] platform" board mentions `HEALTH_MENTION`, once per
+outage (a hidden `<!-- health-liveness v1 outage=<run id> -->` marker in the bot's comment; nothing in the board body),
+and that run is red (the failed-run email, once). The first health run after a gap over 45 minutes warns (`Health
+liveness`); after one over 90 minutes, with `HEALTH_MENTION`, it adds a "Health runs again" item to the platform board,
+without a mention. If GitHub delivers neither health's nor this cron while the Worker is down, nothing is said: the
+two paths share nothing but GitHub Actions itself.
 
 **Selftest.** The monthly cron (09:17 UTC on the 1st) and `gh workflow run health.yml -f watchdog_selftest=true` force the
-P1 `alerts:selftest`: the run must be red, which proves the red path and the email. `reconcile` records the last selftest
+P1 `alerts:selftest`: the run must be red, which proves the red path and the email, and with `HEALTH_MENTION` its comment
+on the alert-pipeline board mentions the owner, which proves the GitHub Mobile push. `reconcile` records the last selftest
 on the boards; GitHub can drop a scheduled run, so 35 days without one opens `watcher:selftest-overdue`.
 
 **Walks and writers.** `history`, `first-solutions`, `backfill`, `archive`, `remerge` and `stats` keep a blocked run green: a `::warning::`,
@@ -588,7 +631,8 @@ node scripts/alerts-watchdog.mjs        # annotations and exit codes: 0 healthy,
 node scripts/platform-watchdog.mjs      # the same for the API and config Workers: 0 healthy, 1 a host down, 3 misconfigured
 node scripts/feed-health.mjs            # prints its findings document (without GH_TOKEN, no GitHub parts)
 node scripts/alerts-watchdog.mjs --findings findings/alerts.json   # likewise feed-health.mjs and platform-watchdog.mjs
-node scripts/reconcile.mjs --findings-dir findings --dry-run         # what the boards would say; writes and pings nothing
+node scripts/reconcile.mjs --findings-dir findings --dry-run         # what the boards would say; writes and comments nothing
+GH_TOKEN=$(gh auth token) GITHUB_REPOSITORY=TheShelterApp/earthquakes-feed DRY_RUN=1 node scripts/health-liveness.mjs   # is health alive?
 ```
 
 ## Licensing & takedowns

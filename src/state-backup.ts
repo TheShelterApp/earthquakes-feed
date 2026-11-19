@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { constants as zlibConstants, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 import { REPO } from './config.js';
-import { parseGeneration, type Generation } from './event-map-store.js';
+import { blobSizes, parseGeneration, type Generation } from './event-map-store.js';
 import { GC_MAX_WINDOW_DAYS, GENERATION_PATH, githubSources, readBackupMarkerWithGh, type BackupMarker } from './state-gc.js';
 import { backendFromEnv, casKey, getBlobs, sha256Hex, type StateBackend } from './state-store.js';
 
@@ -301,7 +301,7 @@ export async function runBackup(
         const b = await io.fileAt(commit, p);
         if (b) companions.set(p, b);
       }
-      const blobs = await getBlobs(backend, Object.values(g.days).map((e) => e.blob));
+      const blobs = await getBlobs(backend, Object.values(g.days).map((e) => e.blob), { sizes: blobSizes(g) });
       const zst = compressBackup(writeTar(backupMembers(commit, text, companions, blobs)));
       verifyBackup(readTar(decompressBackup(zst)));
       const file = join(opts.workDir, held.nextName);

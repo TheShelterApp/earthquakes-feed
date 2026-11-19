@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { saveEventMap } from './bitemporal.js';
 import { dataPaths } from './config.js';
-import { dayFileName, eventMapFiles, hydrate, persist, readCanonicalDay, readGeneration } from './event-map-store.js';
+import { blobSizes, dayFileName, eventMapFiles, hydrate, persist, readCanonicalDay, readGeneration } from './event-map-store.js';
 import { collect, gcCounts, GC_MIN_AGE_DAYS } from './state-gc.js';
 import { backupMembers, compressBackup, decompressBackup, readTar, verifyBackup, writeTar } from './state-backup.js';
 import { gzipSync } from 'node:zlib';
@@ -111,9 +111,10 @@ export async function rehearse(backend: StateBackend, opts: { nowMs?: number; lo
     const p1 = await persist(a, backend, { cutoffDay });
     if (p1.uploaded.length !== REHEARSAL_DAYS) throw new Error(`persist uploaded ${p1.uploaded.length} day(s), expected ${REHEARSAL_DAYS}`);
     step(`persist: ${p1.uploaded.length} day blob(s) uploaded (${(p1.uploadedBytes / 1e3).toFixed(0)} kB)`);
-    const h1 = await hydrate(a, backend, { mode: 'shadow' });
-    if (h1.mismatches.length || h1.days !== REHEARSAL_DAYS) throw new Error(`shadow hydrate: ${h1.days} day(s), mismatches ${h1.mismatches.join('; ')}`);
-    step(`shadow hydrate: ${h1.days} day(s) fetched and verified, identical to the checkout`);
+    // Every day, not the rotating sample of a production run: the rehearsal proves the store holds each blob it wrote.
+    const h1 = await hydrate(a, backend, { mode: 'shadow', sample: REHEARSAL_DAYS });
+    if (h1.mismatches.length || h1.days !== REHEARSAL_DAYS || h1.fetched.length !== REHEARSAL_DAYS) throw new Error(`shadow hydrate: ${h1.days} day(s), ${h1.fetched.length} fetched, mismatches ${h1.mismatches.join('; ')}`);
+    step(`shadow hydrate: ${h1.fetched.length} day(s) fetched and verified in ${h1.batches} batch(es), identical to the checkout`);
     writeFileSync(dataPaths(a).head, JSON.stringify({ seq: 2, ingest_time: new Date(nowMs).toISOString() }) + '\n');
     const first = map.values().next().value!;
     map.set(first.feedId, { ...first, lastSeq: 2, place: 'revised synthetic rehearsal event' });
@@ -136,7 +137,8 @@ export async function rehearse(backend: StateBackend, opts: { nowMs?: number; lo
     // The restore path (scripts/state-restore.ts) on the same synthetic state: the daily backup archive of the
     // generation, built, verified, and its blobs PUT again (the same keys: a restore into a store that kept them).
     const genText = readFileSync(dataPaths(a).generation, 'utf8');
-    const blobs = await getBlobs(backend, Object.values(readGeneration(a)!.generation.days).map((e) => e.blob));
+    const genA = readGeneration(a)!.generation;
+    const blobs = await getBlobs(backend, Object.values(genA.days).map((e) => e.blob), { sizes: blobSizes(genA) });
     const archive = readTar(decompressBackup(compressBackup(writeTar(backupMembers('0'.repeat(40), genText, new Map(), blobs)))));
     const restored = verifyBackup(archive);
     for (const e of Object.values(restored.generation.days)) await backend.put(e.blob, archive.get(casKey(e.blob))!);

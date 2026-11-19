@@ -596,8 +596,9 @@ startup failure) over 45 minutes old dispatches `health.yml` once (not again whi
 minutes exists); over 90 minutes, one comment on the "[health] platform" board mentions `HEALTH_MENTION`, once per
 outage (a hidden `<!-- health-liveness v1 outage=<run id> -->` marker in the bot's comment; nothing in the board body),
 and that run is red (the failed-run email, once). The first health run after a gap over 45 minutes warns (`Health
-liveness`); after one over 90 minutes, with `HEALTH_MENTION`, it adds a "Health runs again" item to the platform board,
-without a mention. If GitHub delivers neither health's nor this cron while the Worker is down, nothing is said: the
+liveness`); when the liveness check said that outage on the platform board (its marker since the last reconcile), that
+run adds a "Health runs again" item there, without a mention and whether or not `HEALTH_MENTION` is set, so every "health
+is down" gets its answer and nothing else does (if the comments cannot be read, a gap over 90 minutes decides). If GitHub delivers neither health's nor this cron while the Worker is down, nothing is said: the
 two paths share nothing but GitHub Actions itself.
 
 **Selftest.** The monthly cron (09:17 UTC on the 1st) and `gh workflow run health.yml -f watchdog_selftest=true` force the

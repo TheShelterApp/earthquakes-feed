@@ -27,7 +27,11 @@ import {
   MAX_BODY_CHARS,
   MAX_SILENCES,
   SELFTEST_CRON,
+  BOT_LOGIN,
   annotation,
+  lastReconciledMs,
+  outageMarker,
+  outageSaid,
   main,
   markdownText,
   parseArgs,
@@ -67,6 +71,8 @@ interface RunOpts {
   mention?: string | null;
   /** Why a HEALTH_MENTION that is set names no user (the wrapper's resolveMention warnings). */
   mentionError?: string | null;
+  /** Whether the liveness check said an outage since the previous reconcile (absent: no, as in most replays; null: unknown). */
+  livenessSaid?: boolean | null;
 }
 
 /** A sequence of health runs whose state lives only in the rendered bodies, as on GitHub. */
@@ -90,6 +96,7 @@ class World {
       missing: opts.missing ?? {},
       mention: opts.mention ?? null,
       mentionError: opts.mentionError ?? null,
+      livenessSaid: opts.livenessSaid === undefined ? false : opts.livenessSaid,
     });
     for (const b of BOARD_IDS) {
       const body = r.bodies[b];
@@ -650,10 +657,10 @@ test('mentions: a rise into P1/P2 and a P2 promoted to P1 mention again; each la
   assert.equal(p3.comments.length, 1);
   assert.equal(p3.comments[0]!.mention, false, 'the P3 entry: an ordinary comment');
   assert.ok(!p3.comments[0]!.body.includes('@nickaroot'));
-  const p2 = w.run('2026-10-27T20:40:00Z', { platform: [age('P2')] }, ME);
+  const p2 = w.run('2026-10-27T20:40:00Z', { platform: [age('P2')] }, { ...ME, livenessSaid: true });
   assert.deepEqual(p2.comments.map((c) => c.body.split('\n\n')[0]), ['@nickaroot P2 `config:bundle` rose from P3']);
   assert.match(p2.comments[0]!.body, /\*\*P2 · `config:bundle`\*\* config bundle old — rose from P3: the config copy is old \(P2\) \(since 2026-10-22 20:40Z, 5\.0 d\)/);
-  // Five days without a run in this replay: the same comment says health runs again (the liveness item, no mention).
+  // Five days without a run in this replay (the liveness check said so): the same comment says health runs again.
   assert.match(p2.comments[0]!.body, /\n\n\*\*Health runs again\*\* — /);
   assert.deepEqual(w.run('2026-10-27T20:55:00Z', { platform: [age('P2')] }, ME).comments, []);
   const p1 = w.run('2026-11-11T20:40:00Z', { platform: [age('P1')] }, ME);
@@ -778,7 +785,7 @@ test('mentions: a HEALTH_MENTION that is set but names no user is watcher:mentio
   assert.ok(!new World().run('2026-11-01T09:17:00Z', { alerts: [f('alerts:selftest', { text: 'forced' })] }, ME).annotations.some((a) => a.includes('Selftest push not proven')));
 });
 
-test('liveness: a previous reconcile over 45 min old is a warning; over 90 min with HEALTH_MENTION the platform board says health runs again', () => {
+test('liveness: a previous reconcile over 45 min old is a warning; "Health runs again" answers the liveness check\'s outage comment, mentioned or not', () => {
   const w = new World();
   w.run('2026-10-21T10:07:00Z', {}, ME);
   const ok = w.run('2026-10-21T10:52:00Z', {}, ME);
@@ -787,19 +794,45 @@ test('liveness: a previous reconcile over 45 min old is a warning; over 90 min w
   assert.ok(late.annotations.includes('::warning title=Health liveness::the previous health run reconciled at 2026-10-21 10:52Z, 46 min before this one (over 45 min: health missed its dispatches)'));
   assert.match(late.summary, /\*\*Liveness:\*\* the previous health run reconciled at 2026-10-21 10:52Z, 46 min/);
   assert.deepEqual(late.comments, [], 'under 90 min: no comment');
-  const dead = w.run('2026-10-21T13:38:00Z', {}, ME);
+  const dead = w.run('2026-10-21T13:38:00Z', {}, { ...ME, livenessSaid: true });
   assert.deepEqual(dead.comments.map((c) => [c.board, c.mention]), [['platform', false]]);
   assert.match(dead.comments[0]!.body, /^\*\*Health runs again\*\* — the previous health run reconciled at 2026-10-21 11:38Z, 2\.0 h before this one \(the liveness line is 90 min\)/);
   assert.ok(!dead.comments[0]!.body.includes('@'));
   assert.equal(HEALTH_DEAD_MS, 2 * HEALTH_STALE_MS);
-  // Without HEALTH_MENTION: the warning only (as before 2026-11-19, nothing is commented).
+  // Without HEALTH_MENTION the outage comment still went out (unmentioned), so it is answered too.
   const v = new World();
   v.run('2026-10-21T10:07:00Z', {});
-  const quiet = v.run('2026-10-21T13:07:00Z', {});
-  assert.deepEqual(quiet.comments, []);
-  assert.ok(quiet.annotations.some((a) => a.startsWith('::warning title=Health liveness::')));
+  const plain = v.run('2026-10-21T13:07:00Z', {}, { livenessSaid: true });
+  assert.deepEqual(plain.comments.map((c) => c.board), ['platform']);
+  assert.ok(plain.annotations.some((a) => a.startsWith('::warning title=Health liveness::')));
+  // No outage comment (the check was silenced, health.yml was off on purpose, or it never got that far): no answer.
+  const u = new World();
+  u.run('2026-10-21T10:07:00Z', {}, ME);
+  assert.deepEqual(u.run('2026-10-21T13:07:00Z', {}, { ...ME, livenessSaid: false }).comments, []);
+  // The comments could not be read (null): the gap alone, over 90 min.
+  const n = new World();
+  n.run('2026-10-21T10:07:00Z', {});
+  assert.deepEqual(n.run('2026-10-21T11:30:00Z', {}, { livenessSaid: null }).comments, [], '83 min: under the line');
+  assert.deepEqual(n.run('2026-10-21T13:07:00Z', {}, { livenessSaid: null }).comments.map((c) => c.board), ['platform']);
   // The first run of all has no previous run to measure.
   assert.ok(!new World().run('2026-10-21T10:07:00Z', {}, ME).annotations.some((a) => a.includes('Health liveness')));
+});
+
+test('outageSaid / lastReconciledMs: the bot\'s outage marker since the last reconcile; the boards\' newest updatedMs', () => {
+  const since = T('2026-10-21T10:00:00Z');
+  const bot = { login: BOT_LOGIN };
+  const said = (c: unknown): boolean => outageSaid([c], since);
+  assert.equal(outageMarker(T('2026-10-21T10:00:00Z')), `<!-- health-liveness v1 outage=${T('2026-10-21T10:00:00Z')} -->`);
+  assert.equal(outageMarker('5 --> x'), '<!-- health-liveness v1 outage=5x -->', 'nothing can close the marker early');
+  assert.equal(said({ body: `x\n\n${outageMarker(since)}`, user: bot, created_at: '2026-10-21T11:31:00Z' }), true);
+  assert.equal(said({ body: `x\n\n${outageMarker(12)}`, user: bot }), true, 'any outage marker since the last reconcile is this outage');
+  assert.equal(said({ body: `x\n\n${outageMarker(since)}`, user: { login: 'someone' } }), false, 'a copy by a person does not count');
+  assert.equal(said({ body: `x\n\n${outageMarker(1)}`, user: bot, created_at: '2026-10-21T09:59:00Z' }), false, 'an earlier outage, answered before the last reconcile');
+  assert.equal(said({ body: 'health is down', user: bot }), false, 'no marker');
+  assert.equal(outageSaid(null, since), false);
+  assert.equal(lastReconciledMs({ alerts: { updatedMs: 5 }, feed: null, platform: { updatedMs: 9 } }), 9);
+  assert.equal(lastReconciledMs([{ updatedMs: null }, null]), null);
+  assert.equal(lastReconciledMs(null as never), null);
 });
 
 test('body: round trip, escaping of untrusted text, a broken marker, and 42 open sources plus 300 log events under the limit', () => {
@@ -1342,6 +1375,8 @@ class FakeGitHub {
   graphqlStatus = 200;
   dispatched: FakeRun[] = [];
   runsStatus = 200;
+  /** GET /issues/N/comments?since=: the status (the comments are the bot's, without created_at). */
+  commentsListStatus = 200;
   nextNumber = 100;
 
   board(title: string): FakeIssue | undefined {
@@ -1409,6 +1444,12 @@ class FakeGitHub {
         return json({ data: { pinIssue: { issue: { number: issue?.number ?? null } } } });
       }
       return json({ data: { nodes: (vars.ids ?? []).map((id) => this.issues.find((i) => i.node_id === id)).map((i) => (i ? { id: i.node_id, number: i.number, isPinned: i.pinned, locked: i.locked } : null)) } });
+    }
+    const listing = /^\/repos\/[^/]+\/[^/]+\/issues\/(\d+)\/comments\?since=[^&]+&per_page=100$/.exec(path);
+    if (method === 'GET' && listing) {
+      const i = this.issues.find((x) => x.number === Number(listing[1]));
+      if (this.commentsListStatus !== 200 || !i) return json({ message: 'boom' }, i ? this.commentsListStatus : 404);
+      return json(i.comments.map((c) => ({ body: c, user: { login: 'github-actions[bot]' } })));
     }
     const m = /^\/repos\/[^/]+\/[^/]+\/issues\/(\d+)(\/[a-z]+)?$/.exec(path);
     const issue = m ? this.issues.find((i) => i.number === Number(m[1])) : undefined;
@@ -1992,6 +2033,41 @@ test('main: HEALTH_MENTION is checked against the API (a user, not an organizati
   assert.ok(!rolled.log.some((x) => x.event === 'mention'));
   await runMain(down, T('2026-10-21T10:22:00Z'), { alerts: [f('alerts:policy', { text: 'fallback policy' })] }, { ...nums, env: { HEALTH_MENTION: 'nickaroot' } });
   assert.match(down.board('[health] alert pipeline')!.comments[0]!, /^@nickaroot P1 `alerts:policy` opened/);
+});
+
+test('main: after a gap over 90 min, "Health runs again" only when the platform board has the liveness check\'s outage comment since the last reconcile', async () => {
+  const nums = { numbers: NUMBERS };
+  const setup = async (): Promise<FakeGitHub> => {
+    const gh = new FakeGitHub();
+    await runMain(gh, T('2026-10-21T09:52:00Z'), {}, { numbers: TO_MAKE });
+    await runMain(gh, T('2026-10-21T10:07:00Z'), {}, nums);
+    gh.calls = [];
+    return gh;
+  };
+  const listings = (gh: FakeGitHub): string[] => gh.calls.filter((c) => c.method === 'GET' && c.url.includes('/comments?since=')).map(callText);
+
+  const quiet = await setup();
+  const q = await runMain(quiet, T('2026-10-21T12:07:00Z'), {}, nums);
+  assert.equal(q.code, 0);
+  assert.deepEqual(listings(quiet), [`GET /repos/${REPO}/issues/102/comments?since=${encodeURIComponent('2026-10-21T10:07:00.000Z')}&per_page=100`]);
+  assert.deepEqual(quiet.board('[health] platform')!.comments, [], 'no outage was said: nothing to answer');
+  assert.ok(q.lines.some((l) => l.startsWith('::warning title=Health liveness::')));
+
+  const said = await setup();
+  said.board('[health] platform')!.comments.push(`health is down: ...\n\n${outageMarker(T('2026-10-21T10:07:00Z'))}`);
+  await runMain(said, T('2026-10-21T12:07:00Z'), {}, nums);
+  assert.match(said.board('[health] platform')!.comments[1]!, /^\*\*Health runs again\*\* — the previous health run reconciled at 2026-10-21 10:07Z, 2\.0 h before this one/);
+
+  const unread = await setup();
+  unread.commentsListStatus = 502;
+  const u = await runMain(unread, T('2026-10-21T12:07:00Z'), {}, nums);
+  assert.ok(u.lines.some((l) => l.startsWith("::warning title=Health reconcile::cannot read board #102's comments (HTTP 502")));
+  assert.match(unread.board('[health] platform')!.comments[0]!, /^\*\*Health runs again\*\*/, 'unreadable: by the gap alone');
+
+  // Under the line: no lookup at all.
+  const near = await setup();
+  await runMain(near, T('2026-10-21T11:07:00Z'), {}, nums);
+  assert.deepEqual(listings(near), []);
 });
 
 test('main: an unreadable findings file or no directory marks evaluators missing; --dry-run writes nothing', async () => {

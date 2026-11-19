@@ -34,8 +34,8 @@
 // when the silence ends. A single external source, a maintenance walk and the watcher itself never turn a run red.
 // Shadow rules only log "would notify". The last selftest is recorded on every board: 35 days without one opens
 // watcher:selftest-overdue. A run whose previous reconcile is over 45 min old (HEALTH_STALE_MS: health missed three
-// dispatches) says so in a warning; over 90 min with HEALTH_MENTION set, the platform board gets a "health runs again"
-// item, the answer to scripts/health-liveness.mjs's mention.
+// dispatches) says so in a warning; when scripts/health-liveness.mjs said that outage on the platform board (its marker
+// since the previous reconcile), the board gets a "health runs again" item, its answer.
 //
 // Boards: the first run that finds none creates all three at once, the labels first (a one-time rollout notification to
 // the repository's watchers), never because of a finding (a P4 sample, a pending one or a shadow rule cannot open an
@@ -520,11 +520,52 @@ const resolveItem = (e, nowMs) =>
 /** The selftest's item: the forced P1 that proves the red run and, mentioned, the GitHub Mobile push. */
 const selftestItem = (f) => `**P1 · \`${SELFTEST_KEY}\`** selftest — ${md(f.text)}: this comment proves the push path, and the red run the email; nothing to do`;
 /**
- * A health run that came over HEALTH_DEAD_MS after the previous reconcile (scripts/health-liveness.mjs has mentioned the
- * outage by then): one platform item, no mention, so the push that said "health is down" has its answer.
+ * A health run that answers scripts/health-liveness.mjs's outage comment (its marker on the platform board since the
+ * previous reconcile): one platform item, no mention, so the push that said "health is down" has its answer.
  */
 const livenessItem = (prevMs, nowMs) =>
   `**Health runs again** — the previous health run reconciled at ${utcText(prevMs)}, ${ageText(nowMs - prevMs)} before this one (the liveness line is ${ageText(HEALTH_DEAD_MS)}): no health run reconciled in between; nothing to do unless it repeats`;
+
+// ---------------------------------------------------------------------------------------------------------
+// Health's own liveness, shared with scripts/health-liveness.mjs
+
+/** The author of every health comment (the workflows' GITHUB_TOKEN), the liveness outage comment among them. */
+export const BOT_LOGIN = 'github-actions[bot]';
+const OUTAGE_MARKER_HEAD = 'health-liveness v1 outage=';
+
+/**
+ * The hidden marker of scripts/health-liveness.mjs's outage comment. The outage is the time of the last reconcile it
+ * measured from (the boards' newest state.updatedMs, lastReconciledMs), 'none' without one.
+ */
+export function outageMarker(outage) {
+  return `<!-- ${OUTAGE_MARKER_HEAD}${String(outage).replace(/[^0-9a-z]/gi, '')} -->`;
+}
+
+/**
+ * Whether the bot said a liveness outage at or after `sinceMs` (the last reconcile): any outage marker counts, since
+ * every outage since the last reconcile is this one, so the identity never depends on a listing window. Both halves use
+ * it: the liveness check says an outage once, and reconcile answers exactly the outages that were said. A comment
+ * without a readable created_at counts (the API's `since` already filtered it).
+ */
+export function outageSaid(comments, sinceMs) {
+  return (Array.isArray(comments) ? comments : []).some(
+    (c) => isObject(c) && typeof c.body === 'string' && c.body.includes(`<!-- ${OUTAGE_MARKER_HEAD}`) && c.user?.login === BOT_LOGIN && !(Date.parse(String(c.created_at)) < sinceMs),
+  );
+}
+
+/**
+ * When health last reconciled: the newest state.updatedMs of the boards (reconcile rewrites every board's state on every
+ * run that applies a fresh document), null without one. reconcile's gap and the liveness check both measure from it, so
+ * "health is down" and "health runs again" describe the same outage, and a run that never reconciled (the gate failed,
+ * reconcile exited 3 before saving) is no sign of life.
+ */
+export function lastReconciledMs(states) {
+  let newest = null;
+  for (const s of Object.values(isObject(states) || Array.isArray(states) ? states : {})) {
+    if (isObject(s) && finite(s.updatedMs) && (newest === null || s.updatedMs > newest)) newest = s.updatedMs;
+  }
+  return newest;
+}
 
 /** Merge a duplicate finding of one key: the worst severity wins, members are merged. */
 function addPresent(present, f, evaluator) {
@@ -634,6 +675,9 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
     mention: parseMention(context?.mention).login,
     // Why a HEALTH_MENTION that is set names no user (a typo, a renamed or deleted account, an organization); null
     // when it is unset, or a user, or could not be checked (an API hiccup keeps the login).
+    // Whether scripts/health-liveness.mjs said an outage since the previous reconcile (its comment's marker); null
+    // when the wrapper could not read the comments, or did not look (the gap was not over HEALTH_DEAD_MS).
+    livenessSaid: typeof context?.livenessSaid === 'boolean' ? context.livenessSaid : null,
     mentionError: typeof context?.mentionError === 'string' && context.mentionError.trim() !== '' ? oneLine(context.mentionError, 300) : null,
     silenceErrors: Array.isArray(context?.silenceErrors) ? context.silenceErrors.map((x) => oneLine(x, 300)) : [],
   };
@@ -1022,10 +1066,13 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
     items.alerts.push(selftestItem(selftestFinding));
     pushes.alerts.push(`P1 \`${SELFTEST_KEY}\` (the selftest)`);
   }
-  // Health's own liveness: a previous reconcile over 45 min old is a warning; over 90 min, with HEALTH_MENTION, the
-  // platform board says health runs again (scripts/health-liveness.mjs mentioned the outage by then).
+  // Health's own liveness: a previous reconcile over 45 min old is a warning. The platform board says health runs again
+  // when scripts/health-liveness.mjs said the outage (its comment since the previous reconcile), with or without
+  // HEALTH_MENTION, as its comment goes out either way; and only then, so no answer comes without a question (a gap the
+  // liveness check never reported: it was silenced, or health.yml was off on purpose). Comments that could not be read:
+  // by the gap alone, over HEALTH_DEAD_MS (where the liveness check speaks).
   const gap = finite(prevRunMs) && nowMs - prevRunMs > HEALTH_STALE_MS ? { prevMs: prevRunMs, ms: nowMs - prevRunMs } : null;
-  if (gap !== null && mentionOn && gap.ms > HEALTH_DEAD_MS) items.platform.push(livenessItem(gap.prevMs, nowMs));
+  if (gap !== null && (ctx.livenessSaid === true || (ctx.livenessSaid === null && gap.ms > HEALTH_DEAD_MS))) items.platform.push(livenessItem(gap.prevMs, nowMs));
   const comments = [];
   for (const b of BOARD_IDS) {
     if (items[b].length === 0) continue;
@@ -1871,6 +1918,15 @@ export async function main({
   const prevState = {};
   for (const b of BOARD_IDS) prevState[b] = read.boards[b] ? mergedBoardState(read.boards[b].stateBodies.map((body) => parseBoardState(body, b))) : null;
   for (const b of BOARD_IDS) if (read.boards[b] && prevState[b] === null) warn(`board #${read.boards[b].number} "${BOARDS[b]}" has no readable state marker: it starts empty`);
+  // Did the liveness check say an outage since the last reconcile? Looked up only after a gap over HEALTH_DEAD_MS (one
+  // GET of the platform board's comments since then); unreadable: null, and the gap alone decides.
+  const prevRunMs = lastReconciledMs(prevState);
+  let livenessSaid = null;
+  if (gh && prevRunMs !== null && nowMs - prevRunMs > HEALTH_DEAD_MS && read.boards.platform) {
+    const r = await gh.call('GET', `/repos/${repo}/issues/${read.boards.platform.number}/comments?since=${encodeURIComponent(new Date(prevRunMs).toISOString())}&per_page=100`);
+    if (r.ok && Array.isArray(r.json)) livenessSaid = outageSaid(r.json, prevRunMs);
+    else warn(`cannot read board #${read.boards.platform.number}'s comments (${r.ok ? 'not a list' : r.message}): "Health runs again" goes by the gap alone`);
+  }
   const mentionWarnings = [];
   const mention = await resolveMention({
     gh,
@@ -1890,6 +1946,7 @@ export async function main({
     existing: Object.keys(read.boards),
     mention,
     mentionError,
+    livenessSaid,
     silenceErrors,
   });
 

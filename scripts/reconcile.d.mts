@@ -144,6 +144,8 @@ export interface ReconcileContext {
   mention?: string | null;
   /** Why a HEALTH_MENTION that is set names no user (resolveMention's warnings): opens watcher:mention. */
   mentionError?: string | null;
+  /** The liveness check said an outage since the previous reconcile (null: unknown, the gap over 90 min decides). */
+  livenessSaid?: boolean | null;
   /** parseSilences errors, warned about in the summary and as annotations. */
   silenceErrors?: string[];
 }
@@ -240,6 +242,14 @@ export function postComment(opts: {
   log: (line: string) => void;
   warn: (message: string) => void;
 }): Promise<GitHubResponse>;
+/** The author of every health comment (the workflows' GITHUB_TOKEN). */
+export const BOT_LOGIN: string;
+/** The liveness outage comment's hidden marker (`<!-- health-liveness v1 outage=<id> -->`). */
+export function outageMarker(outage: number | string): string;
+/** The bot posted a liveness outage comment (any marker) at or after `sinceMs`. */
+export function outageSaid(comments: unknown, sinceMs: number): boolean;
+/** The boards' newest state.updatedMs: when health last reconciled (null without one). */
+export function lastReconciledMs(states: Record<string, { updatedMs?: number | null } | null> | Array<{ updatedMs?: number | null } | null>): number | null;
 /** HEALTH_MENTION as one GitHub user's login (an organization, a team or an unknown login: null, with a warning). */
 export function resolveMention(opts: { gh: GitHubClient | null; value: string | null | undefined; warn: (message: string) => void }): Promise<string | null>;
 

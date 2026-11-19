@@ -367,7 +367,7 @@ dispatch or failed run before `feed:state-backup`'s P2 line at 12:00 UTC of the 
 `state-gc` (03:33 UTC, with `tick=1`: the scheduled run) through the Actions API with a fine-grained
 `GH_PAT` (Actions: write). The two daily jobs keep their own GitHub crons (00:41, 03:23) as the fallback for a Worker
 outage; GitHub delivered neither on 2026-11-16 or 11-17. Health has no such fallback of its own beyond its `:25` cron:
-`health-liveness.yml` dispatches it when no health run completed for 45 minutes and mentions the owner after 90
+`health-liveness.yml` dispatches it when no health run reconciled for 45 minutes and mentions the owner after 90
 (*Health watchdogs*, Liveness). It has no HTTP surface (`workers_dev = false`, `preview_urls = false`).
 Cron Triggers are not exactly-once (on 2026-10-14 the one `* * * * *` trigger fired twice a minute, 30 s apart, and every
 workflow was dispatched twice), so each activation first claims its (workflow, intended UTC minute) in a dispatch
@@ -552,7 +552,8 @@ hundred, the board is not written at all: exit 3). The label `health:p1` … `he
 `key=until,reason;…`, where `key` is exact or a prefix ending in `*` and `until` is `YYYY-MM-DD` (the end of that UTC day)
 or an ISO time with a zone (at most 20 entries). A silence lifts early when the key's severity rises, and it does not
 change a red run; an expired or malformed entry is named in the run's warnings. For example
-`gh variable set HEALTH_SILENCES --body 'feed:source:tmd=2026-11-01,new certificate chain' -R TheShelterApp/earthquakes-feed`.
+`gh variable set HEALTH_SILENCES --body 'feed:source:tmd=2026-11-01,new certificate chain' -R TheShelterApp/earthquakes-feed`. The key
+`health:liveness` silences the liveness check (below): no dispatch and no "health is down" comment until then.
 
 **Who is told** (owner decision 2026-11-19: Healthchecks.io is dropped, its sign-up email never arrived; the push
 channel is GitHub Mobile, free and already on the owner's phone).
@@ -589,17 +590,26 @@ channel is GitHub Mobile, free and already on the owner's phone).
 
 **Liveness** ([`scripts/health-liveness.mjs`](scripts/health-liveness.mjs), `health-liveness.yml`): the dead-man switch.
 When health stops (the Worker down or its `GH_PAT` refused, and GitHub not delivering the `:25` cron), nothing turns red
-and the boards just stop changing. `health-liveness.yml` runs on a GitHub cron of its own (every 10 minutes, never at
-minute 0; GitHub delivers this repository's crons late or not at all, so it is frequent and idempotent) and reads
-health.yml's runs: the last completed run that judged (success, failure or timed_out; not cancelled, skipped or a
-startup failure) over 45 minutes old dispatches `health.yml` once (not again while a health run created in the last 45
-minutes exists); over 90 minutes, one comment on the "[health] platform" board mentions `HEALTH_MENTION`, once per
-outage (a hidden `<!-- health-liveness v1 outage=<run id> -->` marker in the bot's comment; nothing in the board body),
-and that run is red (the failed-run email, once). The first health run after a gap over 45 minutes warns (`Health
-liveness`); when the liveness check said that outage on the platform board (its marker since the last reconcile), that
-run adds a "Health runs again" item there, without a mention and whether or not `HEALTH_MENTION` is set, so every "health
-is down" gets its answer and nothing else does (if the comments cannot be read, a gap over 90 minutes decides). If GitHub delivers neither health's nor this cron while the Worker is down, nothing is said: the
-two paths share nothing but GitHub Actions itself.
+and the boards just stop changing; when its runs start but never reconcile (the gate failing at checkout, `reconcile`
+exiting 3 before it saves), each run is red but no P1/P2 can be mentioned either. `health-liveness.yml` runs on a GitHub
+cron of its own (every 10 minutes, never at minute 0; GitHub delivers this repository's crons late or not at all, so it
+is frequent and idempotent) and measures what health wrote, not how its runs ended: the newest hidden state of the three
+boards (`updatedMs`, rewritten by every reconcile; the same time `reconcile` measures its own gap from). No reconcile
+for 45 minutes dispatches `health.yml` once (not again while a health run created in the last 45 minutes exists); over
+90 minutes, one comment on the "[health] platform" board mentions `HEALTH_MENTION`, once per outage (the outage is
+everything since the last reconcile: a bot comment with the hidden `<!-- health-liveness v1 outage=<ms> -->` marker since
+then means it was said; nothing in the board body), and that run is red (the failed-run email). The mention waits up to
+20 minutes while a health run created in that window has not completed (this check's own dispatch after a late cron
+delivery, which usually heals it); a run that finished without reconciling holds nothing. With `health.yml` disabled
+(`gh workflow disable health.yml`, or by GitHub) the check is quiet and green (a warning on each run; `gh workflow enable
+health.yml` resumes it), and a `HEALTH_SILENCES` entry `health:liveness=<until>,<reason>` turns it off until then. A
+failure of the check itself (a board or the runs unreadable, the dispatch or the comment refused) is an `::error::` on
+every run and red at most once a day (no run of it red in the last 24 hours), not on each of the 144 deliveries. The
+first health run after a gap over 45 minutes warns (`Health liveness`); when the liveness check said that outage on the
+platform board (its marker since the last reconcile), that run adds a "Health runs again" item there, without a mention
+and whether or not `HEALTH_MENTION` is set, so every "health is down" gets its answer and nothing else does (if the
+comments cannot be read, a gap over 90 minutes decides). If GitHub delivers neither health's nor this cron while the
+Worker is down, nothing is said: the two paths share nothing but GitHub Actions itself.
 
 **Selftest.** The monthly cron (09:17 UTC on the 1st) and `gh workflow run health.yml -f watchdog_selftest=true` force the
 P1 `alerts:selftest`: the run must be red, which proves the red path and the email, and with `HEALTH_MENTION` its comment

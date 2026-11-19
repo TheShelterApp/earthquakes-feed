@@ -2,11 +2,13 @@
 // Only the tests import it from TypeScript.
 import type { FetchImpl } from './reconcile.mjs';
 
-export const JUDGED: ReadonlyArray<string>;
-export const RUNS_PER_PAGE: number;
-export const BOT_LOGIN: string;
+export { BOT_LOGIN, outageMarker, outageSaid } from './reconcile.mjs';
 
-export function outageMarker(outage: number | string): string;
+export const RUNS_PER_PAGE: number;
+export const LIVENESS_KEY: string;
+export const MENTION_HOLD_MS: number;
+export const LIVENESS_RED_EVERY_MS: number;
+export const SELF_WORKFLOW: string;
 
 export interface CompletedRun {
   id: number | null;
@@ -15,20 +17,36 @@ export interface CompletedRun {
   conclusion: string;
   url: string | null;
 }
-export function summarizeRuns(runs: unknown): { lastCompleted: CompletedRun | null; newestCreatedMs: number | null };
+export function summarizeRuns(runs: unknown): { lastRun: CompletedRun | null; newestCreatedMs: number | null; newestPendingCreatedMs: number | null };
 
 export interface Decision {
   state: 'ok' | 'stale' | 'dead';
   ageMs: number;
   dispatch: boolean;
+  /** Dead, but the mention waits for a health run that may still reconcile. */
+  hold: boolean;
   heal: string | null;
   reason: string;
 }
-export function decide(opts: { nowMs: number; lastCompletedMs: number | null; newestCreatedMs: number | null; staleMs?: number; deadMs?: number }): Decision;
+export function decide(opts: {
+  nowMs: number;
+  lastReconciledMs: number | null;
+  newestCreatedMs?: number | null;
+  newestPendingCreatedMs?: number | null;
+  staleMs?: number;
+  deadMs?: number;
+  holdMs?: number;
+}): Decision;
 
-export function outageSaid(comments: unknown, outage: number | string): boolean;
-
-export function outageBody(opts: { mention: string | null; nowMs: number; lastCompleted: CompletedRun | null; decision: Decision; dispatched: boolean; runUrl: string | null }): string;
+export function outageBody(opts: {
+  mention: string | null;
+  nowMs: number;
+  lastReconciledMs: number | null;
+  lastRun: CompletedRun | null;
+  decision: Decision;
+  dispatched: boolean;
+  runUrl: string | null;
+}): string;
 
 export function run(opts: {
   env: Record<string, string | undefined>;

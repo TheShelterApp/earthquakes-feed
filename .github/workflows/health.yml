@@ -17,8 +17,9 @@ name: health
 #             2026-11-19); it sets the run's conclusion: red on every run a P1's finding holds (or cannot be judged),
 #             during the first hour of a P2, and when alerting itself is broken (the boards unreadable, a board body not
 #             created or saved, board comments failing on two runs in a row, no GH_TOKEN).
-# health-liveness.yml (its own GitHub cron) watches this workflow from outside: no completed run for 45 min dispatches
-# one, 90 min mentions the owner on the platform board.
+# health-liveness.yml (its own GitHub cron) watches this workflow from outside, by what reconcile wrote (the boards'
+# state, not a run's conclusion): no reconcile for 45 min dispatches a run, 90 min mentions the owner on the platform
+# board.
 # The evaluator jobs are stateless: each writes one findings document (scripts/lib/findings.mjs) as the artifact
 # findings-<evaluator> and exits 0 whatever it judged; a non-zero exit is a crash (the run is red, and reconcile files
 # watcher:evaluator:<name> and freezes that evaluator's entries). Everything that needs memory across runs (the 2-run

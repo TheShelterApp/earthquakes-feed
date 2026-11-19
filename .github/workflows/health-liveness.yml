@@ -2,15 +2,17 @@ name: health-liveness
 
 # Health's own liveness (owner decision 2026-11-19; scripts/health-liveness.mjs, README "Health watchdogs"): the
 # dead-man switch Healthchecks.io was to be (dropped: its sign-up email never arrived). health.yml has no way to report
-# that it stopped running, so this workflow reads its runs from outside, on a GitHub cron of its own, independent of the
-# heartbeat Worker that dispatches health: no completed health run for 45 min dispatches health.yml once (self-heal);
-# for 90 min, one comment on the "[health] platform" board mentions HEALTH_MENTION (a GitHub Mobile push), once per
-# outage, and that run is red (the failed-run email, once).
+# that it stopped reconciling (no run at all, or runs that fail before reconcile saves the boards), so this workflow
+# reads the boards' state and health's runs from outside, on a GitHub cron of its own, independent of the heartbeat
+# Worker that dispatches health: no reconcile for 45 min dispatches health.yml once (self-heal); for 90 min, one comment
+# on the "[health] platform" board mentions HEALTH_MENTION (a GitHub Mobile push), once per outage, and that run is red
+# (the failed-run email). health.yml switched off, or a health:liveness silence: quiet and green. A failure of this
+# check itself is red at most once a day.
 #
 # GitHub delivers this repository's crons late or not at all (backfill, derive and health each got 4 scheduled runs in
-# the 24 hours to 2026-10-01 16:40 UTC, APIs.md), so the schedule is frequent: a delivery is a ~20 s run that reads one
-# listing and, nearly always, does nothing, and the decision is idempotent (no second dispatch while a health run created
-# in the last 45 min exists, the outage marker in the comment), so extra deliveries add nothing. Never at minute 0,
+# the 24 hours to 2026-10-01 16:40 UTC, APIs.md), so the schedule is frequent: a delivery is a ~20 s run that reads the
+# three boards and, nearly always, does nothing, and the decision is idempotent (no second dispatch while a health run
+# created in the last 45 min exists, the outage marker in the comment), so extra deliveries add nothing. Never at minute 0,
 # where GitHub's scheduler is busiest. Manual check: gh workflow run health-liveness.yml (dry run by default).
 on:
   schedule:
@@ -34,15 +36,16 @@ jobs:
   liveness:
     # Pinned, not ubuntu-latest (as health.yml).
     runs-on: ubuntu-24.04
-    # One listing, at most one dispatch, one comment listing, a user lookup and one comment (each 20 s at most, reads
-    # tried three times).
+    # Three board reads; when health is late, health.yml's state and runs, at most one dispatch, one comment listing, a
+    # user lookup and one comment, and on a failure this workflow's red runs (each 20 s at most, reads tried three times).
     timeout-minutes: 5
     permissions:
       contents: read
-      # health.yml's runs, and its dispatch (a workflow_dispatch event from the GITHUB_TOKEN starts a run).
+      # health.yml's state, runs and dispatch (a workflow_dispatch event from the GITHUB_TOKEN starts a run), and this
+      # workflow's own red runs.
       actions: write
-      # The platform board's comments: read them (the outage marker), post the outage comment, and unlock and lock
-      # the board around it when GitHub refuses the bot's comment on a locked issue.
+      # The boards (their hidden state: when health last reconciled), the platform board's comments (the outage marker),
+      # the outage comment, and unlocking and locking the board around it when GitHub refuses the bot's comment.
       issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -60,5 +63,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           # One GitHub user's login (README "Who is told"); unset, the comment goes out without a mention.
           HEALTH_MENTION: ${{ vars.HEALTH_MENTION }}
+          # A `health:liveness=<until>,<reason>` entry (reconcile's syntax) turns this check off until then: no dispatch,
+          # no comment (README "Silences").
+          HEALTH_SILENCES: ${{ vars.HEALTH_SILENCES }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
         run: node scripts/health-liveness.mjs

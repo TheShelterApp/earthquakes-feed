@@ -697,7 +697,8 @@ test('state client: 46 day blobs in 6 batches, 3 in flight; a stream broken mid-
     plan = planBatches(hexes, sizes);
     const lines: string[] = [];
     const t0 = Date.now();
-    const deadlineMs = t0 + 8_000;
+    // Far above the ~1.5 s the recoveries take, so a loaded runner's late timers cannot fail it.
+    const deadlineMs = t0 + 15_000;
     // The attempt timeout capped at 1 s (the scaled one would be 10 s): the hung answer costs a second, not ten.
     const be = new WorkerBackend({ baseUrl: base, ...quick, timeoutMs: 1_000, deadlineMs, log: (l) => lines.push(l) });
     const stats2 = { batches: 0, blobs: 0, bytes: 0 };
@@ -727,7 +728,8 @@ test('state client: 46 day blobs in 6 batches, 3 in flight; a stream broken mid-
 
 test('state client: a batch that cannot be fetched fails the whole fetch closed: its 4 attempts, the siblings cancelled, no batch started after it', async () => {
   let plan: string[][] = [];
-  const { w, asked } = faultyWorker((shas) => (shas.includes(plan[0]![0]!) ? 'break-first' : { delayMs: 3_000 }));
+  // The siblings never answer: waited for, each would run to its own timeout (about 10 s), far above the bound below.
+  const { w, asked } = faultyWorker((shas) => (shas.includes(plan[0]![0]!) ? 'break-first' : 'hang'));
   const base = await w.start();
   try {
     const { hexes, sizes } = dayBlobs(w);
@@ -739,7 +741,7 @@ test('state client: a batch that cannot be fetched fails the whole fetch closed:
       (e: unknown) =>
         e instanceof StateStoreError && e.kind === 'transport' && e.retryable && e.message.includes(`the stream broke after 0 of ${plan[0]!.length} blob(s)`) && /0 of \d held after 4 attempts$/.test(e.message),
     );
-    assert.ok(Date.now() - t0 < 2_500, 'the slow siblings were cancelled, not waited for');
+    assert.ok(Date.now() - t0 < 5_000, 'the hung siblings were cancelled, not waited for');
     assert.equal(asked.filter((a) => a.includes(plan[0]![0]!)).length, BATCH_ATTEMPTS);
     const started = new Set(asked.map((a) => a[0]));
     assert.equal(started.size, BATCH_CONCURRENCY, 'the three batches of the first wave only');
@@ -840,7 +842,8 @@ test('state client: a store that hangs fails the fetch at the step deadline; a M
     const be = new WorkerBackend({ baseUrl: base, ...quick, timeoutMs: 15_000, deadlineMs: t0 + 1_200 });
     await assert.rejects(getBlobs(be, hexes, { sizes }), (e: unknown) => e instanceof StateStoreError && e.kind === 'transport' && /timed out|deadline/.test(e.message));
     const took = Date.now() - t0;
-    assert.ok(took >= 1_000 && took < 2_500, `bounded by the deadline (${took} ms)`);
+    // The upper bound leaves a loaded runner's late timers room; without the deadline it would be 4 attempts of about 10 s.
+    assert.ok(took >= 1_000 && took < 5_000, `bounded by the deadline (${took} ms)`);
   } finally {
     await hung.w.stop();
   }

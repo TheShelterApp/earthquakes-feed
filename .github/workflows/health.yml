@@ -12,10 +12,14 @@ name: health
 #   platform  scripts/platform-watchdog.mjs: The Shelter's API and config Workers and the config bundles' age (prod,
 #             staging and dev)
 #   reconcile scripts/reconcile.mjs: the only writer of the three board issues ("[health] alert pipeline", "[health]
-#             feed", "[health] platform"; created together on the first run, then pinned and locked) and the only
-#             pinger; it sets the run's conclusion: red on every run a P1's finding holds (or cannot be judged), during
-#             the first hour of a P2, and when alerting itself is broken (the boards unreadable, a board body not
+#             feed", "[health] platform"; created together on the first run, then pinned and locked); with the
+#             HEALTH_MENTION variable its P1/P2 comments @mention the owner (the GitHub Mobile push, owner decision
+#             2026-11-19); it sets the run's conclusion: red on every run a P1's finding holds (or cannot be judged),
+#             during the first hour of a P2, and when alerting itself is broken (the boards unreadable, a board body not
 #             created or saved, board comments failing on two runs in a row, no GH_TOKEN).
+# health-liveness.yml (its own GitHub cron) watches this workflow from outside, by what reconcile wrote (the boards'
+# state, not a run's conclusion): no reconcile for 45 min dispatches a run, 90 min mentions the owner on the platform
+# board.
 # The evaluator jobs are stateless: each writes one findings document (scripts/lib/findings.mjs) as the artifact
 # findings-<evaluator> and exits 0 whatever it judged; a non-zero exit is a crash (the run is red, and reconcile files
 # watcher:evaluator:<name> and freezes that evaluator's entries). Everything that needs memory across runs (the 2-run
@@ -26,13 +30,14 @@ on:
   schedule:
     - cron: '25 * * * *'
     # The selftest (scripts/reconcile.mjs SELFTEST_CRON): 09:17 UTC on the 1st of each month, a forced P1, so the run
-    # must be red; it proves the red path and the failed-run email once a month. GitHub can drop a scheduled run, so
+    # must be red; it proves the red path and the failed-run email once a month, and with HEALTH_MENTION the GitHub
+    # Mobile push (its comment mentions the owner). GitHub can drop a scheduled run, so
     # reconcile tracks the last selftest: 35 days without one opens watcher:selftest-overdue.
     - cron: '17 9 1 * *'
   workflow_dispatch:
     inputs:
       watchdog_selftest:
-        description: 'Selftest: force the P1 finding alerts:selftest, so this run MUST be red (proves the red path and the email)'
+        description: 'Selftest: force the P1 finding alerts:selftest, so this run MUST be red (proves the red path, the email and the HEALTH_MENTION push)'
         type: boolean
         default: false
 
@@ -211,7 +216,7 @@ jobs:
     # listings (duplicates, retired once: renamed, unpinned, closed, unlabelled); a board still to be made (null there):
     # the five labels, its creation, pin and lock; then per board at most one comment (3 tries on a network error, a 429 or a 5xx), its body and its labels (GET,
     # PATCH and PUT retried twice; a board locked against the bot is unlocked and locked again around the write); once
-    # a day one GraphQL query of the pins and locks. Pings only with HC_PING_KEY (unset: none).
+    # a day one GraphQL query of the pins and locks; with HEALTH_MENTION one GET /users/{login}.
     timeout-minutes: 10
     permissions:
       contents: read
@@ -237,14 +242,17 @@ jobs:
       # saved after its retries, or too long even shrunk (the boards are the memory of every rule: without them nothing
       # confirms, resolves or comments); a new board that cannot be labelled; board comments failing on two runs in a
       # row; no GH_TOKEN, a bad argument or a crash. A comment that fails once is an ::error::, retried by the next run
-      # (watcher:reconcile); a failed ping, label edit, lock or pin check is a ::warning:: and never changes the exit
-      # code.
+      # (watcher:reconcile); a failed label edit, lock or pin check, and a HEALTH_MENTION that is not one GitHub user,
+      # are a ::warning:: and never change the exit code.
       - name: Reconcile the boards and set the run's verdict
         env:
+          # GITHUB_TOKEN, never the owner's PAT: the comments are github-actions[bot]'s, and GitHub never notifies a
+          # user of their own comment, so a mention posted as the owner would push nothing to the owner's phone.
           GH_TOKEN: ${{ github.token }}
-          # key=until,reason;... (README "Health watchdogs"): mutes a key's comments and pings until a date.
+          # key=until,reason;... (README "Health watchdogs"): mutes a key's comments and mentions until a date.
           HEALTH_SILENCES: ${{ vars.HEALTH_SILENCES }}
-          # Healthchecks.io ping key (owner decision 2026-10-22: no push channel for now, so it is unset and every
-          # ping is skipped). A capability: the script never logs it or the ping URLs.
-          HC_PING_KEY: ${{ secrets.HC_PING_KEY }}
+          # One GitHub user's login (owner decision 2026-11-19; README "Who is told"): the P1/P2 transitions and the
+          # selftest mention it, for a GitHub Mobile push. Unset: P1/P2 rows stay silent (the red run is the alarm).
+          # The Healthchecks.io pings are retired: its sign-up email never arrived.
+          HEALTH_MENTION: ${{ vars.HEALTH_MENTION }}
         run: node scripts/reconcile.mjs --findings-dir findings

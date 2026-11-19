@@ -55,26 +55,51 @@ export const NEVER_RED_CLASSES = Object.freeze(['external', 'maintenance', 'watc
 export const EVALUATORS = Object.freeze(['alerts', 'feed', 'platform']);
 
 /**
- * Healthchecks.io checks (plan section 4). The verdict checks get /fail while an open, unmuted P1/P2 finding names
- * them and /0 otherwise, on every run; gh-aging gets /fail while any open entry has passed its escalation line;
- * health-watchdog is pinged by workflow_dispatch runs only (/0 when every evaluator produced findings); selftest by
- * the selftest run (/fail, then /0). Owner decision 2026-10-22: no push channel for now, so every ping is skipped
- * while the HC_PING_KEY secret is unset (it is), and no check needs to exist.
+ * The verdict groups of a finding (plan section 4): `check` names the path a P1/P2 finding is about (gh-detect,
+ * gh-deliver, gh-redundancy, gh-feed, gh-platform, gh-capacity), gh-aging an escalation, health-watchdog health's own
+ * liveness and selftest the forced P1. They were Healthchecks.io checks until 2026-11-19, when the owner dropped
+ * Healthchecks.io (its sign-up email never arrived): nothing is pinged any more, and the push channel is a GitHub
+ * Mobile @mention (reconcile's HEALTH_MENTION, scripts/health-liveness.mjs). The names stay as a field of the findings
+ * schema (health-findings/1), which every evaluator writes and validateFinding checks.
  */
 export const VERDICT_CHECKS = Object.freeze(['gh-detect', 'gh-deliver', 'gh-redundancy', 'gh-feed', 'gh-platform', 'gh-capacity']);
 export const AGING_CHECK = 'gh-aging';
 export const LIVENESS_CHECK = 'health-watchdog';
 export const SELFTEST_CHECK = 'selftest';
 export const CHECKS = Object.freeze([LIVENESS_CHECK, ...VERDICT_CHECKS, AGING_CHECK, SELFTEST_CHECK]);
-/** Ping URLs are `${HC_PING_BASE}/<HC_PING_KEY>/<check>/0|fail`: capabilities, never echoed or logged. */
-export const HC_PING_BASE = 'https://hc-ping.com';
 
 /**
- * Pushover priorities for a push channel added later (recorded only; nothing sends them today). P1: emergency (2),
- * repeated until acknowledged, a Critical Alert on the iPhone. P2: high (1), which bypasses quiet hours (owner
- * decision 2026-10-22: P2 at night breaks through).
+ * Health's own liveness (the dead-man switch Healthchecks.io was to be; owner decision 2026-11-19). The heartbeat Worker
+ * dispatches health every 15 min, so a last completed run older than HEALTH_STALE_MS has missed three ticks:
+ * scripts/health-liveness.mjs (its own GitHub cron, independent of the Worker) dispatches health once, and a reconcile
+ * whose previous run is that old says so. Older than HEALTH_DEAD_MS (the dispatch did not help either), the liveness
+ * check mentions HEALTH_MENTION on the platform board, once per outage.
  */
-export const PUSH_PRIORITY = Object.freeze({ P1: 2, P2: 1 });
+export const HEALTH_STALE_MS = 45 * MIN;
+export const HEALTH_DEAD_MS = 90 * MIN;
+
+/**
+ * A GitHub login, as GitHub allows one: 1-39 letters, digits or single hyphens, not starting or ending with a hyphen. A
+ * team (`org/team`) never matches, so a mention can only name one account.
+ */
+const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
+
+/**
+ * HEALTH_MENTION (a repository variable): the one GitHub user that P1/P2 board comments and the liveness check mention,
+ * so GitHub Mobile pushes them. Empty or unset: { login: null, error: null } (no mention). A leading `@` is allowed;
+ * anything but a single login (a team, a list, spaces) is an error and mentions nobody. Whether the login is a user and
+ * not an organization is checked against the API by the caller (reconcile.mjs resolveMention).
+ * @returns {{ login: string | null, error: string | null }}
+ */
+export function parseMention(value) {
+  const raw = String(value ?? '').trim();
+  if (raw === '') return { login: null, error: null };
+  const login = raw.startsWith('@') ? raw.slice(1) : raw;
+  if (!LOGIN_RE.test(login)) {
+    return { login: null, error: `HEALTH_MENTION ${JSON.stringify(oneLine(raw, 60))} is not one GitHub login (a user's name, without a team, a list or spaces): no one is mentioned` };
+  }
+  return { login, error: null };
+}
 
 /** A P2 turns the run red during its first hour only, then the run is green with an ::error:: annotation. */
 export const P2_RED_MS = HOUR;
@@ -89,7 +114,7 @@ export const AGENCY_PAIRS = Object.freeze({ usgs: 'usgs', emsc: 'emsc', gfz: 'ge
 
 /**
  * Inhibition (plan section 3b): while the `when` key is open, or present at P1-P3 in this run, the `mute` keys still
- * open and close as rows but send no comment and no ping, and cannot turn the run red. `muteMembers` mutes
+ * open and close as rows but send no comment and no mention, and cannot turn the run red. `muteMembers` mutes
  * `<prefix><member>` for every member of the inhibiting finding (a coverage finding mutes its providers: one notice per
  * group, the parent inhibits its children). A trailing `*` matches a key prefix.
  */
@@ -155,9 +180,9 @@ const FOUR_OF_EIGHT = { min: 4, of: 8, severity: 'P3' };
  * Reconcile parameters (scripts/reconcile.mjs):
  *   severity       the severity the rule notifies at; an evaluator may emit P4 below its line, and another severity
  *                  where the rule says so (config:bundle P3/P2/P1, alerts:degraded forced P3)
- *   check          the verdict check a P1/P2 finding pings: one slug, or one per severity
+ *   check          the verdict group of a P1/P2 finding: one slug, or one per severity
  *   phase          1: evaluated from Phase 1a; 2: needs a gateway field (the plan's star), not emitted yet
- *   shadow         logs "would notify" only: never a comment, a ping or a red run (owner: the canary, watermark-age
+ *   shadow         logs "would notify" only: never a comment, a mention or a red run (owner: the canary, watermark-age
  *                  and latency rules; the plan: feed:systemic)
  *   confirmRuns    consecutive runs with the finding before it takes its severity (P4 until then); the confirming run
  *                  must come at least 10 min after the first sighting (a rerun or an extra dispatch confirms nothing)
@@ -338,7 +363,8 @@ export const RULES = Object.freeze({
   'alerts:selftest': rule('alerts:selftest', {
     title: 'selftest',
     // The watchdog selftest (health.yml input watchdog_selftest, and the monthly selftest cron): a forced P1 that
-    // must turn the run red. Never stored on a board; pings `selftest` /fail, then /0.
+    // must turn the run red. Never stored on a board; with HEALTH_MENTION set, the run's comment on the alert-pipeline
+    // board mentions the owner, which proves the GitHub Mobile push path too.
     board: 'alerts', class: 'symptom', severity: 'P1', key: 'alerts:selftest', check: SELFTEST_CHECK,
   }),
 
@@ -582,9 +608,10 @@ export const RULES = Object.freeze({
     title: 'watcher fault',
     // The monitoring itself: a refused or misconfigured token (alerts-watchdog exit 3), usage-query errors, GitHub API
     // errors, an evaluator that produced no findings (watcher:evaluator:<name>), board comments reconcile could not post
-    // (watcher:reconcile), no selftest for 35 days (watcher:selftest-overdue). P3 after 2 runs, never red (comments that
-    // fail on two runs in a row make reconcile exit 3 instead). HC_PING_KEY unset is NOT a fault (owner decision
-    // 2026-10-22: no push channel for now).
+    // (watcher:reconcile), no selftest for 35 days (watcher:selftest-overdue), a HEALTH_MENTION that is set but names no
+    // user (watcher:mention: every push is off). P3 after 2 runs, never red (comments that fail on two runs in a row make
+    // reconcile exit 3 instead). HEALTH_MENTION unset is NOT a fault: P1/P2 rows are then silent, as before the owner
+    // decision of 2026-11-19.
     board: 'platform', class: 'watcher', severity: 'P3', keyPrefix: 'watcher:',
     confirmRuns: 2,
   }),
@@ -619,7 +646,7 @@ export function matchesKey(pattern, key) {
   return pattern.endsWith('*') ? key.startsWith(pattern.slice(0, -1)) : key === pattern;
 }
 
-/** The check a rule's finding pings at `severity`: a P1/P2 only; one slug, or the slug of that severity. */
+/** The verdict group of a rule's finding at `severity`: a P1/P2 only; one slug, or the slug of that severity. */
 export function checkFor(r, severity) {
   if (!r || !r.check) return null;
   if (typeof r.check === 'string') return severity === 'P1' || severity === 'P2' ? r.check : null;

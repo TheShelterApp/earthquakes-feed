@@ -1,6 +1,6 @@
 // Types for scripts/reconcile.mjs (dependency-free JavaScript, so the health workflow runs it without `npm ci`). Only
 // the tests import it from TypeScript.
-import type { Board, CheckSlug, Evaluator, FindingClass, RuleId, Severity } from './lib/findings.mjs';
+import type { Board, Evaluator, FindingClass, RuleId, Severity } from './lib/findings.mjs';
 
 export const SELFTEST_CRON: string;
 export const MAX_BODY_CHARS: number;
@@ -17,8 +17,6 @@ export const STATE_TEXT_SHORT_CHARS: number;
 export const STATE_TEXT_MIN_CHARS: number;
 export const LOG_ROWS_SHOWN: number;
 export const MAX_SILENCES: number;
-export const PING_REASON_CHARS: number;
-export const PING_TIMEOUT_MS: number;
 export const SEVERITY_LABELS: Readonly<{ P1: string; P2: string; P3: string; ok: string }>;
 export const LABEL_DEFS: ReadonlyArray<Readonly<{ name: string; color: string; description: string }>>;
 
@@ -29,8 +27,6 @@ export interface Entry {
   rule: RuleId;
   board: Board;
   class: FindingClass;
-  /** The verdict check this entry pings at its current severity (null below P2, or for a rule without one). */
-  check: CheckSlug | null;
   shadow: boolean;
   /** The evaluator that produced the latest finding; null for findings reconcile makes itself (watcher:evaluator:*). */
   evaluator: Evaluator | null;
@@ -62,10 +58,12 @@ export interface Entry {
   sampleMs: number[];
   /** The time of the oldest '1' in the window. */
   firstSampleMs: number | null;
-  /** The severity last announced (by a comment, or by the red run for P1/P2); null: not yet. */
+  /** The severity last announced (by a comment, or by the red run for a P1/P2 without HEALTH_MENTION); null: not yet. */
   notified: Severity | null;
   escalated: boolean;
   escalationNotified: boolean;
+  /** A comment of this episode mentioned HEALTH_MENTION (a P1/P2 transition): its resolve gets an item, without one. */
+  mentioned: boolean;
   /** Its last comment could not be posted: the next run posts it again, present or not. */
   retryComment: boolean;
   /** When the entry first was P1/P2 in this episode: a P2 is red for P2_RED_MS from here. */
@@ -78,7 +76,8 @@ export interface Entry {
   frozen: string | null;
 }
 
-export type LogEventKind = 'open' | 'escalate' | 'resolve' | 'would-resolve' | 'would-notify' | 'notify';
+/** `mention`: an item of a comment that mentioned HEALTH_MENTION (in place of `notify`). */
+export type LogEventKind = 'open' | 'escalate' | 'resolve' | 'would-resolve' | 'would-notify' | 'notify' | 'mention';
 
 export interface LogEvent {
   ms: number;
@@ -90,8 +89,8 @@ export interface LogEvent {
 export interface DayCounts {
   red: number;
   comments: number;
-  /** Checks that went from success to /fail: the pushes that would have gone out. */
-  transitions: number;
+  /** Comments that mentioned HEALTH_MENTION: the GitHub Mobile pushes (they count in `comments` too). */
+  mentions: number;
   /** Shadow entries that would have notified. */
   would: number;
 }
@@ -110,12 +109,8 @@ export interface BoardState {
   updatedMs: number | null;
   runId: string | null;
   runUrl: string | null;
-  /** Whether the run that wrote it sent its pings (HC_PING_KEY set). */
-  pings: 'sent' | 'skipped';
   /** Copied to all three boards: the generatedAtMs of the last document applied per evaluator. */
   evaluators: Partial<Record<Evaluator, number>>;
-  /** Copied to all three boards: the last signal per check. */
-  checks: Partial<Record<CheckSlug, 'success' | 'fail'>>;
   /** Copied to all three boards: the last run that reconciled the selftest's forced P1. */
   lastSelftestMs: number | null;
   /** Copied to all three boards: the last daily pin and lock check. */
@@ -145,16 +140,14 @@ export interface ReconcileContext {
   missing?: Partial<Record<Evaluator, string>>;
   /** The boards that exist as issues (default: those with a previous state). */
   existing?: Board[];
-  /** HC_PING_KEY is set (only shown on the boards and in the summary). */
-  pingsEnabled?: boolean;
+  /** HEALTH_MENTION as checked by the wrapper (resolveMention); re-parsed, anything but one login mentions no one. */
+  mention?: string | null;
+  /** Why a HEALTH_MENTION that is set names no user (resolveMention's warnings): opens watcher:mention. */
+  mentionError?: string | null;
+  /** The liveness check said an outage since the previous reconcile (null: unknown, the gap over 90 min decides). */
+  livenessSaid?: boolean | null;
   /** parseSilences errors, warned about in the summary and as annotations. */
   silenceErrors?: string[];
-}
-
-export interface Ping {
-  check: CheckSlug;
-  signal: 'success' | 'fail';
-  reason: string;
 }
 
 export interface EvaluatorStatus {
@@ -172,8 +165,6 @@ export interface ReconcileResult {
   /** At most one per board per run, one item per key; `keys` with what they had before this run, for a rollback. */
   comments: BoardComment[];
   labels: Record<Board, string[]>;
-  /** Computed on every run; the wrapper skips them without HC_PING_KEY. */
-  pings: Ping[];
   exitCode: 0 | 1;
   summary: string;
   annotations: string[];
@@ -189,7 +180,9 @@ export interface ReconcileResult {
 export interface BoardComment {
   board: Board;
   body: string;
-  keys: Array<{ key: string; notified: Severity | null; escalationNotified: boolean }>;
+  keys: Array<{ key: string; notified: Severity | null; escalationNotified: boolean; mentioned?: boolean }>;
+  /** The body's first line mentions HEALTH_MENTION. */
+  mention?: boolean;
 }
 
 export function reconcile(
@@ -221,12 +214,44 @@ export function scheduleGate(opts: {
   dispatchedRuns: Array<{ created_at?: unknown; status?: unknown; conclusion?: unknown }> | null;
   nowMs: number;
 }): { run: boolean; selftest: boolean; reason: string };
-export function pingUrl(key: string, check: CheckSlug, signal: 'success' | 'fail'): string;
 export function markdownText(x: unknown): string;
 export function annotation(level: 'error' | 'warning' | 'notice', title: string | null, message: string): string;
 export function parseArgs(argv: string[]): { gate: boolean; findingsDir: string | null; dryRun: boolean };
 
 export type FetchImpl = (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal }) => Promise<Response>;
+
+export interface GitHubResponse {
+  ok: boolean;
+  status: number;
+  json: any;
+  message: string;
+}
+export interface GitHubClient {
+  call(method: string, path: string, payload?: unknown): Promise<GitHubResponse>;
+  graphql(query: string, variables: Record<string, unknown>): Promise<GitHubResponse>;
+}
+/** REST and GraphQL calls with a timeout; every method but POST is retried on a 5xx or a network error. */
+export function githubClient(opts: { token: string; fetchImpl: FetchImpl; sleep?: (ms: number) => Promise<void>; userAgent?: string }): GitHubClient;
+/** One board comment: retried on a network error, a 429 or a 5xx; a board locked against it is unlocked around it. */
+export function postComment(opts: {
+  gh: GitHubClient;
+  repo: string;
+  issue: { number: number; locked: boolean };
+  body: string;
+  sleep: (ms: number) => Promise<void>;
+  log: (line: string) => void;
+  warn: (message: string) => void;
+}): Promise<GitHubResponse>;
+/** The author of every health comment (the workflows' GITHUB_TOKEN). */
+export const BOT_LOGIN: string;
+/** The liveness outage comment's hidden marker (`<!-- health-liveness v1 outage=<id> -->`). */
+export function outageMarker(outage: number | string): string;
+/** The bot posted a liveness outage comment (any marker) at or after `sinceMs`. */
+export function outageSaid(comments: unknown, sinceMs: number): boolean;
+/** The boards' newest state.updatedMs: when health last reconciled (null without one). */
+export function lastReconciledMs(states: Record<string, { updatedMs?: number | null } | null> | Array<{ updatedMs?: number | null } | null>): number | null;
+/** HEALTH_MENTION as one GitHub user's login (an organization, a team or an unknown login: null, with a warning). */
+export function resolveMention(opts: { gh: GitHubClient | null; value: string | null | undefined; warn: (message: string) => void }): Promise<string | null>;
 
 export function main(opts?: {
   argv?: string[];

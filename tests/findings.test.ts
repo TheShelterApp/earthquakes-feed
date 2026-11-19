@@ -11,14 +11,14 @@ import {
   CLASSES,
   EVALUATORS,
   FINDINGS_SCHEMA,
-  HC_PING_BASE,
+  HEALTH_DEAD_MS,
   HEALTH_FALLBACK_CRON,
+  HEALTH_STALE_MS,
   INHIBITIONS,
   LIVENESS_CHECK,
   MAX_TEXT_CHARS,
   NEVER_RED_CLASSES,
   P2_RED_MS,
-  PUSH_PRIORITY,
   RULES,
   SCHEDULE_SKIP_MS,
   SELFTEST_CHECK,
@@ -34,6 +34,7 @@ import {
   moreSevere,
   oneLine,
   parseFindingsDocument,
+  parseMention,
   ruleJudgesKey,
   ruleOf,
   severityRank,
@@ -65,13 +66,11 @@ test('enums: severities most severe first, the three board titles, the classes a
   assert.deepEqual([...VERDICT_CHECKS], ['gh-detect', 'gh-deliver', 'gh-redundancy', 'gh-feed', 'gh-platform', 'gh-capacity']);
   assert.deepEqual([...CHECKS], [LIVENESS_CHECK, ...VERDICT_CHECKS, AGING_CHECK, SELFTEST_CHECK]);
   assert.equal(new Set(CHECKS).size, CHECKS.length);
-  assert.equal(HC_PING_BASE, 'https://hc-ping.com');
   assert.equal(FINDINGS_SCHEMA, 'health-findings/1');
   assert.equal(STATE_MARKER, 'health-state v1');
 });
 
-test('owner decisions 2026-10-22: P2 pushes would bypass quiet hours, P2 is red for its first hour, writers are not judged', () => {
-  assert.deepEqual({ ...PUSH_PRIORITY }, { P1: 2, P2: 1 });
+test('owner decisions 2026-10-22: P2 is red for its first hour, writers are not judged', () => {
   assert.equal(P2_RED_MS, HOUR);
   // Transient aggregate/derive publish failures stay red runs: no rule judges the writer workflows.
   assert.ok(ids.every((id) => !id.startsWith('writer')));
@@ -114,7 +113,7 @@ test('RULES: every entry is well formed and consistent with its board', () => {
     assert.ok(r.escalateAfterMs === null || r.escalateAfterMs > 0, `${id}: escalateAfterMs`);
     if (r.promote) {
       assert.ok(r.promote.afterMs > 0 && moreSevere(r.promote.to, r.severity), `${id}: promote`);
-      assert.ok(checkFor(r, r.promote.to), `${id}: a promoted entry pings a check`);
+      assert.ok(checkFor(r, r.promote.to), `${id}: a promoted entry has a verdict group`);
       assert.ok(Object.isFrozen(r.promote), `${id}: promote frozen`);
     }
     if (r.ratio) assert.ok(r.ratio.min >= 1 && r.ratio.min <= r.ratio.of && SEVERITIES.includes(r.ratio.severity), `${id}: ratio`);
@@ -392,4 +391,23 @@ test('alerts:budget caps match the alerts-gateway FREE_TIER', { skip: existsSync
     doRowsWritten: n('doRowsWrittenPerDay'),
     doGbSec: n('doGbSecPerDay'),
   });
+});
+
+test('owner decision 2026-11-19 (Healthchecks.io dropped): the liveness lines and HEALTH_MENTION as one GitHub user', () => {
+  // Health is dispatched every 15 min: 45 min is three missed ticks, 90 min the outage the owner is mentioned for.
+  assert.equal(HEALTH_STALE_MS, 45 * MIN);
+  assert.equal(HEALTH_DEAD_MS, 90 * MIN);
+  assert.deepEqual(parseMention(undefined), { login: null, error: null });
+  assert.deepEqual(parseMention('  '), { login: null, error: null });
+  assert.deepEqual(parseMention('nickaroot'), { login: 'nickaroot', error: null });
+  assert.deepEqual(parseMention(' @nickaroot '), { login: 'nickaroot', error: null });
+  assert.deepEqual(parseMention('a-b-c1'), { login: 'a-b-c1', error: null });
+  assert.deepEqual(parseMention('a'.repeat(39)), { login: 'a'.repeat(39), error: null });
+  // Never a team, a list, more than one login, or what GitHub does not allow as a login.
+  for (const bad of ['TheShelterApp/owners', '@org/team', 'nickaroot,other', 'nickaroot other', '@nickaroot @other', '-lead', 'trail-', 'dou--ble', 'a'.repeat(40), 'name_with_underscore', '@', 'nick\nroot']) {
+    const r = parseMention(bad);
+    assert.equal(r.login, null, bad);
+    assert.match(r.error ?? '', /is not one GitHub login/, bad);
+    assert.ok(!(r.error ?? '').includes('\n'), 'one line');
+  }
 });

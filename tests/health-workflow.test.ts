@@ -111,7 +111,7 @@ test('health.yml: each evaluator job writes one findings document as the artifac
     if (ev === 'feed') assert.ok(stepWith(block, 'name: repo-size-samples\n').includes('\n          path: samples/repo-size.json\n          if-no-files-found: ignore\n'));
     assert.equal(steps(block).filter((st) => st.includes('actions/upload-artifact@')).length, ev === 'feed' ? 2 : 1, ev);
     assert.ok(upload.includes(`\n          name: findings-${ev}\n          path: ${path}\n          if-no-files-found: error\n`), ev);
-    assert.doesNotMatch(block, /issues:|HC_PING_KEY|continue-on-error/, ev);
+    assert.doesNotMatch(block, /issues:|HEALTH_MENTION|continue-on-error/, ev);
   }
   // Each script accepts the arguments the job gives it.
   assert.equal(feedArgs(['--findings', 'findings/feed.json']).findingsPath, 'findings/feed.json');
@@ -147,9 +147,12 @@ test('health.yml: reconcile runs after every evaluator, even a failed one, but n
   assert.ok(download.includes('\n          pattern: findings-*\n          path: findings\n          merge-multiple: true'));
   const run = stepWith(block, 'reconcile.mjs');
   assert.match(run, /\n {8}run: node scripts\/reconcile\.mjs --findings-dir findings\n/);
-  for (const line of ['GH_TOKEN: ${{ github.token }}', 'HEALTH_SILENCES: ${{ vars.HEALTH_SILENCES }}', 'HC_PING_KEY: ${{ secrets.HC_PING_KEY }}']) {
+  for (const line of ['GH_TOKEN: ${{ github.token }}', 'HEALTH_SILENCES: ${{ vars.HEALTH_SILENCES }}', 'HEALTH_MENTION: ${{ vars.HEALTH_MENTION }}']) {
     assert.ok(run.includes(`\n          ${line}\n`), line);
   }
+  // Healthchecks.io is retired (owner decision 2026-11-19), and the mention is posted by the workflow's own token: the
+  // owner's PAT would make the owner the author, and GitHub never notifies a user of their own comment.
+  assert.doesNotMatch(health, /HC_PING_KEY|hc-ping|secrets\.GH_PAT/);
   assert.deepEqual(reconcileArgs(['--findings-dir', 'findings']), { gate: false, findingsDir: 'findings', dryRun: false });
 });
 

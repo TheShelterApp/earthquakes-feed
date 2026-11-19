@@ -56,7 +56,7 @@
 // of every rule is lost, or it does not fit), a board created this run that cannot be labelled, board comments that
 // fail on two runs in a row, or a crash. A comment that fails once is an ::error::, retried by the next run, which
 // reports it as watcher:reconcile; a failed label edit of an existing board, lock or pin check, and a HEALTH_MENTION that
-// is not one GitHub user, are a ::warning::.
+// is not one GitHub user, are a ::warning:: (the latter also opens watcher:mention, a P3 on the platform board).
 //
 // Dependency-free (Node >= 22, global fetch): the health workflow runs it from a sparse checkout without `npm ci`, so it
 // imports nothing but scripts/lib. Types: reconcile.d.mts. The pure core is exported for tests/reconcile.test.ts, which
@@ -151,6 +151,7 @@ const BOARD_IDS = Object.freeze(Object.keys(BOARDS));
 const SELFTEST_KEY = RULES['alerts:selftest'].key;
 const RECONCILE_WATCHER_ID = 'reconcile';
 const SELFTEST_WATCHER_ID = 'selftest-overdue';
+const MENTION_WATCHER_ID = 'mention';
 const STATUS_KEYS = Object.freeze([RULES['alerts:status:stale'].key, RULES['alerts:status:unreadable'].key]);
 const RENDER_ROWS = Object.freeze([LOG_ROWS_SHOWN, 25, 10, 0]);
 /** The last resort of fitBody: at most this many rows per table (worst first); the state keeps every row. */
@@ -631,6 +632,9 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
     // The login every P1/P2 transition mentions (HEALTH_MENTION, checked by the wrapper); re-parsed here, so nothing
     // but one GitHub login ever reaches a comment. null: no mention, and P1/P2 rows stay silent.
     mention: parseMention(context?.mention).login,
+    // Why a HEALTH_MENTION that is set names no user (a typo, a renamed or deleted account, an organization); null
+    // when it is unset, or a user, or could not be checked (an API hiccup keeps the login).
+    mentionError: typeof context?.mentionError === 'string' && context.mentionError.trim() !== '' ? oneLine(context.mentionError, 300) : null,
     silenceErrors: Array.isArray(context?.silenceErrors) ? context.silenceErrors.map((x) => oneLine(x, 300)) : [],
   };
   const prev = {};
@@ -752,6 +756,13 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
     const since = selftestMs === null ? `no selftest since the boards were created at ${utcText(selftestBase)}` : `the last selftest ran at ${utcText(selftestBase)}`;
     const text = `${since} (${ageText(nowMs - selftestBase)}; line ${ageText(SELFTEST_OVERDUE_MS)}): GitHub may have dropped the monthly selftest cron, so run the health workflow with watchdog_selftest=true`;
     addPresent(present, makeFinding('watcher', { id: SELFTEST_WATCHER_ID, sinceMs: selftestBase + SELFTEST_OVERDUE_MS, text }), null);
+  }
+  // A HEALTH_MENTION that is set but names no user turns every push off (the P1/P2 transitions, the selftest's, the
+  // liveness outage's) while each run only warns: a watcher fault, so the platform board says so (a P3 on its second run)
+  // instead of the owner learning it from a missed P1. Unset is no fault (the owner's choice).
+  if (ctx.mentionError !== null) {
+    const text = `${ctx.mentionError}; the P1/P2 transitions, the selftest and the liveness check push nothing to GitHub Mobile until HEALTH_MENTION is the owner's user login (or deleted)`;
+    addPresent(present, makeFinding('watcher', { id: MENTION_WATCHER_ID, text }), null);
   }
 
   // 2. Frozen keys keep their entry unchanged: no counters, no samples, no enter, no resolve. Every other alerts:* key
@@ -1139,6 +1150,8 @@ function buildAnnotations(entries, selftestFinding, ctx, gap) {
     out.push(annotation(level, `${e.severity} ${e.key}`, `${e.text}${flags.length > 0 ? ` (${flags.join('; ')})` : ''}`));
   }
   if (selftestFinding) out.push(annotation('error', `P1 ${SELFTEST_KEY}`, selftestFinding.text));
+  // The selftest proves the push path too: with a HEALTH_MENTION set that names no user it cannot, and must say so.
+  if (selftestFinding && ctx.mentionError !== null) out.push(annotation('error', 'Selftest push not proven', `the selftest mentions no one, so the GitHub Mobile push path is NOT proven: ${ctx.mentionError}`));
   for (const err of ctx.silenceErrors) out.push(annotation('warning', 'HEALTH_SILENCES', err));
   if (gap) out.push(annotation('warning', 'Health liveness', gapText(gap)));
   return out;
@@ -1858,7 +1871,17 @@ export async function main({
   const prevState = {};
   for (const b of BOARD_IDS) prevState[b] = read.boards[b] ? mergedBoardState(read.boards[b].stateBodies.map((body) => parseBoardState(body, b))) : null;
   for (const b of BOARD_IDS) if (read.boards[b] && prevState[b] === null) warn(`board #${read.boards[b].number} "${BOARDS[b]}" has no readable state marker: it starts empty`);
-  const mention = await resolveMention({ gh, value: env.HEALTH_MENTION, warn });
+  const mentionWarnings = [];
+  const mention = await resolveMention({
+    gh,
+    value: env.HEALTH_MENTION,
+    warn: (m) => {
+      mentionWarnings.push(m);
+      warn(m);
+    },
+  });
+  // Set, yet no user to mention: watcher:mention (reconcile). A lookup that failed for another reason keeps the login.
+  const mentionError = mention === null && String(env.HEALTH_MENTION ?? '').trim() !== '' ? mentionWarnings.join('; ') || 'HEALTH_MENTION names no GitHub user' : null;
   const result = reconcile(prevState, docs, nowMs, silences, {
     runId,
     runUrl,
@@ -1866,6 +1889,7 @@ export async function main({
     missing,
     existing: Object.keys(read.boards),
     mention,
+    mentionError,
     silenceErrors,
   });
 

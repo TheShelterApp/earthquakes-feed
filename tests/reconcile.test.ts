@@ -65,6 +65,8 @@ interface RunOpts {
   missing?: Partial<Record<Evaluator, string>>;
   /** HEALTH_MENTION as the wrapper resolved it (null or absent: no mention). */
   mention?: string | null;
+  /** Why a HEALTH_MENTION that is set names no user (the wrapper's resolveMention warnings). */
+  mentionError?: string | null;
 }
 
 /** A sequence of health runs whose state lives only in the rendered bodies, as on GitHub. */
@@ -87,6 +89,7 @@ class World {
       existing: BOARD_IDS.filter((b) => this.bodies[b] !== null),
       missing: opts.missing ?? {},
       mention: opts.mention ?? null,
+      mentionError: opts.mentionError ?? null,
     });
     for (const b of BOARD_IDS) {
       const body = r.bodies[b];
@@ -747,6 +750,32 @@ test('mentions: the selftest mentions on the alert-pipeline board (it proves the
   assert.equal(s.state('alerts')!.days['2026-11-01']!.mentions, 1);
   // A rerun of the same documents is a replay: no second comment.
   assert.deepEqual(s.apply(T('2026-11-01T09:20:00Z'), s.lastDocs, ME).comments, []);
+});
+
+test('mentions: a HEALTH_MENTION that is set but names no user is watcher:mention (a P3 on its second run); the selftest says the push is not proven', () => {
+  const bad = { mentionError: 'HEALTH_MENTION "nickar00t" is no GitHub account: no one is mentioned' };
+  const w = new World();
+  const first = w.run('2026-10-21T10:07:00Z', {}, bad);
+  assert.deepEqual(first.comments, [], 'P4 on its first run (a watcher confirms on two)');
+  assert.equal(w.entry('watcher:mention')!.severity, 'P4');
+  const second = w.run('2026-10-21T10:22:00Z', {}, bad);
+  assert.equal(second.exitCode, 0, 'a watcher fault is never red');
+  assert.deepEqual(second.comments.map((c) => [c.board, c.mention]), [['platform', false]]);
+  assert.match(second.comments[0]!.body, /^\*\*P3 · `watcher:mention`\*\* watcher fault — HEALTH_MENTION "nickar00t" is no GitHub account: no one is mentioned; the P1\/P2 transitions, the selftest and the liveness check push nothing to GitHub Mobile until HEALTH_MENTION is the owner's user login \(or deleted\)/);
+  // Fixed (or deleted): it resolves like any watcher fault.
+  for (const iso of ['2026-10-21T10:37:00Z', '2026-10-21T10:52:00Z', '2026-10-21T11:07:00Z', '2026-10-21T11:22:00Z']) w.run(iso, {}, ME);
+  assert.notEqual(w.entry('watcher:mention')?.open, true, 'resolved');
+  // Unset is no fault.
+  const u = new World();
+  u.run('2026-10-21T10:07:00Z', {});
+  u.run('2026-10-21T10:22:00Z', {});
+  assert.equal(u.entry('watcher:mention'), undefined);
+
+  const st = new World().run('2026-11-01T09:17:00Z', { alerts: [f('alerts:selftest', { text: 'forced by the selftest: this run must be red' })] }, bad);
+  assert.equal(st.exitCode, 1);
+  assert.deepEqual(st.comments, [], 'nothing to push to');
+  assert.ok(st.annotations.includes('::error title=Selftest push not proven::the selftest mentions no one, so the GitHub Mobile push path is NOT proven: HEALTH_MENTION "nickar00t" is no GitHub account: no one is mentioned'));
+  assert.ok(!new World().run('2026-11-01T09:17:00Z', { alerts: [f('alerts:selftest', { text: 'forced' })] }, ME).annotations.some((a) => a.includes('Selftest push not proven')));
 });
 
 test('liveness: a previous reconcile over 45 min old is a warning; over 90 min with HEALTH_MENTION the platform board says health runs again', () => {
@@ -1917,6 +1946,9 @@ test('main: HEALTH_MENTION is checked against the API (a user, not an organizati
     assert.ok(out.lines.some((l) => l.startsWith('::warning title=Health reconcile::') && warning.test(l)), `${value}: ${out.lines.join('\n')}`);
     assert.equal(fresh.calls.some((c) => c.url.includes('/users/')), lookup, value);
     assert.deepEqual(fresh.board('[health] alert pipeline')!.comments, [], value);
+    // Set, yet no user: watcher:mention (its P4 sample on this first run), with the warning as its text.
+    const platform = parseBoardState(fresh.board('[health] platform')!.body, 'platform')!;
+    assert.match(platform.entries['watcher:mention']!.text, warning, value);
   }
 
   // A user: the comment's first line mentions the login GitHub returns, posted with GITHUB_TOKEN (GH_TOKEN), never a PAT.
@@ -1945,6 +1977,7 @@ test('main: HEALTH_MENTION is checked against the API (a user, not an organizati
   flaky.userStatus = 502;
   const kept = await runMain(flaky, T('2026-10-21T10:07:00Z'), { alerts: [f('alerts:policy', { text: 'fallback policy' })] }, { ...nums, env: { HEALTH_MENTION: 'nickaroot' } });
   assert.ok(kept.lines.some((l) => /cannot check that HEALTH_MENTION "nickaroot" is a user \(HTTP 502/.test(l)));
+  assert.equal(parseBoardState(flaky.board('[health] platform')!.body, 'platform')!.entries['watcher:mention'], undefined, 'a hiccup is no watcher fault');
   assert.match(flaky.board('[health] alert pipeline')!.comments[0]!, /^@nickaroot P1 `alerts:policy` opened/);
 
   // A failed post rolls the mention back: the next run mentions again.

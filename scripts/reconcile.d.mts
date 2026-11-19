@@ -142,6 +142,8 @@ export interface ReconcileContext {
   existing?: Board[];
   /** HEALTH_MENTION as checked by the wrapper (resolveMention); re-parsed, anything but one login mentions no one. */
   mention?: string | null;
+  /** Why a HEALTH_MENTION that is set names no user (resolveMention's warnings): opens watcher:mention. */
+  mentionError?: string | null;
   /** parseSilences errors, warned about in the summary and as annotations. */
   silenceErrors?: string[];
 }

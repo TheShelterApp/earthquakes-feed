@@ -608,9 +608,10 @@ export const RULES = Object.freeze({
     title: 'watcher fault',
     // The monitoring itself: a refused or misconfigured token (alerts-watchdog exit 3), usage-query errors, GitHub API
     // errors, an evaluator that produced no findings (watcher:evaluator:<name>), board comments reconcile could not post
-    // (watcher:reconcile), no selftest for 35 days (watcher:selftest-overdue). P3 after 2 runs, never red (comments that
-    // fail on two runs in a row make reconcile exit 3 instead). HEALTH_MENTION unset is NOT a fault: P1/P2 rows are then
-    // silent, as before the owner decision of 2026-11-19.
+    // (watcher:reconcile), no selftest for 35 days (watcher:selftest-overdue), a HEALTH_MENTION that is set but names no
+    // user (watcher:mention: every push is off). P3 after 2 runs, never red (comments that fail on two runs in a row make
+    // reconcile exit 3 instead). HEALTH_MENTION unset is NOT a fault: P1/P2 rows are then silent, as before the owner
+    // decision of 2026-11-19.
     board: 'platform', class: 'watcher', severity: 'P3', keyPrefix: 'watcher:',
     confirmRuns: 2,
   }),

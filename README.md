@@ -546,7 +546,7 @@ hundred, the board is not written at all: exit 3). The label `health:p1` … `he
 | `config:bundle` | P3 / P2 / P1 | The older of the config bundle's data copy and the signed policy over 5 / 10 / 25 days (the bundle expires at 30); or the copy's version behind `/healthz` for 24 h (a partial publish) | Rerun the config bundle's refresh, then check the copy reaches the host's version |
 | `config:bundle:staging`, `config:bundle:dev` | P3 | That environment's bundle, by the `expiresAt` its config Worker's `/healthz` serves: under 25 days left (no refresh for over 5 of its 30), or expired; a host without `expiresAt` is not judged | Rerun the config refresh for that environment (the config repo's `publish.yml`, which refreshes every environment twice a week) |
 | `platform:cf-usage` | P2 / P1 | Only with `CF_ANALYTICS_TOKEN`: Workers requests or D1 rows written at 80 % (or a projected 100 %) / 95 % of the free daily caps | What spends them; the caps reset at 00:00 UTC |
-| `watcher:<name>` | P3 (2nd run) | The monitoring itself: an evaluator without findings, a refused token, a usage query that failed, a GitHub read of the feed job (`feed-github`), the state Worker's budget unreadable (`feed-state`), board comments `reconcile` could not post (`reconcile`), no selftest for 35 days (`selftest-overdue`) | The job's log; the frozen rows wait for it; `selftest-overdue`: run the selftest |
+| `watcher:<name>` | P3 (2nd run) | The monitoring itself: an evaluator without findings, a refused token, a usage query that failed, a GitHub read of the feed job (`feed-github`), the state Worker's budget unreadable (`feed-state`), board comments `reconcile` could not post (`reconcile`), no selftest for 35 days (`selftest-overdue`), a `HEALTH_MENTION` that is set but names no user, so no push goes out (`mention`) | The job's log; the frozen rows wait for it; `selftest-overdue`: run the selftest; `mention`: set `HEALTH_MENTION` to the owner's user login |
 
 **Silences.** The repository variable `HEALTH_SILENCES` mutes a key's comments and mentions until a date, with no commit:
 `key=until,reason;…`, where `key` is exact or a prefix ending in `*` and `until` is `YYYY-MM-DD` (the end of that UTC day)
@@ -560,8 +560,9 @@ channel is GitHub Mobile, free and already on the owner's phone).
   rises or escalates, the selftest's comment and the liveness check's outage comment start with `@<login>`, and GitHub
   Mobile pushes the mention. The comments are posted with the workflow's `GITHUB_TOKEN` (author `github-actions[bot]`),
   never with the owner's PAT: GitHub never notifies a user of their own comment, so a mention posted as the owner would
-  push nothing. The variable must be one user's login: a team, a list or an organization mentions no one (a warning on
-  the run). The boards are public, so a mention shows the login on a public issue; it carries only what the board
+  push nothing. The variable must be one user's login: a team, a list, an organization or a login that does not exist
+  (a typo, an account renamed later) mentions no one, so every push is off: a warning on each run, `watcher:mention` (a
+  P3 comment on the platform board) and, on a selftest run, an `::error::` that the push path is not proven. The boards are public, so a mention shows the login on a public issue; it carries only what the board
   already shows (severity, key, condition, the run's link).
 - **A red run** sends GitHub's failed-workflow email (Settings → Notifications → Actions) to whoever GitHub notifies for
   that run: for the runs the heartbeat dispatches, the account that owns its `GH_PAT` (another account's PAT reroutes the

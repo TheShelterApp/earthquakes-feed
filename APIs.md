@@ -1767,11 +1767,27 @@ to the ref.
     retried after at most 3 s whatever its Retry-After (`KEYS_UNAVAILABLE_WAIT_MS`; the Worker refetches a keyless
     isolate's keys within 2 s), inside the step's deadline: with Retry-After 30 a shadow step used to give up at once
     (runs 43907386794 and 43964170954, 2026-11-16). Phase 3a's shadow steps use a tighter policy
-    (`SHADOW_RETRY_POLICY`): 2 attempts of at most 15 s, 5 s of backoff, and a deadline over the whole step, OIDC token
-    requests included (hydrate 30 s, persist 60 s), so a hanging store adds at most about 90 s to an aggregate run; each
-    step writes a `killed` marker when it starts, which its report overwrites, so a step its timeout kills still reads
-    as failed. It mints a fresh OIDC token unless the cached one has more than 60 s left. `FsBackend` is the same
-    contract on a directory (tests, `scripts/phase3/dryrun.sh`, a disaster replay).
+    (`SHADOW_RETRY_POLICY`): 2 attempts of at most 15 s (a hydrate batch: 4, below), 8 s of backoff, and a deadline over
+    the step's store requests, OIDC token requests included (hydrate 30 s, persist 60 s), so a hanging store adds at
+    most about 90 s to an aggregate run. A hydrate's deadline starts at its first store request, after the local
+    comparison of the checkout (about 78 MB canonicalized; the marker summary names those ms as `of it local`); each step writes a `killed` marker when it starts, which its report overwrites, so a step
+    its timeout kills still reads as failed. It mints a fresh OIDC token unless the cached one has more than 60 s left
+    (concurrent requests share one token request). `FsBackend` is the same contract on a directory (tests,
+    `scripts/phase3/dryrun.sh`, a disaster replay).
+  - *Blob reads* (`getBlobs`, since 2026-11-19). One batchGet of 40 day blobs is about 10 MB streamed through the
+    Worker in one answer, and a stall anywhere in it lost the whole answer: the shadow hydrate failed about once in
+    200 runs (runs 44043134871 and 44177064278 on 2026-11-17, a 40-blob body stalled until the 15 s timeout, twice;
+    44403949467 on 2026-11-18, a 6-blob request that never answered, twice), each a `feed:state-shadow` row for about
+    15 minutes, and phase 3b's hydrate, which fails closed, would have stopped those runs. The client now asks for at
+    most 2.5 MB of blobs a request (`BATCH_MAX_BYTES`, by the generation's `blob_bytes`: about 9 day blobs, the 46
+    days in 6 requests), 3 in flight (`BATCH_CONCURRENCY`). Each batch has its own 4 attempts (`BATCH_ATTEMPTS`), each
+    attempt a timeout of 5 s plus 2 s a MB it asks for (`batchTimeoutMs`: 10 s for a full batch, 5.6 s for one day; at
+    most the policy's timeout), and reads the answer as a stream: the blobs that arrived whole and verified are kept,
+    and a retry asks only for the rest. A stream that delivered every blob is complete even if its trailer was cut.
+    The first batch that fails for good (its attempts or the deadline used up, or a MISSING, an integrity failure, the
+    budget, a 1027, none of them retried) fails the whole read: the batches in flight are cancelled and none starts
+    after it. A cancelled batch stops at once wherever the cancel finds it: waiting for its token (no request goes
+    out), mid-stream (logged `cancelled`, not as a timeout, and no backoff after it) or in a backoff (the wait ends).
 - *The generation* (format 1) is canonical text: one day per line in ascending order, `{"sha256", "bytes", "nodes",
   "blob", "blob_bytes"}` (the NDJSON's sha256, size and node count; the gzip's sha256 and size), plus `head_seq` and
   `parent` (the sha256 of the previous document). The `parent` line changes on every write, so two writers that both
@@ -1787,9 +1803,15 @@ to the ref.
   duplicate keeps the higher `lastSeq`, the later file on a tie), the original JSON lines, in feed-id order, a
   trailing newline, byte for byte the day file `saveEventMap` writes at 24 hours.
 - *aggregate* has three steps for the store:
-  - The shadow hydrate (before the silent-change snapshot): every blob the generation names is fetched and checked
-    (the gzip's sha256 by the client, the NDJSON's sha256, size and node count) and compared with the checkout's
-    canonical days.
+  - The shadow hydrate (before the silent-change snapshot): every checked-out day is compared with its generation
+    entry (no network: a difference is a mismatch whatever the store holds). The store is then exercised with the
+    days that differ plus a rotating sample of 4 (`SHADOW_SAMPLE_DAYS`, `shadowSample`): consecutive run numbers
+    (`GITHUB_RUN_NUMBER`) take consecutive slices of the sorted days, so any 12 consecutive aggregate runs (an hour)
+    verify all 46; each fetched blob is checked (the gzip's sha256 by the client, the NDJSON's sha256, size and node
+    count). The summary names the changed and the sampled days. Until 2026-11-19 it fetched all 46 days every run
+    (12.2 MB, 13,000 Class B a day), which verified the same blobs twelve times an hour; a blob the store lost is now
+    found within the hour instead of within 5 minutes, which phase 3a (git is the truth) affords, and phase 3b's
+    hydrate fetches every day anyway.
   - Persist (after the Aggregate step): each day whose canonical sha256 differs from its entry is PUT, then the new
     generation is written. A day the previous generation lists that the checkout lacks throws, unless it is below the
     45-day horizon; a removal is never inferred from a missing file. On any store error nothing is written, so a
@@ -1893,9 +1915,13 @@ for ever (the Releases). Until phase 3, git kept every 5-minute version for ever
 2026-11-16 traded that for the daily copies.
 
 **Cost and budgets (never pay: Workers Free and R2's free tier, enforced in the Worker).**
-- Requests: a run makes about 3.4 Worker requests (2 batchGets, about 1.4 PUTs), about 1,100 a day with health's
-  budget reads. That is about 1 % of the account's 100,000 Workers requests a day, which the platform's API shares.
-- Operations: about 13,000 Class B a day (46 blob reads a run) and 400 Class A.
+- Requests (state/README.md has the breakdown): in phase 3a a run makes about 2.4 Worker requests (one batchGet of
+  the shadow sample, about 1.4 PUTs), about 830 a day with health's budget reads, the backups and GC. Phase 3b reads
+  all 46 days in 6 batchGets a run (and 6 per first-solutions collect): about 2,400 a day, and about 8,000 if every
+  batch of every run needed all 4 attempts. That is about 1–2.5 % (at most 8 %) of the account's 100,000 Workers
+  requests a day, which the platform's API shares.
+- Operations: about 1,200 Class B a day in phase 3a (4 sampled blob reads a run), about 14,400 in phase 3b (46 a run;
+  batching does not change it, a blob is one GET), and 400 Class A.
 - Storage: about 0.1 GB written a day, about 3.3 GB held at GC's 30-day age, against the account's 10 GB, which the
   platform shares (about 0.4 GB).
 - The Worker refuses (429 budget) above its ceilings: 20,000 Class A and 200,000 Class B a day, 1 GiB written a day,
@@ -1947,9 +1973,13 @@ Exit path: the bucket is plain S3 keys; `rclone` it to any S3 store and add an S
     - every later commit refuses a staged event-map file;
     - derive-publish's hydrate after the push restores any day a push retry's rebase removed;
     - first-solutions' collect hydrates before it reads.
-  - Remove `continue-on-error` from aggregate's and derive.yml's two state steps. They then run with the client's
-    default retry policy (`SHADOW_RETRY_POLICY` applies only while `EVENT_MAP_STORE_AUTHORITATIVE` is false), up to
-    about 87 s a request, so raise their 2-minute `timeout-minutes` back (hydrate 3, persist 4).
+  - Remove `continue-on-error` from aggregate's and derive.yml's two state steps. The hydrate then runs with
+    `AUTHORITATIVE_HYDRATE_POLICY`: all 46 days (12.2 MB, a fresh checkout has none) in 6 batches, 3 in flight, 4
+    attempts a batch of at most 20 s each (10 s for a full batch), 15 s of backoff a request, and a 60 s deadline
+    over the step, after which it fails closed (the run stops; the next one tries again 5 minutes later). A run needs
+    2–4 s, a stalled batch about 15 s more. Its 2-minute `timeout-minutes` stays the backstop. Persist runs with the
+    client's default policy (`SHADOW_RETRY_POLICY` applies only while `EVENT_MAP_STORE_AUTHORITATIVE` is false), up to
+    about 87 s a request, so raise its `timeout-minutes` to 4.
   - Lower `feed:repo-growth`'s `maxMbPerDay` to 11 (scripts/lib/findings.mjs).
 - *The sentinel* is one line that is not JSON. Code from before 3a that parses it throws instead of reading an
   untracked map as empty, and its live floor becomes `0000-00-00`, so an old backfill writes nothing. New code skips

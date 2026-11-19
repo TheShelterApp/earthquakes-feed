@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { DATA_DIR, EVENT_MAP_HORIZON_DAYS, dataPaths } from './config.js';
 import { isSparseCheckout, treeNames } from './sparse-checkout.js';
-import { StateStoreError, backendFromEnv, getBlobs, isSha256Hex, sha256Hex, type StateBackend } from './state-store.js';
+import { StateStoreError, backendFromEnv, getBlobs, isSha256Hex, sha256Hex, type GetBlobsStats, type RetryPolicy, type StateBackend } from './state-store.js';
 
 /**
  * The event map in the state store (storage phase 3; APIs.md "Repository size"). The event map is the feed's dedup
@@ -25,11 +25,13 @@ import { StateStoreError, backendFromEnv, getBlobs, isSha256Hex, sha256Hex, type
  *   the generation's entry is gzipped and PUT; the new generation is written. It never infers a removal from a missing
  *   file: a day the previous generation lists that the checkout lacks throws, unless it is below the horizon.
  * - pruneGeneration (derive, beside the prune of the day files): a pure local edit, no network.
- * - hydrate: every blob of the generation fetched, each checked against the generation (gzip sha256 by the client,
- *   NDJSON sha256, bytes and node count here). Phase 3a (`shadow`): compared with the checked-out day files, mismatches
- *   reported, the checkout never touched, the run never failed by it (git is still the truth). Phase 3b
- *   (`authoritative`, behind EVENT_MAP_STORE_AUTHORITATIVE): the directory is replaced by exactly the generation's days
- *   and any failure throws.
+ * - hydrate: blobs of the generation fetched (in batches of at most 2.5 MB, three at a time, each retried on its own:
+ *   src/state-store.ts getBlobs), each checked against the generation (gzip sha256 by the client, NDJSON sha256, bytes
+ *   and node count here). Phase 3a (`shadow`): every checked-out day is compared with its generation entry, mismatches
+ *   reported, and the store is exercised with the days that differ plus a rotating sample (SHADOW_SAMPLE_DAYS a run,
+ *   every day about hourly); the checkout is never touched, the run never failed by it (git is still the truth). Phase
+ *   3b (`authoritative`, behind EVENT_MAP_STORE_AUTHORITATIVE): every day not already identical on disk is fetched, the
+ *   directory is replaced by exactly the generation's days and any failure throws.
  *
  * The layout on disk follows git (eventMapShardHours): while git tracks the event map (phase 3a) saveEventMap keeps
  * writing round 17's hour shards, so each 5-minute commit still adds ~70 KB shards to the repository's history instead
@@ -68,13 +70,68 @@ export const PUT_CONCURRENCY = 4;
 /**
  * Phase 3a's retry policy for the two shadow steps (hydrate, persist): the store only shadows git, so a slow or hanging
  * store must not stretch the 5-minute aggregate job (the client's defaults allow ~87 s per request: 4 × 20 s plus
- * backoff). Two attempts of at most 15 s each, 5 s of backoff, and a deadline over the whole step, the OIDC token
- * requests included: hydrate (2 batchGets of the 46 days, ~12 MB) 30 s, persist (the first run's 46 PUTs) 60 s, so a
- * hung store costs a run at most ~90 s. A step cut by its deadline reports a transport error (feed:state-shadow).
- * Phase 3b keeps the client's defaults: the store is authoritative there and a failure stops the run.
+ * backoff). Two attempts of at most 15 s for a PUT, up to BATCH_ATTEMPTS (4) for each hydrate batch with a timeout
+ * scaled to its bytes (src/state-store.ts batchTimeoutMs: 5.6 s for one day, 10 s for a full 2.5 MB batch), 8 s of
+ * backoff per request, and a deadline over the step's store requests, the OIDC token requests included: hydrate 30 s,
+ * persist (the first run's 46 PUTs) 60 s, so a hung store costs a run at most ~90 s. hydrate's 30 s start after its
+ * local comparison (canonicalizing the checkout's ~78 MB of days, a second or more on a busy runner: main builds the
+ * backend when the fetch starts, and the marker summary names the local ms), so the store requests have all of it. A shadow hydrate fetches about 1.2 MB (the
+ * sample of 4 days and the rare day that differs: one request), so 30 s holds three or four attempts of it; even a
+ * full 46-day fetch (12.2 MB, 6 batches in two waves) holds a stalled batch's retry. A step cut by its deadline reports
+ * a transport error (feed:state-shadow).
  */
-export const SHADOW_RETRY_POLICY = { attempts: 2, timeoutMs: 15_000, retryBudgetMs: 5_000 } as const;
+export const SHADOW_RETRY_POLICY = { attempts: 2, batchAttempts: 4, timeoutMs: 15_000, retryBudgetMs: 8_000 } as const;
 export const SHADOW_STEP_DEADLINE_MS = { hydrate: 30_000, persist: 60_000 } as const;
+/**
+ * Phase 3b's hydrate (authoritative: a fresh checkout has no day file, so every run fetches all 46 days, 12.2 MB, 6
+ * batches): 4 attempts a batch, each at most 20 s (batchTimeoutMs: 10 s for a full batch), 15 s of backoff a request,
+ * and a 60 s deadline over the step, after which it fails closed (the run stops; the next one, 5 minutes later, tries
+ * again). At the 3a failure rate (one batch stall in about 200 runs, now one of 6 smaller batches, retried for its
+ * missing blobs only) a run needs 2–4 s, a stalled one about 15 s. The step's timeout-minutes (2) stays the backstop.
+ * persist keeps the client's defaults in 3b (a failure stops the run; APIs.md "Phase 3b").
+ */
+export const AUTHORITATIVE_HYDRATE_POLICY = { batchAttempts: 4, timeoutMs: 20_000, retryBudgetMs: 15_000 } as const;
+export const AUTHORITATIVE_HYDRATE_DEADLINE_MS = 60_000;
+/**
+ * Days a shadow hydrate fetches beyond the ones that differ (shadowSample): 4 of the 46 a run, a different 4 each run
+ * by the run number, so 12 consecutive aggregate runs (an hour) verify every day the store holds. Before 2026-11-19 the
+ * shadow fetched all 46 every run (12.2 MB, 13,000 Class B a day), which only exercised the same blobs 12 times an hour.
+ */
+export const SHADOW_SAMPLE_DAYS = 4;
+
+/** The retry policy of a step: phase 3a's shadow steps and phase 3b's hydrate are bounded; 3b's persist keeps the
+ *  client's defaults. */
+export function stepPolicy(cmd: 'hydrate' | 'persist', mode: HydrateMode | null, t0: number): RetryPolicy | undefined {
+  if (cmd === 'hydrate' && mode === 'authoritative') return { ...AUTHORITATIVE_HYDRATE_POLICY, deadlineMs: t0 + AUTHORITATIVE_HYDRATE_DEADLINE_MS };
+  if (cmd === 'persist' && EVENT_MAP_STORE_AUTHORITATIVE) return undefined;
+  return { ...SHADOW_RETRY_POLICY, deadlineMs: t0 + SHADOW_STEP_DEADLINE_MS[cmd] };
+}
+
+/**
+ * The rotation number of this run's shadow sample: GITHUB_RUN_NUMBER (counts up by one each run of a workflow, so
+ * consecutive runs take consecutive slices and the coverage is exact), else GITHUB_RUN_ID, else the 5-minute slot of
+ * `nowMs` (a local run). A re-run attempt has the same number and the same sample.
+ */
+export function shadowRotation(env: NodeJS.ProcessEnv = process.env, nowMs: number = Date.now()): number {
+  for (const k of ['GITHUB_RUN_NUMBER', 'GITHUB_RUN_ID'] as const) {
+    const v = (env[k] ?? '').trim();
+    if (/^\d{1,15}$/.test(v)) return Number(v);
+  }
+  return Math.floor(nowMs / 300_000);
+}
+
+/**
+ * The days of a shadow hydrate's rotating sample: `k` consecutive days (wrapping) of the sorted `days`, starting at
+ * rotation × k. Deterministic (a run can be replayed), distinct, and ceil(n / k) consecutive rotations cover every day:
+ * 12 aggregate runs, one hour, for 46 days and k = 4. `k` at or above n: every day.
+ */
+export function shadowSample(days: readonly string[], rotation: number, k: number = SHADOW_SAMPLE_DAYS): string[] {
+  const sorted = [...days].sort();
+  const n = sorted.length;
+  if (k >= n) return sorted;
+  const start = ((rotation % n) * (k % n)) % n;
+  return Array.from({ length: k }, (_, i) => sorted[(start + i) % n]!).sort();
+}
 
 const DAY_MS = 86_400_000;
 const dayKey = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
@@ -446,14 +503,29 @@ export interface HydrateReport {
   mismatches: string[];
   /** authoritative: the days written. */
   written: string[];
-  /** The days whose blobs were fetched (authoritative: only those not already identical on disk). */
+  /** The days whose blobs were fetched (authoritative: those not already identical on disk; shadow: changed ∪ sampled). */
   fetched: string[];
+  /** shadow: the days whose checkout differs from their generation entry (or that the checkout lacks): always fetched. */
+  changed: string[];
+  /** shadow: the rotating sample fetched beside them (shadowSample, without the changed days). */
+  sampled: string[];
+  /** The batchGet batches the fetch was planned into (each one request unless retried). */
+  batches: number;
+  /** ms of local work (reading and canonicalizing the checkout's days) before the first store request. */
+  localMs: number;
   headSeq: number | null;
 }
 
+/** blob → its stored size, from the generation: plans the batches by bytes and times each attempt. */
+export const blobSizes = (g: Generation): Map<string, number> => new Map(Object.values(g.days).map((e) => [e.blob, e.blob_bytes]));
+
 /** The NDJSON of each generation day from the store, every check applied (throws on the first failure). */
-export async function fetchGenerationDays(backend: StateBackend, g: Generation): Promise<Map<string, string>> {
-  const blobs = await getBlobs(backend, Object.values(g.days).map((e) => e.blob));
+export async function fetchGenerationDays(backend: StateBackend, g: Generation, stats?: GetBlobsStats): Promise<Map<string, string>> {
+  const blobs = await getBlobs(
+    backend,
+    Object.values(g.days).map((e) => e.blob),
+    { sizes: blobSizes(g), stats },
+  );
   const out = new Map<string, string>();
   for (const [day, e] of Object.entries(g.days).sort(([a], [b]) => (a < b ? -1 : 1))) {
     const gz = blobs.get(e.blob);
@@ -477,16 +549,42 @@ export async function fetchGenerationDays(backend: StateBackend, g: Generation):
 }
 
 /**
- * Hydrate the checkout's event map from the store. `shadow` (phase 3a) fetches and verifies every day and compares it
- * with the checkout's canonical day: each difference is a mismatch line, the checkout is never written. A store or
- * integrity failure throws; the caller reports it. `authoritative` (phase 3b) replaces the directory with exactly the
- * generation's days (the sentinel kept) and throws on anything, including a missing generation unless
+ * Hydrate the checkout's event map from the store. `shadow` (phase 3a) compares every checked-out day with its
+ * generation entry (each difference a mismatch line) and fetches and verifies the days that differ plus a rotating
+ * sample of `sample` days (SHADOW_SAMPLE_DAYS; `rotation` from shadowRotation), so the store is exercised every run and
+ * every blob about hourly; the checkout is never written. A store or integrity failure throws; the caller reports it.
+ * `authoritative` (phase 3b) replaces the directory with exactly the generation's days (the sentinel kept), fetching
+ * every day not already identical on disk, and throws on anything, including a missing generation unless
  * EVENT_MAP_BOOTSTRAP=1. Both refuse a generation ahead of head.json (its head_seq above the checkout's seq).
  */
-export async function hydrate(root: string, backend: StateBackend, opts: { mode: HydrateMode; env?: NodeJS.ProcessEnv }): Promise<HydrateReport> {
+export async function hydrate(
+  root: string,
+  backend: StateBackend | (() => StateBackend),
+  opts: { mode: HydrateMode; env?: NodeJS.ProcessEnv; sample?: number; rotation?: number },
+): Promise<HydrateReport> {
   const env = opts.env ?? process.env;
+  const t0 = Date.now();
+  // `backend` may be a factory, called once the local work is done: main builds the backend there, so the step's
+  // deadline starts with the store requests and the canonicalization of ~78 MB of checkout does not eat into it.
+  const connect = (): StateBackend => {
+    report.localMs = Date.now() - t0;
+    return typeof backend === 'function' ? backend() : backend;
+  };
   const gen = readGeneration(root);
-  const report: HydrateReport = { mode: opts.mode, noGeneration: !gen, days: 0, blobBytes: 0, mismatches: [], written: [], fetched: [], headSeq: gen?.generation.head_seq ?? null };
+  const report: HydrateReport = {
+    mode: opts.mode,
+    noGeneration: !gen,
+    days: 0,
+    blobBytes: 0,
+    mismatches: [],
+    written: [],
+    fetched: [],
+    changed: [],
+    sampled: [],
+    batches: 0,
+    localMs: 0,
+    headSeq: gen?.generation.head_seq ?? null,
+  };
   const dir = dataPaths(root).eventMapDir;
   if (!gen) {
     if (opts.mode === 'authoritative' && env.EVENT_MAP_BOOTSTRAP !== '1') {
@@ -498,10 +596,14 @@ export async function hydrate(root: string, backend: StateBackend, opts: { mode:
   const g = gen.generation;
   const head = headSeqOf(root);
   if (g.head_seq > head) throw new Error(`hydrate: the generation was written at seq ${g.head_seq}, head.json is at ${head}: a generation ahead of its commit`);
+  const stats: GetBlobsStats = { batches: 0, blobs: 0, bytes: 0 };
+  const files = eventMapFiles(root);
+  const days = Object.keys(g.days).sort();
+  report.days = days.length;
+  const only = (keep: ReadonlySet<string>): Generation => ({ ...g, days: Object.fromEntries(Object.entries(g.days).filter(([d]) => keep.has(d))) });
   if (opts.mode === 'authoritative') {
     // A day whose files on disk already canonicalize to the entry's sha256 is that content: it is rewritten from disk,
     // not fetched (derive-publish's hydrate after the aggregate commit then fetches only what a rebase removed).
-    const files = eventMapFiles(root);
     const have = new Map<string, string>();
     for (const [day, e] of Object.entries(g.days)) {
       const names = files.get(day);
@@ -509,35 +611,45 @@ export async function hydrate(root: string, backend: StateBackend, opts: { mode:
       const c = readCanonicalDay(root, names);
       if (c.nodes === e.nodes && Buffer.byteLength(c.text) === e.bytes && sha256Hex(c.text) === e.sha256) have.set(day, c.text);
     }
-    const missing: Generation = { ...g, days: Object.fromEntries(Object.entries(g.days).filter(([d]) => !have.has(d))) };
-    const fetched = Object.keys(missing.days).length ? await fetchGenerationDays(backend, missing) : new Map<string, string>();
-    report.days = Object.keys(g.days).length;
+    const missing = only(new Set(days.filter((d) => !have.has(d))));
+    const fetched = Object.keys(missing.days).length ? await fetchGenerationDays(connect(), missing, stats) : new Map<string, string>();
     report.blobBytes = Object.values(missing.days).reduce((n, e) => n + e.blob_bytes, 0);
     report.fetched = [...fetched.keys()];
+    report.batches = stats.batches;
     mkdirSync(dir, { recursive: true });
     for (const f of readdirSync(dir)) if (!isSentinelName(f)) rmSync(join(dir, f), { recursive: true, force: true });
-    for (const day of Object.keys(g.days).sort()) {
+    for (const day of days) {
       writeFileSync(join(dir, dayFileName(day)), have.get(day) ?? fetched.get(day)!);
       report.written.push(day);
     }
     return report;
   }
-  const texts = await fetchGenerationDays(backend, g);
-  report.days = texts.size;
-  report.fetched = [...texts.keys()];
-  report.blobBytes = Object.values(g.days).reduce((n, e) => n + e.blob_bytes, 0);
-  // shadow: every blob fetched and verified (the store is what is under test), then compared, the checkout untouched.
-  const files = eventMapFiles(root);
-  for (const [day, e] of Object.entries(g.days).sort(([a], [b]) => (a < b ? -1 : 1))) {
+  // shadow: the checkout against the generation first (no network: a mismatch is a difference between the two whatever
+  // the store holds), then the store exercised with the days that differ and the rotating sample, each blob verified
+  // against its entry (the store is what is under test; a blob the sample has not reached yet is verified within the
+  // hour, and phase 3b's authoritative hydrate fetches every one anyway).
+  for (const day of days) {
+    const e = g.days[day]!;
     const names = files.get(day);
     if (!names) {
       report.mismatches.push(`${day}: in the generation, not in the checkout`);
+      report.changed.push(day);
       continue;
     }
     const sha = sha256Hex(readCanonicalDay(root, names).text);
-    if (sha !== e.sha256) report.mismatches.push(`${day}: the store's day (sha256 ${e.sha256.slice(0, 12)}) differs from the checkout's (${sha.slice(0, 12)})`);
+    if (sha !== e.sha256) {
+      report.mismatches.push(`${day}: the store's day (sha256 ${e.sha256.slice(0, 12)}) differs from the checkout's (${sha.slice(0, 12)})`);
+      report.changed.push(day);
+    }
   }
   for (const day of files.keys()) if (!g.days[day]) report.mismatches.push(`${day}: in the checkout, not in the generation`);
+  const changed = new Set(report.changed);
+  report.sampled = shadowSample(days, opts.rotation ?? shadowRotation(env), opts.sample ?? SHADOW_SAMPLE_DAYS).filter((d) => !changed.has(d));
+  const want = only(new Set([...report.changed, ...report.sampled]));
+  const texts = Object.keys(want.days).length ? await fetchGenerationDays(connect(), want, stats) : new Map<string, string>();
+  report.fetched = [...texts.keys()];
+  report.blobBytes = Object.values(want.days).reduce((n, e) => n + e.blob_bytes, 0);
+  report.batches = stats.batches;
   return report;
 }
 
@@ -729,9 +841,11 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
   }
   markStarted(cmd, common, env);
   const t0 = Date.now();
+  const mode: HydrateMode = modeArg === 'authoritative' || modeArg === 'shadow' ? modeArg : authoritative ? 'authoritative' : 'shadow';
   let backend: StateBackend | null;
   try {
-    backend = backendFromEnv(env, authoritative ? {} : { policy: { ...SHADOW_RETRY_POLICY, deadlineMs: t0 + SHADOW_STEP_DEADLINE_MS[cmd] } });
+    const policy = stepPolicy(cmd, cmd === 'hydrate' ? mode : null, t0);
+    backend = backendFromEnv(env, policy ? { policy } : {});
   } catch (e) {
     report({ step: cmd, ok: false, ...common, summary: `store misconfigured: ${errText(e)}`, error: errText(e), error_kind: 'config' }, env);
     return authoritative ? 1 : 0;
@@ -745,15 +859,19 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
     return 0;
   }
   if (cmd === 'hydrate') {
-    const mode: HydrateMode = modeArg === 'authoritative' || modeArg === 'shadow' ? modeArg : authoritative ? 'authoritative' : 'shadow';
     try {
-      const r = await hydrate(root, backend, { mode, env });
+      // The step's deadline (stepPolicy) starts when the store requests do, after hydrate's local comparison: the
+      // backend is built again there with a policy from that instant (the first one above checked the configuration).
+      const first = backend;
+      const r = await hydrate(root, () => backendFromEnv(env, { policy: stepPolicy('hydrate', mode, Date.now())! }) ?? first, { mode, env });
       const ms = Date.now() - t0;
+      const mb = `${(r.blobBytes / 1e6).toFixed(1)} MB in ${r.batches} batch(es)`;
       const summary = r.noGeneration
         ? `no generation.json in the checkout yet (before the first persist): nothing to ${mode === 'shadow' ? 'compare' : 'hydrate'}`
         : mode === 'shadow'
-          ? `${r.days} day(s), ${(r.blobBytes / 1e6).toFixed(1)} MB of blobs from ${backend.label} in ${ms} ms, verified; ${r.mismatches.length ? `${r.mismatches.length} MISMATCH(ES) with the checkout` : 'identical to the checkout'} (generation at seq ${r.headSeq})`
-          : `${r.written.length} day(s) written, ${r.fetched.length} fetched from ${backend.label} (the rest already identical on disk) in ${ms} ms (generation at seq ${r.headSeq})`;
+          ? `${r.days} day(s) compared with the checkout; ${r.fetched.length} fetched and verified (${r.changed.length} changed, ${r.sampled.length} sampled: ${r.sampled.join(' ') || 'none'}), ` +
+            `${mb} from ${backend.label} in ${ms} ms (${r.localMs} ms of it local); ${r.mismatches.length ? `${r.mismatches.length} MISMATCH(ES) with the checkout` : 'identical to the checkout'} (generation at seq ${r.headSeq})`
+          : `${r.written.length} day(s) written, ${r.fetched.length} fetched (${mb}) from ${backend.label} (the rest already identical on disk) in ${ms} ms (${r.localMs} ms of it local; generation at seq ${r.headSeq})`;
       report({ step: 'hydrate', ok: r.mismatches.length === 0, mode, ...common, summary, mismatches: r.mismatches }, env);
       return 0;
     } catch (e) {

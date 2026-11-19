@@ -57,9 +57,13 @@ END <count>\n                              the trailer, once, last; count = the 
 ```
 
 The status is sent before the blobs are read, so a bucket error after the first byte aborts the stream: there is no
-trailer. The client fails closed on a MISSING frame it needs, on an absent or wrong trailer, on bytes after the
-trailer, on a length that does not end at a `\n`, and on any blob whose sha256 is not its frame's `<hex>`; it then
-decompresses and checks the NDJSON's own sha256 and length against the generation document (the authoritative check).
+trailer. The client fails closed on a MISSING frame it needs, on a wrong trailer, on bytes after the trailer, on a
+length that does not end at a `\n`, and on any blob whose sha256 is not its frame's `<hex>`; it then decompresses and
+checks the NDJSON's own sha256 and length against the generation document (the authoritative check). An absent trailer
+(a stream cut short) is not trusted for what it did not deliver: the client keeps the blobs that arrived whole and
+verified and asks again for the rest only. It asks for at most 2.5 MB of blobs a request (about 9 day blobs, by the
+generation's `blob_bytes`), at most 3 requests at a time, each batch retried on its own (src/state-store.ts `getBlobs`):
+a stall costs one small answer, not 10 MB, and an invocation reads about 9 blobs (about 10 subrequests), not 40.
 
 **`POST /v1/gc`** (gc) runs one page of garbage collection. Body (≤ 1 MiB):
 
@@ -298,8 +302,8 @@ whose colo cache has the copy: one (`cache.match`), plus the revalidation's GitH
 is past its hour (3). A cold isolate on a colo-cache miss with a bucket copy: `cache.match`, `bucket.get`, then (after
 the answer) the GitHub fetch, the bucket `put` only when a rewrite is due, one `cache.put` (GitHub's copy, or the bucket
 copy when the fetch failed) and one ledger `charge`: at most 6. Keyless (no bucket copy): `cache.match`, `bucket.get`,
-two GitHub fetches, the bucket `put`, `cache.put` and `charge`: at most 7. A 40-blob batchGet (about 41 of its own)
-stays under 50 either way; a GC first page (44 of its own: `gcBegin`, 40 HEADs, a list, a delete, `gcEnd`) reaches 50
+two GitHub fetches, the bucket `put`, `cache.put` and `charge`: at most 7. A 40-blob batchGet (about 41 of its own;
+the feed's client asks for about 9, so about 10) stays under 50 either way; a GC first page (44 of its own: `gcBegin`, 40 HEADs, a list, a delete, `gcEnd`) reaches 50
 or 51 on such a cold isolate, which matters only if R2 and Durable Object calls count against the 50 (the open rehearsal
 item under "Verify"; the 4.0 table's `x-feed-state-store-ops` does not include these).
 
@@ -386,8 +390,13 @@ successful GC in 3 days) fire long before. The ledger's new columns are added in
 a no-op once present), so a rollback to a protocol-1 version still reads every row; that version's re-seed leaves the
 meta bytes out (the estimate then reads low by them: tens of kB a day).
 
-The feed's own use: about 1,500 requests a day (about 288 aggregate runs, each one or two batchGets and a few PUTs),
-roughly 1-2 % of every ceiling. The ledger writes one day row per authenticated request (the account's Durable Object
+The feed's own use (2026-11-19, batches of at most 2.5 MB): phase 3a about 830 requests a day (about 290 aggregate
+runs, each one batchGet for the shadow hydrate's sample of 4 days and about 1.4 PUTs; health's budget reads, the
+backups' 6 batchGets a day and GC's pages), about 1,200 Class B a day. Phase 3b about 2,400 a day: each aggregate run
+fetches all 46 days in 6 batchGets (about 1,750 a day), first-solutions' about 24 collects 6 each, the PUTs and health
+as before; Class B about 14,400 a day (a blob is one GET however it is batched). A batch retried on every attempt (4)
+on every run would be about 8,000 a day: under 10 % of the account's 100,000 even then. The ledger's Durable Object
+rows follow the requests (one a request). Roughly 1-7 % of every ceiling. The ledger writes one day row per authenticated request (the account's Durable Object
 limit is 100,000 rows written a day, shared with the heartbeat ledger and the alerts gateway); an unauthenticated request
 never reaches a reservation or a blob. The one exception is bounded per isolate: an isolate with no signing key reads
 the JWKS copy (and charges that GET) at most once per 10 s (2 s after a read that failed), whoever's token arrives.

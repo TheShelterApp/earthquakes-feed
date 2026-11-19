@@ -7,7 +7,10 @@ import { gzipSync } from 'node:zlib';
 import { loadEventMap, pruneEventMapShards, saveEventMap } from '../src/bitemporal.js';
 import { dataPaths } from '../src/config.js';
 import {
+  AUTHORITATIVE_HYDRATE_DEADLINE_MS,
+  AUTHORITATIVE_HYDRATE_POLICY,
   EVENT_MAP_STORE_AUTHORITATIVE,
+  SHADOW_SAMPLE_DAYS,
   IGNORE_LINES,
   PersistRefused,
   SENTINEL_FILE,
@@ -29,6 +32,9 @@ import {
   readCanonicalDay,
   readGeneration,
   serializeGeneration,
+  shadowRotation,
+  shadowSample,
+  stepPolicy,
   untrackEventMap,
   writeGeneration,
   type Generation,
@@ -273,6 +279,33 @@ test('shadow hydrate: verified blobs compared with the checkout; mismatches repo
   }
 });
 
+test('hydrate builds a backend given as a factory only when its local work is done and a fetch is due (the step deadline starts there)', async () => {
+  const r = dataRoot();
+  const dir = tmp();
+  try {
+    const be = new FsBackend(dir);
+    await persist(r, be, { cutoffDay: CUTOFF });
+    let built = 0;
+    const factory = (): FsBackend => {
+      built++;
+      return be;
+    };
+    // Nothing differs and no sample: no store request, so no backend (and no deadline) at all.
+    const quiet = await hydrate(r, factory, { mode: 'shadow', sample: 0 });
+    assert.deepEqual([quiet.fetched, built], [[], 0]);
+    // The sample: one backend, built once for the whole fetch.
+    const sampled = await hydrate(r, factory, { mode: 'shadow', sample: 2 });
+    assert.deepEqual([sampled.fetched.length, sampled.mismatches, built], [2, [], 1]);
+    assert.ok(sampled.localMs >= 0);
+    // Authoritative with every day already on disk: nothing to fetch, no backend.
+    const auth = await hydrate(r, factory, { mode: 'authoritative' });
+    assert.deepEqual([auth.written.length, auth.fetched, built], [2, [], 1]);
+  } finally {
+    rmSync(r, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('hydrate fails closed on a missing or corrupt blob; another gzip of the same NDJSON hydrates (the blob is keyed by its gzip)', async () => {
   const r = dataRoot();
   const dir = tmp();
@@ -377,6 +410,7 @@ test('the steps: markers for the health workflow; the store off, a mismatch or a
     assert.equal(marker('persist').run_id, '42');
     assert.equal(await main(['hydrate'], env({ FEED_STATE_BACKEND: `fs:${dir}` })), 0);
     assert.deepEqual([marker('hydrate').ok, marker('hydrate').mode, marker('hydrate').mismatches], [true, 'shadow', []]);
+    assert.match(String(marker('hydrate').summary), /^2 day\(s\) compared with the checkout; 2 fetched and verified \(0 changed, 2 sampled: 2026-11-14 2026-11-15\), 0\.0 MB in 1 batch\(es\) from .* in \d+ ms \(\d+ ms of it local\)/);
     const m = loadEventMap(r);
     m.get('efd_a')!.lastSeq = 4;
     saveEventMap(r, m);
@@ -399,9 +433,14 @@ test('the steps: markers for the health workflow; the store off, a mismatch or a
     assert.deepEqual([marker('hydrate').ok, marker('hydrate').error_kind, marker('hydrate').run_id], [false, 'killed', '43']);
     assert.equal(await main(['hydrate'], env({ FEED_STATE_BACKEND: `fs:${dir}` })), 0);
     assert.notEqual(marker('hydrate').error_kind, 'killed');
-    // Phase 3a's bound on a hanging store: 2 attempts, and a step deadline well inside the 5-minute job.
+    // Phase 3a's bound on a hanging store: 2 attempts (4 a hydrate batch, each short), and step deadlines well inside the
+    // 5-minute job; phase 3b's hydrate fails closed within a minute.
     assert.equal(SHADOW_RETRY_POLICY.attempts, 2);
     assert.ok(SHADOW_STEP_DEADLINE_MS.hydrate + SHADOW_STEP_DEADLINE_MS.persist <= 90_000);
+    assert.deepEqual(stepPolicy('hydrate', 'shadow', 1_000), { ...SHADOW_RETRY_POLICY, deadlineMs: 1_000 + SHADOW_STEP_DEADLINE_MS.hydrate });
+    assert.deepEqual(stepPolicy('persist', null, 1_000), { ...SHADOW_RETRY_POLICY, deadlineMs: 1_000 + SHADOW_STEP_DEADLINE_MS.persist });
+    assert.deepEqual(stepPolicy('hydrate', 'authoritative', 1_000), { ...AUTHORITATIVE_HYDRATE_POLICY, deadlineMs: 1_000 + AUTHORITATIVE_HYDRATE_DEADLINE_MS });
+    assert.ok(AUTHORITATIVE_HYDRATE_DEADLINE_MS <= 60_000, 'inside the step\'s 2-minute timeout-minutes');
     // The phase-3b-only steps (derive-publish, first-solutions) and the commit step's transition do nothing in 3a.
     rmSync(markers, { recursive: true, force: true });
     assert.equal(await main(['hydrate', '--3b-only'], env({ FEED_STATE_BACKEND: `fs:${dir}` })), 0);
@@ -453,5 +492,93 @@ test('the phase-3b transition (untrack, off while EVENT_MAP_IN_GIT=1): the day f
     assert.deepEqual([...loadEventMap(r).keys()], ['efd_a', 'efd_b', 'efd_c'], 'the sentinel is no day');
   } finally {
     rmSync(r, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The shadow hydrate's sample (phase 3a after 2026-11-19): the days that differ plus a rotating sample, not all 46.
+
+const DAYS46 = Array.from({ length: 46 }, (_, i) => new Date(Date.parse('2026-10-04T00:00:00Z') + i * 86_400_000).toISOString().slice(0, 10));
+
+test('shadow sample: deterministic by the run number, distinct days, every day covered by 12 consecutive runs', () => {
+  assert.equal(SHADOW_SAMPLE_DAYS, 4);
+  for (const r of [0, 1, 7, 1234, 44_403_949_467]) {
+    const a = shadowSample(DAYS46, r);
+    assert.deepEqual(shadowSample([...DAYS46].reverse(), r), a, 'the order of the input does not matter');
+    assert.equal(new Set(a).size, 4);
+    assert.ok(a.every((d) => DAYS46.includes(d)));
+  }
+  // Any 12 consecutive run numbers (an hour of 5-minute aggregate runs) verify all 46 days.
+  for (const from of [0, 5, 98_765]) {
+    const seen = new Set<string>();
+    for (let r = from; r < from + Math.ceil(46 / 4); r++) for (const d of shadowSample(DAYS46, r)) seen.add(d);
+    assert.equal(seen.size, 46, `runs ${from}..${from + 11}`);
+  }
+  // Consecutive runs take consecutive slices.
+  assert.deepEqual(shadowSample(DAYS46, 0), DAYS46.slice(0, 4));
+  assert.deepEqual(shadowSample(DAYS46, 1), DAYS46.slice(4, 8));
+  assert.deepEqual(shadowSample(DAYS46, 11), [...DAYS46.slice(44), ...DAYS46.slice(0, 2)].sort());
+  assert.deepEqual(shadowSample(DAYS46.slice(0, 3), 9), DAYS46.slice(0, 3), 'fewer days than the sample: all');
+  assert.deepEqual(shadowSample([], 3), []);
+  // The rotation: the run number, else the run id, else the 5-minute slot.
+  assert.equal(shadowRotation({ GITHUB_RUN_NUMBER: '318941', GITHUB_RUN_ID: '44403949467' }), 318_941);
+  assert.equal(shadowRotation({ GITHUB_RUN_ID: '44403949467' }), 44_403_949_467);
+  assert.equal(shadowRotation({}, Date.parse('2026-11-19T10:07:00Z')), Math.floor(Date.parse('2026-11-19T10:05:00Z') / 300_000));
+});
+
+/** A data root with one event on each of `n` days ending 2026-11-15. */
+function manyDays(n: number): string {
+  const r = mkdtempSync(join(tmpdir(), 'efd-em-many-'));
+  mkdirSync(dataPaths(r).indexDir, { recursive: true });
+  writeFileSync(dataPaths(r).head, JSON.stringify({ seq: 10, ingest_time: '2026-11-16T11:55:00.000Z' }) + '\n');
+  const nodes = Array.from({ length: n }, (_, i) => node(`efd_${String(i).padStart(3, '0')}`, new Date(Date.parse('2026-11-15T06:00:00Z') - i * 86_400_000).toISOString()));
+  saveEventMap(r, mapOf(...nodes));
+  return r;
+}
+
+test('shadow hydrate: fetches the days that differ and the rotating sample only, verified; sampled vs changed reported', async () => {
+  const r = manyDays(10);
+  const dir = tmp();
+  try {
+    const inner = new FsBackend(dir);
+    await persist(r, inner, { cutoffDay: CUTOFF });
+    const g = readGeneration(r)!.generation;
+    const days = Object.keys(g.days).sort();
+    assert.equal(days.length, 10);
+    const dayOfBlob = new Map(Object.entries(g.days).map(([d, e]) => [e.blob, d]));
+    const asked: string[] = [];
+    const be: StateBackend = { ...counting(inner).be, batchGet: async (s, o) => (asked.push(...s.map((h) => dayOfBlob.get(h)!)), inner.batchGet(s, o)) };
+    // Nothing differs: the sample alone, one batch.
+    const quiet = await hydrate(r, be, { mode: 'shadow', rotation: 1 });
+    assert.deepEqual(quiet.changed, []);
+    assert.deepEqual(quiet.sampled, days.slice(4, 8));
+    assert.deepEqual([quiet.fetched, quiet.mismatches, quiet.days, quiet.batches], [days.slice(4, 8), [], 10, 1]);
+    assert.deepEqual(asked.sort(), days.slice(4, 8));
+    assert.equal(quiet.blobBytes, days.slice(4, 8).reduce((n, d) => n + g.days[d]!.blob_bytes, 0));
+    // A day that differs and a day the checkout lost: both mismatches, both fetched and verified, beside the sample.
+    asked.length = 0;
+    const m = loadEventMap(r);
+    m.get('efd_000')!.place = 'checkout only';
+    m.get('efd_000')!.lastSeq = 3;
+    saveEventMap(r, m);
+    rmDay(r, days[0]!);
+    const busy = await hydrate(r, be, { mode: 'shadow', rotation: 0 });
+    assert.deepEqual(busy.changed, [days[0], days[9]]);
+    assert.deepEqual(busy.sampled, days.slice(1, 4), 'the sample without the days already fetched as changed');
+    assert.deepEqual(busy.fetched, [days[0], ...days.slice(1, 4), days[9]]);
+    assert.deepEqual(asked.sort(), busy.fetched);
+    assert.equal(busy.mismatches.length, 2);
+    // A blob lost from the store: unseen while the sample has not reached its day (git is the truth in phase 3a, the
+    // next hour's runs reach it), a fail-closed `missing` once it does.
+    rmSync(join(dir, 'cas', 'sha256', g.days[days[6]!]!.blob.slice(0, 2), g.days[days[6]!]!.blob));
+    const unreached = await hydrate(r, be, { mode: 'shadow', rotation: 2 });
+    assert.deepEqual(unreached.sampled, [days[1], days[8]], 'days 8, 9, 0, 1 without the two changed ones');
+    assert.ok(!unreached.fetched.includes(days[6]!));
+    await assert.rejects(hydrate(r, be, { mode: 'shadow', rotation: 1 }), (e: unknown) => e instanceof StateStoreError && e.kind === 'missing');
+    // `sample` at or above the day count verifies every day (the staging rehearsal).
+    await assert.rejects(hydrate(r, be, { mode: 'shadow', rotation: 0, sample: 10 }), (e: unknown) => e instanceof StateStoreError && e.kind === 'missing');
+  } finally {
+    rmSync(r, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
   }
 });

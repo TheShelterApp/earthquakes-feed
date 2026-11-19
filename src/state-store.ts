@@ -29,8 +29,10 @@ import { dirname, join, relative, sep } from 'node:path';
  *                                   same bytes, and the write refreshes `uploaded`, which GC's age rule reads.
  *   POST /v1/cas:batchGet           body {"shas": [hex, …]} (1–40 unique); 200 application/octet-stream, a framed
  *                                   stream: per blob `BLOB <hex> <length>\n` + bytes + `\n`, a missing one
- *                                   `MISSING <hex>\n`, then `END <count>\n`. The client fails closed on a MISSING, a
- *                                   stream without its trailer, any length or sha256 mismatch.
+ *                                   `MISSING <hex>\n`, then `END <count>\n`. The client fails closed on a MISSING and
+ *                                   on any length or sha256 mismatch; a stream cut short (no trailer) keeps the blobs
+ *                                   it delivered whole and verified and asks again for the rest (getBlobs below: at
+ *                                   most BATCH_MAX_BYTES a request, BATCH_CONCURRENCY in flight).
  *   POST /v1/gc                     body {keep (1–10,000), current (1–40 on the first page, none later), cursor,
  *                                   minAgeDays ≥ 14, maxDeletes ≤ 1,000, dryRun}: one listing page; 200 {listed,
  *                                   deleted, bytesDeleted, wouldDelete, bytesWouldDelete, kept, young, capped,
@@ -75,9 +77,36 @@ export const DEFAULT_STATE_URL = 'https://feed-state.theshelter.app';
 export const DEFAULT_STATE_AUDIENCE = 'earthquakes-feed-state';
 /** At most this many blobs per batchGet (the Worker's limit; a Free-plan invocation's subrequests stay well inside). */
 export const BATCH_MAX = 40;
+/**
+ * At most this many blob bytes (the generation's blob_bytes) per batchGet: about 9 day blobs, so the 46 days (12.2 MB)
+ * are 6 requests, not 2. One 40-blob answer is about 10 MB streamed through the Worker in one response, and a stall
+ * anywhere in it cost the whole answer: phase 3a's shadow hydrate failed about once in 200 runs that way (runs
+ * 44043134871 and 44177064278 on 2026-11-17, "the stream broke: This operation was aborted" after 15 s of a 40-blob
+ * body; 44403949467 on 2026-11-18, a 6-blob request that never answered, twice). Smaller answers fail less often, are
+ * retried on their own, cost less to repeat, and keep a Worker invocation's subrequests near 10 instead of 41.
+ */
+export const BATCH_MAX_BYTES = 2_500_000;
+/** batchGets in flight at once (getBlobs): 46 days in two waves; the Worker sees at most three of this run's at a time. */
+export const BATCH_CONCURRENCY = 3;
+/**
+ * Attempts per batch, independent of the policy's `attempts` (which bounds every other request): each batch is retried
+ * on its own and asks only for the blobs it has not yet received and verified, so a retry is cheap and short. The step
+ * deadline and the retry budget still bound it.
+ */
+export const BATCH_ATTEMPTS = 4;
+/**
+ * A batch attempt's timeout: BATCH_TIMEOUT_BASE_MS (the token check and the first byte: about 0.1–0.6 s, once 3.4 s on
+ * a cold isolate) plus BATCH_MS_PER_MB for every MB it asks for (a floor of 0.5 MB/s; a healthy answer streams 10 MB in
+ * about 1.5 s), capped by the policy's timeoutMs: 10 s for a full 2.5 MB batch, 5.6 s for one 0.3 MB day. A stalled
+ * attempt is cut after seconds, not after the 15–20 s the largest answer needed, and the retry still fits the deadline.
+ */
+export const BATCH_TIMEOUT_BASE_MS = 5_000;
+export const BATCH_MS_PER_MB = 2_000;
+/** A blob of unknown size counts as this many bytes when batches are planned and timed (a day blob is 0.08–0.33 MB). */
+export const BLOB_BYTES_ESTIMATE = 300_000;
 /** The Worker refuses a PUT body over this size (413). A day's gzipped NDJSON is about 0.3 MB. */
 export const PUT_MAX_BYTES = 25 * 1024 * 1024;
-/** Per request; a batchGet of 40 day blobs is about 12 MB. */
+/** Per request (a batchGet attempt: batchTimeoutMs of its bytes, at most this). */
 export const REQUEST_TIMEOUT_MS = 20_000;
 /** Attempts per request (network errors, 5xx, a 429 that is not the budget). */
 export const MAX_ATTEMPTS = 4;
@@ -103,6 +132,8 @@ export const RETRY_BUDGET_MS = 90_000;
 export interface RetryPolicy {
   timeoutMs?: number;
   attempts?: number;
+  /** Attempts of one batchGet batch (default BATCH_ATTEMPTS); its timeout is batchTimeoutMs of its bytes. */
+  batchAttempts?: number;
   retryBudgetMs?: number;
   deadlineMs?: number | null;
 }
@@ -170,12 +201,20 @@ export interface StateBudget {
   ceilings: { class_a: number; class_b: number; bytes_written: number; stored_bytes: number };
 }
 
+/** What a batchGet may know beyond its shas (getBlobs passes both; a backend that has no use for them ignores them). */
+export interface BatchGetOptions {
+  /** Each blob's stored size (the generation's blob_bytes): scales the attempt's timeout (batchTimeoutMs). */
+  sizes?: ReadonlyMap<string, number>;
+  /** Aborted when a sibling batch failed for good: no further attempt starts, a running one is cut. */
+  signal?: AbortSignal;
+}
+
 export interface StateBackend {
   readonly label: string;
   /** Store `bytes` under the sha256 `hex` of those bytes. */
   put(hex: string, bytes: Uint8Array): Promise<PutResult>;
   /** The blobs `shas` (1–40), each verified against its sha256. Throws when any is missing. */
-  batchGet(shas: readonly string[]): Promise<Map<string, Buffer>>;
+  batchGet(shas: readonly string[], opts?: BatchGetOptions): Promise<Map<string, Buffer>>;
   /** One GC page. */
   gc(req: GcRequest): Promise<GcPage>;
   /** Today's counters and ceilings, as the store reports them (null: the backend keeps none). */
@@ -200,15 +239,29 @@ export class StateStoreError extends Error {
 // ---------------------------------------------------------------------------------------------------------------------
 // The batchGet framing
 
+/** What a batchGet answer held up to where it ended. */
+export interface BatchScan {
+  /** The blobs delivered whole, each verified against its sha256. */
+  blobs: Map<string, Buffer>;
+  /** The shas answered MISSING. */
+  missing: string[];
+  /** The END trailer was read (and checked): the answer is complete. */
+  ended: boolean;
+  /** Without the trailer: where the answer was cut (for the error message). */
+  cut: string | null;
+}
+
 /**
- * The blobs of a batchGet answer, each checked: every requested sha exactly once, as `BLOB <hex> <length>` with that
- * many bytes whose sha256 is <hex> and a `\n` after them, nothing unrequested, the `END <count>` trailer last and
- * nothing after it, <count> the number of records. A `MISSING` record throws (kind `missing`); a stream cut short (no
- * trailer) throws kind `transport` (the request is worth repeating); anything else malformed throws kind `integrity`.
+ * Read a batchGet answer as far as it goes. Every frame up to the cut is checked: a requested sha at most once, as `BLOB
+ * <hex> <length>` with that many bytes whose sha256 is <hex> and a `\n` after them, or as `MISSING <hex>`; nothing
+ * unrequested; the `END <count>` trailer last and nothing after it, <count> the number of records. Anything malformed
+ * throws kind `integrity` (never retried: the store answered something else than it holds). A stream that ends before
+ * its trailer is not an error here: `ended` is false and `blobs` holds what it delivered whole, so a retry can ask for
+ * the rest only.
  */
-export function parseBatchFrames(body: Buffer, requested: readonly string[]): Map<string, Buffer> {
+export function scanBatchFrames(body: Buffer, requested: readonly string[]): BatchScan {
   const want = new Set(requested);
-  const out = new Map<string, Buffer>();
+  const blobs = new Map<string, Buffer>();
   const missing: string[] = [];
   let records = 0;
   let pos = 0;
@@ -217,47 +270,58 @@ export function parseBatchFrames(body: Buffer, requested: readonly string[]): Ma
   };
   for (;;) {
     const nl = body.indexOf(0x0a, pos);
-    if (nl < 0) {
-      throw new StateStoreError(`batchGet: the stream ended after ${records} record(s) without its END trailer`, 'transport', null, true);
-    }
+    if (nl < 0) return { blobs, missing, ended: false, cut: `the stream ended after ${records} record(s) without its END trailer` };
     const line = body.toString('latin1', pos, nl);
-    pos = nl + 1;
     const parts = line.split(' ');
     if (parts[0] === 'END' && parts.length === 2) {
       if (!/^\d+$/.test(parts[1]!) || Number(parts[1]) !== records) bad(`trailer ${JSON.stringify(line)} after ${records} record(s)`);
-      if (pos !== body.length) bad(`${body.length - pos} byte(s) after the trailer`);
-      break;
+      if (nl + 1 !== body.length) bad(`${body.length - nl - 1} byte(s) after the trailer`);
+      return { blobs, missing, ended: true, cut: null };
     }
     if (parts[0] === 'MISSING' && parts.length === 2) {
       const hex = parts[1]!;
-      if (!want.has(hex) || out.has(hex) || missing.includes(hex)) bad(`unexpected MISSING ${hex.slice(0, 80)}`);
+      if (!want.has(hex) || blobs.has(hex) || missing.includes(hex)) bad(`unexpected MISSING ${hex.slice(0, 80)}`);
       missing.push(hex);
       records++;
+      pos = nl + 1;
       continue;
     }
     if (parts[0] === 'BLOB' && parts.length === 3) {
       const hex = parts[1]!;
-      if (!want.has(hex) || out.has(hex) || missing.includes(hex)) bad(`unexpected BLOB ${hex.slice(0, 80)}`);
+      if (!want.has(hex) || blobs.has(hex) || missing.includes(hex)) bad(`unexpected BLOB ${hex.slice(0, 80)}`);
       if (!/^\d+$/.test(parts[2]!)) bad(`BLOB ${hex}: length ${JSON.stringify(parts[2]!.slice(0, 20))}`);
       const len = Number(parts[2]);
-      if (pos + len + 1 > body.length) {
-        throw new StateStoreError(`batchGet: BLOB ${hex} declares ${len} bytes, the stream ends ${body.length - pos} byte(s) later`, 'transport', null, true);
-      }
-      const bytes = body.subarray(pos, pos + len);
-      if (body[pos + len] !== 0x0a) bad(`BLOB ${hex}: no newline after its ${len} bytes`);
+      const at = nl + 1;
+      if (at + len + 1 > body.length) return { blobs, missing, ended: false, cut: `BLOB ${hex} declares ${len} bytes, the stream ends ${body.length - at} byte(s) later` };
+      const bytes = body.subarray(at, at + len);
+      if (body[at + len] !== 0x0a) bad(`BLOB ${hex}: no newline after its ${len} bytes`);
       const got = sha256Hex(bytes);
       if (got !== hex) bad(`BLOB ${hex}: its bytes hash to ${got}`);
-      out.set(hex, Buffer.from(bytes));
-      pos += len + 1;
+      blobs.set(hex, Buffer.from(bytes));
+      pos = at + len + 1;
       records++;
       continue;
     }
+    // A header line cut before its newline is caught above (no newline); a whole line that is no frame is malformed.
     bad(`unreadable frame ${JSON.stringify(line.slice(0, 80))}`);
   }
-  if (missing.length) throw new StateStoreError(`batchGet: ${missing.length} blob(s) missing from the store: ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ', …' : ''}`, 'missing');
-  const absent = requested.filter((h) => !out.has(h));
-  if (absent.length) bad(`${absent.length} requested blob(s) not in the answer: ${absent.slice(0, 5).join(', ')}`);
-  return out;
+}
+
+const missingError = (missing: readonly string[]): StateStoreError =>
+  new StateStoreError(`batchGet: ${missing.length} blob(s) missing from the store: ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ', …' : ''}`, 'missing');
+
+/**
+ * The blobs of a whole batchGet answer, each checked (scanBatchFrames): a `MISSING` record throws (kind `missing`); a
+ * stream cut short (no trailer) throws kind `transport` (the request is worth repeating); a requested blob the trailer
+ * left out, or anything malformed, throws kind `integrity`.
+ */
+export function parseBatchFrames(body: Buffer, requested: readonly string[]): Map<string, Buffer> {
+  const scan = scanBatchFrames(body, requested);
+  if (!scan.ended) throw new StateStoreError(`batchGet: ${scan.cut}`, 'transport', null, true);
+  if (scan.missing.length) throw missingError(scan.missing);
+  const absent = requested.filter((h) => !scan.blobs.has(h));
+  if (absent.length) throw new StateStoreError(`batchGet: ${absent.length} requested blob(s) not in the answer: ${absent.slice(0, 5).join(', ')}`, 'integrity');
+  return scan.blobs;
 }
 
 /** The framed answer for `blobs` (in order; null = MISSING), as the Worker writes it. For tests and the FsBackend's own checks. */
@@ -277,13 +341,82 @@ function checkShas(shas: readonly string[]): void {
   for (const s of shas) if (!isSha256Hex(s)) throw new StateStoreError(`batchGet: not a sha256: ${String(s).slice(0, 80)}`, 'client');
 }
 
-/** Every blob of `shas` (any number, duplicates allowed), fetched in batches of at most BATCH_MAX. */
-export async function getBlobs(backend: StateBackend, shas: Iterable<string>): Promise<Map<string, Buffer>> {
-  const all = [...new Set(shas)].sort();
+/** The stored size of `hex` as far as `sizes` knows it (BLOB_BYTES_ESTIMATE otherwise). */
+const sizeOf = (hex: string, sizes?: ReadonlyMap<string, number>): number => sizes?.get(hex) ?? BLOB_BYTES_ESTIMATE;
+
+/** A batch attempt's timeout for `bytes` of blobs: BATCH_TIMEOUT_BASE_MS + BATCH_MS_PER_MB a MB, at most `capMs`. */
+export function batchTimeoutMs(bytes: number, capMs: number): number {
+  return Math.max(1, Math.min(capMs, BATCH_TIMEOUT_BASE_MS + Math.ceil((bytes / 1e6) * BATCH_MS_PER_MB)));
+}
+
+/**
+ * The batches of `shas` (sorted, unique): consecutive runs of at most BATCH_MAX blobs and at most `maxBytes` of them
+ * (a blob larger than that alone). Deterministic, so a run's requests can be read back from its log.
+ */
+export function planBatches(shas: Iterable<string>, sizes?: ReadonlyMap<string, number>, maxBytes: number = BATCH_MAX_BYTES): string[][] {
+  const out: string[][] = [];
+  let cur: string[] = [];
+  let bytes = 0;
+  for (const h of [...new Set(shas)].sort()) {
+    const n = sizeOf(h, sizes);
+    if (cur.length && (cur.length >= BATCH_MAX || bytes + n > maxBytes)) {
+      out.push(cur);
+      cur = [];
+      bytes = 0;
+    }
+    cur.push(h);
+    bytes += n;
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+
+/** What getBlobs did (filled in when the caller passes it). */
+export interface GetBlobsStats {
+  batches: number;
+  blobs: number;
+  bytes: number;
+}
+
+/**
+ * Every blob of `shas` (any number, duplicates allowed): planned into batches by bytes (planBatches, from `sizes`: the
+ * generation's blob_bytes), at most `concurrency` (BATCH_CONCURRENCY) in flight. Each batch is one backend.batchGet
+ * with its own attempts (the Worker backend retries a batch on its own and asks again only for the blobs not yet
+ * received and verified). The first batch that fails for good (its attempts or the step deadline used up, or a failure
+ * that is never retried: a MISSING, an integrity failure, the budget, a 1027) fails the whole fetch, fail closed: the
+ * batches in flight are cancelled, none starts after it, and its error is the one thrown.
+ */
+export async function getBlobs(
+  backend: StateBackend,
+  shas: Iterable<string>,
+  opts: { sizes?: ReadonlyMap<string, number>; maxBatchBytes?: number; concurrency?: number; stats?: GetBlobsStats } = {},
+): Promise<Map<string, Buffer>> {
+  const batches = planBatches(shas, opts.sizes, opts.maxBatchBytes ?? BATCH_MAX_BYTES);
   const out = new Map<string, Buffer>();
-  for (let i = 0; i < all.length; i += BATCH_MAX) {
-    const got = await backend.batchGet(all.slice(i, i + BATCH_MAX));
-    for (const [k, v] of got) out.set(k, v);
+  const cancel = new AbortController();
+  let failed: { error: unknown } | null = null;
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (!failed && next < batches.length) {
+      const batch = batches[next++]!;
+      try {
+        const got = await backend.batchGet(batch, { sizes: opts.sizes, signal: cancel.signal });
+        for (const [k, v] of got) out.set(k, v);
+      } catch (e) {
+        // The first failure wins; the cancelled siblings' errors that follow it say nothing new.
+        if (!failed) {
+          failed = { error: e };
+          cancel.abort();
+        }
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(opts.concurrency ?? BATCH_CONCURRENCY, batches.length) }, worker));
+  if (failed) throw (failed as { error: unknown }).error;
+  if (opts.stats) {
+    opts.stats.batches += batches.length;
+    opts.stats.blobs += out.size;
+    for (const v of out.values()) opts.stats.bytes += v.length;
   }
   return out;
 }
@@ -733,8 +866,16 @@ export function githubOidcTokenSource(
   // The deadline is wall-clock time (Date.now), whatever `now` a test passes for the token's expiry.
   const left = (): number => (deadlineMs == null ? Infinity : deadlineMs - Date.now());
   let cached: { token: string; expMs: number } | null = null;
-  return async () => {
+  // Concurrent callers (getBlobs' batches, persist's PUTs) share one token request instead of each minting their own.
+  let pending: Promise<string> | null = null;
+  const source: TokenSource = async () => {
     if (cached && cached.expMs - now() > TOKEN_MIN_LEFT_MS) return cached.token;
+    pending ??= mint().finally(() => {
+      pending = null;
+    });
+    return pending;
+  };
+  const mint = async (): Promise<string> => {
     const url = env.ACTIONS_ID_TOKEN_REQUEST_URL;
     const bearer = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
     if (!url || !bearer) {
@@ -781,6 +922,7 @@ export function githubOidcTokenSource(
     }
     throw new StateStoreError(`the OIDC token request failed: ${last || 'no attempt'} after ${tried} attempt${tried === 1 ? '' : 's'}`, 'transport', null, true);
   };
+  return source;
 }
 
 /** Jittered exponential backoff before attempt `attempt` (2, 3, …): 0.5–1 s, 1–2 s, 2–4 s. */
@@ -800,6 +942,8 @@ export interface WorkerBackendOptions {
   random?: () => number;
   timeoutMs?: number;
   attempts?: number;
+  /** Attempts of one batchGet batch (default BATCH_ATTEMPTS). */
+  batchAttempts?: number;
   /** At most this much sleeping between one request's attempts (default RETRY_BUDGET_MS). */
   retryBudgetMs?: number;
   /** No attempt starts after this epoch-ms instant and none runs past it (RetryPolicy); null: none. */
@@ -818,12 +962,23 @@ const errorOf = (text: string): string | null => {
 };
 
 /** The extra knobs of one request: a different protocol header, extra headers, statuses besides 200 that `read`
- *  handles (404 for a ref GET, 412 for a ref PUT), and a cap on attempts (1 for a CAS). */
+ *  handles (404 for a ref GET, 412 for a ref PUT), the attempts (1 for a CAS; a batchGet's own BATCH_ATTEMPTS),
+ *  each attempt's timeout when it is not the backend's (a batchGet's, scaled to the bytes it still asks for), a
+ *  signal that cancels the request (a sibling batch failed), and what the log line names beside the route. */
 interface RequestOpts {
   protocol?: number;
   headers?: Record<string, string>;
   accept?: readonly number[];
   attempts?: number;
+  timeoutMs?: () => number;
+  signal?: AbortSignal;
+  what?: () => string;
+}
+
+/** What `read` knows about the attempt it reads: whether the attempt's timeout (or a cancel) aborted it, and its limit. */
+interface AttemptInfo {
+  aborted: () => boolean;
+  limitMs: number;
 }
 
 /** A Cloudflare error 1027 page: the account's daily Workers requests are used up until 00:00 UTC. */
@@ -837,6 +992,7 @@ export class WorkerBackend implements StateBackend, StateRefs {
   private readonly random: () => number;
   private readonly timeoutMs: number;
   private readonly attempts: number;
+  private readonly batchAttempts: number;
   private readonly retryBudgetMs: number;
   private readonly deadlineMs: number | null;
   private readonly log: (line: string) => void;
@@ -855,6 +1011,7 @@ export class WorkerBackend implements StateBackend, StateRefs {
     this.random = opts.random ?? Math.random;
     this.timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
     this.attempts = opts.attempts ?? MAX_ATTEMPTS;
+    this.batchAttempts = opts.batchAttempts ?? BATCH_ATTEMPTS;
     this.retryBudgetMs = opts.retryBudgetMs ?? RETRY_BUDGET_MS;
     this.deadlineMs = opts.deadlineMs ?? null;
     this.log = opts.log ?? (() => {});
@@ -872,11 +1029,19 @@ export class WorkerBackend implements StateBackend, StateRefs {
    * otherwise after a jittered backoff, and never sleeping more than `retryBudgetMs` in
    * all. A 500 `misconfigured` (a deploy error) and any other status are final. `read` turns a 200 into the result and
    * may throw a retryable StateStoreError (a stream cut short). With a deadline, no attempt starts or waits past it and
-   * a running attempt's timeout is cut to it.
+   * a running attempt's timeout is cut to it. `body` may be a function: it is called for every attempt (a batchGet's
+   * retry asks only for what is still missing).
    */
-  private async request<T>(method: string, path: string, body: Uint8Array | string | null, contentType: string | null, read: (res: Response) => Promise<T>, ro: RequestOpts = {}): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body: Uint8Array | string | null | (() => Uint8Array | string),
+    contentType: string | null,
+    read: (res: Response, at: AttemptInfo) => Promise<T>,
+    ro: RequestOpts = {},
+  ): Promise<T> {
     const route = `${method} ${path.replace(/[0-9a-f]{64}/, '<hex>').replace(/\?.*$/, '')}`;
-    const maxAttempts = Math.min(this.attempts, ro.attempts ?? this.attempts);
+    const maxAttempts = ro.attempts ?? this.attempts;
     let last: StateStoreError | null = null;
     let slept = 0;
     let asked: number | null = null;
@@ -900,10 +1065,16 @@ export class WorkerBackend implements StateBackend, StateRefs {
         stop = ": the step's deadline passed";
         break;
       }
+      if (ro.signal?.aborted) {
+        stop = ': cancelled (another request of the step failed)';
+        break;
+      }
       attempt++;
       asked = null;
       const t0 = Date.now();
       const token = await this.opts.token();
+      const tag = ro.what ? ` [${ro.what()}]` : '';
+      const sent = typeof body === 'function' ? body() : body;
       const headers: Record<string, string> = {
         authorization: `Bearer ${token}`,
         'user-agent': STATE_USER_AGENT,
@@ -914,16 +1085,18 @@ export class WorkerBackend implements StateBackend, StateRefs {
       // Content-Length is not set here: fetch derives it from a buffered body (a string or bytes, never a stream), and
       // the Worker refuses a body without one (411; R2's put needs a known length). tests/state-store.test.ts checks it.
       const ctrl = new AbortController();
-      const limit = Math.max(1, Math.min(this.timeoutMs, this.left()));
+      const limit = Math.max(1, Math.min(ro.timeoutMs ? ro.timeoutMs() : this.timeoutMs, this.left()));
       const timer = setTimeout(() => ctrl.abort(), limit);
+      const cancel = (): void => ctrl.abort();
+      ro.signal?.addEventListener('abort', cancel, { once: true });
       let status: number | null = null;
       try {
-        const res = await this.fetchImpl(`${this.base}${path}`, { method, headers, body: body ?? undefined, signal: ctrl.signal });
+        const res = await this.fetchImpl(`${this.base}${path}`, { method, headers, body: sent ?? undefined, signal: ctrl.signal });
         status = res.status;
         const rid = res.headers.get('x-request-id') ?? '-';
         if (res.status === 200 || ro.accept?.includes(res.status)) {
-          this.log(`state ${route}: ${res.status} in ${Date.now() - t0} ms (attempt ${attempt}, request ${rid})`);
-          return await read(res);
+          this.log(`state ${route}${tag}: ${res.status} in ${Date.now() - t0} ms (attempt ${attempt}, request ${rid})`);
+          return await read(res, { aborted: () => ctrl.signal.aborted, limitMs: limit });
         }
         const text = await res.text().catch(() => '');
         const err = errorOf(text);
@@ -971,12 +1144,15 @@ export class WorkerBackend implements StateBackend, StateRefs {
         if (e instanceof StateStoreError) {
           if (!e.retryable) throw e;
           last = e;
+          if (status === 200) this.log(`state ${route}${tag}: ${e.message} (attempt ${attempt})`);
           continue;
         }
-        last = new StateStoreError(`${route}: ${ctrl.signal.aborted ? `timed out after ${limit} ms` : `network error: ${(e as Error).message}`}`, 'transport', status, true);
-        this.log(`state ${route}: ${last.message} (attempt ${attempt})`);
+        const why = ro.signal?.aborted ? 'cancelled' : ctrl.signal.aborted ? `timed out after ${limit} ms` : `network error: ${(e as Error).message}`;
+        last = new StateStoreError(`${route}: ${why}`, 'transport', status, true);
+        this.log(`state ${route}${tag}: ${last.message} (attempt ${attempt})`);
       } finally {
         clearTimeout(timer);
+        ro.signal?.removeEventListener('abort', cancel);
       }
     }
     throw new StateStoreError(`${last?.message ?? route} after ${attempt} attempt${attempt === 1 ? '' : 's'}${stop}`, last?.kind ?? 'transport', last?.status ?? null, true);
@@ -995,17 +1171,63 @@ export class WorkerBackend implements StateBackend, StateRefs {
     });
   }
 
-  async batchGet(shas: readonly string[]): Promise<Map<string, Buffer>> {
+  /**
+   * One batch, resumable: the answer is read as a stream and scanned (scanBatchFrames), every blob delivered whole is
+   * verified and kept, and when the stream breaks (a cut connection, the attempt's timeout) the next attempt asks only
+   * for the blobs not yet held. A stream that delivered every requested blob is complete even if its trailer was cut
+   * (each blob is proven by its sha256; the trailer guards against a blob left out, and none is). Up to batchAttempts
+   * attempts, each timed by batchTimeoutMs of the bytes it asks for (opts.sizes; BLOB_BYTES_ESTIMATE a blob otherwise).
+   * A MISSING blob or a malformed frame fails at once (never retried).
+   */
+  async batchGet(shas: readonly string[], opts: BatchGetOptions = {}): Promise<Map<string, Buffer>> {
     checkShas(shas);
-    return this.request('POST', '/v1/cas:batchGet', JSON.stringify({ shas }), 'application/json', async (res) => {
-      let body: Buffer;
-      try {
-        body = Buffer.from(await res.arrayBuffer());
-      } catch (e) {
-        throw new StateStoreError(`batchGet: the stream broke: ${(e as Error).message}`, 'transport', 200, true);
-      }
-      return parseBatchFrames(body, shas);
-    });
+    const got = new Map<string, Buffer>();
+    const left = (): string[] => shas.filter((h) => !got.has(h));
+    const bytes = (hs: readonly string[]): number => hs.reduce((n, h) => n + sizeOf(h, opts.sizes), 0);
+    return this.request(
+      'POST',
+      '/v1/cas:batchGet',
+      () => JSON.stringify({ shas: left() }),
+      'application/json',
+      async (res, at) => {
+        const asked = left();
+        const chunks: Buffer[] = [];
+        let broke: string | null = null;
+        try {
+          if (res.body) {
+            const reader = res.body.getReader();
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              chunks.push(Buffer.from(value));
+            }
+          } else chunks.push(Buffer.from(await res.arrayBuffer()));
+        } catch (e) {
+          broke = at.aborted() ? `timed out after ${at.limitMs} ms` : (e as Error).message;
+        }
+        const scan = scanBatchFrames(Buffer.concat(chunks), asked);
+        for (const [k, v] of scan.blobs) got.set(k, v);
+        if (scan.missing.length) throw missingError(scan.missing);
+        const rest = left();
+        if (rest.length === 0) return got;
+        if (scan.ended) throw new StateStoreError(`batchGet: ${rest.length} requested blob(s) not in the answer: ${rest.slice(0, 5).join(', ')}`, 'integrity');
+        throw new StateStoreError(
+          `batchGet: the stream broke after ${scan.blobs.size} of ${asked.length} blob(s) (${broke ?? scan.cut}); ${shas.length - rest.length} of ${shas.length} held`,
+          'transport',
+          200,
+          true,
+        );
+      },
+      {
+        attempts: this.batchAttempts,
+        timeoutMs: () => batchTimeoutMs(bytes(left()), this.timeoutMs),
+        signal: opts.signal,
+        what: () => {
+          const l = left();
+          return `${l.length} blob(s), ${(bytes(l) / 1e6).toFixed(1)} MB`;
+        },
+      },
+    );
   }
 
   async gc(req: GcRequest): Promise<GcPage> {
@@ -1146,7 +1368,7 @@ export class FsBackend implements StateBackend, StateRefs {
     return { key: casKey(hex), size: bytes.byteLength, uploaded: new Date(this.now()).toISOString() };
   }
 
-  async batchGet(shas: readonly string[]): Promise<Map<string, Buffer>> {
+  async batchGet(shas: readonly string[], _opts?: BatchGetOptions): Promise<Map<string, Buffer>> {
     checkShas(shas);
     const framed = frameBatch(shas.map((h) => [h, existsSync(this.file(h)) ? readFileSync(this.file(h)) : null]));
     return parseBatchFrames(framed, shas);
@@ -1322,6 +1544,7 @@ export function backendFromEnv(
       fetchImpl: opts.fetchImpl,
       timeoutMs: opts.policy?.timeoutMs,
       attempts: opts.policy?.attempts,
+      batchAttempts: opts.policy?.batchAttempts,
       retryBudgetMs: opts.policy?.retryBudgetMs,
       deadlineMs: opts.policy?.deadlineMs ?? null,
       log: opts.log ?? ((l) => console.log(l)),

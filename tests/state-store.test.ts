@@ -1,18 +1,24 @@
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { gzipSync } from 'node:zlib';
 import {
+  BATCH_ATTEMPTS,
+  BATCH_CONCURRENCY,
   BATCH_MAX,
+  BATCH_MAX_BYTES,
+  BATCH_TIMEOUT_BASE_MS,
   FsBackend,
   KEYS_UNAVAILABLE_WAIT_MS,
   STATE_USER_AGENT,
   StateStoreError,
   WorkerBackend,
   backendFromEnv,
+  batchTimeoutMs,
   casKey,
   frameBatch,
   getBlobs,
@@ -21,6 +27,7 @@ import {
   parseBatchFrames,
   parseBudget,
   parseGcPage,
+  planBatches,
   retryAfterMs,
   sha256Hex,
   type GcRequest,
@@ -132,7 +139,13 @@ function fakeWorker(hooks: { before?: (req: Seen, res: ServerResponse) => boolea
     uploaded,
     seen,
     start: () => new Promise<string>((resolve) => server.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${(server.address() as { port: number }).port}`))),
-    stop: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    // closeAllConnections: a connection a test left hanging (a hung answer the client gave up on) ends now, not after
+    // the server's keep-alive timeout.
+    stop: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      }),
   };
 }
 
@@ -168,17 +181,26 @@ test('state client: PUT then batchGet round trip; every request carries the toke
   }
 });
 
-test('state client: a MISSING blob fails closed; getBlobs batches 40 at a time', async () => {
+test('state client: a MISSING blob fails closed; getBlobs batches at most 40 blobs and at most 2.5 MB at a time', async () => {
   const w = fakeWorker();
   const base = await w.start();
   try {
     const be = new WorkerBackend({ baseUrl: base, ...quick });
     const blobs = Array.from({ length: BATCH_MAX + 5 }, (_, i) => blob(`{"feedId":"efd_${i}"}\n`));
     for (const x of blobs) await be.put(x.hex, x.bytes);
-    const all = await getBlobs(be, blobs.map((x) => x.hex));
+    const gets = (): number[] =>
+      w.seen
+        .filter((s) => s.url === '/v1/cas:batchGet')
+        .map((s) => (JSON.parse(s.body.toString('utf8')) as { shas: string[] }).shas.length)
+        .sort((a, b) => b - a);
+    // Sizes known (tiny blobs): the count limit rules.
+    const all = await getBlobs(be, blobs.map((x) => x.hex), { sizes: new Map(blobs.map((x) => [x.hex, x.bytes.length])) });
     assert.equal(all.size, blobs.length);
-    const gets = w.seen.filter((s) => s.url === '/v1/cas:batchGet').map((s) => (JSON.parse(s.body.toString('utf8')) as { shas: string[] }).shas.length);
-    assert.deepEqual(gets, [BATCH_MAX, 5]);
+    assert.deepEqual(gets(), [BATCH_MAX, 5]);
+    // Sizes unknown: each blob counts as a day blob (BLOB_BYTES_ESTIMATE), 8 to a 2.5 MB batch.
+    w.seen.length = 0;
+    assert.equal((await getBlobs(be, blobs.map((x) => x.hex))).size, blobs.length);
+    assert.deepEqual(gets(), [8, 8, 8, 8, 8, 5]);
     const absent = blob('never stored');
     await assert.rejects(be.batchGet([blobs[0]!.hex, absent.hex]), (e: unknown) => e instanceof StateStoreError && e.kind === 'missing' && e.message.includes(absent.hex));
     await assert.rejects(be.batchGet([]), /1 to 40/);
@@ -281,12 +303,14 @@ test('state client: 5xx, a non-budget 429 and a cut stream are retried (at most 
   } finally {
     await down.stop();
   }
-  // A batchGet answer cut short is asked again; the second answer is whole.
+  // A batchGet answer cut short inside a blob is asked again; the second answer is whole. One that delivered every blob
+  // whole and lost only its trailer is complete: each blob is proven by its sha256 and none was left out.
   let cut = 0;
+  let cutAt = 60;
   const flaky = fakeWorker({
     frame: (shas, store) => {
       const full = frameBatch(shas.map((h) => [h, store.get(h) ?? null]));
-      return cut++ === 0 ? full.subarray(0, full.length - 4) : full;
+      return cut++ === 0 ? full.subarray(0, cutAt < 0 ? full.length + cutAt : cutAt) : full;
     },
   });
   const fb = await flaky.start();
@@ -296,6 +320,10 @@ test('state client: 5xx, a non-budget 429 and a cut stream are retried (at most 
     await be.put(a.hex, a.bytes);
     assert.equal((await be.batchGet([a.hex])).size, 1);
     assert.equal(flaky.seen.filter((s) => s.url === '/v1/cas:batchGet').length, 2);
+    cut = 0;
+    cutAt = -4;
+    assert.equal((await be.batchGet([a.hex])).size, 1);
+    assert.equal(flaky.seen.filter((s) => s.url === '/v1/cas:batchGet').length, 3, 'only the trailer cut: no second request');
   } finally {
     await flaky.stop();
   }
@@ -555,4 +583,205 @@ test('state client: Retry-After up to 60 s is honoured within the retry budget; 
   } finally {
     await c.stop();
   }
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The batched, resumable hydrate fetch (getBlobs; phase 3a's shadow failures of 2026-11-17 and 11-18: runs 44043134871,
+// 44177064278, 44403949467): a fake Worker whose batchGet answers break mid-blob, hang, 503 or come late.
+
+/** 46 blobs the size of the event map's day blobs (0.25–0.32 MB, 12–13 MB in all), stored in `w`. */
+function dayBlobs(w: ReturnType<typeof fakeWorker>, n = 46): { hexes: string[]; sizes: Map<string, number>; bytes: Map<string, Buffer> } {
+  const bytes = new Map<string, Buffer>();
+  for (let i = 0; i < n; i++) {
+    const b = randomBytes(250_000 + ((i * 1_571) % 70_000));
+    bytes.set(sha256Hex(b), b);
+  }
+  for (const [h, b] of bytes) w.store.set(h, b);
+  const hexes = [...bytes.keys()].sort();
+  return { hexes, sizes: new Map([...bytes].map(([h, b]) => [h, b.length])), bytes };
+}
+
+type Fault = 'break' | 'break-first' | 'hang' | '503' | { delayMs: number } | null;
+
+/**
+ * A fake Worker whose batchGet consults `decide` (the shas asked, in order) for each request: `break` writes the frames of
+ * the first two blobs and half of the third, then cuts the connection; `break-first` cuts inside the first blob; `hang`
+ * never answers; `503` answers {"error":"store read failed"}; a delay answers whole, late. Every request's shas are kept
+ * in `asked`, and the most batchGets in flight at once in `maxInFlight`.
+ */
+function faultyWorker(decide: (shas: string[]) => Fault) {
+  const asked: string[][] = [];
+  let inFlight = 0;
+  const stats = { maxInFlight: 0 };
+  const w = fakeWorker({
+    before: (s, res) => {
+      if (s.url !== '/v1/cas:batchGet') return false;
+      const shas = (JSON.parse(s.body.toString('utf8')) as { shas: string[] }).shas;
+      asked.push(shas);
+      inFlight++;
+      stats.maxInFlight = Math.max(stats.maxInFlight, inFlight);
+      res.on('close', () => inFlight--);
+      const fault = decide(shas);
+      const whole = (): void => {
+        res.writeHead(200, { 'content-type': 'application/octet-stream' });
+        res.end(frameBatch(shas.map((h) => [h, w.store.get(h) ?? null])));
+      };
+      if (fault === 'hang') return true;
+      if (fault === '503') {
+        res.writeHead(503, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'store read failed' }));
+        return true;
+      }
+      if (fault === 'break' || fault === 'break-first') {
+        const head = fault === 'break' ? shas.slice(0, 2) : [];
+        const next = shas[head.length]!;
+        const b = w.store.get(next)!;
+        const part = Buffer.concat([
+          ...head.flatMap((h) => [Buffer.from(`BLOB ${h} ${w.store.get(h)!.length}\n`), w.store.get(h)!, Buffer.from('\n')]),
+          Buffer.from(`BLOB ${next} ${b.length}\n`),
+          b.subarray(0, b.length >> 1),
+        ]);
+        res.writeHead(200, { 'content-type': 'application/octet-stream' });
+        res.write(part, () => res.destroy());
+        return true;
+      }
+      if (fault && typeof fault === 'object') {
+        setTimeout(whole, fault.delayMs);
+        return true;
+      }
+      whole();
+      return true;
+    },
+  });
+  return { w, asked, stats };
+}
+
+test('state client: batches are planned by bytes and count, deterministic; a batch attempt\'s timeout scales with its bytes', () => {
+  const sizes = new Map<string, number>();
+  const hexes = Array.from({ length: 46 }, (_, i) => sha256Hex(`day ${i}`));
+  hexes.forEach((h, i) => sizes.set(h, 250_000 + ((i * 1_571) % 70_000)));
+  const plan = planBatches([...hexes, hexes[0]!], sizes);
+  assert.deepEqual(plan.flat(), [...hexes].sort(), 'every blob once, sorted');
+  for (const b of plan) {
+    assert.ok(b.length <= BATCH_MAX);
+    assert.ok(b.reduce((n, h) => n + sizes.get(h)!, 0) <= BATCH_MAX_BYTES, 'at most 2.5 MB a batch');
+  }
+  assert.equal(plan.length, 6, '46 day blobs (~13 MB): 6 requests');
+  assert.deepEqual(planBatches(hexes, sizes), plan, 'deterministic');
+  // A blob larger than the limit goes alone; no sizes: BLOB_BYTES_ESTIMATE each.
+  const three = hexes.slice(0, 3).sort();
+  assert.deepEqual(planBatches(three, new Map([[three[1]!, 9_000_000]])).map((b) => b.length), [1, 1, 1]);
+  assert.deepEqual(planBatches(three, new Map([[three[0]!, 9_000_000]])).map((b) => b.length), [1, 2]);
+  assert.deepEqual(planBatches(hexes).map((b) => b.length), [8, 8, 8, 8, 8, 6]);
+  assert.equal(batchTimeoutMs(0, 20_000), BATCH_TIMEOUT_BASE_MS);
+  assert.equal(batchTimeoutMs(300_000, 20_000), 5_600, 'one day blob');
+  assert.equal(batchTimeoutMs(2_500_000, 20_000), 10_000, 'a full batch');
+  assert.equal(batchTimeoutMs(12_200_000, 20_000), 20_000, 'capped by the policy');
+  assert.equal(batchTimeoutMs(2_500_000, 300), 300);
+});
+
+test('state client: 46 day blobs in 6 batches, 3 in flight; a stream broken mid-blob, a hung answer and a 503 are each recovered within the deadline, a retry asking only for what is missing', async () => {
+  let plan: string[][] = [];
+  const fired = new Set<string>();
+  const once = (key: string, f: Fault): Fault => (fired.has(key) ? null : (fired.add(key), f));
+  const { w, asked, stats } = faultyWorker((shas) => {
+    if (shas.includes(plan[0]![2]!)) return once('break', 'break');
+    if (shas.includes(plan[1]![0]!)) return once('hang', 'hang');
+    if (shas.includes(plan[2]![0]!)) return once('503', '503');
+    return { delayMs: 40 };
+  });
+  const base = await w.start();
+  try {
+    const { hexes, sizes, bytes } = dayBlobs(w);
+    plan = planBatches(hexes, sizes);
+    const lines: string[] = [];
+    const t0 = Date.now();
+    const deadlineMs = t0 + 8_000;
+    // The attempt timeout capped at 1 s (the scaled one would be 10 s): the hung answer costs a second, not ten.
+    const be = new WorkerBackend({ baseUrl: base, ...quick, timeoutMs: 1_000, deadlineMs, log: (l) => lines.push(l) });
+    const stats2 = { batches: 0, blobs: 0, bytes: 0 };
+    const got = await getBlobs(be, hexes, { sizes, stats: stats2 });
+    const took = Date.now() - t0;
+    assert.equal(got.size, 46);
+    for (const [h, b] of bytes) assert.ok(got.get(h)!.equals(b), h);
+    assert.ok(plan.length >= 6 && plan.length <= 7, `${plan.length} batches of at most 2.5 MB`);
+    assert.deepEqual(stats2, { batches: plan.length, blobs: 46, bytes: [...bytes.values()].reduce((n, b) => n + b.length, 0) });
+    assert.ok(took < deadlineMs - t0, `recovered inside the deadline (${took} ms)`);
+    assert.equal(stats.maxInFlight, BATCH_CONCURRENCY, 'three batches in flight at once, never more');
+    // One request a batch, and one retry each for the broken, the hung and the 503 one.
+    assert.equal(asked.length, plan.length + 3);
+    // The broken batch delivered two blobs whole: its retry asked for the other six only.
+    const brokenRetry = asked.filter((a) => a.includes(plan[0]![2]!));
+    assert.deepEqual(brokenRetry, [plan[0], plan[0]!.slice(2)]);
+    // The hung and the 503 batches had nothing delivered: asked again whole.
+    assert.deepEqual(asked.filter((a) => a.includes(plan[1]![0]!)), [plan[1], plan[1]]);
+    assert.deepEqual(asked.filter((a) => a.includes(plan[2]![0]!)), [plan[2], plan[2]]);
+    assert.ok(lines.some((l) => l.includes(`the stream broke after 2 of ${plan[0]!.length} blob(s)`)), lines.join('\n'));
+    assert.ok(lines.some((l) => l.includes(`[${plan[0]!.length - 2} blob(s), `) && /: 200 in/.test(l)), 'the retry logs what it still asks for');
+    assert.ok(lines.some((l) => /timed out after 1000 ms/.test(l)));
+  } finally {
+    await w.stop();
+  }
+});
+
+test('state client: a batch that cannot be fetched fails the whole fetch closed: its 4 attempts, the siblings cancelled, no batch started after it', async () => {
+  let plan: string[][] = [];
+  const { w, asked } = faultyWorker((shas) => (shas.includes(plan[0]![0]!) ? 'break-first' : { delayMs: 3_000 }));
+  const base = await w.start();
+  try {
+    const { hexes, sizes } = dayBlobs(w);
+    plan = planBatches(hexes, sizes);
+    const be = new WorkerBackend({ baseUrl: base, ...quick, timeoutMs: 15_000 });
+    const t0 = Date.now();
+    await assert.rejects(
+      getBlobs(be, hexes, { sizes }),
+      (e: unknown) =>
+        e instanceof StateStoreError && e.kind === 'transport' && e.retryable && e.message.includes(`the stream broke after 0 of ${plan[0]!.length} blob(s)`) && /0 of \d held after 4 attempts$/.test(e.message),
+    );
+    assert.ok(Date.now() - t0 < 2_500, 'the slow siblings were cancelled, not waited for');
+    assert.equal(asked.filter((a) => a.includes(plan[0]![0]!)).length, BATCH_ATTEMPTS);
+    const started = new Set(asked.map((a) => a[0]));
+    assert.equal(started.size, BATCH_CONCURRENCY, 'the three batches of the first wave only');
+  } finally {
+    await w.stop();
+  }
+});
+
+test('state client: a store that hangs fails the fetch at the step deadline; a MISSING blob fails it at once, never retried', async () => {
+  const hung = faultyWorker(() => 'hang');
+  const base = await hung.w.start();
+  try {
+    const { hexes, sizes } = dayBlobs(hung.w, 10);
+    const t0 = Date.now();
+    const be = new WorkerBackend({ baseUrl: base, ...quick, timeoutMs: 15_000, deadlineMs: t0 + 1_200 });
+    await assert.rejects(getBlobs(be, hexes, { sizes }), (e: unknown) => e instanceof StateStoreError && e.kind === 'transport' && /timed out|deadline/.test(e.message));
+    const took = Date.now() - t0;
+    assert.ok(took >= 1_000 && took < 2_500, `bounded by the deadline (${took} ms)`);
+  } finally {
+    await hung.w.stop();
+  }
+  const missing = faultyWorker(() => null);
+  const mb = await missing.w.start();
+  try {
+    const { hexes, sizes } = dayBlobs(missing.w, 10);
+    missing.w.store.delete(hexes[3]!);
+    const be = new WorkerBackend({ baseUrl: mb, ...quick });
+    await assert.rejects(getBlobs(be, hexes, { sizes }), (e: unknown) => e instanceof StateStoreError && e.kind === 'missing' && e.message.includes(hexes[3]!));
+    assert.equal(missing.asked.filter((a) => a.includes(hexes[3]!)).length, 1);
+  } finally {
+    await missing.w.stop();
+  }
+});
+
+test('state client: concurrent requests share one OIDC token request', async () => {
+  let minted = 0;
+  const fetchImpl = (async () => {
+    minted++;
+    await new Promise((r) => setTimeout(r, 20));
+    return new Response(JSON.stringify({ value: jwt(Math.floor(Date.now() / 1000) + 300) }), { status: 200 });
+  }) as typeof fetch;
+  const source = githubOidcTokenSource('earthquakes-feed-state', { env: { ACTIONS_ID_TOKEN_REQUEST_URL: 'https://token.example/req', ACTIONS_ID_TOKEN_REQUEST_TOKEN: 't' }, fetchImpl });
+  const tokens = await Promise.all([source(), source(), source()]);
+  assert.equal(new Set(tokens).size, 1);
+  assert.equal(minted, 1);
 });

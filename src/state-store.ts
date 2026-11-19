@@ -925,6 +925,20 @@ export function githubOidcTokenSource(
   return source;
 }
 
+/** WorkerBackend's default wait between attempts: `ms`, or until `signal` aborts, whichever comes first. */
+export function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
 /** Jittered exponential backoff before attempt `attempt` (2, 3, …): 0.5–1 s, 1–2 s, 2–4 s. */
 export function backoffMs(attempt: number, random: () => number): number {
   const base = 500 * 2 ** (attempt - 2);
@@ -938,7 +952,9 @@ export interface WorkerBackendOptions {
   baseUrl?: string;
   token: TokenSource;
   fetchImpl?: FetchImpl;
-  sleep?: (ms: number) => Promise<void>;
+  /** The wait between attempts; the default ends early when `signal` aborts (an injected one may ignore it: the
+   *  backend stops waiting on the abort either way). */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   random?: () => number;
   timeoutMs?: number;
   attempts?: number;
@@ -975,9 +991,11 @@ interface RequestOpts {
   what?: () => string;
 }
 
-/** What `read` knows about the attempt it reads: whether the attempt's timeout (or a cancel) aborted it, and its limit. */
+/** What `read` knows about the attempt it reads: whether the attempt's timeout (or a cancel) aborted it, whether a cancel
+ *  did (a sibling batch failed: the cut is reported `cancelled`, not as a timeout), and its limit. */
 interface AttemptInfo {
   aborted: () => boolean;
+  cancelled: () => boolean;
   limitMs: number;
 }
 
@@ -988,7 +1006,7 @@ export class WorkerBackend implements StateBackend, StateRefs {
   readonly label: string;
   private readonly base: string;
   private readonly fetchImpl: FetchImpl;
-  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   private readonly random: () => number;
   private readonly timeoutMs: number;
   private readonly attempts: number;
@@ -1007,7 +1025,7 @@ export class WorkerBackend implements StateBackend, StateRefs {
     this.base = base;
     this.label = `state Worker ${u.host}`;
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch;
-    this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    this.sleep = opts.sleep ?? sleepUnlessAborted;
     this.random = opts.random ?? Math.random;
     this.timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
     this.attempts = opts.attempts ?? MAX_ATTEMPTS;
@@ -1020,6 +1038,22 @@ export class WorkerBackend implements StateBackend, StateRefs {
   /** ms left before the deadline (Infinity without one). */
   private left(): number {
     return this.deadlineMs == null ? Infinity : this.deadlineMs - Date.now();
+  }
+
+  /** The wait between attempts, over as soon as `signal` aborts (whether or not the injected sleep heeds it). */
+  private async pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
+    if (!signal) return this.sleep(ms);
+    if (signal.aborted) return;
+    let wake = (): void => {};
+    const aborted = new Promise<void>((r) => {
+      wake = r;
+      signal.addEventListener('abort', wake, { once: true });
+    });
+    try {
+      await Promise.race([this.sleep(ms, signal), aborted]);
+    } finally {
+      signal.removeEventListener('abort', wake);
+    }
   }
 
   /**
@@ -1047,7 +1081,15 @@ export class WorkerBackend implements StateBackend, StateRefs {
     let asked: number | null = null;
     let attempt = 0;
     let stop = '';
+    const cancelled = (): boolean => {
+      if (!ro.signal?.aborted) return false;
+      stop = ': cancelled (another request of the step failed)';
+      return true;
+    };
     while (attempt < maxAttempts) {
+      // A cancel (getBlobs: a sibling batch failed for good) is checked before the backoff, not only after it, so an
+      // attempt it cut short does not sleep up to 4 s first; the backoff itself ends on it (pause).
+      if (cancelled()) break;
       if (attempt > 0) {
         const wait = asked ?? backoffMs(attempt + 1, this.random);
         if (slept + wait > this.retryBudgetMs) {
@@ -1058,21 +1100,24 @@ export class WorkerBackend implements StateBackend, StateRefs {
           stop = ": the step's deadline leaves no room for another attempt";
           break;
         }
-        await this.sleep(wait);
+        await this.pause(wait, ro.signal);
         slept += wait;
+        if (cancelled()) break;
       }
       if (this.left() <= 0) {
         stop = ": the step's deadline passed";
-        break;
-      }
-      if (ro.signal?.aborted) {
-        stop = ': cancelled (another request of the step failed)';
         break;
       }
       attempt++;
       asked = null;
       const t0 = Date.now();
       const token = await this.opts.token();
+      // The cancel may land while the token is minted: the abort listener below is added after this await, and a
+      // listener added to an aborted signal never fires, so without this check the attempt would run to its timeout.
+      if (cancelled()) {
+        attempt--; // no request went out: the count in the error names requests sent
+        break;
+      }
       const tag = ro.what ? ` [${ro.what()}]` : '';
       const sent = typeof body === 'function' ? body() : body;
       const headers: Record<string, string> = {
@@ -1096,7 +1141,7 @@ export class WorkerBackend implements StateBackend, StateRefs {
         const rid = res.headers.get('x-request-id') ?? '-';
         if (res.status === 200 || ro.accept?.includes(res.status)) {
           this.log(`state ${route}${tag}: ${res.status} in ${Date.now() - t0} ms (attempt ${attempt}, request ${rid})`);
-          return await read(res, { aborted: () => ctrl.signal.aborted, limitMs: limit });
+          return await read(res, { aborted: () => ctrl.signal.aborted, cancelled: () => ro.signal?.aborted === true, limitMs: limit });
         }
         const text = await res.text().catch(() => '');
         const err = errorOf(text);
@@ -1203,7 +1248,7 @@ export class WorkerBackend implements StateBackend, StateRefs {
             }
           } else chunks.push(Buffer.from(await res.arrayBuffer()));
         } catch (e) {
-          broke = at.aborted() ? `timed out after ${at.limitMs} ms` : (e as Error).message;
+          broke = at.cancelled() ? 'cancelled' : at.aborted() ? `timed out after ${at.limitMs} ms` : (e as Error).message;
         }
         const scan = scanBatchFrames(Buffer.concat(chunks), asked);
         for (const [k, v] of scan.blobs) got.set(k, v);

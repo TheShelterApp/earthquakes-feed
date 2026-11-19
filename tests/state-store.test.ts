@@ -30,6 +30,7 @@ import {
   planBatches,
   retryAfterMs,
   sha256Hex,
+  sleepUnlessAborted,
   type GcRequest,
 } from '../src/state-store.js';
 import { SHADOW_RETRY_POLICY, SHADOW_STEP_DEADLINE_MS } from '../src/event-map-store.js';
@@ -745,6 +746,89 @@ test('state client: a batch that cannot be fetched fails the whole fetch closed:
   } finally {
     await w.stop();
   }
+});
+
+/** Six small blobs planned as 1 MB each: three batches of two, one per getBlobs worker. */
+function threeBatches(): { hexes: string[]; sizes: Map<string, number>; blobs: Map<string, Buffer>; plan: string[][] } {
+  const blobs = new Map<string, Buffer>();
+  for (let i = 0; i < 6; i++) {
+    const b = Buffer.from(`blob ${i} `.repeat(200));
+    blobs.set(sha256Hex(b), b);
+  }
+  const hexes = [...blobs.keys()].sort();
+  const sizes = new Map(hexes.map((h) => [h, 1_000_000]));
+  const plan = planBatches(hexes, sizes);
+  assert.equal(plan.length, 3);
+  return { hexes, sizes, blobs, plan };
+}
+
+const shasOf = (init?: RequestInit): string[] => (JSON.parse(String(init?.body)) as { shas: string[] }).shas;
+
+test('state client: a cancel that lands while a sibling batch waits for its token stops it before its request', async () => {
+  const { hexes, sizes, plan } = threeBatches();
+  // The first batch's token comes at once, its answer is MISSING; the siblings' tokens come after that failure.
+  let tokens = 0;
+  const token = async (): Promise<string> => {
+    if (tokens++ > 0) await new Promise((r) => setTimeout(r, 100));
+    return jwt(Math.floor(Date.now() / 1000) + 300);
+  };
+  const fetched: string[][] = [];
+  const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+    const shas = shasOf(init);
+    fetched.push(shas);
+    if (shas.includes(plan[0]![0]!)) return new Response(frameBatch(shas.map((h) => [h, null])), { status: 200 });
+    // A sibling request that went out would hang until its own timeout (9 s for 2 MB).
+    return new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted'))));
+  }) as typeof fetch;
+  const be = new WorkerBackend({ baseUrl: 'https://feed-state.example', fetchImpl, token, sleep: quick.sleep, random: () => 0, timeoutMs: 15_000 });
+  await assert.rejects(getBlobs(be, hexes, { sizes }), (e: unknown) => e instanceof StateStoreError && e.kind === 'missing');
+  assert.deepEqual(fetched, [plan[0]], 'the siblings never sent their request');
+});
+
+test('state client: a sibling cut mid-stream or waiting out a backoff by the cancel stops at once, labelled cancelled', { timeout: 10_000 }, async () => {
+  const { hexes, sizes, blobs, plan } = threeBatches();
+  const fetched: string[][] = [];
+  const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+    const shas = shasOf(init);
+    fetched.push(shas);
+    if (shas.includes(plan[0]![0]!)) {
+      // Fails for good once the siblings are under way: one mid-stream, one in its backoff after a 503.
+      await new Promise((r) => setTimeout(r, 50));
+      return new Response(frameBatch(shas.map((h) => [h, null])), { status: 200 });
+    }
+    if (shas.includes(plan[2]![0]!)) return new Response(JSON.stringify({ error: 'store read failed' }), { status: 503 });
+    const b = blobs.get(shas[0]!)!;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(Buffer.concat([Buffer.from(`BLOB ${shas[0]} ${b.length}\n`), b.subarray(0, b.length >> 1)]));
+        init?.signal?.addEventListener('abort', () => c.error(new Error('This operation was aborted')));
+      },
+    });
+    return new Response(body, { status: 200 });
+  }) as typeof fetch;
+  // A backoff that never ends by itself: only the cancel can end it (the test's timeout catches a backend that waits).
+  const sleeps: number[] = [];
+  const sleep = (ms: number): Promise<void> => {
+    sleeps.push(ms);
+    return new Promise(() => {});
+  };
+  const lines: string[] = [];
+  const be = new WorkerBackend({ baseUrl: 'https://feed-state.example', fetchImpl, token: quick.token, sleep, random: () => 0, timeoutMs: 15_000, log: (l) => lines.push(l) });
+  await assert.rejects(getBlobs(be, hexes, { sizes }), (e: unknown) => e instanceof StateStoreError && e.kind === 'missing');
+  assert.equal(fetched.length, 3, 'one request a batch, no retry after the cancel');
+  assert.deepEqual(sleeps, [500], "the 503 sibling's backoff only; the cut one went straight to the cancel");
+  assert.ok(lines.some((l) => l.includes(`the stream broke after 0 of ${plan[1]!.length} blob(s) (cancelled)`)), lines.join('\n'));
+  assert.ok(!lines.some((l) => /timed out/.test(l)), lines.join('\n'));
+});
+
+test('state client: the default wait between attempts ends early on an abort', { timeout: 10_000 }, async () => {
+  // A minute-long wait each: only the abort can end them inside the test's timeout.
+  const ac = new AbortController();
+  const p = sleepUnlessAborted(60_000, ac.signal);
+  ac.abort();
+  await p;
+  await sleepUnlessAborted(60_000, ac.signal);
+  await sleepUnlessAborted(1);
 });
 
 test('state client: a store that hangs fails the fetch at the step deadline; a MISSING blob fails it at once, never retried', async () => {

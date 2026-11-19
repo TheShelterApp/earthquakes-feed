@@ -1785,7 +1785,8 @@ to the ref.
     and a retry asks only for the rest. A stream that delivered every blob is complete even if its trailer was cut.
     The first batch that fails for good (its attempts or the deadline used up, or a MISSING, an integrity failure, the
     budget, a 1027, none of them retried) fails the whole read: the batches in flight are cancelled and none starts
-    after it.
+    after it. A cancelled batch stops at once wherever the cancel finds it: waiting for its token (no request goes
+    out), mid-stream (logged `cancelled`, not as a timeout, and no backoff after it) or in a backoff (the wait ends).
 - *The generation* (format 1) is canonical text: one day per line in ascending order, `{"sha256", "bytes", "nodes",
   "blob", "blob_bytes"}` (the NDJSON's sha256, size and node count; the gzip's sha256 and size), plus `head_seq` and
   `parent` (the sha256 of the previous document). The `parent` line changes on every write, so two writers that both

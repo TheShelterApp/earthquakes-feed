@@ -5,8 +5,9 @@ import { test } from 'node:test';
 import { evaluateStatus } from '../scripts/alerts-watchdog.mjs';
 import {
   EVALUATORS,
-  HC_PING_BASE,
+  HEALTH_DEAD_MS,
   HEALTH_FALLBACK_CRON,
+  HEALTH_STALE_MS,
   P2_RED_MS,
   SCHEDULE_SKIP_MS,
   findingsDocument,
@@ -32,7 +33,6 @@ import {
   parseArgs,
   parseBoardState,
   parseSilences,
-  pingUrl,
   reconcile,
   renderBody,
   scheduleGate,
@@ -63,7 +63,8 @@ interface RunOpts {
   unjudged?: Partial<Record<Evaluator, string[]>>;
   generatedAtMs?: number;
   missing?: Partial<Record<Evaluator, string>>;
-  pingsEnabled?: boolean;
+  /** HEALTH_MENTION as the wrapper resolved it (null or absent: no mention). */
+  mention?: string | null;
 }
 
 /** A sequence of health runs whose state lives only in the rendered bodies, as on GitHub. */
@@ -85,7 +86,7 @@ class World {
       eventName: opts.eventName ?? 'workflow_dispatch',
       existing: BOARD_IDS.filter((b) => this.bodies[b] !== null),
       missing: opts.missing ?? {},
-      pingsEnabled: opts.pingsEnabled ?? false,
+      mention: opts.mention ?? null,
     });
     for (const b of BOARD_IDS) {
       const body = r.bodies[b];
@@ -135,8 +136,8 @@ function every15(from: string, to: string): string[] {
   return out;
 }
 
-const signal = (r: ReconcileResult, check: string): string[] => r.pings.filter((p) => p.check === check).map((p) => p.signal);
-const failing = (r: ReconcileResult): string[] => r.pings.filter((p) => p.signal === 'fail').map((p) => p.check);
+/** The comments of a run that mention someone (their first line starts with @). */
+const mentioning = (r: ReconcileResult): string[] => r.comments.filter((c) => c.body.startsWith('@')).map((c) => c.body);
 
 const f = (rule: RuleId, fields: { id?: string; severity?: Severity; sinceMs?: number | null; text?: string; members?: string[] }): Finding =>
   makeFinding(rule, { ...fields, text: fields.text ?? `${rule}${fields.id ? ` ${fields.id}` : ''} (${fields.severity ?? 'rule severity'})` });
@@ -154,7 +155,6 @@ test('2026-10-21 GEOFON: P4 samples, enters by 4 of 8 at 13:37 (one comment), P3
     const nowMs = T(iso);
     const r = w.run(iso, { alerts: [gfz(nowMs - since >= 60 * MIN ? 'P3' : 'P4', since)] });
     assert.equal(r.exitCode, 0, iso);
-    assert.deepEqual(failing(r), [], `${iso}: every ping is a success`);
     const e = w.entry('alerts:provider:gfz')!;
     if (nowMs < T('2026-10-21T13:37:00Z')) {
       assert.equal(e.open, false, iso);
@@ -186,7 +186,7 @@ test('2026-10-21 GEOFON: P4 samples, enters by 4 of 8 at 13:37 (one comment), P3
   assert.equal(w.comments.length, 1, 'exactly one comment for the whole incident');
   const log = w.state('alerts')!.log;
   assert.deepEqual(log.map((x) => `${utcText(x.ms)} ${x.event}`), ['2026-10-21 13:37Z open', '2026-10-21 13:37Z notify', '2026-10-21 16:22Z resolve']);
-  assert.deepEqual(w.state('alerts')!.days['2026-10-21'], { red: 0, comments: 1, transitions: 0, would: 0 });
+  assert.deepEqual(w.state('alerts')!.days['2026-10-21'], { red: 0, comments: 1, mentions: 0, would: 0 });
 
   // The scheduled run of 15:22:39 that duplicated the dispatched one (created 15:22:30) is skipped by the gate.
   const dispatchedRuns = [
@@ -242,8 +242,6 @@ test('2026-10-04..06 USGS: enters past 30 min, escalates exactly 2 h after its s
       assert.equal(r.comments.length, 1);
       assert.match(r.comments[0]!.body, /\*\*P3 · `alerts:provider:usgs`\*\* USGS failing — open for 2\.0 h: /);
     } else assert.equal(r.comments.length, 0, iso);
-    assert.deepEqual(signal(r, 'gh-aging'), [nowMs >= S + 2 * HOUR ? 'fail' : 'success'], iso);
-    assert.deepEqual(failing(r).filter((c) => c !== 'gh-aging'), [], iso);
   }
   assert.equal(w.comments.length, 2, 'the entry and the escalation, nothing in the 31.6 h after');
   const a = w.run('2026-10-06T01:52:00Z', {});
@@ -253,8 +251,7 @@ test('2026-10-04..06 USGS: enters past 30 min, escalates exactly 2 h after its s
   assert.equal(w.entry('alerts:provider:usgs'), undefined, 'resolved, and its samples cleared: nothing left to keep');
   assert.equal(w.state('alerts')!.log.at(-1)!.event, 'resolve');
   assert.equal(b.comments.length, 0, 'resolving is silent');
-  assert.deepEqual(signal(b, 'gh-aging'), ['success']);
-  assert.equal(w.state('alerts')!.days['2026-10-04']!.transitions, 1, 'gh-aging went to /fail once');
+  assert.equal(w.state('alerts')!.days['2026-10-04']!.mentions, 0, 'a P3 never mentions');
 });
 
 test('2026-10-04 USGS with EMSC also failing: coverage:two is red for its first hour, then green with ::error::; it mutes usgs until it resolves', () => {
@@ -269,7 +266,6 @@ test('2026-10-04 USGS with EMSC also failing: coverage:two is red for its first 
     assert.equal(r.exitCode, red, `${hm}: P2 red during its first hour only`);
     assert.equal(r.comments.length, 0, `${hm}: a P2 has no comment and usgs is muted`);
     assert.ok(r.annotations.some((x) => x.startsWith('::error title=P2 alerts%3Acoverage%3Atwo::')), `${hm}: still an ::error::`);
-    assert.deepEqual(signal(r, 'gh-redundancy'), ['fail']);
     if (T(iso) >= S + 30 * MIN) assert.deepEqual(w.entry('alerts:provider:usgs')!.muted, { by: 'inhibited', note: 'inhibited by alerts:coverage:two' }, hm);
   }
   // 19:52: the second run without coverage:two resolves it; usgs is no longer muted and its entry comment goes out.
@@ -278,7 +274,6 @@ test('2026-10-04 USGS with EMSC also failing: coverage:two is red for its first 
   assert.equal(w.entry('alerts:provider:usgs')!.muted, null);
   assert.equal(r.comments.length, 1);
   assert.match(r.comments[0]!.body, /^\*\*P3 · `alerts:provider:usgs`\*\* USGS failing — usgs ok:false \(since 2026-10-04 18:07Z, 105 min\)/);
-  assert.deepEqual(signal(r, 'gh-redundancy'), ['success']);
   assert.equal(w.state('alerts')!.days['2026-10-04']!.red, 4);
 });
 
@@ -296,7 +291,6 @@ test('stale status.json: P1 and red, and every provider entry frozen (no counter
   ] as const) {
     const r = w.run(iso, { alerts: [...alerts] }, { unjudged: { alerts: ['alerts:*'] } });
     assert.equal(r.exitCode, 1, iso);
-    assert.deepEqual(signal(r, 'gh-detect'), ['fail']);
     for (const [key, old] of [['alerts:provider:gfz', gfzBefore], ['alerts:coverage:two', covBefore]] as const) {
       const now = w.entry(key)!;
       assert.equal(now.open, true, `${iso} ${key}`);
@@ -330,7 +324,6 @@ test('a fresh status.json right after a stale one is judged on that run: a P1 it
   assert.equal(w.entry('alerts:coverage:all')!.frozen, null);
   assert.equal(r.exitCode, 1);
   assert.match(r.summary, /\*\*Run verdict: red\*\*: P1 `alerts:coverage:all`/);
-  assert.deepEqual(signal(r, 'gh-detect'), ['fail']);
   // A run that cannot read status.json freezes it (it cannot tell, so it stays red, even before the unreadable finding
   // confirms); the next fresh document without it resolves it.
   const back = w.run('2026-10-21T10:37:00Z', { alerts: [f('alerts:status:unreadable', { text: 'HTTP 522 after 3 attempt(s)' })] }, { unjudged: { alerts: ['alerts:*'] } });
@@ -348,12 +341,10 @@ test('status.json unreadable: P4 (green) on the first run, P2 (red) on the secon
   assert.equal(w.entry('alerts:status:unreadable')!.pending, 'confirming 1/2');
   const r2 = w.run('2026-10-21T10:22:00Z', { alerts: [unreadable] }, { unjudged: { alerts: ['alerts:*'] } });
   assert.equal(r2.exitCode, 1);
-  assert.deepEqual(signal(r2, 'gh-platform'), ['fail']);
   assert.equal(r2.comments.length, 0);
   const r3 = w.run('2026-10-21T10:37:00Z', {});
   assert.equal(r3.exitCode, 0);
   assert.equal(w.entry('alerts:status:unreadable'), undefined);
-  assert.deepEqual(failing(r3), []);
 });
 
 test('overlapping runs and reruns: the same or older documents leave state, bodies and comments unchanged, and a P1 stays red', () => {
@@ -401,7 +392,6 @@ test('confirmation and the red hour: unreachable is P4 then P2; stale is P2 at o
     const r = v.run(iso, { feed: [stale] });
     assert.equal(r.exitCode, i < 4 ? 1 : 0, `+${i * 15} min`);
     assert.ok(r.annotations.some((a) => a.startsWith('::error title=P2 feed%3Afreshness::')), `+${i * 15} min`);
-    assert.deepEqual(signal(r, 'gh-feed'), ['fail']);
     assert.equal(v.entry('feed:freshness')!.open, true);
     assert.equal(r.comments.length, 0);
   }
@@ -437,14 +427,9 @@ test('config v65/v66 replay: the gap holds 24 h, then a P3 entry; the age keeps 
     } else assert.equal(r.comments.length, 0, iso);
     if (iso === '2026-10-19T23:07:00Z') assert.equal(e.pending, 'holding 12.0 h of 24.0 h');
     if (iso === '2026-10-22T20:40:00Z') assert.deepEqual(e.members, ['age', 'gap']);
-    if (iso.startsWith('2026-10-27')) assert.deepEqual(signal(r, 'gh-platform'), ['fail'], iso);
-    if (iso.startsWith('2026-11-11')) {
-      assert.deepEqual(signal(r, 'gh-deliver'), ['fail'], iso);
-      assert.deepEqual(signal(r, 'gh-platform'), ['success'], iso);
-    }
   }
   assert.deepEqual(w.state('platform')!.entries['config:bundle']!.rule, 'config:bundle:age');
-  // A rise lands at P1 or P2: the red run (and its push) is the alarm, never a comment on the public board.
+  // A rise lands at P1 or P2: without HEALTH_MENTION the red run is the alarm, never a comment on the public board.
   assert.equal(w.entry('config:bundle')!.notified, 'P1');
   assert.equal(w.comments.length, 1, 'the P3 entry comment only');
 });
@@ -503,7 +488,7 @@ test('silences: parseSilences, a silenced key gets no comment, a rise lifts it, 
   assert.equal(r3.comments.length, 1, 'the expired silence posts the pending entry comment');
   assert.equal(w.entry('feed:source:tmd')!.muted, null);
 
-  // A rise above the silenced severity lifts the silence (the P2 pings again); a silence never stops red.
+  // A rise above the silenced severity lifts the silence; a silence never stops red.
   const v = new World();
   const all = parseSilences('config:bundle=2026-11-30,owner knows;feed:freshness=2026-11-30,owner knows', now).silences;
   const age = (severity: Severity): Finding => f('config:bundle:age', { severity, text: `the config copy is old (${severity})` });
@@ -512,12 +497,11 @@ test('silences: parseSilences, a silenced key gets no comment, a rise lifts it, 
   assert.deepEqual(v.entry('config:bundle')!.silence, { spec: 'config:bundle=2026-11-30,owner knows', severity: 'P3' });
   const b = v.run('2026-10-27T20:40:00Z', { platform: [age('P2')], feed: [f('feed:freshness', { text: 'v1 manifest 40 min old' })] }, { silences: all });
   assert.equal(v.entry('config:bundle')!.muted, null, 'lifted by the rise');
-  assert.deepEqual(signal(b, 'gh-platform'), ['fail']);
-  // It was never announced while silenced, so the P2 is announced like a new one: by the red run, not a comment.
+  // It was never announced while silenced, so the P2 is announced like a new one: without HEALTH_MENTION, by the red
+  // run alone, not a comment.
   assert.equal(b.comments.length, 0);
   assert.equal(v.entry('config:bundle')!.notified, 'P2');
   assert.equal(v.entry('feed:freshness')!.muted?.by, 'silenced');
-  assert.deepEqual(signal(b, 'gh-feed'), ['success'], 'a silenced entry does not ping');
   assert.equal(b.exitCode, 1, 'silences never stop red');
   const c = v.run('2026-11-11T20:40:00Z', { platform: [age('P1')] }, { silences: all });
   assert.equal(c.comments.length, 0, 'a later rise is silent too: the red run announces it');
@@ -538,7 +522,6 @@ test('shadow rules: the canary, provider-silent, latency and feed:systemic log w
     const r = w.run(iso, shadow());
     assert.equal(r.exitCode, 0);
     assert.deepEqual(r.comments, []);
-    assert.deepEqual(failing(r), []);
     assert.deepEqual(r.labels.feed, ['health-board', 'health:ok']);
     assert.ok(r.annotations.some((a) => a.startsWith('::notice title=P4 alerts%3Acanary::')));
     assert.ok(r.annotations.some((a) => a.startsWith('::notice title=P2 feed%3Asystemic::')));
@@ -597,19 +580,15 @@ test('a missing evaluator: watcher:evaluator:<e> confirms over 2 runs, its entri
   const t1 = w.entry('feed:source:tmd')!;
   assert.equal(t1.absentRuns, 0, 'frozen: not counted as absent');
   assert.match(t1.frozen ?? '', /the feed findings are missing/);
-  assert.deepEqual(signal(r1, 'health-watchdog'), ['fail']);
-  assert.match(r1.pings.find((p) => p.check === 'health-watchdog')!.reason, /no findings from feed/);
   assert.equal(r1.exitCode, 0);
   const r2 = w.run('2026-10-21T10:37:00Z', { feed: null }, { eventName: 'schedule' });
   assert.equal(w.entry('watcher:evaluator:feed')!.open, true);
   assert.deepEqual(r2.comments.map((c) => c.board), ['platform']);
   assert.match(r2.comments[0]!.body, /\*\*P3 · `watcher:evaluator:feed`\*\* watcher fault — /);
-  assert.deepEqual(signal(r2, 'health-watchdog'), [], 'not pinged on schedule');
   assert.equal(r2.exitCode, 0, 'the watcher is never red');
-  const r3 = w.run('2026-10-21T10:52:00Z', { feed: [] });
+  w.run('2026-10-21T10:52:00Z', { feed: [] });
   assert.equal(w.entry('watcher:evaluator:feed'), undefined, 'resolved');
   assert.equal(w.entry('feed:source:tmd'), undefined, 'judged again: absent, resolved');
-  assert.deepEqual(signal(r3, 'health-watchdog'), ['success']);
   // An invalid document counts as missing too.
   const v = new World();
   const bad = { ...findingsDocument({ evaluator: 'feed', generatedAtMs: T('2026-10-21T10:06:30Z'), findings: [] }), findings: [{ key: 'feed:size' }] };
@@ -618,29 +597,180 @@ test('a missing evaluator: watcher:evaluator:<e> confirms over 2 runs, its entri
   assert.equal(rv.evaluators.feed.state, 'missing');
 });
 
-test('pings: the verdict checks, gh-aging, and the selftest (fail then success, red, no board row)', () => {
-  const w = new World();
-  const r = w.run('2026-10-21T10:07:00Z', {
-    alerts: [f('alerts:degraded', { text: 'ladder active' }), f('alerts:budget', { severity: 'P2', members: ['doRowsWritten'], text: 'rows written projected at 80 %' })],
-  });
-  assert.deepEqual(failing(r).sort(), ['gh-capacity', 'gh-deliver']);
-  assert.deepEqual(r.pings.map((p) => p.check), ['gh-detect', 'gh-deliver', 'gh-redundancy', 'gh-feed', 'gh-platform', 'gh-capacity', 'gh-aging', 'health-watchdog']);
-  assert.match(r.pings.find((p) => p.check === 'gh-deliver')!.reason, /^P1 alerts:degraded: ladder active$/);
-  assert.equal(w.state('alerts')!.days['2026-10-21']!.transitions, 2);
-  assert.deepEqual(w.state('alerts')!.checks['gh-deliver'], 'fail');
-  w.run('2026-10-21T10:22:00Z', { alerts: [f('alerts:degraded', { text: 'ladder active' }), f('alerts:budget', { severity: 'P2', members: ['doRowsWritten'], text: 'rows written projected at 80 %' })] });
-  assert.equal(w.state('alerts')!.days['2026-10-21']!.transitions, 2, 'a check already failing is no new transition');
-
+test('the selftest: red, no board row, and without HEALTH_MENTION no comment', () => {
   const s = new World();
   const st = s.run('2026-11-01T09:17:00Z', { alerts: [f('alerts:selftest', { text: 'forced by the selftest: this run must be red' })] });
   assert.equal(st.exitCode, 1);
-  assert.deepEqual(st.pings.filter((p) => p.check === 'selftest').map((p) => p.signal), ['fail', 'success']);
+  assert.deepEqual(st.comments, [], 'no mention configured: the red run alone (as before 2026-11-19)');
   for (const b of BOARD_IDS) assert.deepEqual(st.state[b]!.entries, {}, `${b}: no board row`);
   assert.equal(s.state('alerts')!.lastSelftestMs, T('2026-11-01T09:17:00Z'), 'recorded, on every board');
   assert.equal(s.state('platform')!.lastSelftestMs, T('2026-11-01T09:17:00Z'));
   assert.match(s.bodies.alerts!, /Last selftest \(the forced P1 that proves the red run\): 2026-11-01 09:17Z\./);
   assert.ok(st.annotations.includes('::error title=P1 alerts%3Aselftest::forced by the selftest: this run must be red'));
   assert.match(st.summary, /\*\*Run verdict: red\*\*: the selftest/);
+});
+
+// --- GitHub Mobile mentions (owner decision 2026-11-19: Healthchecks.io dropped): with HEALTH_MENTION, a P1/P2 that
+// opens, rises or escalates is announced by a board comment whose first line @mentions the owner ---
+
+const ME = { mention: 'nickaroot' };
+
+test('mentions: a P1/P2 that opens gets one mentioning comment per transition; a P3 in the same run shares it unmentioned', () => {
+  const w = new World();
+  const r = w.run('2026-10-21T10:07:00Z', { alerts: [f('alerts:degraded', { text: 'ladder active' }), f('alerts:provider:usgs', { sinceMs: T('2026-10-21T09:30:00Z'), text: 'usgs ok:false' })], platform: [f('platform:api', { text: 'api down: HTTP 522' })] }, ME);
+  assert.equal(r.exitCode, 1, 'a mention changes no verdict');
+  assert.deepEqual(r.comments.map((c) => [c.board, c.mention]), [['alerts', true], ['platform', true]]);
+  const [alerts, platform] = r.comments.map((c) => c.body.split('\n\n'));
+  // The first line is what GitHub Mobile shows: the owner, the severity, the key; only the P1/P2 is in it.
+  assert.equal(alerts![0], '@nickaroot P1 `alerts:degraded` opened');
+  assert.match(alerts![1]!, /^\*\*P1 · `alerts:degraded`\*\* degradation ladder active — ladder active \(since 2026-10-21 10:07Z, 0 s\)$/);
+  assert.match(alerts![2]!, /^\*\*P3 · `alerts:provider:usgs`\*\* /);
+  assert.match(alerts![3]!, /^Run: https:\/\/github\.com\/TheShelterApp\/earthquakes-feed\/actions\/runs\/\d+$/);
+  assert.equal(platform![0], '@nickaroot P2 `platform:api` opened');
+  assert.deepEqual(r.comments[0]!.keys.map((k) => [k.key, k.notified, k.mentioned]), [['alerts:degraded', null, false], ['alerts:provider:usgs', null, false]]);
+  assert.equal(w.entry('alerts:degraded')!.mentioned, true);
+  assert.equal(w.entry('alerts:provider:usgs')!.mentioned, false, 'a P3 is never a push');
+  assert.deepEqual(w.state('alerts')!.days['2026-10-21'], { red: 1, comments: 1, mentions: 1, would: 0 });
+  assert.deepEqual(w.state('alerts')!.log.filter((x) => x.event === 'mention' || x.event === 'notify').map((x) => `${x.key} ${x.event}`), ['alerts:degraded mention', 'alerts:provider:usgs notify']);
+  assert.match(r.summary, /\*\*Comments:\*\* alerts \(2 item\(s\), mentions the owner\), platform \(1 item\(s\), mentions the owner\)/);
+  // Still open on the next runs: nothing new, no second push (one mention per key per transition, not per run).
+  for (const iso of every15('2026-10-21T10:22:00Z', '2026-10-21T11:22:00Z')) {
+    const again = w.run(iso, { alerts: [f('alerts:degraded', { text: 'ladder active' })], platform: [f('platform:api', { text: 'api down: HTTP 522' })] }, ME);
+    assert.deepEqual(again.comments, [], iso);
+  }
+});
+
+test('mentions: a rise into P1/P2 and a P2 promoted to P1 mention again; each later run is quiet', () => {
+  const w = new World();
+  const age = (severity: Severity): Finding => f('config:bundle:age', { severity, text: `the config copy is old (${severity})` });
+  const p3 = w.run('2026-10-22T20:40:00Z', { platform: [age('P3')] }, ME);
+  assert.equal(p3.comments.length, 1);
+  assert.equal(p3.comments[0]!.mention, false, 'the P3 entry: an ordinary comment');
+  assert.ok(!p3.comments[0]!.body.includes('@nickaroot'));
+  const p2 = w.run('2026-10-27T20:40:00Z', { platform: [age('P2')] }, ME);
+  assert.deepEqual(p2.comments.map((c) => c.body.split('\n\n')[0]), ['@nickaroot P2 `config:bundle` rose from P3']);
+  assert.match(p2.comments[0]!.body, /\*\*P2 · `config:bundle`\*\* config bundle old — rose from P3: the config copy is old \(P2\) \(since 2026-10-22 20:40Z, 5\.0 d\)/);
+  // Five days without a run in this replay: the same comment says health runs again (the liveness item, no mention).
+  assert.match(p2.comments[0]!.body, /\n\n\*\*Health runs again\*\* — /);
+  assert.deepEqual(w.run('2026-10-27T20:55:00Z', { platform: [age('P2')] }, ME).comments, []);
+  const p1 = w.run('2026-11-11T20:40:00Z', { platform: [age('P1')] }, ME);
+  assert.equal(p1.comments[0]!.body.split('\n\n')[0], '@nickaroot P1 `config:bundle` rose from P2');
+  assert.deepEqual(w.run('2026-11-11T20:55:00Z', { platform: [age('P1')] }, ME).comments, []);
+
+  // status.json unreadable: P2 on its second run (mentioned), P1 after 60 min open (mentioned once more).
+  const v = new World();
+  const unreadable = f('alerts:status:unreadable', { text: 'status.json: HTTP 522 after 3 tries' });
+  const pushes: string[] = [];
+  for (const iso of every15('2026-10-21T10:07:00Z', '2026-10-21T11:52:00Z')) for (const c of v.run(iso, { alerts: [unreadable] }, ME).comments) pushes.push(`${iso.slice(11, 16)} ${c.body.split('\n\n')[0]}`);
+  assert.deepEqual(pushes, ['10:22 @nickaroot P2 `alerts:status:unreadable` opened', '11:22 @nickaroot P1 `alerts:status:unreadable` rose from P2']);
+});
+
+test('mentions: an escalation while P1/P2 mentions; a P2 already past its line on entry gets one item and one push', () => {
+  const w = new World();
+  const since = T('2026-10-09T02:01:00Z');
+  const open = w.run('2026-10-09T04:07:00Z', { feed: [tmd('P2', since)] }, ME);
+  assert.equal(open.comments[0]!.body.split('\n\n')[0], '@nickaroot P2 `feed:source:tmd` opened');
+  assert.equal(open.exitCode, 0, 'one external source is never red, but a P2 still pushes');
+  const esc = w.run('2026-10-10T02:07:00Z', { feed: [tmd('P2', since)] }, ME);
+  assert.equal(esc.comments[0]!.body.split('\n\n')[0], '@nickaroot P2 `feed:source:tmd` open past 24.0 h');
+  assert.match(esc.comments[0]!.body, /\*\*P2 · `feed:source:tmd`\*\* feed source failing with a definite error — open for 24\.1 h: /);
+  assert.deepEqual(w.run('2026-10-10T02:22:00Z', { feed: [tmd('P2', since)] }, ME).comments, [], 'escalates once');
+
+  const v = new World();
+  const late = v.run('2026-10-10T10:07:00Z', { feed: [tmd('P2', since)] }, ME);
+  const lines = late.comments[0]!.body.split('\n\n');
+  assert.deepEqual([lines[0], lines.length], ['@nickaroot P2 `feed:source:tmd` opened', 3]);
+  assert.match(lines[1]!, /; past its 24\.0 h escalation line$/);
+});
+
+test('mentions: a mentioned P1/P2 that resolves gets one item without a mention; an unmentioned one resolves silently', () => {
+  const w = new World();
+  w.run('2026-10-21T10:07:00Z', { alerts: [f('alerts:policy', { text: 'fallback policy' })] }, ME);
+  const done = w.run('2026-10-21T10:22:00Z', {}, ME);
+  assert.equal(done.comments.length, 1);
+  assert.equal(done.comments[0]!.mention, false);
+  assert.match(done.comments[0]!.body, /^\*\*Resolved · `alerts:policy`\*\* compiled fallback policy — the P1 is over after 15 min \(since 2026-10-21 10:07Z\)\n\nRun: /);
+  assert.ok(!done.comments[0]!.body.includes('@'));
+  assert.deepEqual(w.state('alerts')!.days['2026-10-21'], { red: 1, comments: 2, mentions: 1, would: 0 });
+  assert.equal(w.entry('alerts:policy'), undefined);
+  // A new episode is mentioned again, and resolves with an item again.
+  assert.equal(w.run('2026-10-21T11:07:00Z', { alerts: [f('alerts:policy', { text: 'fallback policy' })] }, ME).comments[0]!.body.split('\n\n')[0], '@nickaroot P1 `alerts:policy` opened');
+  assert.match(w.run('2026-10-21T11:22:00Z', {}, ME).comments[0]!.body, /^\*\*Resolved · `alerts:policy`\*\*/);
+
+  // Opened without HEALTH_MENTION, it was never mentioned: setting the variable later announces nothing about it.
+  const v = new World();
+  v.run('2026-10-21T10:07:00Z', { alerts: [f('alerts:policy', { text: 'fallback policy' })] });
+  assert.deepEqual(v.run('2026-10-21T10:22:00Z', { alerts: [f('alerts:policy', { text: 'fallback policy' })] }, ME).comments, []);
+  assert.deepEqual(v.run('2026-10-21T10:37:00Z', {}, ME).comments, [], 'never mentioned: resolves silently');
+
+  // A silence in force when it resolves holds the item back (a silence mutes every comment of the key).
+  const s = new World();
+  s.run('2026-10-21T10:07:00Z', { alerts: [f('alerts:policy', { text: 'fallback policy' })] }, ME);
+  const silences = parseSilences('alerts:policy=2026-10-22,known', T('2026-10-21T10:10:00Z')).silences;
+  assert.deepEqual(s.run('2026-10-21T10:22:00Z', {}, { ...ME, silences }).comments, []);
+});
+
+test('mentions: a silence holds the push back until it ends; a shadow P2 and a frozen row never mention', () => {
+  const now = T('2026-10-21T10:00:00Z');
+  const w = new World();
+  const short = parseSilences('platform:api=2026-10-21T10:30Z,deploy in progress', now).silences;
+  const api = f('platform:api', { text: 'api down: HTTP 522' });
+  assert.deepEqual(w.run('2026-10-21T10:07:00Z', { platform: [api] }, { ...ME, silences: short }).comments, []);
+  assert.equal(w.entry('platform:api')!.muted?.by, 'silenced');
+  assert.equal(w.entry('platform:api')!.notified, null, 'still due');
+  assert.deepEqual(w.run('2026-10-21T10:22:00Z', { platform: [api] }, { ...ME, silences: short }).comments, []);
+  const after = w.run('2026-10-21T10:37:00Z', { platform: [api] }, { ...ME, silences: short });
+  assert.equal(after.comments[0]!.body.split('\n\n')[0], '@nickaroot P2 `platform:api` opened', 'the silence ended');
+
+  const v = new World();
+  for (const iso of ['2026-10-21T10:07:00Z', '2026-10-21T10:22:00Z']) {
+    const r = v.run(iso, { feed: [f('feed:systemic', { severity: 'P2', members: ['usgs', 'emsc'], text: 'usgs and emsc failing for 31 min' })] }, ME);
+    assert.deepEqual(r.comments, [], `${iso}: a shadow rule only logs would-notify`);
+  }
+
+  // A P1 that opens while its evaluator is missing cannot be judged: frozen rows announce nothing.
+  const x = new World();
+  x.run('2026-10-21T10:07:00Z', { alerts: [f('alerts:degraded', { text: 'ladder active' })] });
+  const frozen = x.run('2026-10-21T10:22:00Z', { alerts: null }, ME);
+  assert.ok(frozen.comments.every((c) => !c.body.includes('alerts:degraded')));
+});
+
+test('mentions: the selftest mentions on the alert-pipeline board (it proves the push path), once per selftest run', () => {
+  const s = new World();
+  const st = s.run('2026-11-01T09:17:00Z', { alerts: [f('alerts:selftest', { text: 'forced by the selftest: this run must be red' })] }, ME);
+  assert.equal(st.exitCode, 1);
+  assert.deepEqual(st.comments.map((c) => [c.board, c.mention, c.keys]), [['alerts', true, []]]);
+  const lines = st.comments[0]!.body.split('\n\n');
+  assert.equal(lines[0], '@nickaroot P1 `alerts:selftest` (the selftest)');
+  assert.match(lines[1]!, /^\*\*P1 · `alerts:selftest`\*\* selftest — forced by the selftest: this run must be red: this comment proves the push path, and the red run the email; nothing to do$/);
+  for (const b of BOARD_IDS) assert.deepEqual(st.state[b]!.entries, {}, `${b}: still no board row`);
+  assert.equal(s.state('alerts')!.days['2026-11-01']!.mentions, 1);
+  // A rerun of the same documents is a replay: no second comment.
+  assert.deepEqual(s.apply(T('2026-11-01T09:20:00Z'), s.lastDocs, ME).comments, []);
+});
+
+test('liveness: a previous reconcile over 45 min old is a warning; over 90 min with HEALTH_MENTION the platform board says health runs again', () => {
+  const w = new World();
+  w.run('2026-10-21T10:07:00Z', {}, ME);
+  const ok = w.run('2026-10-21T10:52:00Z', {}, ME);
+  assert.ok(!ok.annotations.some((a) => a.includes('Health liveness')), '45 min exactly is not over the line');
+  const late = w.run('2026-10-21T11:38:00Z', {}, ME);
+  assert.ok(late.annotations.includes('::warning title=Health liveness::the previous health run reconciled at 2026-10-21 10:52Z, 46 min before this one (over 45 min: health missed its dispatches)'));
+  assert.match(late.summary, /\*\*Liveness:\*\* the previous health run reconciled at 2026-10-21 10:52Z, 46 min/);
+  assert.deepEqual(late.comments, [], 'under 90 min: no comment');
+  const dead = w.run('2026-10-21T13:38:00Z', {}, ME);
+  assert.deepEqual(dead.comments.map((c) => [c.board, c.mention]), [['platform', false]]);
+  assert.match(dead.comments[0]!.body, /^\*\*Health runs again\*\* — the previous health run reconciled at 2026-10-21 11:38Z, 2\.0 h before this one \(the liveness line is 90 min\)/);
+  assert.ok(!dead.comments[0]!.body.includes('@'));
+  assert.equal(HEALTH_DEAD_MS, 2 * HEALTH_STALE_MS);
+  // Without HEALTH_MENTION: the warning only (as before 2026-11-19, nothing is commented).
+  const v = new World();
+  v.run('2026-10-21T10:07:00Z', {});
+  const quiet = v.run('2026-10-21T13:07:00Z', {});
+  assert.deepEqual(quiet.comments, []);
+  assert.ok(quiet.annotations.some((a) => a.startsWith('::warning title=Health liveness::')));
+  // The first run of all has no previous run to measure.
+  assert.ok(!new World().run('2026-10-21T10:07:00Z', {}, ME).annotations.some((a) => a.includes('Health liveness')));
 });
 
 test('body: round trip, escaping of untrusted text, a broken marker, and 42 open sources plus 300 log events under the limit', () => {
@@ -692,18 +822,27 @@ test('labels follow the worst open severity; the 7-day counts and the log drop w
   assert.deepEqual(r.labels, { alerts: ['health-board', 'health:p1'], feed: ['health-board', 'health:ok'], platform: ['health-board', 'health:ok'] });
 
   const prev = w.prev();
-  prev.feed!.days = { '2026-10-10': { red: 9, comments: 9, transitions: 9, would: 9 }, '2026-10-15': { red: 1, comments: 2, transitions: 3, would: 4 }, ...prev.feed!.days };
+  prev.feed!.days = { '2026-10-10': { red: 9, comments: 9, mentions: 9, would: 9 }, '2026-10-15': { red: 1, comments: 2, mentions: 3, would: 4 }, ...prev.feed!.days };
   prev.feed!.log = [{ ms: T('2026-10-14T10:00:00Z'), key: 'feed:source:old', event: 'open', severity: 'P3' }, ...prev.feed!.log];
   w.bodies.feed = renderBody('feed', prev.feed!);
   w.run('2026-10-21T10:52:00Z', {});
   const days = w.state('feed')!.days;
   assert.deepEqual(Object.keys(days), ['2026-10-15', '2026-10-21']);
   assert.ok(w.state('feed')!.log.every((x) => x.ms >= T('2026-10-14T10:52:00Z')));
-  // Today: the freshness P2 was red once, tmd got its comment, gh-feed went to /fail once; plus 10-15.
-  assert.match(w.bodies.feed!, /\| 2026-10-21 \| 1 \| 1 \| 1 \| 0 \|\n\| 2026-10-15 \| 1 \| 2 \| 3 \| 4 \|\n\| \*\*7 days\*\* \| 2 \| 3 \| 4 \| 4 \|/);
+  // Today: the freshness P2 was red once, tmd got its comment, nothing mentioned (no HEALTH_MENTION); plus 10-15.
+  assert.match(w.bodies.feed!, /\| Day \(UTC\) \| Red runs \| Comments \| Mentions \| Shadow would-notify \|/);
+  assert.match(w.bodies.feed!, /\| 2026-10-21 \| 1 \| 1 \| 0 \| 0 \|\n\| 2026-10-15 \| 1 \| 2 \| 3 \| 4 \|\n\| \*\*7 days\*\* \| 2 \| 3 \| 3 \| 4 \|/);
   assert.ok(!w.bodies.feed!.includes('2026-10-10'));
   assert.ok(!w.bodies.feed!.includes('feed:source:old'));
-  assert.match(w.bodies.feed!, /pings skipped: HC_PING_KEY unset/);
+  assert.match(w.bodies.feed!, /Mentions count the comments that mentioned HEALTH_MENTION/);
+  // A state written before 2026-11-19 (Healthchecks' transitions, checks and pings) reads as zero mentions.
+  const old = JSON.parse(JSON.stringify(prev.feed)) as Record<string, unknown>;
+  old['pings'] = 'skipped';
+  old['checks'] = { 'gh-feed': 'fail' };
+  old['days'] = { '2026-10-20': { red: 1, comments: 2, transitions: 3, would: 0 } };
+  const parsed = parseBoardState(`x\n<!-- health-state v1 ${JSON.stringify(old)} -->\n`, 'feed')!;
+  assert.deepEqual(parsed.days, { '2026-10-20': { red: 1, comments: 2, mentions: 0, would: 0 } });
+  assert.ok(!('checks' in parsed) && !('pings' in parsed));
 });
 
 test('scheduleGate: the fallback cron skips within 20 min of a dispatched run (whatever its status, unless cancelled or skipped); everything else runs', () => {
@@ -732,9 +871,7 @@ test('scheduleGate: the fallback cron skips within 20 min of a dispatched run (w
   assert.equal(SELFTEST_CRON, '17 9 1 * *');
 });
 
-test('small helpers: pingUrl, annotation, parseArgs', () => {
-  assert.equal(pingUrl('k', 'gh-detect', 'fail'), `${HC_PING_BASE}/k/gh-detect/fail`);
-  assert.equal(pingUrl('k', 'gh-detect', 'success'), `${HC_PING_BASE}/k/gh-detect/0`);
+test('small helpers: annotation, parseArgs', () => {
   assert.equal(annotation('warning', 'P3 a:b, c', 'line\n100%'), '::warning title=P3 a%3Ab%2C c::line%0A100%25');
   assert.equal(annotation('error', null, 'boards unreadable'), '::error::boards unreadable');
   assert.deepEqual(parseArgs(['--findings-dir', 'findings', '--dry-run']), { gate: false, findingsDir: 'findings', dryRun: true });
@@ -786,7 +923,6 @@ test('a resolved entry starts its samples afresh: one blip after a resolve re-op
   const again = v.run('2026-10-05T05:07:00Z', { alerts: [usgs(T('2026-10-05T05:07:00Z'), T('2026-10-05T05:06:00Z'))] });
   assert.equal(v.entry('alerts:provider:usgs')!.open, false);
   assert.deepEqual(again.comments, []);
-  assert.deepEqual(signal(again, 'gh-aging'), ['success']);
 });
 
 test('the episode start: a streak after a day of blips enters with its own start (no escalation in the same run); one past its line on entry gets one item', () => {
@@ -803,7 +939,6 @@ test('the episode start: a streak after a day of blips enters with its own start
     assert.equal(r.comments[0]!.body.split('\n\n').length, 2, `${iso}: one item and the run line`);
     assert.equal(e.escalated, false, iso);
     assert.ok(e.episodeSinceMs! >= T('2026-10-20T22:00:00Z'), `${iso}: dated by this streak and the window's samples, not ${utcText(e.episodeSinceMs)}`);
-    assert.deepEqual(signal(r, 'gh-aging'), ['success']);
   }
   assert.equal(w.comments.length, 1);
 
@@ -814,8 +949,7 @@ test('the episode start: a streak after a day of blips enters with its own start
   const items = r.comments[0]!.body.split('\n\n');
   assert.equal(items.length, 2, 'one item');
   assert.equal(items[0], '**P3 · `alerts:provider:usgs`** USGS failing — usgs ok:false: FDSN and the summary feed both fail (since 2026-10-21 04:07Z, 6.0 h); past its 2.0 h escalation line');
-  assert.deepEqual(signal(r, 'gh-aging'), ['fail']);
-  assert.deepEqual(r.comments[0]!.keys, [{ key: 'alerts:provider:usgs', notified: null, escalationNotified: false }]);
+  assert.deepEqual(r.comments[0]!.keys, [{ key: 'alerts:provider:usgs', notified: null, escalationNotified: false, mentioned: false }]);
   assert.equal(v.run('2026-10-21T10:22:00Z', { alerts: [f('alerts:provider:usgs', { sinceMs: T('2026-10-21T04:07:00Z'), text: 'usgs ok:false' })] }).comments.length, 0);
 });
 
@@ -848,7 +982,6 @@ test('red only on evidence: a P2 held open only by its resolve count is not red;
   assert.equal(w.entry('alerts:coverage:two')!.open, true, 'one healthy run of 2');
   assert.equal(after.exitCode, 0, 'the outage is over: no red email about it');
   assert.ok(after.annotations.some((a) => a.startsWith('::error title=P2 alerts%3Acoverage%3Atwo::')), 'still an open row');
-  assert.deepEqual(signal(after, 'gh-redundancy'), ['fail'], 'the ping holds until it resolves (no flapping push)');
   w.run('2026-10-21T10:37:00Z', { alerts: [] });
   assert.equal(w.entry('alerts:coverage:two'), undefined);
   assert.equal(w.state('alerts')!.days['2026-10-21']!.red, 1);
@@ -901,7 +1034,6 @@ test('escalation only on a run where the finding is present: a recovering entry 
   assert.equal(w.entry('alerts:provider:usgs')!.open, true);
   assert.equal(w.entry('alerts:provider:usgs')!.escalated, false);
   assert.deepEqual(r.comments, []);
-  assert.deepEqual(signal(r, 'gh-aging'), ['success']);
   // Back at 20:22 (present again, 2.4 h into the episode): it escalates now.
   const back = w.run('2026-10-04T20:22:00Z', { alerts: [usgs(T('2026-10-04T20:22:00Z'))] });
   assert.match(back.comments[0]!.body, /— open for 2\.3 h: /);
@@ -919,7 +1051,7 @@ test('only an entry open after this run\'s holds inhibits: a pending first sampl
   assert.deepEqual(w.entry('feed:source:kagsr')!.muted, { by: 'inhibited', note: 'inhibited by feed:freshness' });
 });
 
-test('gh-aging: an announced escalation keeps it failing through a mute, so the unmute pushes nothing new', () => {
+test('an announced escalation stays announced through a mute: the unmute comments nothing new', () => {
   const w = new World();
   const S = T('2026-10-04T18:07:00Z');
   const usgs = (nowMs: number): Finding => f('alerts:provider:usgs', { severity: nowMs - S >= 30 * MIN ? 'P3' : 'P4', sinceMs: S, text: 'usgs ok:false' });
@@ -929,12 +1061,11 @@ test('gh-aging: an announced escalation keeps it failing through a mute, so the 
   for (const iso of every15('2026-10-04T20:22:00Z', '2026-10-04T21:52:00Z')) {
     const muted = T(iso) <= T('2026-10-04T21:07:00Z');
     const r = w.run(iso, { alerts: muted ? [usgs(T(iso)), cov] : [usgs(T(iso))] });
-    assert.deepEqual(signal(r, 'gh-aging'), ['fail'], iso);
+    assert.ok(r.comments.every((c) => !c.body.includes('`alerts:provider:usgs`')), iso);
     if (T(iso) <= T('2026-10-04T21:22:00Z')) assert.equal(w.entry('alerts:provider:usgs')!.muted?.by, 'inhibited', iso);
   }
   assert.equal(w.entry('alerts:provider:usgs')!.muted, null);
-  // gh-aging went to /fail once (20:07) and gh-redundancy once (20:22): two would-be pushes, not three.
-  assert.equal(w.state('alerts')!.days['2026-10-04']!.transitions, 2);
+  assert.equal(w.entry('alerts:provider:usgs')!.escalationNotified, true);
 });
 
 test('samples and confirmations go by time: a run within 10 min of the last shares its slot; a confirming run comes 10 min after the first', () => {
@@ -997,20 +1128,19 @@ test('promotion: status.json unreadable for 60 min becomes P1 (red on every run,
   const unreadable = f('alerts:status:unreadable', { text: 'cannot read status.json: HTTP 404 after 3 attempt(s)' });
   const run = (iso: string): ReconcileResult => w.run(iso, { alerts: [unreadable] }, { unjudged: { alerts: ['alerts:*'] } });
   run('2026-10-21T10:07:00Z');
-  const want: Record<string, [Severity, number, string]> = {
-    '10:22': ['P2', 1, 'gh-platform'],
-    '10:37': ['P2', 1, 'gh-platform'],
-    '11:07': ['P2', 1, 'gh-platform'],
-    '11:22': ['P1', 1, 'gh-detect'],
-    '11:37': ['P1', 1, 'gh-detect'],
-    '13:37': ['P1', 1, 'gh-detect'],
+  const want: Record<string, [Severity, number]> = {
+    '10:22': ['P2', 1],
+    '10:37': ['P2', 1],
+    '11:07': ['P2', 1],
+    '11:22': ['P1', 1],
+    '11:37': ['P1', 1],
+    '13:37': ['P1', 1],
   };
-  for (const [hm, [sev, exit, check]] of Object.entries(want)) {
+  for (const [hm, [sev, exit]] of Object.entries(want)) {
     const r = run(`2026-10-21T${hm}:00Z`);
     assert.equal(w.entry('alerts:status:unreadable')!.severity, sev, hm);
     assert.equal(r.exitCode, exit, hm);
-    assert.deepEqual(failing(r), [check], hm);
-    // The promotion is silent: the red run tells the owner, the public board's watchers get no P1 comment.
+    // Without HEALTH_MENTION the promotion is silent: the red run tells the owner, the board gets no P1 comment.
     assert.deepEqual(r.comments, [], hm);
   }
   assert.equal(w.run('2026-10-21T13:52:00Z', { alerts: [] }).exitCode, 0);
@@ -1026,18 +1156,15 @@ test('a P1/P2 held open by a P4 sample below its line is not red and fails no ch
   const below = f('alerts:coverage:all', { severity: 'P4', sinceMs: S, members: ['usgs', 'gfz'], text: '2 of the 3 direct providers are failing (usgs, gfz): below the all-three line' });
   const r1 = w.run('2026-10-22T10:07:00Z', { alerts: [all] });
   assert.equal(r1.exitCode, 1);
-  assert.deepEqual(signal(r1, 'gh-detect'), ['fail']);
   for (const iso of every15('2026-10-22T10:22:00Z', '2026-10-22T12:22:00Z')) {
     const r = w.run(iso, { alerts: [below] });
     assert.equal(r.exitCode, 0, iso);
-    assert.deepEqual(signal(r, 'gh-detect'), ['success'], iso);
     assert.deepEqual([w.entry('alerts:coverage:all')!.open, w.entry('alerts:coverage:all')!.severity], [true, 'P1'], `${iso}: open until it resolves`);
   }
   assert.match(w.bodies.alerts!, /below its line this run: not red, open until it resolves/);
   // All three down again: red at once, in the same episode (one open event).
   const again = w.run('2026-10-22T12:37:00Z', { alerts: [all] });
   assert.equal(again.exitCode, 1);
-  assert.deepEqual(signal(again, 'gh-detect'), ['fail']);
   w.run('2026-10-22T12:52:00Z', {});
   assert.equal(w.entry('alerts:coverage:all'), undefined);
   assert.equal(w.state('alerts')!.log.filter((x) => x.key === 'alerts:coverage:all' && x.event === 'open').length, 1);
@@ -1049,7 +1176,6 @@ test('a P1/P2 held open by a P4 sample below its line is not red and fails no ch
   assert.equal(v.run('2026-10-22T10:07:00Z', { alerts: [budget('P2')] }).exitCode, 1);
   const band = v.run('2026-10-22T10:22:00Z', { alerts: [budget('P4')] });
   assert.equal(band.exitCode, 0);
-  assert.deepEqual(signal(band, 'gh-capacity'), ['success']);
   assert.equal(v.run('2026-10-22T10:37:00Z', { alerts: [budget('P2')] }).exitCode, 1, 'over the line again inside its first hour');
 });
 
@@ -1101,7 +1227,6 @@ test('a direct provider the gateway stopped polling is on the board, and with th
     const r = w.run(iso, { alerts: v.findings }, { unjudged: { alerts: v.unjudged } });
     assert.equal(r.exitCode, 1, iso);
     assert.match(r.summary, /P1 `alerts:coverage:all`/, iso);
-    assert.deepEqual(signal(r, 'gh-detect'), ['fail'], iso);
   }
   const gfz = w.entry('alerts:provider:gfz')!;
   assert.deepEqual([gfz.open, gfz.rule, gfz.severity], [true, 'alerts:provider:unlisted', 'P3']);
@@ -1172,7 +1297,9 @@ class FakeGitHub {
   /** GraphQL's label listing answers without these issues. */
   graphqlListingMisses = new Set<number>();
   patchStatus = 200;
-  pingStatus = 200;
+  /** GET /users/{login}: the accounts GitHub knows, by lower-case login. */
+  accounts: Record<string, { login: string; type: string }> = { nickaroot: { login: 'nickaroot', type: 'User' }, theshelterapp: { login: 'TheShelterApp', type: 'Organization' } };
+  userStatus = 200;
   /** The status of the next comment POSTs, one per try (then 201). */
   commentStatus: number[] = [];
   /** Whether GITHUB_TOKEN may comment on a locked issue is unverified: 0 accepts it, 403 or 422 refuses it as locked. */
@@ -1199,7 +1326,13 @@ class FakeGitHub {
     this.calls.push({ method, url, body });
     const json = (value: unknown, status = 200): Response => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
     const rest = (i: FakeIssue): unknown => ({ number: i.number, title: i.title, body: i.body, state: i.state, locked: i.locked, labels: i.labels.map((name) => ({ name })), node_id: i.node_id, user: { login: i.author ?? 'github-actions[bot]' }, ...(i.pull_request ? { pull_request: i.pull_request } : {}) });
-    if (url.startsWith(HC_PING_BASE)) return new Response('OK', { status: this.pingStatus });
+    const user = /^https:\/\/api\.github\.com\/users\/([^/?]+)$/.exec(url);
+    if (method === 'GET' && user) {
+      const status = this.userStatus;
+      if (status !== 200) return json({ message: status === 404 ? 'Not Found' : 'boom' }, status);
+      const known = this.accounts[decodeURIComponent(user[1]!).toLowerCase()];
+      return known ? json(known) : json({ message: 'Not Found' }, 404);
+    }
     const path = url.replace('https://api.github.com', '');
     const b = body as Record<string, unknown> | null;
     if (method === 'GET' && path === `/repos/${REPO}/issues?labels=health-board&state=all&per_page=100`) {
@@ -1290,7 +1423,7 @@ class FakeGitHub {
 
   /** Every call that changes something (GraphQL queries are reads). */
   writes(): Call[] {
-    return this.calls.filter((c) => c.method !== 'GET' && !c.url.startsWith(HC_PING_BASE) && !isGraphqlQuery(c));
+    return this.calls.filter((c) => c.method !== 'GET' && !isGraphqlQuery(c));
   }
 }
 
@@ -1374,7 +1507,7 @@ test('main: the first run creates all three boards, the labels first, each pinne
     ],
   );
   assert.equal(parseBoardState(gh.issues[0]!.body, 'alerts')!.createdMs, T('2026-10-21T10:07:00Z'));
-  assert.ok(first.lines.includes('pings skipped (HC_PING_KEY unset)'));
+  assert.ok(first.lines.includes('reconcile: no mention (HEALTH_MENTION unset or invalid): P1/P2 rows are silent'));
   assert.ok(first.summary.join('').includes('**Run verdict: green.**'));
 
   // A P3 entry: its comment first, then the bodies (and the new label); no board is created by a finding.
@@ -1550,14 +1683,13 @@ test('main: the 2026-10-22 sets (#100-#102 numbered, a selftest set, a third set
   assert.equal(pin.issues.find((i) => i.number === 9)!.title, '[health] feed (duplicate of #101)');
 });
 
-test('main: unreadable boards, or GH_TOKEN unset, write nothing, send no pings and exit 3, naming the P1/P2 findings present', async () => {
+test('main: unreadable boards, or GH_TOKEN unset, write nothing, comment nothing and exit 3, naming the P1/P2 findings present', async () => {
   const gh = new FakeGitHub();
   gh.listStatus = [502, 502, 502];
-  const p3 = await runMain(gh, T('2026-10-21T10:07:00Z'), { feed: [tmd()] }, { env: { HC_PING_KEY: 'k3y-SECRET' } });
+  const p3 = await runMain(gh, T('2026-10-21T10:07:00Z'), { feed: [tmd()] }, { env: { HEALTH_MENTION: 'nickaroot' } });
   assert.equal(p3.code, 3, 'alerting itself is broken: the prior state is unknown');
   assert.deepEqual(p3.sleeps, [2_000, 5_000]);
   assert.deepEqual(gh.writes(), []);
-  assert.equal(gh.calls.filter((c) => c.url.startsWith(HC_PING_BASE)).length, 0);
   assert.ok(p3.lines.some((l) => l.startsWith('::error::boards unreadable ("[health] alert pipeline" has no number in scripts/health-boards.json and a listing failed (the label listing: HTTP 502')));
   gh.listStatus = [500, 500, 500];
   const urgent = await runMain(gh, T('2026-10-21T10:22:00Z'), { alerts: [f('alerts:policy', { text: 'fallback policy' })], platform: [f('platform:api', { text: 'api down' })] });
@@ -1761,34 +1893,72 @@ test('main: once a day the boards\' pins and locks are checked through GraphQL a
   assert.equal(parseBoardState(gh.issues[0]!.body, 'alerts')!.pinsCheckedMs, T('2026-10-23T10:08:00Z'));
 });
 
-test('main: pings are skipped without HC_PING_KEY; with it they are sent and the URL never reaches a log line', async () => {
+test('main: HEALTH_MENTION is checked against the API (a user, not an organization or an unknown login); the P1 comment mentions it as the bot', async () => {
   const gh = new FakeGitHub();
-  const none = await runMain(gh, T('2026-10-21T10:07:00Z'), { alerts: [f('alerts:degraded', { text: 'ladder active' })] });
-  assert.equal(none.code, 1);
-  assert.equal(gh.calls.filter((c) => c.url.includes('hc-ping.com')).length, 0);
-  assert.equal(none.lines.filter((l) => l === 'pings skipped (HC_PING_KEY unset)').length, 1);
+  const nums = { numbers: NUMBERS };
+  await runMain(gh, T('2026-10-21T09:52:00Z'), {}, { numbers: TO_MAKE });
+  const unset = await runMain(gh, T('2026-10-21T10:07:00Z'), { alerts: [f('alerts:degraded', { text: 'ladder active' })] }, nums);
+  assert.equal(unset.code, 1);
+  assert.deepEqual(gh.board('[health] alert pipeline')!.comments, [], 'unset: the P1 is silent, as before');
+  assert.equal(gh.calls.filter((c) => c.url.includes('/users/')).length, 0, 'unset: no lookup');
 
-  const key = 'k3y-SECRET';
-  const sent = await runMain(gh, T('2026-10-21T10:22:00Z'), { alerts: [f('alerts:degraded', { text: 'ladder active' })] }, { env: { HC_PING_KEY: key } });
-  const pings = gh.calls.filter((c) => c.url.startsWith(HC_PING_BASE));
-  assert.deepEqual(pings.map((c) => c.url.slice(`${HC_PING_BASE}/${key}/`.length)), ['gh-detect/0', 'gh-deliver/fail', 'gh-redundancy/0', 'gh-feed/0', 'gh-platform/0', 'gh-capacity/0', 'gh-aging/0', 'health-watchdog/0']);
-  assert.equal(pings[1]!.body, 'P1 alerts:degraded: ladder active');
-  assert.ok(sent.lines.includes('pinged gh-deliver /fail'));
-  for (const l of [...sent.lines, ...sent.summary]) {
-    assert.ok(!l.includes(key), l);
-    assert.ok(!l.includes('hc-ping.com'), l);
+  // An organization, a team, a list, an unknown login: a warning, no lookup for what is not one login, no mention.
+  for (const [value, warning, lookup] of [
+    ['TheShelterApp', /HEALTH_MENTION "TheShelterApp" is a GitHub Organization, not a user: no one is mentioned/, true],
+    ['TheShelterApp/owners', /HEALTH_MENTION "TheShelterApp\/owners" is not one GitHub login/, false],
+    ['nickaroot,someone', /is not one GitHub login/, false],
+    ['nobody-here', /HEALTH_MENTION "nobody-here" is no GitHub account: no one is mentioned/, true],
+  ] as const) {
+    const fresh = new FakeGitHub();
+    await runMain(fresh, T('2026-10-21T09:52:00Z'), {}, { numbers: TO_MAKE });
+    fresh.calls = [];
+    const out = await runMain(fresh, T('2026-10-21T10:07:00Z'), { alerts: [f('alerts:degraded', { text: 'ladder active' })] }, { ...nums, env: { HEALTH_MENTION: value } });
+    assert.equal(out.code, 1, value);
+    assert.ok(out.lines.some((l) => l.startsWith('::warning title=Health reconcile::') && warning.test(l)), `${value}: ${out.lines.join('\n')}`);
+    assert.equal(fresh.calls.some((c) => c.url.includes('/users/')), lookup, value);
+    assert.deepEqual(fresh.board('[health] alert pipeline')!.comments, [], value);
   }
-  assert.match(gh.board('[health] alert pipeline')!.body, /Push transitions count the checks that went to \/fail\.\n/);
 
-  gh.pingStatus = 503;
-  gh.calls = [];
-  const failed = await runMain(gh, T('2026-10-21T10:37:00Z'), {}, { env: { HC_PING_KEY: key } });
-  assert.equal(failed.code, 0, 'a ping never changes the exit code');
-  assert.equal(gh.calls.filter((c) => c.url.startsWith(HC_PING_BASE)).length, 8 * 3);
-  const warnings = failed.lines.filter((l) => l.startsWith('::warning title=Health ping::'));
-  assert.equal(warnings.length, 8);
-  assert.equal(warnings[0], '::warning title=Health ping::gh-detect /0 failed after 3 tries: HTTP 503');
-  for (const l of failed.lines) assert.ok(!l.includes(key) && !l.includes('hc-ping.com'), l);
+  // A user: the comment's first line mentions the login GitHub returns, posted with GITHUB_TOKEN (GH_TOKEN), never a PAT.
+  const user = new FakeGitHub();
+  await runMain(user, T('2026-10-21T09:52:00Z'), {}, { numbers: TO_MAKE });
+  const sent = await runMain(user, T('2026-10-21T10:07:00Z'), { alerts: [f('alerts:degraded', { text: 'ladder active' })] }, { ...nums, env: { HEALTH_MENTION: '@NickARoot' } });
+  assert.equal(sent.code, 1, 'a mention never changes the verdict');
+  const [comment] = user.board('[health] alert pipeline')!.comments;
+  assert.match(comment!, /^@nickaroot P1 `alerts:degraded` opened\n\n\*\*P1 · `alerts:degraded`\*\* degradation ladder active — ladder active \(since /);
+  assert.match(comment!, /\n\nRun: https:\/\/github\.com\/TheShelterApp\/earthquakes-feed\/actions\/runs\/42$/);
+  assert.ok(sent.lines.includes('reconcile: P1/P2 transitions mention @nickaroot'));
+  assert.match(sent.summary.join(''), /\*\*Mention \(P1\/P2, GitHub Mobile\):\*\* @nickaroot/);
+  assert.match(sent.summary.join(''), /\*\*Comments:\*\* alerts \(1 item\(s\), mentions the owner\)/);
+  const state = parseBoardState(user.board('[health] alert pipeline')!.body, 'alerts')!;
+  assert.equal(state.entries['alerts:degraded']!.mentioned, true);
+  assert.equal(state.days['2026-10-21']!.mentions, 1);
+  // The next run: nothing new to say, so no second push.
+  user.calls = [];
+  await runMain(user, T('2026-10-21T10:22:00Z'), { alerts: [f('alerts:degraded', { text: 'ladder active' })] }, { ...nums, env: { HEALTH_MENTION: 'nickaroot' } });
+  assert.equal(user.board('[health] alert pipeline')!.comments.length, 1);
+  assert.equal(user.calls.filter((c) => c.method === 'POST' && c.url.endsWith('/comments')).length, 0);
+
+  // A lookup that fails otherwise keeps the login (a P1 push lost to an API hiccup costs more), with a warning.
+  const flaky = new FakeGitHub();
+  await runMain(flaky, T('2026-10-21T09:52:00Z'), {}, { numbers: TO_MAKE });
+  flaky.userStatus = 502;
+  const kept = await runMain(flaky, T('2026-10-21T10:07:00Z'), { alerts: [f('alerts:policy', { text: 'fallback policy' })] }, { ...nums, env: { HEALTH_MENTION: 'nickaroot' } });
+  assert.ok(kept.lines.some((l) => /cannot check that HEALTH_MENTION "nickaroot" is a user \(HTTP 502/.test(l)));
+  assert.match(flaky.board('[health] alert pipeline')!.comments[0]!, /^@nickaroot P1 `alerts:policy` opened/);
+
+  // A failed post rolls the mention back: the next run mentions again.
+  const down = new FakeGitHub();
+  await runMain(down, T('2026-10-21T09:52:00Z'), {}, { numbers: TO_MAKE });
+  down.commentStatus = [500, 500, 500];
+  const lost = await runMain(down, T('2026-10-21T10:07:00Z'), { alerts: [f('alerts:policy', { text: 'fallback policy' })] }, { ...nums, env: { HEALTH_MENTION: 'nickaroot' } });
+  assert.equal(lost.code, 1);
+  const rolled = parseBoardState(down.board('[health] alert pipeline')!.body, 'alerts')!;
+  assert.deepEqual([rolled.entries['alerts:policy']!.notified, rolled.entries['alerts:policy']!.mentioned, rolled.entries['alerts:policy']!.retryComment], [null, false, true]);
+  assert.equal(rolled.days['2026-10-21']!.mentions, 0);
+  assert.ok(!rolled.log.some((x) => x.event === 'mention'));
+  await runMain(down, T('2026-10-21T10:22:00Z'), { alerts: [f('alerts:policy', { text: 'fallback policy' })] }, { ...nums, env: { HEALTH_MENTION: 'nickaroot' } });
+  assert.match(down.board('[health] alert pipeline')!.comments[0]!, /^@nickaroot P1 `alerts:policy` opened/);
 });
 
 test('main: an unreadable findings file or no directory marks evaluators missing; --dry-run writes nothing', async () => {
@@ -1806,10 +1976,9 @@ test('main: an unreadable findings file or no directory marks evaluators missing
   assert.deepEqual(Object.keys(st.entries), ['watcher:evaluator:alerts', 'watcher:evaluator:feed', 'watcher:evaluator:platform']);
 
   const dry = new FakeGitHub();
-  const out = await runMain(dry, now, { feed: [tmd()] }, { argv: ['--findings-dir', 'findings', '--dry-run'], env: { HC_PING_KEY: 'k' } });
+  const out = await runMain(dry, now, { feed: [tmd()] }, { argv: ['--findings-dir', 'findings', '--dry-run'], env: { HEALTH_MENTION: 'nickaroot' } });
   assert.equal(out.code, 0);
   assert.deepEqual(dry.writes(), []);
-  assert.equal(dry.calls.filter((c) => c.url.startsWith(HC_PING_BASE)).length, 0);
   assert.ok(out.lines.some((l) => l.startsWith('----- new board "[health] feed"')));
   assert.ok(out.lines.some((l) => l.startsWith('----- comment on "[health] feed" -----')));
   // Without a token a dry run starts from empty boards; a real run treats it as unreadable boards.
@@ -1871,23 +2040,20 @@ test('time escalation counts from the episode start: a TMD certificate failure s
   const esc = w.run('2026-10-10T02:07:00Z', { feed: [tmd('P3', since)] });
   assert.equal(esc.comments.length, 1);
   assert.match(esc.comments[0]!.body, /— open for 24\.1 h: /);
-  assert.deepEqual(signal(esc, 'gh-aging'), ['fail']);
   assert.equal(esc.exitCode, 0);
   assert.equal(w.run('2026-10-10T02:22:00Z', { feed: [tmd('P3', since)] }).comments.length, 0, 'escalates once');
 });
 
-test('the copies on every board: the last applied document is the max per evaluator; the checks come from the newest board', () => {
+test('the copies on every board: the last applied document is the max per evaluator', () => {
   const now = T('2026-10-21T10:07:00Z');
-  const base = (board: Board, updatedMs: number, evaluators: BoardState['evaluators'], checks: BoardState['checks']): BoardState => ({
+  const base = (board: Board, updatedMs: number, evaluators: BoardState['evaluators']): BoardState => ({
     v: 1,
     board,
     createdMs: updatedMs - 2 * HOUR,
     updatedMs,
     runId: '1',
     runUrl: null,
-    pings: 'skipped',
     evaluators,
-    checks,
     lastSelftestMs: null,
     pinsCheckedMs: updatedMs - HOUR,
     faults: [],
@@ -1896,8 +2062,8 @@ test('the copies on every board: the last applied document is the max per evalua
     days: {},
   });
   const prev = {
-    alerts: base('alerts', now - 30 * MIN, { alerts: now - 40 * MIN }, { 'gh-deliver': 'success' }),
-    feed: base('feed', now - 15 * MIN, { alerts: now - 20 * MIN, feed: now - 20 * MIN }, { 'gh-deliver': 'fail' }),
+    alerts: base('alerts', now - 30 * MIN, { alerts: now - 40 * MIN }),
+    feed: base('feed', now - 15 * MIN, { alerts: now - 20 * MIN, feed: now - 20 * MIN }),
     platform: null,
   };
   const docs = new World().docs(now, {}, { generatedAtMs: now - 25 * MIN });
@@ -1906,10 +2072,7 @@ test('the copies on every board: the last applied document is the max per evalua
   assert.equal(r.evaluators.feed.state, 'stale');
   assert.equal(r.evaluators.platform.state, 'fresh');
   assert.equal(r.replay, false);
-  assert.equal(r.state.feed!.days[isoDay(now)]?.transitions ?? 0, 0, 'gh-deliver was already failing on the newest board; now success');
   assert.deepEqual(Object.keys(r.state.feed!.evaluators), ['alerts', 'feed', 'platform'], 'in evaluator order');
   assert.equal(r.state.feed!.evaluators.platform, now - 25 * MIN);
-  assert.equal(r.state.alerts!.checks['gh-deliver'], 'success');
+  assert.ok(!r.annotations.some((a) => a.includes('Health liveness')), 'the newest board was written 15 min ago: no gap');
 });
-
-const isoDay = (ms: number): string => new Date(ms).toISOString().slice(0, 10);

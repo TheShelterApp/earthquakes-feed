@@ -84,9 +84,9 @@ export interface Finding {
   sinceMs: number | null;
   /** One line, safe for a public issue: what is wrong, how long, and what it means. */
   text: string;
-  /** The verdict check a P1/P2 pings; null for none (a P3's escalation goes to gh-aging). */
+  /** The verdict group of a P1/P2 (a schema field; nothing pings it since 2026-11-19); null for none. */
   check: CheckSlug | null;
-  /** Shadow rule (always the rule's): logged as "would notify", never a comment, a ping or a red run. */
+  /** Shadow rule (always the rule's): logged as "would notify", never a comment, a mention or a red run. */
   shadow: boolean;
   /** Sub-items: the failing providers of a coverage finding (muted while it is open), the reasons of a feed source
    *  (fetch, silent, frozen), the files over a size line, ... */
@@ -110,7 +110,7 @@ export interface Rule {
   /** The single key it judges, or null when it judges `<keyPrefix><member>` keys. */
   key: string | null;
   keyPrefix: string | null;
-  /** The verdict check a P1/P2 finding pings: one slug, or one per severity. */
+  /** The verdict group of a P1/P2 finding: one slug, or one per severity. */
   check: CheckSlug | Partial<Record<Severity, CheckSlug>> | null;
   /** 1: evaluated from Phase 1a; 2: needs a gateway field not published yet. */
   phase: 1 | 2;
@@ -170,8 +170,8 @@ export const AGING_CHECK: 'gh-aging';
 export const LIVENESS_CHECK: 'health-watchdog';
 export const SELFTEST_CHECK: 'selftest';
 export const CHECKS: ReadonlyArray<CheckSlug>;
-export const HC_PING_BASE: string;
-export const PUSH_PRIORITY: Readonly<{ P1: number; P2: number }>;
+export const HEALTH_STALE_MS: number;
+export const HEALTH_DEAD_MS: number;
 export const P2_RED_MS: number;
 export const HEALTH_FALLBACK_CRON: string;
 export const SCHEDULE_SKIP_MS: number;
@@ -188,6 +188,8 @@ export function moreSevere(a: unknown, b: unknown): boolean;
 export function worstSeverity(...list: Array<Severity | null | undefined>): Severity;
 export function mayTurnRed(cls: FindingClass): boolean;
 export function matchesKey(pattern: string, key: string): boolean;
+/** HEALTH_MENTION as one GitHub login (a leading @ allowed); null without an error when unset. */
+export function parseMention(value: unknown): { login: string | null; error: string | null };
 export function checkFor(rule: Readonly<Rule> | null | undefined, severity: Severity): CheckSlug | null;
 export function ruleOf(finding: { rule?: unknown } | null | undefined): Readonly<Rule> | null;
 export function ruleJudgesKey(rule: Readonly<Rule> | null | undefined, key: string): boolean;

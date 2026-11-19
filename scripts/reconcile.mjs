@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Health reconcile: the single writer of the three health boards and the only pinger (alerting plan of 2026-10-22,
-// section 4 and Phase 1a item 5, with the owner's decisions of that day). Run by .github/workflows/health.yml:
+// Health reconcile: the single writer of the three health boards (alerting plan of 2026-10-22, section 4 and Phase 1a
+// item 5, with the owner's decisions of that day and of 2026-11-19). Run by .github/workflows/health.yml:
 //
 //   node scripts/reconcile.mjs --gate                               # job `gate`: run= and selftest= to GITHUB_OUTPUT
 //   node scripts/reconcile.mjs --findings-dir findings              # job `reconcile`: apply the evaluators' documents
@@ -17,17 +17,25 @@
 // after the previous sample shares its slot (and counts as no healthy run of its own), and a confirming run must come at
 // least 10 min after the first sighting, so an extra dispatch adds nothing. A resolved entry starts its samples afresh.
 //
-// Notifications (owner decisions 2026-10-22): a board gets a comment only when a P3 enters or passes its rule's age line
-// (the escalation), at most one item per key per run. A P1/P2 row is silent, and so is a rise into P1/P2 (config:bundle
-// by age, the promotion): the boards are public and P1 goes to the owner only, through the red run. Red only on
+// Notifications (owner decisions 2026-10-22): a board gets a comment when a P3 enters or passes its rule's age line
+// (the escalation), at most one item per key per run. P1/P2 (owner decision 2026-11-19, when Healthchecks.io was dropped
+// because its sign-up email never arrived): with the repository variable HEALTH_MENTION naming one GitHub user, a key
+// that opens at P1/P2, rises into P1/P2 (config:bundle by age, the promotion) or escalates while P1/P2 gets an item in
+// that comment, whose first line @mentions the user: GitHub Mobile pushes it. Once per key per transition (the entry's
+// notified and escalationNotified, as for P3), held back by a silence or an inhibition like any comment; when such a
+// mentioned entry resolves, one more item says so, without a mention. The selftest's comment mentions too, so the
+// monthly selftest proves the push path. The comment is the workflow's GITHUB_TOKEN's (github-actions[bot]) on purpose:
+// GitHub never notifies a user of their own comment, so one posted with the owner's PAT would push nothing. Without
+// HEALTH_MENTION a P1/P2 row stays silent (the red run is its alarm), as before. Red only on
 // evidence: a P1 on every run its finding is present at P1/P2 or frozen, a P2 so during its first hour (then green with
 // ::error::); an entry held open only by its resolve count, or by a P4 sample below its line, is not red. Members leaving
 // and resolutions are silent body edits. A comment an inhibition held back goes out only on a run where the key's own
 // finding is present (a child that cleared while its parent was open never comments); one a silence held back goes out
 // when the silence ends. A single external source, a maintenance walk and the watcher itself never turn a run red.
-// Shadow rules only log "would notify". The Healthchecks.io pings are computed on every run but skipped while the
-// HC_PING_KEY secret is unset (no push channel for now). The last selftest is recorded on every board: 35 days without
-// one opens watcher:selftest-overdue.
+// Shadow rules only log "would notify". The last selftest is recorded on every board: 35 days without one opens
+// watcher:selftest-overdue. A run whose previous reconcile is over 45 min old (HEALTH_STALE_MS: health missed three
+// dispatches) says so in a warning; over 90 min with HEALTH_MENTION set, the platform board gets a "health runs again"
+// item, the answer to scripts/health-liveness.mjs's mention.
 //
 // Boards: the first run that finds none creates all three at once, the labels first (a one-time rollout notification to
 // the repository's watchers), never because of a finding (a P4 sample, a pending one or a shadow rule cannot open an
@@ -41,13 +49,14 @@
 // neither written nor commented on. Once a day the pins and locks are checked again through GraphQL.
 //
 // Environment: GH_TOKEN (issues: write, actions: read), GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_SERVER_URL,
-// GITHUB_EVENT_NAME, HEALTH_SILENCES (repository variable), HC_PING_KEY (secret, optional), GITHUB_STEP_SUMMARY; with
+// GITHUB_EVENT_NAME, HEALTH_SILENCES and HEALTH_MENTION (repository variables), GITHUB_STEP_SUMMARY; with
 // --gate also GITHUB_OUTPUT, EVENT, SCHEDULE and SELFTEST_INPUT.
 // Exit codes: 0 green · 1 red (a P1, a P2 in its first hour, the selftest) · 3 alerting itself is broken: a bad
 // argument, GH_TOKEN or GITHUB_REPOSITORY unset, the boards unreadable, a board body not created or saved (the memory
 // of every rule is lost, or it does not fit), a board created this run that cannot be labelled, board comments that
 // fail on two runs in a row, or a crash. A comment that fails once is an ::error::, retried by the next run, which
-// reports it as watcher:reconcile; a failed ping, label edit of an existing board, lock or pin check is a ::warning::.
+// reports it as watcher:reconcile; a failed label edit of an existing board, lock or pin check, and a HEALTH_MENTION that
+// is not one GitHub user, are a ::warning::.
 //
 // Dependency-free (Node >= 22, global fetch): the health workflow runs it from a sparse checkout without `npm ci`, so it
 // imports nothing but scripts/lib. Types: reconcile.d.mts. The pure core is exported for tests/reconcile.test.ts, which
@@ -57,30 +66,26 @@ import { appendFileSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
-  AGING_CHECK,
   BOARD_LABEL,
   BOARDS,
-  CHECKS,
   EVALUATORS,
-  HC_PING_BASE,
+  HEALTH_DEAD_MS,
   HEALTH_FALLBACK_CRON,
+  HEALTH_STALE_MS,
   INHIBITIONS,
-  LIVENESS_CHECK,
   P2_RED_MS,
   RULES,
   SCHEDULE_SKIP_MS,
-  SELFTEST_CHECK,
   SEVERITIES,
   STATE_MARKER,
-  VERDICT_CHECKS,
   ageText,
-  checkFor,
   makeFinding,
   matchesKey,
   mayTurnRed,
   moreSevere,
   oneLine,
   parseFindingsDocument,
+  parseMention,
   ruleJudgesKey,
   severityRank,
   utcText,
@@ -122,9 +127,6 @@ export const STATE_TEXT_MIN_CHARS = 60;
 export const LOG_ROWS_SHOWN = 50;
 /** HEALTH_SILENCES holds at most this many entries. */
 export const MAX_SILENCES = 20;
-/** A ping carries its reason as the body (Healthchecks shows it), at most this long, with a 10 s timeout per try. */
-export const PING_REASON_CHARS = 1_000;
-export const PING_TIMEOUT_MS = 10_000;
 /** The severity label of a board: its worst open non-shadow severity, or ok. */
 export const SEVERITY_LABELS = Object.freeze({ P1: 'health:p1', P2: 'health:p2', P3: 'health:p3', ok: 'health:ok' });
 /** The five labels reconcile uses, created before the first board (and again when GitHub refuses one as missing). */
@@ -144,7 +146,7 @@ const BACKOFF_MS = Object.freeze([2_000, 5_000]);
 const REQUEST_TIMEOUT_MS = 20_000;
 const MAX_MEMBERS = 50;
 const KEY_RE = /^[a-z0-9][a-z0-9._:-]*$/;
-const EVENTS = Object.freeze(['open', 'escalate', 'resolve', 'would-resolve', 'would-notify', 'notify']);
+const EVENTS = Object.freeze(['open', 'escalate', 'resolve', 'would-resolve', 'would-notify', 'notify', 'mention']);
 const BOARD_IDS = Object.freeze(Object.keys(BOARDS));
 const SELFTEST_KEY = RULES['alerts:selftest'].key;
 const RECONCILE_WATCHER_ID = 'reconcile';
@@ -210,11 +212,6 @@ export function annotation(level, title, message) {
   return title === null || title === undefined ? `::${level}::${esc(message)}` : `::${level} title=${escProp(title)}::${esc(message)}`;
 }
 
-/** The Healthchecks.io ping URL of one check. A capability: never log it or put it in an error message. */
-export function pingUrl(key, check, signal) {
-  return `${HC_PING_BASE}/${key}/${check}/${signal === 'fail' ? 'fail' : '0'}`;
-}
-
 // ---------------------------------------------------------------------------------------------------------
 // State: the hidden marker of a board body
 
@@ -224,7 +221,6 @@ function blankEntry(key, board) {
     rule: null,
     board,
     class: null,
-    check: null,
     shadow: false,
     evaluator: null,
     text: '',
@@ -247,6 +243,7 @@ function blankEntry(key, board) {
     notified: null,
     escalated: false,
     escalationNotified: false,
+    mentioned: false,
     retryComment: false,
     redSinceMs: null,
     silence: null,
@@ -265,7 +262,6 @@ function normalizeEntry(key, raw, board) {
   e.rule = r.id;
   e.class = r.class;
   e.shadow = r.shadow;
-  e.check = CHECKS.includes(raw.check) ? raw.check : null;
   e.evaluator = EVALUATORS.includes(raw.evaluator) ? raw.evaluator : null;
   e.text = typeof raw.text === 'string' ? oneLine(raw.text, STATE_TEXT_CHARS) : '';
   e.members = stateMembers(raw.members);
@@ -290,6 +286,7 @@ function normalizeEntry(key, raw, board) {
   e.notified = severityOrNull(raw.notified);
   e.escalated = raw.escalated === true;
   e.escalationNotified = raw.escalationNotified === true;
+  e.mentioned = raw.mentioned === true;
   e.retryComment = raw.retryComment === true;
   e.redSinceMs = numOrNull(raw.redSinceMs);
   e.silence = isObject(raw.silence) && typeof raw.silence.spec === 'string' && SEVERITIES.includes(raw.silence.severity) ? { spec: oneLine(raw.silence.spec, 300), severity: raw.silence.severity } : null;
@@ -336,8 +333,6 @@ function normalizeState(raw, board) {
   const b = raw.board;
   const evaluators = {};
   if (isObject(raw.evaluators)) for (const e of EVALUATORS) if (finite(raw.evaluators[e])) evaluators[e] = raw.evaluators[e];
-  const checks = {};
-  if (isObject(raw.checks)) for (const c of CHECKS) if (raw.checks[c] === 'success' || raw.checks[c] === 'fail') checks[c] = raw.checks[c];
   const entries = {};
   if (isObject(raw.entries)) {
     for (const k of Object.keys(raw.entries).sort()) {
@@ -351,7 +346,8 @@ function normalizeState(raw, board) {
   if (isObject(raw.days)) {
     for (const d of Object.keys(raw.days).sort()) {
       const x = raw.days[d];
-      if (/^\d{4}-\d{2}-\d{2}$/.test(d) && isObject(x)) days[d] = { red: count(x.red), comments: count(x.comments), transitions: count(x.transitions), would: count(x.would) };
+      // `transitions` (the Healthchecks.io /fail transitions until 2026-11-19) is dropped; `mentions` replaces it.
+      if (/^\d{4}-\d{2}-\d{2}$/.test(d) && isObject(x)) days[d] = { red: count(x.red), comments: count(x.comments), mentions: count(x.mentions), would: count(x.would) };
     }
   }
   return {
@@ -361,9 +357,7 @@ function normalizeState(raw, board) {
     updatedMs: numOrNull(raw.updatedMs),
     runId: typeof raw.runId === 'string' ? oneLine(raw.runId, 40) : null,
     runUrl: runUrlOrNull(raw.runUrl),
-    pings: raw.pings === 'sent' ? 'sent' : 'skipped',
     evaluators,
-    checks,
     lastSelftestMs: numOrNull(raw.lastSelftestMs),
     pinsCheckedMs: numOrNull(raw.pinsCheckedMs),
     faults,
@@ -518,6 +512,18 @@ function entryItem(e, nowMs) {
 const agingItem = (e, nowMs) => `${head(e)} — open for ${ageText(nowMs - e.episodeSinceMs)}: ${md(e.text)} (${sinceText(e, nowMs)})`;
 /** An entry that is past its escalation line in the same run: one item says both. */
 const agingNote = (e) => `; past its ${ageText(RULES[e.rule].escalateAfterMs)} escalation line`;
+const riseItem = (e, from, nowMs) => `${head(e)} — rose from ${from}: ${md(e.text)} (${sinceText(e, nowMs)})`;
+/** A mentioned P1/P2 that resolved: one item, no mention (the push went out when it opened). */
+const resolveItem = (e, nowMs) =>
+  `**Resolved · \`${e.key}\`** ${md(titleOf(e))} — the ${e.severity} is over${finite(e.episodeSinceMs) ? ` after ${ageText(nowMs - e.episodeSinceMs)} (since ${utcText(e.episodeSinceMs)})` : ''}`;
+/** The selftest's item: the forced P1 that proves the red run and, mentioned, the GitHub Mobile push. */
+const selftestItem = (f) => `**P1 · \`${SELFTEST_KEY}\`** selftest — ${md(f.text)}: this comment proves the push path, and the red run the email; nothing to do`;
+/**
+ * A health run that came over HEALTH_DEAD_MS after the previous reconcile (scripts/health-liveness.mjs has mentioned the
+ * outage by then): one platform item, no mention, so the push that said "health is down" has its answer.
+ */
+const livenessItem = (prevMs, nowMs) =>
+  `**Health runs again** — the previous health run reconciled at ${utcText(prevMs)}, ${ageText(nowMs - prevMs)} before this one (the liveness line is ${ageText(HEALTH_DEAD_MS)}): no health run reconciled in between; nothing to do unless it repeats`;
 
 /** Merge a duplicate finding of one key: the worst severity wins, members are merged. */
 function addPresent(present, f, evaluator) {
@@ -553,39 +559,6 @@ function redVerdict(entries, nowMs, selftest) {
     boards.add('alerts');
   }
   return { exitCode: reasons.length > 0 ? 1 : 0, reasons, boards };
-}
-
-/** The pings of this run, in order, and the boards whose entries drive each one (for the transition counts). */
-function computePings(entries, ctx, evaluatorStatus, selftest) {
-  const live = [...entries].filter((e) => e.open && !e.shadow && !e.muted).sort(byWorst);
-  const pings = [];
-  const drivers = [];
-  const describe = (list) => oneLine(list.map((e) => `${e.severity} ${e.key}: ${e.text}`).join('; '), PING_REASON_CHARS);
-  // An entry waiting on its resolve count keeps its check failing (no flapping push); one present below its line not.
-  for (const check of VERDICT_CHECKS) {
-    const culprits = live.filter((e) => e.check === check && redSeverity(e.severity) && !heldBelowRed(e));
-    pings.push({ check, signal: culprits.length > 0 ? 'fail' : 'success', reason: culprits.length > 0 ? describe(culprits) : 'no open P1/P2 finding' });
-    drivers.push([...new Set(culprits.map((e) => e.board))]);
-  }
-  // gh-aging fails while an announced escalation is open, muted or not: a mute that comes later must not flip it back to
-  // /0, or the unmute would push a second time in the same episode. An escalation still held back pushes once announced.
-  const aging = [...entries].filter((e) => e.open && !e.shadow && e.escalated && e.escalationNotified).sort(byWorst);
-  pings.push({ check: AGING_CHECK, signal: aging.length > 0 ? 'fail' : 'success', reason: aging.length > 0 ? describe(aging) : 'no escalated entry' });
-  drivers.push([...new Set(aging.map((e) => e.board))]);
-  if (ctx.eventName === 'workflow_dispatch') {
-    const missing = EVALUATORS.filter((e) => evaluatorStatus[e].state === 'missing');
-    pings.push({
-      check: LIVENESS_CHECK,
-      signal: missing.length > 0 ? 'fail' : 'success',
-      reason: missing.length > 0 ? oneLine(`no findings from ${missing.map((e) => `${e} (${evaluatorStatus[e].reason})`).join(', ')}`, PING_REASON_CHARS) : 'every evaluator produced findings',
-    });
-    drivers.push(missing.length > 0 ? [RULES.watcher.board] : []);
-  }
-  if (selftest) {
-    pings.push({ check: SELFTEST_CHECK, signal: 'fail', reason: 'selftest: forced P1' }, { check: SELFTEST_CHECK, signal: 'success', reason: 'selftest done' });
-    drivers.push(['alerts'], []);
-  }
-  return { pings, drivers };
 }
 
 function labelFor(state) {
@@ -646,7 +619,7 @@ function fitBody(board, state) {
  * @param {unknown[]} findings the evaluators' documents (re-validated: an invalid one counts as missing)
  * @param {number} nowMs
  * @param {Array<{pattern: string, untilMs: number, reason: string, spec: string}>} [silences]
- * @param {object} [context] { runId, runUrl, eventName, missing: {evaluator: reason}, existing: Board[], pingsEnabled, silenceErrors }
+ * @param {object} [context] { runId, runUrl, eventName, missing: {evaluator: reason}, existing: Board[], mention, silenceErrors }
  */
 export function reconcile(prevState, findings, nowMs, silences = [], context = {}) {
   if (!finite(nowMs)) throw new TypeError('reconcile: nowMs is not a finite number');
@@ -655,7 +628,9 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
     runUrl: runUrlOrNull(context?.runUrl),
     eventName: typeof context?.eventName === 'string' ? context.eventName : null,
     missing: isObject(context?.missing) ? context.missing : {},
-    pingsEnabled: context?.pingsEnabled === true,
+    // The login every P1/P2 transition mentions (HEALTH_MENTION, checked by the wrapper); re-parsed here, so nothing
+    // but one GitHub login ever reaches a comment. null: no mention, and P1/P2 rows stay silent.
+    mention: parseMention(context?.mention).login,
     silenceErrors: Array.isArray(context?.silenceErrors) ? context.silenceErrors.map((x) => oneLine(x, 300)) : [],
   };
   const prev = {};
@@ -664,11 +639,10 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
   const active = (Array.isArray(silences) ? silences : []).filter((s) => isObject(s) && typeof s.pattern === 'string' && finite(s.untilMs) && nowMs < s.untilMs);
 
   // The copies every board holds: the last applied document per evaluator, the last selftest and the last pin check
-  // (the max of each), the check states (the newest board's). The oldest board's creation, and the comments the last
-  // run could not post.
+  // (the max of each). The oldest board's creation, the newest board's update (the previous reconcile), and the
+  // comments the last run could not post.
   const lastApplied = {};
-  let checks = {};
-  let checksMs = -Infinity;
+  let prevRunMs = null;
   let lastSelftestMs = null;
   let pinsCheckedMs = null;
   let boardsSinceMs = null;
@@ -678,10 +652,7 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
     const s = prev[b];
     if (!s) continue;
     for (const [e, ms] of Object.entries(s.evaluators)) if (!(lastApplied[e] >= ms)) lastApplied[e] = ms;
-    if (Object.keys(s.checks).length > 0 && (s.updatedMs ?? -Infinity) >= checksMs) {
-      checks = { ...s.checks };
-      checksMs = s.updatedMs ?? -Infinity;
-    }
+    if (finite(s.updatedMs) && (prevRunMs === null || s.updatedMs > prevRunMs)) prevRunMs = s.updatedMs;
     if (finite(s.lastSelftestMs) && (lastSelftestMs === null || s.lastSelftestMs > lastSelftestMs)) lastSelftestMs = s.lastSelftestMs;
     if (finite(s.pinsCheckedMs) && (pinsCheckedMs === null || s.pinsCheckedMs > pinsCheckedMs)) pinsCheckedMs = s.pinsCheckedMs;
     if (finite(s.createdMs) && (boardsSinceMs === null || s.createdMs < boardsSinceMs)) boardsSinceMs = s.createdMs;
@@ -738,17 +709,15 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
     }
     const all = [...before.values()];
     const verdict = redVerdict(all, nowMs, false);
-    const { pings } = computePings(all, ctx, evaluatorStatus, false);
     return {
       state: states,
       bodies,
       create: [],
       comments: [],
       labels,
-      pings,
       exitCode: verdict.exitCode,
-      summary: buildSummary({ ctx, nowMs, evaluatorStatus, all, present: new Map(), comments: [], pings, create: [], verdict, notes, replay: true, silences: active }),
-      annotations: buildAnnotations(all, null, ctx),
+      summary: buildSummary({ ctx, nowMs, evaluatorStatus, all, present: new Map(), comments: [], create: [], verdict, notes, replay: true, silences: active, gap: null }),
+      annotations: buildAnnotations(all, null, ctx, null),
       evaluators: evaluatorStatus,
       replay: true,
       pinCheck: false,
@@ -809,13 +778,14 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
   }
   const today = isoDate(nowMs);
   const bump = (b, field) => {
-    const d = (days[b][today] ??= { red: 0, comments: 0, transitions: 0, would: 0 });
+    const d = (days[b][today] ??= { red: 0, comments: 0, mentions: 0, would: 0 });
     d[field] += 1;
   };
   const logEvent = (e, event) => logs[e.board].push({ ms: nowMs, key: e.key, event, severity: severityOrNull(e.severity) });
 
-  // 3. Per key.
+  // 3. Per key. `resolvedMentioned`: the entries that resolve this run after a mention (they get a resolve item).
   const next = new Map();
+  const resolvedMentioned = [];
   for (const key of [...new Set([...before.keys(), ...present.keys()])].sort()) {
     const old = before.get(key) ?? null;
     const why = frozenReason(key);
@@ -884,6 +854,7 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
         e.notified = null;
         e.escalated = false;
         e.escalationNotified = false;
+        e.mentioned = false;
         e.redSinceMs = null;
         e.silence = null;
         logEvent(e, 'open');
@@ -894,7 +865,6 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
       } else if (!e.open) {
         e.severity = 'P4';
       }
-      e.check = e.open ? (f.severity === e.severity ? f.check : checkFor(r, e.severity)) : null;
     } else {
       e = { ...old, frozen: null, pending: null, found: null };
       const r = RULES[e.rule];
@@ -912,6 +882,8 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
           e.sampleMs = [];
           e.firstSampleMs = null;
           logEvent(e, e.shadow ? 'would-resolve' : 'resolve');
+          if (e.mentioned && !e.shadow) resolvedMentioned.push({ ...e });
+          e.mentioned = false;
         }
       }
     }
@@ -972,9 +944,12 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
   // 5. Notifications: one comment per board per run, one item per key. A due item that is muted stays due. One an
   // inhibition held back goes out only on a run where the key's own finding is present (a child whose condition
   // cleared while its parent was open never comments); one a silence held back goes out once the silence ends, and one
-  // whose post failed (rolled back by the wrapper) on the next run, present or not.
+  // whose post failed (rolled back by the wrapper) on the next run, present or not. `pushes`: the board's mention line,
+  // one short label per P1/P2 transition (GitHub Mobile shows the start of the comment).
   const items = { alerts: [], feed: [], platform: [] };
+  const pushes = { alerts: [], feed: [], platform: [] };
   const announced = { alerts: [], feed: [], platform: [] };
+  const mentionOn = ctx.mention !== null;
   for (const e of [...next.values()].sort(byWorst)) {
     if (!e.open || e.frozen) continue;
     if (e.shadow) {
@@ -987,48 +962,74 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
     }
     if (e.muted || !notifiable(e.severity)) continue;
     if (e.found === null && before.get(e.key)?.muted?.by !== 'silenced' && !e.retryComment) continue;
-    const was = { key: e.key, notified: e.notified, escalationNotified: e.escalationNotified };
+    const was = { key: e.key, notified: e.notified, escalationNotified: e.escalationNotified, mentioned: e.mentioned };
     let item = null;
-    // A P3 entry gets its comment. A P1/P2 entry, and a rise (it always lands at P1 or P2: config:bundle by age, the
-    // promotion of an unreadable status.json), is announced by the red run alone: the boards are public, and P1 goes to
-    // the owner only (owner decisions 2026-10-22).
+    let push = null;
+    // A P3 entry gets its comment. A P1/P2 entry, and a rise into P1/P2, gets one only with HEALTH_MENTION, and then it
+    // mentions the owner; without it the red run alone announces it (owner decisions 2026-10-22 and 2026-11-19).
     if (e.notified === null) {
       if (e.severity === 'P3') item = entryItem(e, nowMs);
+      else if (mentionOn) {
+        item = entryItem(e, nowMs);
+        push = `${e.severity} \`${e.key}\` opened`;
+      }
       e.notified = e.severity;
     } else if (moreSevere(e.severity, e.notified)) {
+      // A rise always lands at P1 or P2 (config:bundle by age, the promotion of an unreadable status.json).
+      if (mentionOn) {
+        item = riseItem(e, e.notified, nowMs);
+        push = `${e.severity} \`${e.key}\` rose from ${e.notified}`;
+      }
       e.notified = e.severity;
     }
     // An entry already past its escalation line when it enters (its finding's sinceMs hours old on the first run after
-    // the rollout) gets one item that says both.
+    // the rollout) gets one item that says both. An escalation while P1/P2 (and red: not held below its line) mentions.
     if (e.escalated && !e.escalationNotified) {
       item = item === null ? agingItem(e, nowMs) : `${item}${agingNote(e)}`;
+      if (mentionOn && push === null && redSeverity(e.severity) && !heldBelowRed(e)) push = `${e.severity} \`${e.key}\` open past ${ageText(RULES[e.rule].escalateAfterMs)}`;
       e.escalationNotified = true;
     }
     e.retryComment = false;
     if (item !== null) {
       items[e.board].push(item);
       announced[e.board].push(was);
-      logEvent(e, 'notify');
+      logEvent(e, push !== null ? 'mention' : 'notify');
+    }
+    if (push !== null) {
+      pushes[e.board].push(push);
+      e.mentioned = true;
     }
   }
+  // A mentioned P1/P2 that resolved: one item without a mention, unless a silence covers its key (a silence mutes every
+  // comment of the key). A failed post loses it (the board body shows the resolve; nothing is rolled back).
+  for (const e of resolvedMentioned.sort(byKey)) {
+    if (active.some((x) => matchesKey(x.pattern, e.key))) continue;
+    items[e.board].push(resolveItem(e, nowMs));
+  }
+  // The selftest proves the push path: with HEALTH_MENTION its item mentions the owner on every selftest run.
+  if (selftestFinding !== null && mentionOn) {
+    items.alerts.push(selftestItem(selftestFinding));
+    pushes.alerts.push(`P1 \`${SELFTEST_KEY}\` (the selftest)`);
+  }
+  // Health's own liveness: a previous reconcile over 45 min old is a warning; over 90 min, with HEALTH_MENTION, the
+  // platform board says health runs again (scripts/health-liveness.mjs mentioned the outage by then).
+  const gap = finite(prevRunMs) && nowMs - prevRunMs > HEALTH_STALE_MS ? { prevMs: prevRunMs, ms: nowMs - prevRunMs } : null;
+  if (gap !== null && mentionOn && gap.ms > HEALTH_DEAD_MS) items.platform.push(livenessItem(gap.prevMs, nowMs));
   const comments = [];
   for (const b of BOARD_IDS) {
     if (items[b].length === 0) continue;
+    const mention = pushes[b].length > 0;
+    const lines = [...(mention ? [`@${ctx.mention} ${pushes[b].join(' · ')}`] : []), ...items[b], `Run: ${ctx.runUrl ?? '(a local run)'}`];
     // `keys`: the keys it announces, with what they had before (the wrapper restores it when the post fails).
-    comments.push({ board: b, body: [...items[b], `Run: ${ctx.runUrl ?? '(a local run)'}`].join('\n\n'), keys: announced[b] });
+    comments.push({ board: b, body: lines.join('\n\n'), keys: announced[b], mention });
     bump(b, 'comments');
+    if (mention) bump(b, 'mentions');
   }
 
-  // 6. Exit code, 7. pings.
+  // 6. Exit code.
   const all = [...next.values()];
   const verdict = redVerdict(all, nowMs, selftestFinding !== null);
   for (const b of verdict.boards) bump(b, 'red');
-  const { pings, drivers } = computePings(all, ctx, evaluatorStatus, selftestFinding !== null);
-  const running = { ...checks };
-  pings.forEach((p, i) => {
-    if (p.signal === 'fail' && running[p.check] !== 'fail') for (const b of drivers[i]) bump(b, 'transitions');
-    running[p.check] = p.signal;
-  });
 
   // 8. States and bodies. Every board exists from the first run on (see the header): nothing here decides whether one
   // is needed, so no finding can be the reason an issue is created.
@@ -1036,7 +1037,6 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
   const applied = { ...lastApplied };
   for (const e of fresh) applied[e] = Math.max(applied[e] ?? -Infinity, evaluatorStatus[e].generatedAtMs);
   const evaluators = ordered(applied, EVALUATORS);
-  const checksOut = ordered(running, CHECKS);
   const oldestDay = isoDate(nowMs - (DAYS_KEPT - 1) * DAY);
   const states = {};
   const bodies = {};
@@ -1055,9 +1055,7 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
       updatedMs: nowMs,
       runId: ctx.runId,
       runUrl: ctx.runUrl,
-      pings: ctx.pingsEnabled ? 'sent' : 'skipped',
       evaluators: { ...evaluators },
-      checks: { ...checksOut },
       lastSelftestMs: selftestMs,
       pinsCheckedMs: pinCheck ? nowMs : pinsCheckedMs,
       faults: [],
@@ -1078,10 +1076,9 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
     create,
     comments,
     labels,
-    pings,
     exitCode: verdict.exitCode,
-    summary: buildSummary({ ctx, nowMs, evaluatorStatus, all: finalEntries, present, comments, pings, create, verdict, notes, replay: false, silences: active }),
-    annotations: buildAnnotations(finalEntries, selftestFinding, ctx),
+    summary: buildSummary({ ctx, nowMs, evaluatorStatus, all: finalEntries, present, comments, create, verdict, notes, replay: false, silences: active, gap }),
+    annotations: buildAnnotations(finalEntries, selftestFinding, ctx, gap),
     evaluators: evaluatorStatus,
     replay: false,
     pinCheck,
@@ -1090,8 +1087,8 @@ export function reconcile(prevState, findings, nowMs, silences = [], context = {
 }
 
 /**
- * The states and bodies once some of a run's comments could not be posted. Each comment's keys get back the notified
- * and escalationNotified they had before the run and are marked for a retry (the next run posts them, present or not);
+ * The states and bodies once some of a run's comments could not be posted. Each comment's keys get back the notified,
+ * escalationNotified and mentioned they had before the run and are marked for a retry (the next run posts them, present or not);
  * the run's notify events and comment count for them are taken back; and the failures are kept on the watcher's board,
  * where the next run turns them into watcher:reconcile. Pure.
  * @param {ReturnType<typeof reconcile>} result
@@ -1107,12 +1104,12 @@ export function withFailedComments(result, failed) {
     const keys = new Set(comment.keys.map((k) => k.key));
     const entries = { ...s.entries };
     for (const k of comment.keys) {
-      if (entries[k.key]) entries[k.key] = { ...entries[k.key], notified: k.notified, escalationNotified: k.escalationNotified, retryComment: true };
+      if (entries[k.key]) entries[k.key] = { ...entries[k.key], notified: k.notified, escalationNotified: k.escalationNotified, mentioned: k.mentioned === true, retryComment: true };
     }
     const day = isoDate(s.updatedMs);
     const days = { ...s.days };
-    if (days[day]) days[day] = { ...days[day], comments: Math.max(0, days[day].comments - 1) };
-    const log = s.log.filter((x) => !(x.ms === s.updatedMs && x.event === 'notify' && keys.has(x.key)));
+    if (days[day]) days[day] = { ...days[day], comments: Math.max(0, days[day].comments - 1), mentions: Math.max(0, days[day].mentions - (comment.mention ? 1 : 0)) };
+    const log = s.log.filter((x) => !(x.ms === s.updatedMs && (x.event === 'notify' || x.event === 'mention') && keys.has(x.key)));
     states[comment.board] = { ...s, entries, log, days };
     touched.add(comment.board);
   }
@@ -1130,7 +1127,11 @@ export function withFailedComments(result, failed) {
   return { state: states, bodies };
 }
 
-function buildAnnotations(entries, selftestFinding, ctx) {
+function gapText(gap) {
+  return `the previous health run reconciled at ${utcText(gap.prevMs)}, ${ageText(gap.ms)} before this one (over ${ageText(HEALTH_STALE_MS)}: health missed its dispatches)`;
+}
+
+function buildAnnotations(entries, selftestFinding, ctx, gap) {
   const out = [];
   for (const e of [...entries].filter((x) => x.open).sort(byWorst)) {
     const level = e.shadow ? 'notice' : redSeverity(e.severity) ? 'error' : 'warning';
@@ -1139,10 +1140,11 @@ function buildAnnotations(entries, selftestFinding, ctx) {
   }
   if (selftestFinding) out.push(annotation('error', `P1 ${SELFTEST_KEY}`, selftestFinding.text));
   for (const err of ctx.silenceErrors) out.push(annotation('warning', 'HEALTH_SILENCES', err));
+  if (gap) out.push(annotation('warning', 'Health liveness', gapText(gap)));
   return out;
 }
 
-function buildSummary({ ctx, nowMs, evaluatorStatus, all, present, comments, pings, create, verdict, notes, replay, silences }) {
+function buildSummary({ ctx, nowMs, evaluatorStatus, all, present, comments, create, verdict, notes, replay, silences, gap }) {
   const lines = ['### Health reconcile', ''];
   lines.push(verdict.exitCode === 1 ? `**Run verdict: red**: ${verdict.reasons.join('; ')}.` : '**Run verdict: green.**');
   if (replay) lines.push('', 'Every findings document was already applied (an overlapping run or a rerun): the boards are unchanged and nothing was commented.');
@@ -1173,9 +1175,11 @@ function buildSummary({ ctx, nowMs, evaluatorStatus, all, present, comments, pin
     lines.push('', '**Shadow rules (log only)**', '');
     for (const e of shadow) lines.push(`- ${e.severity} \`${e.key}\`: ${md(e.text)}`);
   }
-  lines.push('', `**Comments:** ${comments.length > 0 ? comments.map((c) => `${c.board} (${c.body.split('\n\n').length - 1} item(s))`).join(', ') : 'none'}`);
+  const itemCount = (c) => c.body.split('\n\n').length - 1 - (c.mention ? 1 : 0);
+  lines.push('', `**Comments:** ${comments.length > 0 ? comments.map((c) => `${c.board} (${itemCount(c)} item(s)${c.mention ? ', mentions the owner' : ''})`).join(', ') : 'none'}`);
   if (create.length > 0) lines.push(`**Boards to create:** ${create.map((b) => `"${BOARDS[b]}"`).join(', ')}`);
-  lines.push(`**Pings${ctx.pingsEnabled ? '' : ' (skipped: HC_PING_KEY unset)'}:** ${pings.map((p) => `${p.check} ${p.signal === 'fail' ? '/fail' : '/0'}`).join(', ')}`);
+  lines.push(`**Mention (P1/P2, GitHub Mobile):** ${ctx.mention ? `@${ctx.mention}` : 'none (HEALTH_MENTION unset or invalid: P1/P2 rows are silent)'}`);
+  if (gap) lines.push(`**Liveness:** ${md(gapText(gap))}`);
   if (silences.length > 0) lines.push(`**Silences in force:** ${silences.map((s) => `\`${s.pattern}\` until ${utcText(s.untilMs)}`).join(', ')}`);
   for (const err of ctx.silenceErrors) lines.push(`- HEALTH_SILENCES: ${md(err)}`);
   for (const n of notes) lines.push(`- ${md(n)}`);
@@ -1217,7 +1221,7 @@ export function renderBody(board, state, view = {}) {
     if (list.length > tableRows) lines.push('', `${list.length - tableRows} more row(s) are kept in the state only (the run's job summary lists them).`);
   };
   lines.push(
-    `Automated health board of ${BOARD_SCOPE[board] ?? board}. The health workflow rewrites this body on every run and comments only when a P3 enters or passes its age line; P1/P2 rows (a rise into P1/P2 too), members leaving and resolutions are silent edits (the red run is the P1/P2 alarm). Severity: P1 page, P2 urgent, P3 ticket. Runbook: README "Health watchdogs".`,
+    `Automated health board of ${BOARD_SCOPE[board] ?? board}. The health workflow rewrites this body on every run and comments when a P3 enters or passes its age line, and, with the repository variable HEALTH_MENTION, when a P1/P2 opens, rises or escalates (mentioning the owner, for a GitHub Mobile push) and when such a row resolves; members leaving and other resolutions are silent edits. Severity: P1 page, P2 urgent, P3 ticket. Runbook: README "Health watchdogs".`,
   );
   lines.push('', '### Open', '');
   if (open.length === 0) lines.push('Nothing open.');
@@ -1242,17 +1246,17 @@ export function renderBody(board, state, view = {}) {
   }
   lines.push('', '### Last 7 days', '');
   const dayKeys = Object.keys(state.days ?? {}).sort().reverse();
-  const total = { red: 0, comments: 0, transitions: 0, would: 0 };
+  const total = { red: 0, comments: 0, mentions: 0, would: 0 };
   if (dayKeys.length > 0) {
-    lines.push('| Day (UTC) | Red runs | Comments | Push transitions | Shadow would-notify |', '|---|---|---|---|---|');
+    lines.push('| Day (UTC) | Red runs | Comments | Mentions | Shadow would-notify |', '|---|---|---|---|---|');
     for (const d of dayKeys) {
       const x = state.days[d];
       for (const k of Object.keys(total)) total[k] += x[k];
-      lines.push(`| ${d} | ${x.red} | ${x.comments} | ${x.transitions} | ${x.would} |`);
+      lines.push(`| ${d} | ${x.red} | ${x.comments} | ${x.mentions} | ${x.would} |`);
     }
-    lines.push(`| **7 days** | ${total.red} | ${total.comments} | ${total.transitions} | ${total.would} |`, '');
+    lines.push(`| **7 days** | ${total.red} | ${total.comments} | ${total.mentions} | ${total.would} |`, '');
   }
-  lines.push(`Push transitions count the checks that went to /fail${state.pings === 'sent' ? '' : ' (pings skipped: HC_PING_KEY unset, so these are the pushes that would have gone out)'}.`);
+  lines.push('Mentions count the comments that mentioned HEALTH_MENTION (a P1/P2 transition or the selftest: the GitHub Mobile pushes).');
   if (board === 'alerts') lines.push('', `Last selftest (the forced P1 that proves the red run): ${finite(state.lastSelftestMs) ? utcText(state.lastSelftestMs) : 'none yet'}.`);
   const log = state.log ?? [];
   const opened = new Map();
@@ -1319,12 +1323,12 @@ async function request(fetchImpl, url, { method = 'GET', headers = {}, body, tim
 }
 
 /** The GitHub REST/GraphQL client: every method but POST is retried on 5xx and network errors (2 s, 5 s). */
-function githubClient({ token, fetchImpl, sleep }) {
+export function githubClient({ token, fetchImpl, sleep = sleepMs, userAgent = 'earthquakes-feed-health' }) {
   const headers = {
     authorization: `Bearer ${token}`,
     accept: 'application/vnd.github+json',
     'x-github-api-version': '2022-11-28',
-    'user-agent': 'earthquakes-feed-health',
+    'user-agent': userAgent,
   };
   const call = async (method, path, payload) => {
     const url = path.startsWith('https://') ? path : `${API}${path}`;
@@ -1496,7 +1500,7 @@ async function writeUnlocked({ gh, repo, issue, what, write, log, warn }) {
  * POST one comment: up to COMMENT_ATTEMPTS tries on a network error, a 5xx or a 429 (a timeout that did post makes a
  * rare duplicate, which beats a lost comment), around an unlock when the board is locked against it.
  */
-async function postComment({ gh, repo, issue, body, sleep, log, warn }) {
+export async function postComment({ gh, repo, issue, body, sleep, log, warn }) {
   const post = async () => {
     let r = null;
     for (let attempt = 1; attempt <= COMMENT_ATTEMPTS; attempt++) {
@@ -1677,28 +1681,30 @@ async function retireDuplicate({ gh, repo, board, number, duplicate, log, warn }
   log(`retired the duplicate board #${n} (the board is #${number})`);
 }
 
-/** POST each ping (the reason as the body), 3 tries with a 10 s timeout each. The URL never reaches a log line. */
-async function sendPings({ pings, key, fetchImpl, sleep, log }) {
-  for (const p of pings) {
-    const url = pingUrl(key, p.check, p.signal);
-    let last = null;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      if (attempt > 1) await sleep(BACKOFF_MS[Math.min(attempt - 2, BACKOFF_MS.length - 1)]);
-      last = await request(fetchImpl, url, {
-        method: 'POST',
-        headers: { 'content-type': 'text/plain; charset=utf-8', 'user-agent': 'earthquakes-feed-health' },
-        body: oneLine(p.reason, PING_REASON_CHARS),
-        timeoutMs: PING_TIMEOUT_MS,
-      });
-      if (last.ok || (last.status >= 400 && last.status < 500)) break;
-    }
-    const signal = p.signal === 'fail' ? '/fail' : '/0';
-    if (last?.ok) log(`pinged ${p.check} ${signal}`);
-    else {
-      const why = String(last?.status ? `HTTP ${last.status}` : (last?.message ?? 'not sent')).split(url).join('<ping URL>').split(key).join('***');
-      log(annotation('warning', 'Health ping', `${p.check} ${signal} failed after 3 tries: ${why}`));
-    }
+/**
+ * HEALTH_MENTION as the login to mention, or null. parseMention rules out anything but one login (a team, a list); the
+ * API then rules out an organization and a login that does not exist (GET /users/{login}: `type` must be "User"). A
+ * lookup that fails for another reason (a 5xx, a timeout) keeps the login, with a warning: the syntax already allows
+ * only one account, and a P1 push lost to an API hiccup costs more than mentioning an organization, which notifies no
+ * one. `gh` null (a dry run without a token): the login as parsed.
+ * @returns {Promise<string | null>}
+ */
+export async function resolveMention({ gh, value, warn }) {
+  const { login, error } = parseMention(value);
+  if (error) warn(error);
+  if (login === null || gh === null) return login;
+  const r = await gh.call('GET', `/users/${encodeURIComponent(login)}`);
+  if (r.ok && isObject(r.json)) {
+    if (r.json.type === 'User') return typeof r.json.login === 'string' && r.json.login.toLowerCase() === login.toLowerCase() ? r.json.login : login;
+    warn(`HEALTH_MENTION "${login}" is a GitHub ${oneLine(r.json.type ?? 'account', 40)}, not a user: no one is mentioned (set it to the owner's user login)`);
+    return null;
   }
+  if (r.status === 404) {
+    warn(`HEALTH_MENTION "${login}" is no GitHub account: no one is mentioned`);
+    return null;
+  }
+  warn(`cannot check that HEALTH_MENTION "${login}" is a user (${r.message}): it is mentioned as set`);
+  return login;
 }
 
 /** Every findings document of the directory; an unreadable or invalid file marks its evaluator missing. */
@@ -1801,7 +1807,6 @@ export async function main({
   const token = env.GH_TOKEN ?? '';
   const runId = env.GITHUB_RUN_ID ?? null;
   const runUrl = repo && runId ? `${env.GITHUB_SERVER_URL || 'https://github.com'}/${repo}/actions/runs/${runId}` : null;
-  const pingKey = env.HC_PING_KEY ?? '';
   const warnings = [];
   const warn = (m) => warnings.push(m);
   const errors = [];
@@ -1835,16 +1840,16 @@ export async function main({
   };
 
   if (!read.ok) {
-    // Nothing written, no pings, and red (exit 3): the prior state is unknown, so no hold, ratio or resolve can be
+    // Nothing written, nothing commented, and red (exit 3): the prior state is unknown, so no hold, ratio or resolve can be
     // applied, and alerting itself is broken. The P1/P2 findings of this run are listed, so the red run names them.
     const findings = docs.flatMap((d) => d.findings);
     const urgent = findings.filter((f) => (redSeverity(f.severity) && !f.shadow && mayTurnRed(f.class)) || f.key === SELFTEST_KEY);
-    log(annotation('error', null, `boards unreadable (${read.message}): nothing was written and no ping was sent`));
+    log(annotation('error', null, `boards unreadable (${read.message}): nothing was written or commented`));
     for (const f of findings.filter((x) => notifiable(x.severity)).sort((a, b) => severityRank(a.severity) - severityRank(b.severity))) {
       log(annotation(f.shadow ? 'notice' : redSeverity(f.severity) ? 'error' : 'warning', `${f.severity} ${f.key}`, f.text));
     }
     const named = urgent.length > 0 ? `; P1/P2 findings present this run: ${urgent.map((f) => `${f.severity} \`${f.key}\``).join(', ')}` : '';
-    writeSummary(`### Health reconcile\n\n**Boards unreadable** (${md(read.message)}): nothing was written and no ping was sent; the run is red (exit 3: alerting itself is broken)${named}.\n`);
+    writeSummary(`### Health reconcile\n\n**Boards unreadable** (${md(read.message)}): nothing was written or commented; the run is red (exit 3: alerting itself is broken)${named}.\n`);
     log(`reconcile: the run is red (the boards are unreadable${urgent.length > 0 ? `, and ${urgent.length} P1/P2 finding(s) are present` : ''})`);
     return 3;
   }
@@ -1853,13 +1858,14 @@ export async function main({
   const prevState = {};
   for (const b of BOARD_IDS) prevState[b] = read.boards[b] ? mergedBoardState(read.boards[b].stateBodies.map((body) => parseBoardState(body, b))) : null;
   for (const b of BOARD_IDS) if (read.boards[b] && prevState[b] === null) warn(`board #${read.boards[b].number} "${BOARDS[b]}" has no readable state marker: it starts empty`);
+  const mention = await resolveMention({ gh, value: env.HEALTH_MENTION, warn });
   const result = reconcile(prevState, docs, nowMs, silences, {
     runId,
     runUrl,
     eventName: env.GITHUB_EVENT_NAME ?? null,
     missing,
     existing: Object.keys(read.boards),
-    pingsEnabled: Boolean(pingKey) && !opts.dryRun,
+    mention,
     silenceErrors,
   });
 
@@ -1870,7 +1876,6 @@ export async function main({
       log(result.bodies[b]);
     }
     for (const c of result.comments) log(`----- comment on "${BOARDS[c.board]}" -----\n${c.body}`);
-    for (const p of result.pings) log(`ping (dry run, not sent): ${p.check} ${p.signal === 'fail' ? '/fail' : '/0'}`);
     for (const a of result.annotations) log(a);
     for (const w of warnings) log(annotation('warning', 'Health reconcile', w));
     log(`reconcile (dry run): the run would be ${result.exitCode === 1 ? 'red' : 'green'}`);
@@ -1883,11 +1888,9 @@ export async function main({
   // A comment that fails once is retried by the next run; failing on two runs in a row, it turns the run red, because
   // watcher:reconcile's own comment cannot reach anyone either.
   const commentsBroken = written.failedComments > 0 && result.commentFaultsBefore > 0;
-  if (commentsBroken) error(`board comments failed on two runs in a row (${result.commentFaultsBefore} on the last run, ${written.failedComments} on this one): the P3 notices are not reaching anyone`);
+  if (commentsBroken) error(`board comments failed on two runs in a row (${result.commentFaultsBefore} on the last run, ${written.failedComments} on this one): the P3 notices and the P1/P2 mentions are not reaching anyone`);
 
-  if (!pingKey) log('pings skipped (HC_PING_KEY unset)');
-  else await sendPings({ pings: result.pings, key: pingKey, fetchImpl, sleep, log });
-
+  log(mention ? `reconcile: P1/P2 transitions mention @${mention}` : 'reconcile: no mention (HEALTH_MENTION unset or invalid): P1/P2 rows are silent');
   for (const a of result.annotations) log(a);
   for (const e of errors) log(annotation('error', 'Health reconcile', e));
   for (const w of warnings) log(annotation('warning', 'Health reconcile', w));

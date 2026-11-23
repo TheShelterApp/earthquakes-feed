@@ -2947,14 +2947,14 @@
       "provider": "usgs",
       "day": "2026-11-04",
       "tag": "remediation-2026",
-      "asset": "raw-usgs-2026-11-04.ndjson.gz",
-      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/remediation-2026/raw-usgs-2026-11-04.ndjson.gz",
-      "sha256": "5eb6e5b3d3215a57d4e16d919aa0216b827f1ccb2219770676f10fbe98d64625",
-      "bytes": 31404,
-      "rows": 292,
+      "asset": "raw-usgs-2026-11-04.g2.ndjson.gz",
+      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/remediation-2026/raw-usgs-2026-11-04.g2.ndjson.gz",
+      "sha256": "e0bfb39b15eb488e8249c325441ed3fd236c6c0e06236fc5717bf3c3a499da67",
+      "bytes": 32236,
+      "rows": 300,
       "requests": 4,
       "partial": false,
-      "fetched_at": "2026-11-18T13:28:08.171Z",
+      "fetched_at": "2026-11-23T15:24:47.430Z",
       "reason": "late_usgs"
     },
     {
@@ -16300,12 +16300,12 @@
     },
     {
       "day": "2026-11-04",
-      "edition": 1,
+      "edition": 2,
       "tag": "remediation-2026",
-      "asset": "events-2026-11-04.e1.ndjson.gz",
-      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/remediation-2026/events-2026-11-04.e1.ndjson.gz",
-      "sha256": "88211a3c1d2ce074e3e2091db51e68871edf90df7451a3c56fc2af1ed7dd4ac8",
-      "bytes": 295568,
+      "asset": "events-2026-11-04.e2.ndjson.gz",
+      "url": "https://github.com/TheShelterApp/earthquakes-feed/releases/download/remediation-2026/events-2026-11-04.e2.ndjson.gz",
+      "sha256": "f94879d11ef85352d26042da6640b26631eabfaefc2e64a9553832db8629be71",
+      "bytes": 297504,
       "built_on": {
         "tag": "data",
         "asset": "events/2026/11/04.ndjson",
@@ -16313,7 +16313,7 @@
         "blob": "8011745206f5c3d131b94174d11b9af8e60d8856"
       },
       "built_from": [
-        "raw-usgs-2026-11-04.ndjson.gz"
+        "raw-usgs-2026-11-04.g2.ndjson.gz"
       ],
       "reason": "late_usgs",
       "context": {
@@ -16329,22 +16329,21 @@
           "blob": "8011745206f5c3d131b94174d11b9af8e60d8856"
         },
         "2026-11-05": {
-          "tag": "data",
-          "asset": "events/2026/11/05.ndjson",
-          "sha256": "668ac93497924414e6207c3af418a490f5d248a1fc3941851baab3888cef4349",
-          "blob": "28e151e53800d86e82fb1ff72210e0f22ab7b5e2"
+          "tag": "remediation-2026",
+          "asset": "events-2026-11-05.e2.ndjson.gz",
+          "sha256": "d9ca57940c0ad65ee073925f920c935be7357c9b8e0d58f698c2bcdb6bb695f0"
         }
       },
       "stats": {
         "archived_events": 996,
-        "events": 1006,
+        "events": 1012,
         "live_before": 979,
-        "live_after": 988,
-        "rows": 292,
-        "changed": 15,
-        "unchanged": 277,
+        "live_after": 994,
+        "rows": 300,
+        "changed": 32,
+        "unchanged": 268,
         "screened": 0,
-        "new_events": 10,
+        "new_events": 16,
         "retired": 1,
         "off_day": 0,
         "neighbour_joins": 0,
@@ -16354,7 +16353,7 @@
         "provider_rows": {
           "usgs": {
             "before": 287,
-            "after": 300
+            "after": 309
           }
         },
         "remerge": {
@@ -16362,7 +16361,10 @@
           "from_edition": 0
         }
       },
-      "built_at": "2026-11-18T13:28:08.171Z"
+      "built_at": "2026-11-23T15:24:47.430Z",
+      "superseded": [
+        "events-2026-11-04.e1.ndjson.gz"
+      ]
     },
     {
       "day": "2026-11-05",

@@ -1716,8 +1716,9 @@ in all; GitHub keeps 1.5–2 times a local pack). The budget, per phase, at GitH
 | phase 4 (the generation under a ref; about 1 commit a day) | 6.6–8.8 | about 1–1.3 years |
 | phase 4 + phase 5 (the rewrite fixes below) | 1.5–2 | about 4.4–5.8 years |
 
-`feed:repo-growth` (P3) files a 7-day growth over the current phase's budget: 16 MB a day through phase 3a, lowered to
-11 by the phase-3b PR (`maxMbPerDay`, scripts/lib/findings.mjs); `feed:repo-size` stays at 8,000,000 KB.
+`feed:repo-growth` (P3) files a 7-day growth over the current phase's budget: 16 MB a day through phase 3a, 11 since
+the phase-3b merge (`maxMbPerDay`, scripts/lib/findings.mjs; its 7-day window spans phase 3a's last days for a week
+after the merge, so the row can open then); `feed:repo-size` stays at 8,000,000 KB.
 
 **The end state.** Git's `data` holds only what consumers fetch from git: the frozen day partitions and small signed
 catalogs, about one commit a day (phase 4). The working state lives in one R2 bucket of content-addressed blobs, with
@@ -1793,31 +1794,30 @@ to the ref.
   `parent` (the sha256 of the previous document). The `parent` line changes on every write, so two writers that both
   rewrote it conflict in git instead of merging line by line. A reader refuses an unknown `format`, `layout` or
   `node_schema`, and any bytes that are not the canonical form.
-- *The layout* follows git. While git tracks the event map (phase 3a) `saveEventMap` keeps round 17's hour shards,
+- *The layout* follows git, checkout by checkout (`eventMapShardHours`: whether git tracks event-map files there).
+  While it does (phase 3a, and phase 3b's transition run) `saveEventMap` keeps round 17's hour shards,
   `knowledge/index/event_map/YYYY-MM-DD-HH.ndjson`: a commit rewrites ~70 KB shards, where day files of ~1.7 MB would
-  add about 7–22 MB a day to the repository for as long as the soak lasts, for ever (round 17's replay: the event map's
-  share 13/20/32 MB a day with day files against 6/7.5/10 with hour shards). Once git no longer holds the files
-  (phase 3b) it writes one file per day, `YYYY-MM-DD.ndjson`, the store's layout (`eventMapShardHours`), and aggregate
-  moves any day left in shards (`moveToDayLayout`); the authoritative hydrate writes day files anyway, so nothing of
-  that reaches git. A day's store bytes are `canonicalDay` of its files, whatever their layout: every node once (a
+  add about 7–22 MB a day to the repository, for ever (round 17's replay: the event map's share 13/20/32 MB a day with
+  day files against 6/7.5/10 with hour shards). Once git no longer tracks them (phase 3b) it writes one file per day,
+  `YYYY-MM-DD.ndjson`, the store's layout, and aggregate's commit step moves any day left in shards
+  (`moveToDayLayout`), only after the untrack (it refuses while git tracks a file); the authoritative hydrate writes
+  day files anyway, so nothing of that reaches git. A day's store bytes are `canonicalDay` of its files, whatever their layout: every node once (a
   duplicate keeps the higher `lastSeq`, the later file on a tie), the original JSON lines, in feed-id order, a
   trailing newline, byte for byte the day file `saveEventMap` writes at 24 hours.
-- *aggregate* has three steps for the store:
-  - The shadow hydrate (before the silent-change snapshot): every checked-out day is compared with its generation
-    entry (no network: a difference is a mismatch whatever the store holds). The store is then exercised with the
-    days that differ plus a rotating sample of 4 (`SHADOW_SAMPLE_DAYS`, `shadowSample`): consecutive run numbers
-    (`GITHUB_RUN_NUMBER`) take consecutive slices of the sorted days, so any 12 consecutive aggregate runs (an hour)
-    verify all 46; each fetched blob is checked (the gzip's sha256 by the client, the NDJSON's sha256, size and node
-    count). The summary names the changed and the sampled days. Until 2026-11-19 it fetched all 46 days every run
-    (12.2 MB, 13,000 Class B a day), which verified the same blobs twelve times an hour; a blob the store lost is now
-    found within the hour instead of within 5 minutes, which phase 3a (git is the truth) affords, and phase 3b's
-    hydrate fetches every day anyway.
+- *aggregate* has these steps for the store (phase 3b; phase 3a's are under *Phase 3a* below):
+  - The hydrate (first, before the silent-change snapshot, which reads the hydrated map): the checkout's event map
+    replaced by exactly the generation's days, each day already identical on disk kept, every other blob fetched (all
+    46 in a fresh checkout, 12.2 MB in 6 batches) and checked (the gzip's sha256 by the client, the NDJSON's sha256,
+    size and node count). Any failure stops the run before anything else reads the map. While git still tracks
+    event-map files in the checkout (the transition run, or a run after a rollback's re-track) git is the truth for
+    that run, as in phase 3a: the checkout is compared with the generation (the differences listed, no store request)
+    and kept.
   - Persist (after the Aggregate step): each day whose canonical sha256 differs from its entry is PUT, then the new
     generation is written. A day the previous generation lists that the checkout lacks throws, unless it is below the
     45-day horizon; a removal is never inferred from a missing file. On any store error nothing is written, so a
-    generation only ever names blobs that exist, and the next run uploads again.
-  - The staging check of every commit that stages `knowledge`: `stage` after aggregate's `git add`, and
-    `src/stage-data.ts` for derive-publish, backfill and archive.
+    generation only ever names blobs that exist; the run stops before its commit.
+  - The commit step: `stage` before the `git add` (the transition, then the layout move), `assert-staged` after it;
+    `src/stage-data.ts` makes the same check for derive-publish, backfill and archive.
 - *derive's prune* edits the generation locally (`pruneGeneration`, no network) beside deleting the day files below the
   horizon.
 - *Absence is never empty or "today"* (the 2026-11-16 design review):
@@ -1825,23 +1825,29 @@ to the ref.
     is neither a map nor a generation (`EVENT_MAP_BOOTSTRAP=1`, or the empty generation `bootstrap-data-branch.sh`
     writes, starts a fresh branch).
   - The floor merge of `saveEventMap` never writes a generation day from moved nodes alone.
-  - `liveFloor` (backfill's floor, onboard's live day, archive's refusal) takes the generation's oldest day, else the
-    checkout's oldest file, else the oldest name in git's tree (backfill's sparse checkout); an empty generation with
-    no event-map file anywhere (a fresh or reset branch before its first aggregate run) or `EVENT_MAP_BOOTSTRAP=1`
-    gives today; anything else throws.
+  - `liveFloor` (backfill's floor, onboard's live day, archive's refusal) takes the generation's oldest day (backfill's
+    sparse checkout holds the generation with `/knowledge/index/*.json`; archive's checkout is never hydrated); with an
+    empty generation (a fresh or reset branch) the checkout's oldest file (that branch's first aggregate run, before
+    its persist) or today; no generation: today with `EVENT_MAP_BOOTSTRAP=1`, otherwise it throws. Since phase 3b
+    neither the checkout's files nor git's tree stand in for a missing generation (git holds only the sentinels).
   - first-solutions stops on a missing map instead of finishing a day empty.
 - *Permissions*: `id-token: write` is held at job level only, by exactly these jobs (tests/stage-data.test.ts names
   them): aggregate, derive.yml, first-solutions' collect, `state-gc.yml`, `state-backup.yml`, `state-rehearsal.yml` and
   health's feed job. Each job-level block restates everything the job needs. The Worker's write list is aggregate (and
   state-rehearsal on staging). derive.yml never writes: its prune is local.
 
-**Phase 3a (this merge): dual write, shadow-verified.** Git still tracks the event map (its hour shards) and stays the truth. The two
-aggregate steps are `continue-on-error`: a mismatch or a store error is reported (the step summary, a `::warning::`,
-the markers of the artifact `state-shadow`) and never stops the feed (`feed:state-shadow`, P2). The hour shards stay
-in git; the repository grows as in phase 2 (the budget table above) plus the generation document's one-line diffs.
+**Phase 3a (PR #155, 2026-11-16 … the phase-3b merge): dual write, shadow-verified.** Git still tracked the event map
+(its hour shards) and stayed the truth. The two aggregate steps were `continue-on-error`: a mismatch or a store error
+was reported (the step summary, a `::warning::`, the markers of the artifact `state-shadow`) and never stopped the feed
+(`feed:state-shadow`, P2). The shadow hydrate compared every checked-out day with its generation entry (no network: a
+difference is a mismatch whatever the store holds), then exercised the store with the days that differed plus a
+rotating sample of 4 (`SHADOW_SAMPLE_DAYS`, `shadowSample`: consecutive run numbers take consecutive slices, so any 12
+consecutive aggregate runs verified all 46); until 2026-11-19 it fetched all 46 days every run. The hour shards stayed
+in git; the repository grew as in phase 2 (the budget table above) plus the generation document's one-line diffs. The
+shadow mode is kept (`hydrate --mode shadow`) for `state-rehearsal.yml` and the dry runs.
 
-**The phase-3a rollout: PR #155 merged inert, a second commit switched the store on.** The production jobs read the
-store's switch as `${{ vars.FEED_STATE_BACKEND || 'worker' }}` (aggregate's two state steps, derive.yml's hydrate,
+**The phase-3a rollout: PR #155 merged inert, a second commit switched the store on.** Until the phase-3b merge the
+production jobs read the store's switch as `${{ vars.FEED_STATE_BACKEND || 'worker' }}` (aggregate's two state steps, derive.yml's hydrate,
 `state-gc.yml`, `state-backup.yml` and health's feed job): on by default since that commit, and the repository variable
 `FEED_STATE_BACKEND=off` is phase 3a's kill switch (no commit needed). Off (as in #155 itself, where the jobs read the
 variable alone), every state step reports `off` and touches nothing,
@@ -1861,8 +1867,11 @@ GC and the backup complete with an `off` marker, and health judges none of `feed
    green; the scheduled runs take over: the heartbeat Worker's dispatches (state-backup at 00:31 and 06:31,
    state-gc at 03:33 UTC; GitHub delivered neither job's cron on 2026-11-16 or 11-17), with the crons (00:41 and 03:23
    UTC) as the fallback.
-Switching the store off again in phase 3a is `gh variable set FEED_STATE_BACKEND --body off`; from phase 3b the store
-is required (3b removes the kill switch).
+Switching the store off in phase 3a was `gh variable set FEED_STATE_BACKEND --body off`. Since the phase-3b merge no
+workflow reads that variable: every production job sets `FEED_STATE_BACKEND: worker` itself (tests/state-jobs.test.ts),
+the feed's state steps fail closed without a store, and the variable, if set, changes nothing (delete it:
+`gh variable delete FEED_STATE_BACKEND`). From phase 3b the store holds the only copy of the event map, so "off" would
+mean a feed without its dedup state; GC's brake is `STATE_GC_SCHEDULED=dry-run`.
 
 Rehearsed on the event map of `origin/data` 1f12e4461c8 (2026-11-16 05:53 UTC; `git archive` of the directory, a
 directory store):
@@ -1873,10 +1882,8 @@ directory store):
 - the shadow hydrate verified all 46 against the checkout in 0.6 s;
 - an authoritative hydrate into an empty directory gave the 46 files byte for byte.
 
-`scripts/phase3/dryrun.sh` replays whole cycles (shadow hydrate, snapshot, a real aggregate commit's changes, persist,
-the staging check (no day file staged: git keeps the hour shards), an injected lockless commit and its rebase, derive with its generation
-prune, validate, stage-data, a closing shadow hydrate and an authoritative one) on a local worktree of `data` with
-`FEED_STATE_BACKEND=fs:<dir>`.
+`scripts/phase3/dryrun.sh` replays whole cycles on a local worktree of `data` with `FEED_STATE_BACKEND=fs:<dir>`; since
+the phase-3b PR it replays phase 3b's (below, *Rehearsed*).
 
 **The daily jobs.**
 - `state-gc.yml` runs in the writer group (gated, `scripts/writer-queue.mjs` WRITERS), so no persist can re-reference a
@@ -1953,40 +1960,139 @@ nothing but the shadow.
 
 Exit path: the bucket is plain S3 keys; `rclone` it to any S3 store and add an S3 backend beside `FsBackend`.
 
-**Phase 3b (a later PR): untrack.**
-- *Gate*:
-  - at least 24 hours of phase 3a with no `feed:state-shadow` row;
-  - GC (dry runs) and backups green, and the staging rehearsal green;
-  - no writer run created before the 3a merge still queued (`node scripts/writer-queue.mjs status`);
-  - and from then on, never re-run a run from before 3b.
-- *The PR*:
-  - Set `EVENT_MAP_STORE_AUTHORITATIVE = true` in `src/event-map-store.ts`. Its effects:
-    - aggregate's hydrate replaces the checkout's event map with the generation's days, every day already identical
-      on disk kept, and fails on anything;
-    - a persist failure fails the run;
-    - `EVENT_MAP_IN_GIT` defaults to 0, and with it the commit step's `stage` makes the transition: the
-      `.gitignore` lines `knowledge/index/event_map/*` and `!knowledge/index/event_map/0000-00-00.ndjson`,
-      `git rm --cached` of every tracked event-map file (phase 3a's hour shards; they stay on disk), and the tracked
-      sentinel `0000-00-00.ndjson`;
-    - `saveEventMap` writes one file per day (`eventMapShardHours` is 24 once git no longer tracks the map) and
-      aggregate moves any day left in shards (`moveToDayLayout`): the layout move happens off git;
-    - every later commit refuses a staged event-map file;
-    - derive-publish's hydrate after the push restores any day a push retry's rebase removed;
-    - first-solutions' collect hydrates before it reads.
-  - Remove `continue-on-error` from aggregate's and derive.yml's two state steps. The hydrate then runs with
-    `AUTHORITATIVE_HYDRATE_POLICY`: all 46 days (12.2 MB, a fresh checkout has none) in 6 batches, 3 in flight, 4
-    attempts a batch of at most 20 s each (10 s for a full batch), 15 s of backoff a request, and a 60 s deadline
-    over the step, after which it fails closed (the run stops; the next one tries again 5 minutes later). A run needs
-    2–4 s, a stalled batch about 15 s more. Its 2-minute `timeout-minutes` stays the backstop. Persist runs with the
-    client's default policy (`SHADOW_RETRY_POLICY` applies only while `EVENT_MAP_STORE_AUTHORITATIVE` is false), up to
-    about 87 s a request, so raise its `timeout-minutes` to 4.
-  - Lower `feed:repo-growth`'s `maxMbPerDay` to 11 (scripts/lib/findings.mjs).
-- *The sentinel* is one line that is not JSON. Code from before 3a that parses it throws instead of reading an
-  untracked map as empty, and its live floor becomes `0000-00-00`, so an old backfill writes nothing. New code skips
-  it.
-- *Rollback after 3b*: a revert to 3a, which fails closed on a checkout without day files, so the revert must restore
-  the tracked files first. Hydrate authoritatively, commit the day files with the sentinel and the ignore lines
-  removed, then revert.
+**Phase 3b, as merged: the event map out of git.** Owner go 2026-11-26; the gate (written in phase 3a) was met: no
+`feed:state-shadow` row since 2026-11-19 10:40 UTC (about 6.5 days), GC dry runs, backups and the staging rehearsal
+green. The store holds the only copy of the event map; git holds the generation and two sentinels.
+
+- *The switch*: `EVENT_MAP_STORE_AUTHORITATIVE = true` (src/event-map-store.ts). Its effects:
+  - aggregate's and derive.yml's hydrate replaces the checkout's event map with the generation's days and fails closed:
+    no `continue-on-error`, `AUTHORITATIVE_HYDRATE_POLICY` (all 46 days, 12.2 MB, in 6 batches, 3 in flight, 4 attempts
+    a batch of at most 20 s each, 15 s of backoff a request, a 60 s deadline over the store requests) and a 3-minute
+    `timeout-minutes` as the backstop. A run needs 2–4 s; a stalled batch about 15 s more.
+  - persist fails the run before its commit and push: no `continue-on-error`, the client's default policy (up to about
+    87 s a request; usually 1–3 PUTs), a 4-minute `timeout-minutes`.
+  - The store is required: no kill switch. Every production job sets `FEED_STATE_BACKEND: worker` itself (aggregate's
+    two state steps, derive.yml, derive-publish's re-hydrate, first-solutions' collect, state-gc, state-backup, health's
+    feed job) and none reads the repository variable; a state step without a store fails (`config`).
+  - `saveEventMap` writes day files wherever git no longer tracks event-map files, and the commit step moves the rest.
+  - Every commit refuses a staged event-map path but the sentinels (`assert-staged` in aggregate.yml, src/stage-data.ts
+    for derive-publish, backfill and archive), and a sentinel staged with other bytes.
+  - A failed state step is an `::error::` annotation and a failed run, and its marker still reaches health (the upload
+    is `if: always()`).
+- *The transition* is the first phase-3b aggregate run; nothing else changes the branch's layout:
+  1. Its hydrate finds the hour shards tracked: git is still the truth for that run (the generation committed beside
+     them can only lag them, after a phase-3a persist that failed, never lead them), so the checkout is compared and
+     kept, no store request. aggregate saves in hour shards (git tracks them), persist uploads what changed.
+  2. The commit step, before its `git add`, runs `stage`: the ignore lines into `.gitignore`, the two sentinels written,
+     `git rm -r --cached knowledge/index/event_map` (the files stay on disk), the sentinels and `.gitignore` added back,
+     and only then the layout move to day files (`moveToDayLayout` refuses while git tracks a file). After the
+     `git add knowledge status status.json .gitignore`, `assert-staged`. In every later run `stage` stages nothing.
+  3. The commit (rehearsed on production's commit ea2ce39262e, 2026-11-25 23:57 UTC): `D` of every tracked hour shard
+     (1,104), `A knowledge/index/event_map/0000-00-00.ndjson`, `A knowledge/index/event_map/9999-12-31.ndjson`,
+     `M .gitignore` (three lines added: `knowledge/index/event_map/*`, `!knowledge/index/event_map/0000-00-00.ndjson`,
+     `!knowledge/index/event_map/9999-12-31.ndjson`), `M knowledge/index/generation.json`, and the run's usual paths
+     (head, sweeps, watermarks, provider activity, the observation hour, status.json and the status history day):
+     1,115 paths, 1.4 MB of new blobs (production's commit of the same run: 1.5 MB). A push retry rebases it over a
+     lockless commit without a conflict, and the ignored day files survive the rebase.
+  4. derive-publish's re-hydrate then finds every day on disk (0 fetched); the next run's hydrate fetches all 46.
+- *The sentinels*: two tracked files, one line each that is not JSON (`SENTINEL_TEXT`), skipped by every reader of
+  this code. They are for code from before phase 3b that runs anyway (a re-run of an old run, a run queued before the
+  merge), which reads the directory in two ways:
+
+  | Reader | `0000-00-00.ndjson` | `9999-12-31.ndjson` | Result |
+  |---|---|---|---|
+  | loader before phase 3, with a cutoff day (aggregate, derive) | skipped (below every cutoff) | parsed: throws | fails closed |
+  | loader before phase 3, no cutoff (tools) | parsed: throws | parsed: throws | fails closed |
+  | backfill's floor before phase 3 (the smallest name) | 0000-00-00: fills nothing | — | writes nothing |
+  | phase 3a (main before this merge) | skipped | an event-day to it; and the generation's days are lacking | fails closed |
+
+  With `0000-00-00` alone (the runbook of phase 3a) an old aggregate or derive would have loaded an EMPTY map (minted
+  every event anew, published empty views) instead of throwing; with `9999-12-31` alone an old backfill's floor would
+  have been 9999-12-31 and it would have filled the live days. tests/phase3b.test.ts replays both readers.
+- *Every reader of the map reads the hydrated checkout*: aggregate's silent-change snapshot runs after the hydrate;
+  derive.yml hydrates first; derive-publish re-hydrates after its reset (a push retry's rebase, or the reset, cannot
+  leave derive with fewer days); first-solutions' collect hydrates, read only (the Worker's read route; it never
+  commits); backfill and archive take the live floor from the generation (backfill's sparse checkout has it with
+  `/knowledge/index/*.json`, which matches no file under `event_map/`); stats never reads the event map (its sparse
+  checkout is the same pattern). `loadEventMap` on a checkout with no day says so and points to the hydrate; the
+  scripts that load a data checkout's event map (heal-dryrun, correction-dryrun, live-baseline-replay) fail with
+  that message; scripts/bootstrap-data-branch.sh and reset-data-branch.sh write the phase-3b layout (the empty
+  generation, the sentinels, the ignore lines).
+- *Health*: `feed:state-shadow` (key kept, title "feed run stopped at the state store") now means a feed run that
+  stopped at its state step before its push: a hydrate that could not read or verify the generation's days, a persist
+  that could not upload, a step killed by its timeout. P2; the next run retries 5 minutes later; a failure that lasts
+  stops the feed, and `feed:freshness`'s text then starts with "the newest feed runs stopped at the state store
+  (feed:state-shadow)". `feed:state-quota` (P1) names a Cloudflare 1027. `feed:repo-growth`'s line is 11 MB a day.
+- *Growth*: the replay's aggregate commits after the transition add 0.04–0.08 MB of new blobs each (production's
+  commits of the same runs: 0.19–0.37 MB, the hour shards); the event_map tree is no longer rewritten.
+
+**Rehearsed (2026-11-26)** with `scripts/phase3/dryrun.sh` on a local worktree of `data` (never pushed; a directory
+store seeded from the start commit, `--seed`), from production's derive commit 19180154fde (2026-11-25 23:53 UTC),
+replaying production's next five aggregate commits at their own times: the transition (with a lockless commit pushed
+first and the rebase), a run with derive at 23:59:59 and the staging at 00:00:01 (11-15 froze and was committed once,
+a lockless commit and its rebase), the first derive after midnight (its prune: 10-11 left the disk and the
+generation; the commit carried generation.json and no event-map path), a run whose derive failed, and the run after
+it. Every hydrate verified, every persist and commit step passed, derive-publish's re-hydrate fetched nothing after
+each rebase, and an authoritative hydrate of each committed generation into an empty directory gave the checkout's
+days byte for byte. The generation's days (sha256, bytes, nodes) equalled production's after the first and the
+fifth replayed commit: the store's event map is git's, day for day. Only the transition commit touched the event map.
+
+**Before the merge (the checklist).** Run each line; merge only when all hold.
+1. `gh run list -R TheShelterApp/earthquakes-feed -w state-backup.yml -L 3`, `-w state-gc.yml -L 3`,
+   `-w state-rehearsal.yml -L 1`: the newest of each `success` (a backup within 36 h; GC still `dry-run`).
+2. The "[health] feed" board has no open `feed:state-shadow`, `feed:state-budget` or `feed:state-quota` entry, and
+   the newest health run's notes show no `state shadow: … not ok` since 2026-11-19 10:40 UTC.
+3. The state Worker in production is the version of `main` (`npx wrangler deployments list -c state/wrangler.toml
+   --env ""`, the last line's `main <commit>`); this PR changes nothing under `state/`, so no redeploy.
+4. The PR's checks are green (`validate.yml`: `npm test`, `npm run typecheck`).
+5. No dispatch of backfill, archive, derive or state-gc is planned for the next 15 minutes, and the clock is outside
+   00:15–00:45 UTC (midnight's last commit, the backups), 03:15–03:45 (GC holds the writer lock) and the five minutes
+   before archive's :17 of 00/06/12/18 UTC.
+6. `GH_TOKEN=$(gh auth token) GITHUB_REPOSITORY=TheShelterApp/earthquakes-feed node scripts/writer-queue.mjs status`
+   prints `nothing`, or a single `aggregate #<id> holding` and nothing else: no writer run created before the merge
+   is queued. (A run holding the lock runs phase 3a's code to its end and pushes before any phase-3b run starts; the
+   queue is first in, first out.)
+7. Merge at once (within the same minute as line 6; the heartbeat dispatches at every :00 and :05).
+8. Right after it, line 6 again, then for each run it lists `gh run view <id> -R TheShelterApp/earthquakes-feed
+   --json headSha,createdAt`: every queued run's `headSha` is the merge commit (or later). A queued run of an older
+   commit (a dispatch in the seconds around the merge): `gh run cancel <id>`. Left alone it would fail closed (phase
+   3a's loader refuses the lacking days), red but harmless.
+9. Never re-run a run created before the merge (GitHub offers re-runs for 30 days): its code reads the branch as
+   above. The sentinels make it fail closed; the rule is that it never runs.
+
+**After the merge.** The first aggregate run is the transition: its "State hydrate" summary reads `git still tracks
+1,1xx event-map file(s) … every one identical to the checkout`, its commit carries the content of *The transition*,
+step 3 (`git show --stat <commit>` on `data`), derive-publish's re-hydrate reads `… 0 fetched`, and the next run's
+hydrate `46 day(s) written, 46 fetched (12.x MB in 6 batch(es))`. Then `gh variable list` and, if
+`FEED_STATE_BACKEND` is there, `gh variable delete FEED_STATE_BACKEND` (read by nothing now). Watch `feed:state-shadow`
+and `feed:freshness` for a day, and `feed:repo-growth` (the 11 MB a day line) from a week on.
+
+**Rollback after 3b** (only if phase 3b itself is wrong; a store outage is not a reason: *Outage budget*, *Restore*).
+A plain revert is never enough: phase 3a's code on the phase-3b branch fails closed on every run (the generation's
+days are lacking), so the event map must be back in git first, and nothing of phase 3b may run in between.
+1. `gh workflow disable aggregate.yml -R TheShelterApp/earthquakes-feed` (the heartbeat's dispatches are refused
+   meanwhile; `feed:freshness` fires after 30 minutes, which is expected: silence it for the window).
+2. Wait until `node scripts/writer-queue.mjs status` (line 6 above) prints `nothing`.
+3. `gh workflow run derive.yml -R TheShelterApp/earthquakes-feed -f retrack=true` (add `-f force=true` if the gate
+   refuses). Under the writer lock it hydrates (authoritative), then `event-map-store.ts retrack` writes the map back
+   as phase 3a's hour shards, checks every day's canonical bytes against the generation (it refuses an unhydrated or
+   differing checkout), removes the ignore lines and both sentinels, and commits and pushes "retrack: …"; the derive
+   and publish steps follow as usual (their re-hydrate keeps the now-tracked checkout). About 12 MB of shards enter
+   the repository once.
+4. Check `data`: `git ls-tree origin/data knowledge/index/event_map/ | wc -l` about 1,100 hour shards and no
+   `0000-00-00.ndjson`/`9999-12-31.ndjson`; `git show origin/data:.gitignore` without the event-map lines.
+5. Merge the revert of the phase-3b merge commit (phase 3a's code, `EVENT_MAP_STORE_AUTHORITATIVE = false`).
+6. `gh workflow enable aggregate.yml`: phase 3a's runs shadow-verify and persist as before.
+A phase-3b run that slips in between 3 and 5 is no harm: its hydrate finds the shards tracked (git is the truth) and
+its commit makes the transition again; repeat from step 1.
+
+**Reading the event map outside the feed's jobs.** A checkout of `data` holds no event-map day, and the Worker answers
+only this repository's workflows. Locally, from a daily backup (the state at 00:00 UTC of a day):
+`gh release download state-2026-11 -R TheShelterApp/earthquakes-feed -p state-2026-11-25.tar.zst`, then
+`npx tsx scripts/state-restore.ts state-2026-11-25.tar.zst --out /tmp/state` (it verifies every blob and prints the
+data commit), `git -C <data> checkout <that commit>`, and
+`FEED_STATE_BACKEND=fs:/tmp/state DATA_DIR=<data> npx tsx src/event-map-store.ts hydrate`: the day files of that
+commit's generation, which every tool then reads.
 
 **Phase 4.0: the Worker's protocol 2, inert.** The state Worker gained one compare-and-swap ref per writer lane
 (`refs/main`, `refs/main-shadow`, `refs/first-solutions`, `refs/history`) and a create-only reflog

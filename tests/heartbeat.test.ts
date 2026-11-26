@@ -24,8 +24,32 @@ test('heartbeat: the hour, minute by minute', () => {
   assert.deepEqual(minutesOf('backfill.yml'), [41]);
   assert.deepEqual(minutesOf('first-solutions.yml'), [48]);
   assert.deepEqual(minutesOf('history.yml'), [26]);
-  // 19 dispatches an hour, every other minute does nothing.
-  assert.equal(minutes.filter((m) => workflowFor(m, 9) != null).length, 19);
+  assert.deepEqual(minutesOf('health-liveness.yml'), [13, 43]);
+  // 21 dispatches an hour, every other minute does nothing.
+  assert.equal(minutes.filter((m) => workflowFor(m, 9) != null).length, 21);
+});
+
+test('heartbeat: health-liveness at :13 and :43, on minutes nothing else uses in any hour; dispatched with tick=1 (a real check); its own cron stays the second path', () => {
+  // No other workflow on those minutes, in any hour (the daily state jobs' 00:31, 03:33 and 06:31 included).
+  const taken = new Map<string, string>();
+  for (const h of hours) for (const m of minutes) {
+    const w = workflowFor(m, h);
+    if (w) taken.set(`${h}:${m}`, w);
+  }
+  for (const h of hours) for (const m of [13, 43]) assert.equal(taken.get(`${h}:${m}`), 'health-liveness.yml', `${h}:${m}`);
+  for (const [, m] of DAILY) assert.ok(![13, 43].includes(m), `daily minute ${m}`);
+  for (const w of ['aggregate.yml', 'health.yml', 'backfill.yml', 'first-solutions.yml', 'history.yml']) {
+    for (const m of minutesOf(w)) assert.ok(![13, 43].includes(m), `${w} at :${m}`);
+  }
+  // Every 30 minutes: inside the check's 45-minute self-heal line, with a missed tick still inside its 90-minute one.
+  assert.equal(43 - 13, 30);
+  assert.deepEqual(inputsFor('health-liveness.yml'), { tick: '1' });
+  const yml = readFileSync(here('../.github/workflows/health-liveness.yml'), 'utf8');
+  assert.match(yml, /\non:\n {2}schedule:\n {4}- cron: '3,13,23,33,43,53 \* \* \* \*'\n {2}workflow_dispatch:\n/, 'the cron stays');
+  assert.match(yml, /\n {6}tick:\n(?: {8}#.*\n)* {8}description: /, 'the workflow declares tick (GitHub refuses an undeclared input)');
+  // A tick acts; a manual dispatch stays a dry run by default; a cron delivery acts.
+  assert.ok(yml.includes("DRY_RUN: ${{ inputs.tick != '1' && inputs.dry_run && '1' || '' }}"));
+  assert.match(yml, /\nconcurrency:\n {2}group: health-liveness\n {2}cancel-in-progress: false\n/, 'a tick and a cron delivery of one minute meet in one group');
 });
 
 test('heartbeat: the day: state-backup at 00:31 and 06:31, state-gc at 03:33 UTC, on minutes no hourly workflow uses', () => {
@@ -35,8 +59,8 @@ test('heartbeat: the day: state-backup at 00:31 and 06:31, state-gc at 03:33 UTC
   assert.deepEqual(at('state-gc.yml'), ['03:33']);
   // Every other hour is the plain hour; hours 0, 3 and 6 have one dispatch more, and every hourly workflow keeps its minutes.
   for (const h of hours) {
-    assert.equal(minutes.filter((m) => workflowFor(m, h) != null).length, h === 0 || h === 3 || h === 6 ? 20 : 19, `hour ${h}`);
-    for (const w of ['aggregate.yml', 'health.yml', 'backfill.yml', 'first-solutions.yml', 'history.yml']) assert.deepEqual(minutesOf(w, h), minutesOf(w), `${w} at hour ${h}`);
+    assert.equal(minutes.filter((m) => workflowFor(m, h) != null).length, h === 0 || h === 3 || h === 6 ? 22 : 21, `hour ${h}`);
+    for (const w of ['aggregate.yml', 'health.yml', 'health-liveness.yml', 'backfill.yml', 'first-solutions.yml', 'history.yml']) assert.deepEqual(minutesOf(w, h), minutesOf(w), `${w} at hour ${h}`);
   }
   // A daily minute is free in every hour: no hourly workflow loses a tick to it, and (workflow, minute) stays one claim.
   for (const [, m] of DAILY) assert.equal(workflowFor(m, 9), null, `minute ${m} is unused by the hourly fan-out`);
@@ -59,9 +83,10 @@ test('heartbeat: history gets its own minute, away from the writers and from fir
   assert.ok(m! + 20 < minutesOf('first-solutions.yml')[0]!);
 });
 
-test('heartbeat: only first-solutions and state-gc are dispatched with inputs (GitHub refuses inputs a workflow does not declare)', () => {
+test('heartbeat: only first-solutions, state-gc and health-liveness are dispatched with inputs (GitHub refuses inputs a workflow does not declare)', () => {
   assert.deepEqual(inputsFor('first-solutions.yml'), { tick: '1' });
   assert.deepEqual(inputsFor('state-gc.yml'), { tick: '1' });
+  assert.deepEqual(inputsFor('health-liveness.yml'), { tick: '1' });
   for (const w of ['history.yml', 'aggregate.yml', 'backfill.yml', 'health.yml', 'state-backup.yml']) assert.equal(inputsFor(w), null, w);
 });
 
@@ -249,11 +274,12 @@ test('heartbeat: a whole hour of doubled activations dispatches each workflow ex
     return [`2026-10-14T09:${mm}:22Z`, `2026-10-14T09:${mm}:51Z`];
   });
   await h.activate(times, { lateMs: 1_500 });
-  assert.equal(h.calls.length, 19);
-  for (const workflow of ['aggregate.yml', 'health.yml', 'backfill.yml', 'first-solutions.yml', 'history.yml']) {
+  assert.equal(h.calls.length, 21);
+  for (const workflow of ['aggregate.yml', 'health.yml', 'health-liveness.yml', 'backfill.yml', 'first-solutions.yml', 'history.yml']) {
     assert.equal(h.dispatched(workflow), minutesOf(workflow).length, workflow);
   }
-  assert.equal(h.logs.filter((l) => l.startsWith('skip ')).length, 19);
+  assert.deepEqual(h.calls.filter((c) => c.workflow === 'health-liveness.yml').map((c) => c.body), [{ ref: 'main', inputs: { tick: '1' } }, { ref: 'main', inputs: { tick: '1' } }]);
+  assert.equal(h.logs.filter((l) => l.startsWith('skip ')).length, 21);
 });
 
 test('heartbeat: 30 s jitter and concurrent arrivals inside the intended minute still dispatch once', async () => {
@@ -336,9 +362,9 @@ test('heartbeat ledger: every minute still claimable keeps its row; older rows a
     if (workflow) assert.equal(claimMinute(sql, workflow, m, m * 60_000 + 22_000), 'claimed');
   }
   const end = start + 1440;
-  // Bounded: at most KEEP_MINUTES of rows (19 an hour).
+  // Bounded: at most KEEP_MINUTES of rows (21 an hour).
   const rows = sql.rows();
-  assert.ok(rows.length <= (KEEP_MINUTES / 60) * 19 + 1, String(rows.length));
+  assert.ok(rows.length <= (KEEP_MINUTES / 60) * 21 + 1, String(rows.length));
   // Every claimable minute (not older than ACCEPT_MINUTES) is still refused as a duplicate, older ones as stale.
   for (let m = end - ACCEPT_MINUTES - 30; m < end; m++) {
     const workflow = workflowFor(m % 60, Math.floor(m / 60) % 24);

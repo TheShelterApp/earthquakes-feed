@@ -363,14 +363,17 @@ variable.
 
 ### The heartbeat Worker (`heartbeat/`)
 
-A cron-only Cloudflare Worker that dispatches `aggregate` (every 5 min), `health` (every 15 min),
-`backfill`, `first-solutions` and `history` (hourly), and the state store's `state-backup` (00:31 and 06:31 UTC: the second retries a lost first
+A cron-only Cloudflare Worker that dispatches `aggregate` (every 5 min), `health` (every 15 min), `health-liveness`
+(:13 and :43, with `tick=1`, so the run acts like a cron delivery instead of the manual dry run), `backfill`,
+`first-solutions` and `history` (hourly), and the state store's `state-backup` (00:31 and 06:31 UTC: the second retries a lost first
 dispatch or failed run before `feed:state-backup`'s P2 line at 12:00 UTC of the next day) and
 `state-gc` (03:33 UTC, with `tick=1`: the scheduled run) through the Actions API with a fine-grained
 `GH_PAT` (Actions: write). The two daily jobs keep their own GitHub crons (00:41, 03:23) as the fallback for a Worker
 outage; GitHub delivered neither on 2026-11-16 or 11-17. Health has no such fallback of its own beyond its `:25` cron:
 `health-liveness.yml` dispatches it when no health run reconciled for 45 minutes and mentions the owner after 90
-(*Health watchdogs*, Liveness). It has no HTTP surface (`workers_dev = false`, `preview_urls = false`).
+(*Health watchdogs*, Liveness); the Worker's ticks of `health-liveness.yml` came in 2026-11-26, when GitHub had
+delivered that workflow's own cron about 20 times in 6.5 days, and the cron stays its second, independent path (while
+the Worker is down it is the only one, as before). It has no HTTP surface (`workers_dev = false`, `preview_urls = false`).
 Cron Triggers are not exactly-once (on 2026-10-14 the one `* * * * *` trigger fired twice a minute, 30 s apart, and every
 workflow was dispatched twice), so each activation first claims its (workflow, intended UTC minute) in a dispatch
 ledger, one SQLite-backed Durable Object (`heartbeat/src/ledger.js`): exactly one activation per minute dispatches, a
@@ -595,8 +598,10 @@ When health stops (the Worker down or its `GH_PAT` refused, and GitHub not deliv
 and the boards just stop changing; when its runs start but never reconcile (the gate failing at checkout, `reconcile`
 exiting 3 before it saves), each run is red but no P1/P2 can be mentioned either. `health-liveness.yml` runs on a GitHub
 cron of its own (every 10 minutes, never at minute 0; GitHub delivers this repository's crons late or not at all, so it
-is frequent and idempotent) and measures what health wrote, not how its runs ended: the newest hidden state of the three
-boards (`updatedMs`, rewritten by every reconcile; the same time `reconcile` measures its own gap from). No reconcile
+is frequent and idempotent; about 20 deliveries in 6.5 days to 2026-11-26), and the heartbeat Worker also dispatches it
+at :13 and :43 (`tick=1`): two paths, the cron sharing nothing with the Worker. It measures what health wrote, not how
+its runs ended: the newest hidden state of the three boards (`updatedMs`, rewritten by every reconcile; the same time
+`reconcile` measures its own gap from). No reconcile
 for 45 minutes dispatches `health.yml` once (not again while a health run created in the last 45 minutes exists); over
 90 minutes, one comment on the "[health] platform" board mentions `HEALTH_MENTION`, once per outage (the outage is
 everything since the last reconcile: a bot comment with the hidden `<!-- health-liveness v1 outage=<ms> -->` marker since

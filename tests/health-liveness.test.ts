@@ -409,10 +409,12 @@ test('run: unreadable boards, numbers, runs or comments and a refused comment ar
 
 const read = (rel: string): string => readFileSync(fileURLToPath(new URL(`../${rel}`, import.meta.url)), 'utf8');
 
-test('health-liveness.yml: its own cron (independent of the heartbeat Worker), the bot token, the two write scopes, the variable', () => {
+test('health-liveness.yml: its own cron (independent of the heartbeat Worker) and the Worker\'s ticks, the bot token, the two write scopes, the variable', () => {
   const yml = read('.github/workflows/health-liveness.yml');
   assert.match(yml, /\non:\n {2}schedule:\n {4}- cron: '3,13,23,33,43,53 \* \* \* \*'\n/);
-  assert.doesNotMatch(read('heartbeat/src/worker.js'), /health-liveness/, 'the Worker never dispatches it: it watches the Worker\'s work');
+  // Two paths since 2026-11-26: the Worker dispatches it at :13 and :43 (tests/heartbeat.test.ts), and the cron, which
+  // shares nothing with the Worker, stays: while the Worker is down (and health with it) the cron is the only path.
+  assert.match(read('heartbeat/src/worker.js'), /if \(minute === 13 \|\| minute === 43\) return 'health-liveness\.yml';/);
   assert.match(yml, /\n {6}actions: write\n/);
   assert.match(yml, /\n {6}issues: write\n/);
   assert.match(yml, /\n {10}GH_TOKEN: \$\{\{ github\.token \}\}\n/);

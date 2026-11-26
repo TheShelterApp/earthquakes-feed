@@ -15,12 +15,13 @@
 //   superseded it, a daily one's (state-backup, state-gc) GitHub cron is its fallback, and a catch-up burst cannot queue
 //   a backlog of old ticks.
 // - Rows are kept KEEP_MINUTES (longer than ACCEPT_MINUTES), so every minute that can still be claimed has its row:
-//   duplicates are refused exactly; the table holds about 57 rows (19 an hour, 3 hours; a daily dispatch adds one).
+//   duplicates are refused exactly; the table holds about 63 rows (21 an hour, 3 hours; a daily dispatch adds one).
 //
 // Cost on the Workers Free plan (account-wide, shared with the alerts gateway: DO rows written 100,000/day, rows read
 // 5,000,000/day, requests 100,000/day). Measured in workerd: a claim writes 2 rows (the insert and the one row pruned)
-// and reads 3, a duplicate writes 0 and reads 2, a release writes 1. 19 dispatches an hour and 3 a day = about 918 rows
-// written, 1,400 rows read and 459 requests a day (twice the reads and requests while Cloudflare doubles the activations).
+// and reads 3, a duplicate writes 0 and reads 2, a release writes 1. 21 dispatches an hour (19 before health-liveness's
+// :13 and :43, 2026-11-26) and 3 a day = about 1,014 rows written, 1,500 rows read and 507 requests a day (twice the reads
+// and requests while Cloudflare doubles the activations).
 //
 // Pure functions over a `sql.exec(query, ...bindings)` handle (the Durable Object's `ctx.storage.sql`), so the tests
 // run them on node:sqlite; heartbeat/src/index.js wraps them in the Durable Object class.

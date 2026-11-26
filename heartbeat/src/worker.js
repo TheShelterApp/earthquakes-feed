@@ -10,6 +10,17 @@
 //   minute 48            -> first-solutions (earliest-solutions side index, hourly; dispatched with tick=1, so
 //                           the workflow goes ahead only while the repository variable FIRST_SOLUTIONS_SCHEDULE
 //                           is `on`; its own hourly GitHub cron was delivered about 4 times a day on 2026-10-01)
+//   minute 13, 43        -> health-liveness (health's dead-man switch, twice an hour; dispatched with tick=1, so the
+//                           run acts instead of the manual dispatch's dry run). Its own GitHub cron (every 10 min) stays
+//                           the second, independent path: GitHub delivered it about 20 times in 6.5 days (survey to
+//                           2026-11-26), so the check ran hours apart while health was fine. The two paths cover each
+//                           other: while the Worker is down (health then gets no dispatches either) the cron is the only
+//                           one, as before; while GitHub drops the cron, the Worker's ticks run it every 30 minutes,
+//                           well inside its 45-minute self-heal and 90-minute mention lines. :13 and :43 are used by
+//                           nothing else (no multiple of 5, none of 7/22/26/31/33/37/41/48/52); a Worker dispatch and a
+//                           cron delivery of the same minute meet in the workflow's concurrency group, and the check is
+//                           idempotent (no second dispatch while a health run of the last 45 min exists, one comment
+//                           per outage)
 //   minute 26            -> history   (deep-history walk, hourly; no inputs: the workflow's own first step reads
 //                           providers/history.json and does nothing unless `enabled` is true. Its :29 GitHub cron was
 //                           not delivered once between 2026-10-01 16:54 and 21:00 UTC. :26 is after the
@@ -51,8 +62,8 @@ export const DAILY = Object.freeze([
 /**
  * The workflow to dispatch for a given UTC hour and minute, or null on the ~41 minutes/hour that do nothing.
  * Pure + exported so the fan-out can be unit-checked without the runtime. The order matters only if the
- * ranges overlapped — they don't (26, 31, 33, 41, 48 and 7/22/37/52 are never multiples of 5) — but the specific minutes
- * are matched before the every-5 fallback for clarity.
+ * ranges overlapped — they don't (13/43, 26, 31, 33, 41, 48 and 7/22/37/52 are never multiples of 5) — but the specific
+ * minutes are matched before the every-5 fallback for clarity.
  */
 export function workflowFor(minute, hour) {
   for (const [h, m, workflow] of DAILY) if (hour === h && minute === m) return workflow;
@@ -60,16 +71,17 @@ export function workflowFor(minute, hour) {
   if (minute === 48) return 'first-solutions.yml';
   if (minute === 26) return 'history.yml';
   if (minute === 7 || minute === 22 || minute === 37 || minute === 52) return 'health.yml';
+  if (minute === 13 || minute === 43) return 'health-liveness.yml';
   if (minute % 5 === 0) return 'aggregate.yml';
   return null;
 }
 
 /**
- * The `inputs` of a dispatch, or null for none. GitHub refuses inputs a workflow does not declare, so only the workflow
- * that declares `tick` gets it.
+ * The `inputs` of a dispatch, or null for none. GitHub refuses inputs a workflow does not declare, so only the workflows
+ * that declare `tick` get it (health-liveness: without it a dispatch would be the manual dry run).
  */
 export function inputsFor(workflow) {
-  return workflow === 'first-solutions.yml' || workflow === 'state-gc.yml' ? { tick: '1' } : null;
+  return workflow === 'first-solutions.yml' || workflow === 'state-gc.yml' || workflow === 'health-liveness.yml' ? { tick: '1' } : null;
 }
 
 // GitHub answers a dispatch in well under a second; the timeout bounds how long a claim can be in flight, so a failed

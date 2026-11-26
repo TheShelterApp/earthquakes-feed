@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Health's own liveness (owner decision 2026-11-19), run by .github/workflows/health-liveness.yml on a GitHub cron of
-// its own. It replaces the dead-man switch Healthchecks.io was to be (dropped: its sign-up email never arrived).
+// its own and, since 2026-11-26, also dispatched by the heartbeat Worker at :13 and :43 (GitHub delivered the cron about
+// 20 times in 6.5 days; the cron stays the path that shares nothing with the Worker). It replaces the dead-man switch
+// Healthchecks.io was to be (dropped: its sign-up email never arrived).
 //
 // health.yml is dispatched by the heartbeat Worker every 15 min, with its own `:25` cron as the fallback; when both stop
 // (the Worker down or its GH_PAT refused, and GitHub not delivering the cron, which it often does not for this repo), no
@@ -10,7 +12,7 @@
 // measures what health WROTE, not whether its runs finished: the boards' newest state.updatedMs (reconcile rewrites every
 // board's hidden state on every run that applies a fresh document; reconcile.mjs lastReconciledMs), the same time
 // reconcile's own gap is measured from, so "health is down" here and "Health runs again" there describe one outage.
-// It reads the boards and health.yml's runs from outside, on a path that shares nothing with the Worker:
+// It reads the boards and health.yml's runs from outside (its cron path shares nothing with the Worker):
 //
 //   - health last reconciled over HEALTH_STALE_MS (45 min: three missed dispatches) ago: dispatch health.yml once, as the
 //     Worker does (self-heal). Not again while a health run was created within the last 45 min (it is queued or running,
@@ -30,7 +32,7 @@
 //
 // A failure of the check itself (a board or the runs unreadable, the dispatch or the comment refused) is an ::error::.
 // The run is red only when no run of this workflow was red within LIVENESS_RED_EVERY_MS (24 h), so a failure that stays
-// (a refused token, a missing board number) emails once a day, not on each of the 144 deliveries.
+// (a refused token, a missing board number) emails once a day, not on each of the 144 cron slots and 48 Worker ticks.
 //
 // The comment is the workflow's GITHUB_TOKEN's (github-actions[bot]), never the owner's PAT: GitHub never notifies a user
 // of their own comment. Without HEALTH_MENTION the comment still goes out, unmentioned (the board's subscribers see it).

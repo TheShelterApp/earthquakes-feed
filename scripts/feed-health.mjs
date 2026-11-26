@@ -94,9 +94,9 @@ const iso = (ms) => (isTime(ms) ? new Date(ms).toISOString() : '?');
 
 /** The fetch settings of a manifest or status.json read (RULES['feed:freshness:unreachable'].limits). */
 /**
- * Whether the state store is on for this run: health.yml passes `${{ vars.FEED_STATE_BACKEND || 'worker' }}` like the
- * state jobs, so it is on unless the repository variable is `off` (the phase-3a kill switch; src/state-store.ts
- * stateBackendSetting reads it the same way).
+ * Whether the state store is on for this run: health.yml sets FEED_STATE_BACKEND=worker itself since storage phase 3b
+ * (phase 3a's kill switch, the repository variable set to `off`, is read by no workflow any more), so it is off only in
+ * a local run without it (src/state-store.ts stateBackendSetting reads it the same way).
  */
 export function stateBackendOn(env) {
   const raw = (env.FEED_STATE_BACKEND ?? '').trim();
@@ -164,7 +164,7 @@ export function evaluateFreshness({ nowMs, v1, v2, queuedMs = 0, reRead = false 
       const ages = reads.map(([name, m]) => (m && m.ok ? `${name}/manifest.json generated ${ageText(nowMs - m.generatedMs)} ago` : `${name}/manifest.json unreachable`)).join(', ');
       const what = readable.length === 2 && olderName === 'v2' && !isStale(v1, nowMs)
         ? 'v1 is fresh, so the signing of v2 has stopped: the alerts backstop reads the old v2'
-        : 'the feed has stopped publishing (heartbeat Worker, GH_PAT, Actions or Pages): apps and the alerts backstop run on stale data';
+        : 'the feed has stopped publishing (heartbeat Worker, GH_PAT, Actions, the state store or Pages): apps and the alerts backstop run on stale data';
       return makeFinding('feed:freshness', {
         sinceMs: older.generatedMs + older.staleAfterMs,
         text: `live manifest is ${ageText(nowMs - older.generatedMs)} stale (contract: ${ageText(older.staleAfterMs)}): ${ages}${reRead ? '; confirmed by a re-read 60 s later' : ''}${queueNote(queuedMs)}; ${what}`,
@@ -692,8 +692,9 @@ export function trustedRun(run, workflows) {
 
 /**
  * feed:state-shadow (P2): a state step that did not succeed in one of the newest markers younger than holdMs (each holds
- * the `hydrate` and `persist` step's JSON: {ok, off, summary, error_kind}). No marker that young: unjudged (the
- * aggregate runs are feed:freshness's), so an open entry is never resolved on silence. A store that is off is a note.
+ * the `hydrate` and `persist` step's JSON: {ok, off, summary, error_kind}). Since storage phase 3b each is a feed run
+ * that stopped before its push. No marker that young: unjudged (the aggregate runs are feed:freshness's), so an open
+ * entry is never resolved on silence. A store that is off is a note.
  */
 export function evaluateStateShadow(read, nowMs) {
   const { holdMs } = RULES['feed:state-shadow'].limits;
@@ -719,7 +720,7 @@ export function evaluateStateShadow(read, nowMs) {
     findings: [makeFinding('feed:state-shadow', {
       sinceMs: Math.min(...problems.map((p) => p.m.createdAtMs)),
       members: [...new Set(problems.map((p) => p.step))],
-      text: `${problems[0].text}${problems.length > 1 ? ` (+${problems.length - 1} more)` : ''}: the state store disagrees with git or cannot be reached; git is still the truth (phase 3a), phase 3b waits for 24 h without this (APIs.md Repository size)`,
+      text: `${problems[0].text}${problems.length > 1 ? ` (+${problems.length - 1} more)` : ''}: the feed run stopped at the state store before its push (phase 3b: the store holds the only copy of the event map); the next run retries, and a lasting failure stops the feed (feed:freshness; APIs.md Repository size, Outage budget)`,
     })],
     unjudged: [],
     notes,
@@ -1025,10 +1026,20 @@ export function evaluateFeed(inputs) {
   add(evaluateWriterQueue({ nowMs, writerQueue: wq, v1: inputs.v1, v2: inputs.v2 }));
   parts.push(`writer-queue=${wq && wq.ok ? `${wq.queue.filter((q) => isQueued(q.state)).length} queued` : 'unread'}`);
 
-  // The state store (storage phase 3); an input that is absent is not judged (as the statistics). The store off (the
-  // FEED_STATE_BACKEND off: the repository variable set to `off`, phase 3a's kill switch): nothing read, no finding.
+  // The state store (storage phase 3); an input that is absent is not judged (as the statistics). The store off
+  // (FEED_STATE_BACKEND unset or off: a local run; health.yml always sets `worker` since phase 3b): nothing read, no finding.
   if (inputs.stateOff) notes.push('state store off (FEED_STATE_BACKEND off): feed:state-shadow, feed:state-gc, feed:state-backup and feed:state-budget not judged');
-  if (inputs.stateShadow) add(evaluateStateShadow(inputs.stateShadow, nowMs));
+  if (inputs.stateShadow) {
+    const shadow = evaluateStateShadow(inputs.stateShadow, nowMs);
+    add(shadow);
+    // Phase 3b: a feed that stopped because its runs fail at the state store says so in its freshness row (first, so the
+    // 500-character cut never drops it), which is the row the owner is told about first.
+    const at = findings.findIndex((f) => f.rule === 'feed:freshness');
+    if (at >= 0 && shadow.findings.length) {
+      const f = findings[at];
+      findings[at] = makeFinding('feed:freshness', { sinceMs: f.sinceMs, text: `the newest feed runs stopped at the state store (feed:state-shadow): ${f.text}` });
+    }
+  }
   if (inputs.stateGc) add(evaluateStateGc(inputs.stateGc, nowMs));
   if (inputs.stateBackup) add(evaluateStateBackup(inputs.stateBackup, nowMs));
   // A failed read of the samples never starts a new series: the next run reads the old one again.

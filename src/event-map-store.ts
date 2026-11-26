@@ -464,8 +464,17 @@ async function inPool<T>(items: readonly T[], limit: number, fn: (item: T) => Pr
  * `cutoffDay` (derive pruned it). Every PUT completes before the generation is written: on any store error nothing is
  * written, so a generation only ever names blobs that exist; the next run uploads again (its sha differs). An unchanged
  * set of entries leaves the file untouched.
+ *
+ * `uploadAll` (main sets it while git still tracks event-map files: the phase-3b transition run, or a run after a
+ * rollback's re-track) PUTs every day, unchanged ones included. Otherwise an unchanged day keeps its entry without an
+ * upload, and the transition commit, which untracks the shards, would leave a blob nobody had read since the 3a shadow's
+ * last sample as the only copy: a blob missing or corrupt in the store would surface only at the next run's hydrate,
+ * which then fails closed on every run, and the rollback's re-track (which starts with an authoritative hydrate) could
+ * not run either. A PUT is always written and R2 checks its bytes against the key, so after this persist every blob the
+ * generation names was just written from the checkout's day: the transition heals the store instead of trusting it (a
+ * PUT that fails stops the run before its commit, git untouched). 46 PUTs, about 12 MB, once.
  */
-export async function persist(root: string, backend: StateBackend, opts: { cutoffDay: string; concurrency?: number }): Promise<PersistReport> {
+export async function persist(root: string, backend: StateBackend, opts: { cutoffDay: string; concurrency?: number; uploadAll?: boolean }): Promise<PersistReport> {
   const prev = readGeneration(root);
   const prevDays = prev?.generation.days ?? {};
   const files = eventMapFiles(root);
@@ -489,7 +498,7 @@ export async function persist(root: string, backend: StateBackend, opts: { cutof
     const sha = sha256Hex(text);
     const bytes = Buffer.byteLength(text);
     const held = prevDays[day];
-    if (held && held.sha256 === sha && held.bytes === bytes && held.nodes === nodes) {
+    if (!opts.uploadAll && held && held.sha256 === sha && held.bytes === bytes && held.nodes === nodes) {
       days[day] = held;
       continue;
     }
@@ -994,8 +1003,12 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
   }
   const cutoffDay = dayKey(Date.now() - EVENT_MAP_HORIZON_DAYS * DAY_MS);
   try {
-    const r = await persist(root, backend, { cutoffDay });
+    // While git still tracks event-map files (the transition run, or after a rollback's re-track) every day is uploaded:
+    // the commit after it may untrack them, leaving the store's blobs as the only copy (persist, uploadAll).
+    const tracked = trackedEventMapPaths(root).length;
+    const r = await persist(root, backend, { cutoffDay, uploadAll: authoritative && tracked > 0 });
     const summary =
+      `${tracked ? `git still tracks ${tracked} event-map file(s): every day uploaded, unchanged ones included (the store's blobs become the only copy once the commit untracks them); ` : ''}` +
       `${r.days} day(s); ${r.uploaded.length ? `${r.uploaded.length} uploaded (${r.uploaded.join(', ')}, ${(r.uploadedBytes / 1e6).toFixed(2)} MB)` : 'nothing uploaded'}` +
       `${r.dropped.length ? `; ${r.dropped.length} pruned day(s) left the generation` : ''}; generation ${r.written ? `written at seq ${r.headSeq}` : 'unchanged'} (${Date.now() - t0} ms, ${backend.label})`;
     report({ step: 'persist', ok: true, ...common, summary }, env);

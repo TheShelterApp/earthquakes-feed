@@ -185,10 +185,18 @@ test('the transition run: the hydrate keeps git\'s checkout, the commit untracks
     w.setSeq(a, 11);
     assert.deepEqual(dayFiles(a), [], 'no layout change before the untrack');
     assert.equal(shards(a).length, 5);
-    // State persist: the changed and the new day uploaded, the generation rewritten.
+    // The store lost the blob of a day that did not change (DAYS[0]): only git's shard holds it now. The transition's
+    // persist uploads every day while git tracks them, so the commit that untracks the shards never leaves a lost blob
+    // as the only copy.
+    const blob0 = readGeneration(a)!.generation.days[DAYS[0]!]!.blob;
+    const blob0File = join(w.store, 'cas', 'sha256', blob0.slice(0, 2), blob0);
+    rmSync(blob0File);
+    // State persist: every day uploaded (the changed, the new and the unchanged ones), the generation rewritten.
     const p = await w.step(a, 'persist');
     assert.equal(p.code, 0);
-    assert.match(String(p.marker!.summary), /^4 day\(s\); 2 uploaded/);
+    assert.match(String(p.marker!.summary), /^git still tracks 4 event-map file\(s\): every day uploaded, unchanged ones included .*; 4 day\(s\); 4 uploaded/);
+    assert.equal(readGeneration(a)!.generation.days[DAYS[0]!]!.blob, blob0);
+    assert.ok(existsSync(blob0File), 'the lost blob is back before the commit untracks the shards');
     // A lockless commit lands first: the push retry rebases the transition commit over it.
     w.sideCommit('before the transition');
     await w.commitStep(a, 'aggregate: seq=11');

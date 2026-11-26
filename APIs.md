@@ -1813,7 +1813,8 @@ to the ref.
     that run, as in phase 3a: the checkout is compared with the generation (the differences listed, no store request)
     and kept.
   - Persist (after the Aggregate step): each day whose canonical sha256 differs from its entry is PUT, then the new
-    generation is written. A day the previous generation lists that the checkout lacks throws, unless it is below the
+    generation is written; while git still tracks event-map files (the transition run, or after a rollback's
+    re-track) every day is PUT, unchanged ones included (`uploadAll`, below). A day the previous generation lists that the checkout lacks throws, unless it is below the
     45-day horizon; a removal is never inferred from a missing file. On any store error nothing is written, so a
     generation only ever names blobs that exist; the run stops before its commit.
   - The commit step: `stage` before the `git add` (the transition, then the layout move), `assert-staged` after it;
@@ -1982,7 +1983,13 @@ green. The store holds the only copy of the event map; git holds the generation 
 - *The transition* is the first phase-3b aggregate run; nothing else changes the branch's layout:
   1. Its hydrate finds the hour shards tracked: git is still the truth for that run (the generation committed beside
      them can only lag them, after a phase-3a persist that failed, never lead them), so the checkout is compared and
-     kept, no store request. aggregate saves in hour shards (git tracks them), persist uploads what changed.
+     kept, no store request. aggregate saves in hour shards (git tracks them), and persist uploads every day, not only
+     what changed (`uploadAll`: 46 PUTs, about 12 MB, once). A day that did not change would otherwise keep its entry
+     without an upload, and once the commit untracks the shards its blob, last read by phase 3a's shadow sample, would
+     be the only copy: a blob lost or corrupt in the store would surface only at the next run's hydrate, which fails
+     closed on every run, with the rollback's re-track (it starts with an authoritative hydrate) refused as well. Each
+     PUT is written whatever the store holds and checked by R2 against its key, so the transition heals the store from
+     git instead of trusting it; a PUT that fails stops the run before its commit, git untouched.
   2. The commit step, before its `git add`, runs `stage`: the ignore lines into `.gitignore`, the two sentinels written,
      `git rm -r --cached knowledge/index/event_map` (the files stay on disk), the sentinels and `.gitignore` added back,
      and only then the layout move to day files (`moveToDayLayout` refuses while git tracks a file). After the
@@ -2061,7 +2068,8 @@ fifth replayed commit: the store's event map is git's, day for day. Only the tra
    above. The sentinels make it fail closed; the rule is that it never runs.
 
 **After the merge.** The first aggregate run is the transition: its "State hydrate" summary reads `git still tracks
-1,1xx event-map file(s) … every one identical to the checkout`, its commit carries the content of *The transition*,
+1,1xx event-map file(s) … every one identical to the checkout`, its "State persist" summary `git still tracks 1,1xx
+event-map file(s): every day uploaded … 46 day(s); 46 uploaded`, its commit carries the content of *The transition*,
 step 3 (`git show --stat <commit>` on `data`), derive-publish's re-hydrate reads `… 0 fetched`, and the next run's
 hydrate `46 day(s) written, 46 fetched (12.x MB in 6 batch(es))`. Then `gh variable list` and, if
 `FEED_STATE_BACKEND` is there, `gh variable delete FEED_STATE_BACKEND` (read by nothing now). Watch `feed:state-shadow`

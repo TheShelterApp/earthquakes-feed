@@ -194,6 +194,35 @@ test('persist: every day uploaded once as gzip, the generation names the blobs; 
   }
 });
 
+test('persist uploadAll (git still tracks event-map files: the transition run): every day PUT again, so a blob the store lost is healed before the commit untracks git\'s copy', async () => {
+  const r = dataRoot();
+  const dir = tmp();
+  try {
+    const { be, calls } = counting(new FsBackend(dir));
+    await persist(r, be, { cutoffDay: CUTOFF });
+    const g1 = readGeneration(r)!;
+    const blobFile = (sha: string): string => join(dir, 'cas', 'sha256', sha.slice(0, 2), sha);
+    // The store lost an unchanged day's blob (the risk the 3a shadow's sampling leaves open). A plain persist keeps the
+    // entry without an upload, so the loss would outlive the transition; uploadAll writes it back.
+    rmSync(blobFile(g1.generation.days['2026-11-15']!.blob));
+    const plain = await persist(r, be, { cutoffDay: CUTOFF });
+    assert.deepEqual([plain.uploaded, calls.put], [[], 2]);
+    const all = await persist(r, be, { cutoffDay: CUTOFF, uploadAll: true });
+    assert.deepEqual([all.uploaded, all.written, calls.put], [['2026-11-14', '2026-11-15'], false, 4], 'the same bytes: the generation is unchanged');
+    assert.ok(existsSync(blobFile(g1.generation.days['2026-11-15']!.blob)));
+    // Every blob the generation names reads back and verifies.
+    const back = await hydrate(r, new FsBackend(dir), { mode: 'shadow', sample: 2 });
+    assert.deepEqual([back.mismatches, back.fetched.sort()], [[], ['2026-11-14', '2026-11-15']]);
+    // A PUT that fails writes nothing (the run stops before its commit, git keeps the shards).
+    const failing = counting(new FsBackend(dir), () => true);
+    await assert.rejects(persist(r, failing.be, { cutoffDay: CUTOFF, uploadAll: true }));
+    assert.equal(readGeneration(r)!.sha256, g1.sha256);
+  } finally {
+    rmSync(r, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('persist never infers a removal from a missing file: a lost day throws; a day pruned below the horizon leaves', async () => {
   const r = dataRoot();
   const dir = tmp();

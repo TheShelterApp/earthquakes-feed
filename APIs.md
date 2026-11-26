@@ -2051,6 +2051,10 @@ it. Every hydrate verified, every persist and commit step passed, derive-publish
 each rebase, and an authoritative hydrate of each committed generation into an empty directory gave the checkout's
 days byte for byte. The generation's days (sha256, bytes, nodes) equalled production's after the first and the
 fifth replayed commit: the store's event map is git's, day for day. Only the transition commit touched the event map.
+The rehearsal predates three changes of the review that followed it, each covered by tests rather than a new replay:
+the transition's persist uploads all 46 days, not only the changed ones (`uploadAll`; tests/phase3b.test.ts replays it
+on a store that lost an unchanged day's blob), derive-publish's re-hydrate writes a marker of its own
+(`hydrate-publish`), and the re-track checks its preconditions (`retrack-check`, tests/writer-queue.test.ts).
 
 **Before the merge (the checklist).** Run each line; merge only when all hold.
 1. `gh run list -R TheShelterApp/earthquakes-feed -w state-backup.yml -L 3`, `-w state-gc.yml -L 3`,
@@ -2080,7 +2084,13 @@ fifth replayed commit: the store's event map is git's, day for day. Only the tra
 event-map file(s): every day uploaded … 46 day(s); 46 uploaded`, its commit carries the content of *The transition*,
 step 3 (`git show --stat <commit>` on `data`), derive-publish's re-hydrate reads `… 0 fetched`, and the next run's
 hydrate `46 day(s) written, 46 fetched (12.x MB in 6 batch(es))`. Then `gh variable list` and, if
-`FEED_STATE_BACKEND` is there, `gh variable delete FEED_STATE_BACKEND` (read by nothing now). Watch `feed:state-shadow`
+`FEED_STATE_BACKEND` is there, `gh variable delete FEED_STATE_BACKEND` (read by nothing now). Then deploy the heartbeat
+Worker from `main` (`FEED_HEARTBEAT_CF_EMAIL=<the Cloudflare login> bash heartbeat/deploy.sh`, README *The heartbeat
+Worker*): the same PR carries its `health-liveness.yml` ticks at :28 and :58 with `tick=1`, which start only with that
+deploy. Never before the merge (the script refuses anything but `origin/main` anyway): a Worker that sends `tick` to a
+`health-liveness.yml` that does not declare it gets 422 "Unexpected inputs" on every tick, 48 a day. Check the first
+tick: `gh run list -R TheShelterApp/earthquakes-feed -w health-liveness.yml -e workflow_dispatch -L 2` shows a run
+created at :28 or :58. Watch `feed:state-shadow`
 and `feed:freshness` for a day, and `feed:repo-growth` (the 11 MB a day line) from a week on.
 
 **Rollback after 3b** (only if phase 3b itself is wrong; a store outage is not a reason: *Outage budget*, *Restore*).
@@ -2099,7 +2109,13 @@ days are lacking), so the event map must be back in git first, and nothing of ph
    the repository once.
 4. Check `data`: `git ls-tree origin/data knowledge/index/event_map/ | wc -l` about 1,100 hour shards and no
    `0000-00-00.ndjson`/`9999-12-31.ndjson`; `git show origin/data:.gitignore` without the event-map lines.
-5. Merge the revert of the phase-3b merge commit (phase 3a's code, `EVENT_MAP_STORE_AUTHORITATIVE = false`).
+5. Merge a revert of the phase-3b commits (phase 3a's code, `EVENT_MAP_STORE_AUTHORITATIVE = false`), but not of the
+   two `Heartbeat:` commits the same PR carries (the health-liveness ticks, independent of phase 3b): the deployed
+   heartbeat Worker keeps sending `tick=1`, and a `health-liveness.yml` without its `tick` input answers each tick 422,
+   leaving liveness to its own cron (about 20 deliveries in 6.5 days). The commits to revert, newest first:
+   `git log --format='%h %s' <merge>^1..<merge>^2 | grep -v ' Heartbeat:'`, each `git revert --no-edit <sha>` on a
+   branch. If the merge was squashed, or the whole merge is reverted anyway, redeploy the heartbeat from the reverted
+   `main` in the same step (`bash heartbeat/deploy.sh`), so the Worker and the workflow agree again (no ticks).
 6. `gh workflow enable aggregate.yml`: phase 3a's runs shadow-verify and persist as before.
 A phase-3b run that slips in between 3 and 5 is no harm: its hydrate finds the shards tracked (git is the truth) and
 its commit makes the transition again; repeat from step 1.

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { dataPaths } from '../src/config.js';
 import { loadEventMap, saveEventMap } from '../src/bitemporal.js';
-import { liveFloor } from '../src/event-map-store.js';
+import { emptyGeneration, liveFloor, writeGeneration } from '../src/event-map-store.js';
 import { Resolver } from '../src/dedup.js';
 import { onboardStep } from '../src/onboard.js';
 import type { EventNode, ProviderConfig, RawObs } from '../src/types.js';
@@ -30,6 +30,9 @@ function seedEventMap(root: string): void {
   saveEventMap(root, map);
   mkdirSync(dataPaths(root).indexDir, { recursive: true });
   writeFileSync(dataPaths(root).head, JSON.stringify({ seq: 100, ingest_time: '2026-06-30T10:05:00Z' }) + '\n');
+  // A fresh branch's first aggregate run (storage phase 3b): the empty generation scripts/bootstrap-data-branch.sh
+  // writes, the map saved before persist names its days, so the live floor is the checkout's oldest day.
+  writeGeneration(root, emptyGeneration());
 }
 
 test('onboard: bootstrap seeds a source whose live lookback reaches the live floor as onboarded (no gap-fill)', async () => {
@@ -146,6 +149,7 @@ test('onboard never folds two live events: no log line on this path, so no op:me
     saveEventMap(root, map);
     mkdirSync(dataPaths(root).indexDir, { recursive: true });
     writeFileSync(dataPaths(root).head, JSON.stringify({ seq: 100, ingest_time: '2026-06-30T10:06:00Z' }) + '\n');
+    writeGeneration(root, emptyGeneration());
     writeFileSync(dataPaths(root).onboardCursor, JSON.stringify({ onboarded: ['usgs', 'geofon'], pending: {} }) + '\n');
 
     // emsc's reviewed solution sits 12 km from B and joins it; as B's new representative it

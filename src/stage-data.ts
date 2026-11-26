@@ -21,9 +21,10 @@ import { isFrozenDay } from './partitions.js';
  *    file stays on disk, and one the previous commit held is deleted from the branch by this commit (the first run with
  *    phase 2 deletes the 11 unfrozen days; history is never rewritten);
  * 3. a check that nothing staged names an unfrozen day;
- * 4. the event-map check of storage phase 3b (src/event-map-store.ts assertEventMapNotStaged): with EVENT_MAP_IN_GIT=0
- *    nothing under knowledge/index/event_map/ but the sentinel may be added or modified. Off in phase 3a (git still
- *    tracks the event map; EVENT_MAP_IN_GIT defaults to 1).
+ * 4. the event-map check of storage phase 3b (src/event-map-store.ts assertEventMapNotStaged): nothing under
+ *    knowledge/index/event_map/ but the sentinel (with its own bytes) may be added or modified; deletions pass. The
+ *    event map's day files are ignored and untracked since the transition commit (the state store holds them), so a
+ *    `git add -A` never sees them unless an ignore line was lost.
  *
  * A day is committed once, by the first run after it freezes: derive writes every day of the event map's 45-day
  * horizon, a day absent from the checkout is a new file, and the clock here is read after derive, so a day that froze
@@ -79,7 +80,7 @@ export interface StageResult {
 }
 
 /** Stages `pathspecs` of the data checkout at `root` for a commit, without the day partitions of unfrozen days. */
-export function stageData(root: string, pathspecs: string[], nowMs: number, git: Git = gitIn(root), env: NodeJS.ProcessEnv = process.env): StageResult {
+export function stageData(root: string, pathspecs: string[], nowMs: number, git: Git = gitIn(root)): StageResult {
   if (!pathspecs.length) throw new Error('stage-data: no pathspec');
   git(['add', '-A', '--', ...pathspecs]);
   const keptOut = unfrozenPartitionPaths(lines(git(['ls-files', '-z', '--', 'events']), '\0'), nowMs);
@@ -109,7 +110,7 @@ export function stageData(root: string, pathspecs: string[], nowMs: number, git:
     nowMs,
   );
   if (wrong.length) throw new Error(`stage-data: unfrozen day partition(s) still staged: ${wrong.join(', ')}`);
-  assertEventMapNotStaged(git, env);
+  assertEventMapNotStaged(git);
   return {
     keptOut,
     leftBranch,

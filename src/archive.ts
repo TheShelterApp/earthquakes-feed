@@ -297,8 +297,9 @@ export function runArchive(root: string, nowMs: number, io: ArchiveIo, opts: Arc
   const months = eventMonths(dataPaths(root).eventsDir);
   const archives = loadArchives(root);
   const inv = loadInventory(root);
-  // The live pipeline's first day (src/event-map-store.ts liveFloor: the generation, else the event-map files; it throws
-  // when it has neither, so a run never archives without knowing where the live window starts).
+  // The live pipeline's first day (src/event-map-store.ts liveFloor: the generation's oldest day; archive's checkout is
+  // never hydrated, and since storage phase 3b holds no event-map file. It throws without a generation, so a run never
+  // archives without knowing where the live window starts).
   const floor = liveFloor(root, nowMs);
   const staging = mkdtempSync(join(tmpdir(), 'efd-archive-'));
   let archived = 0;

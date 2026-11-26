@@ -1561,9 +1561,10 @@ export class FsBackend implements StateBackend, StateRefs {
 // Configuration
 
 /**
- * FEED_STATE_BACKEND as the jobs read it: the workflows pass `${{ vars.FEED_STATE_BACKEND || 'worker' }}`, so the store
- * is on by default and the repository variable set to `off` is the kill switch (phase 3a only: from phase 3b the store
- * holds the only copy of the event map). `off`, empty or unset → '' (no store).
+ * FEED_STATE_BACKEND as a job reads it: since storage phase 3b every production workflow sets `worker` itself (the
+ * store holds the only copy of the event map; phase 3a's kill switch, the repository variable set to `off`, is read by
+ * no workflow any more). `off`, empty or unset → '' (no store: a local run or a test; the feed's state steps then fail
+ * closed, src/event-map-store.ts).
  */
 export function stateBackendSetting(env: NodeJS.ProcessEnv = process.env): string {
   const raw = (env.FEED_STATE_BACKEND ?? '').trim();

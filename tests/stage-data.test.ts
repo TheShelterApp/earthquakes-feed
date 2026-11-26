@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { FROZEN_AFTER_DAYS, isFrozenDay, partitionPath } from '../src/partitions.js';
 import { partitionDayOf, stageData, unfrozenPartitionPaths, type Git } from '../src/stage-data.js';
+import { IGNORE_LINES, SENTINEL_TEXT } from '../src/event-map-store.js';
 
 // Storage option 4 phase 2: the writers of the `data` branch stage everything but the day partitions of unfrozen days
 // (src/stage-data.ts). The files stay on disk for sign-manifest, validate and publish-r2; a tracked one leaves the
@@ -342,9 +343,10 @@ test('wiring: exactly the state store\'s jobs hold id-token: write, at job level
   }
 });
 
-test('wiring: every commit that stages knowledge carries the phase-3b event-map check (off while EVENT_MAP_IN_GIT=1)', () => {
+test('wiring: every commit that stages knowledge makes the phase-3b transition before its git add and carries the event-map check after it', () => {
   const read = (rel: string): string => readFileSync(here(`../${rel}`), 'utf8');
-  const hook = '( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/event-map-store.ts stage )';
+  const stage = '( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/event-map-store.ts stage )';
+  const check = '( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/event-map-store.ts assert-staged )';
   let explicit = 0;
   for (const file of workflowFiles()) {
     const body = read(file).replace(/^\s*#.*$/gm, '');
@@ -352,7 +354,11 @@ test('wiring: every commit that stages knowledge carries the phase-3b event-map 
       const specs = m[1]!.trim().split(/\s+/).filter((a) => !a.startsWith('-'));
       if (!specs.some((p) => p === 'knowledge' || p === 'knowledge/index' || p === '.')) continue;
       explicit++;
-      const after = body.indexOf(hook, m.index!);
+      // The untrack (git rm -r --cached) and the layout move come first, so the add never meets a tracked event-map
+      // file rewritten as a day file; the check follows the add and precedes the commit.
+      const before = body.lastIndexOf(stage, m.index!);
+      assert.ok(before >= 0 && body.slice(before, m.index!).split('\n').length <= 3, `${file}: ${m[0].trim()} without the transition (stage) right before it`);
+      const after = body.indexOf(check, m.index!);
       assert.ok(after > m.index!, `${file}: ${m[0].trim()} without the event-map check after it`);
       assert.ok(after < body.indexOf('git commit', m.index!), `${file}: the check before the commit`);
     }
@@ -360,7 +366,7 @@ test('wiring: every commit that stages knowledge carries the phase-3b event-map 
   assert.equal(explicit, 1, 'aggregate.yml stages knowledge itself; derive-publish, backfill and archive go through stage-data.ts');
 });
 
-test('stageData: with EVENT_MAP_IN_GIT=0 (phase 3b) a staged event-map day file stops the commit; deletions and the sentinel pass', () => {
+test('stageData (phase 3b): a staged event-map day file, or a sentinel with other bytes, stops the commit; deletions and the sentinel pass', () => {
   const r = repo();
   try {
     r.write('knowledge/index/event_map/2026-11-01.ndjson', '{"feedId":"a"}\n');
@@ -368,22 +374,32 @@ test('stageData: with EVENT_MAP_IN_GIT=0 (phase 3b) a staged event-map day file 
     r.run('add', '-A');
     r.run('commit', '-q', '-m', 'seed');
     r.write('knowledge/index/event_map/2026-11-02.ndjson', '{"feedId":"b"}\n');
-    assert.throws(() => stageData(r.dir, ['.'], NOW, r.git, { EVENT_MAP_IN_GIT: '0' }), /event map staged for a commit while EVENT_MAP_IN_GIT=0 .*: A knowledge\/index\/event_map\/2026-11-02\.ndjson/);
-    r.run('reset', '-q');
-    // Phase 3a (the default): git tracks the event map; nothing is checked.
-    assert.doesNotThrow(() => stageData(r.dir, ['.'], NOW, r.git, {}));
+    assert.throws(() => stageData(r.dir, ['.'], NOW, r.git), /event map staged for a commit \(phase 3b.*\): A knowledge\/index\/event_map\/2026-11-02\.ndjson/);
     r.run('reset', '-q');
     rmSync(join(r.dir, 'knowledge/index/event_map/2026-11-02.ndjson'));
+    // A tracked day file rewritten (a lost ignore line before the transition): refused too.
+    r.write('knowledge/index/event_map/2026-11-01.ndjson', '{"feedId":"a2"}\n');
+    assert.throws(() => stageData(r.dir, ['.'], NOW, r.git), /M knowledge\/index\/event_map\/2026-11-01\.ndjson/);
+    r.run('checkout', '--', '.');
+    r.run('reset', '-q');
     // The phase-3b transition: every day file untracked, the sentinel added.
     r.run('rm', '-q', '-r', '--cached', 'knowledge/index/event_map');
-    r.write('.gitignore', 'knowledge/index/event_map/*\n!knowledge/index/event_map/0000-00-00.ndjson\n');
+    r.write('.gitignore', `${IGNORE_LINES.join('\n')}\n`);
     r.write('knowledge/index/event_map/0000-00-00.ndjson', 'phase 3b sentinel: not JSON\n');
-    assert.doesNotThrow(() => stageData(r.dir, ['.'], NOW, r.git, { EVENT_MAP_IN_GIT: '0' }));
+    assert.throws(() => stageData(r.dir, ['.'], NOW, r.git), /0000-00-00\.ndjson staged with other bytes than the sentinel/);
+    r.write('knowledge/index/event_map/0000-00-00.ndjson', SENTINEL_TEXT);
+    assert.doesNotThrow(() => stageData(r.dir, ['.'], NOW, r.git));
     assert.deepEqual(r.run('diff', '--cached', '--name-status').trim().split('\n').sort(), [
       'A\t.gitignore',
       'A\tknowledge/index/event_map/0000-00-00.ndjson',
       'D\tknowledge/index/event_map/2026-11-01.ndjson',
     ]);
+    // After the transition the day files are ignored: a hydrated day on disk is never staged by `git add -A .`.
+    r.run('commit', '-q', '-m', 'phase 3b');
+    r.write('knowledge/index/event_map/2026-11-03.ndjson', '{"feedId":"c"}\n');
+    r.write('knowledge/index/event_map/2026-11-03-04.ndjson', '{"feedId":"d"}\n');
+    assert.doesNotThrow(() => stageData(r.dir, ['.'], NOW, r.git));
+    assert.equal(r.run('diff', '--cached', '--name-only'), '');
   } finally {
     r.cleanup();
   }

@@ -13,6 +13,13 @@ on:
         description: 'Join the writer queue even when 2 writer runs already wait (README.md "Writer group"): every aggregate run waits behind it'
         type: boolean
         default: false
+      retrack:
+        # Storage phase 3b's rollback only (APIs.md "Rollback after 3b"): with aggregate.yml disabled and the writer
+        # queue empty, this run commits the hydrated event map back into git as hour shards (the sentinel and the ignore
+        # lines removed); the revert to phase 3a is merged next, then aggregate.yml enabled again. Never otherwise.
+        description: 'ROLLBACK ONLY (APIs.md "Rollback after 3b"): commit the event map back into git; aggregate.yml must be disabled first'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -64,7 +71,7 @@ jobs:
     # (job-timeout-minutes below, kept equal by tests/pages-deploy.test.ts) and retries only while 7 min are left.
     timeout-minutes: 12
     # Restated in full at job level (aggregate.yml says why): the push, and an OIDC token for the state store's
-    # shadow hydrate (read only: derive's prune of the generation is a local edit, src/event-map-store.ts).
+    # hydrate (read only: derive's prune of the generation is a local edit, src/event-map-store.ts).
     permissions:
       contents: write
       id-token: write
@@ -85,14 +92,14 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      - name: State shadow hydrate
-        # As in aggregate.yml (storage phase 3a): the store's days against the checkout, reported, never fatal; a 30 s
-        # deadline over the step (SHADOW_RETRY_POLICY), this timeout only the backstop.
-        continue-on-error: true
-        timeout-minutes: 2
+      - name: State hydrate
+        # As in aggregate.yml (storage phase 3b): the generation's days from the state store into the checkout, which
+        # holds none of them; fail closed (a 60 s deadline over the store requests, AUTHORITATIVE_HYDRATE_POLICY; this
+        # timeout only the backstop). FEED_STATE_BACKEND is set here: the store has no kill switch since 3b.
+        timeout-minutes: 3
         env:
           DATA_DIR: .data
-          FEED_STATE_BACKEND: ${{ vars.FEED_STATE_BACKEND || 'worker' }}
+          FEED_STATE_BACKEND: worker
           FEED_STATE_URL: https://feed-state.theshelter.app
           FEED_STATE_AUDIENCE: earthquakes-feed-state
           FEED_STATE_MARKER_DIR: ${{ runner.temp }}/state-shadow
@@ -106,9 +113,21 @@ jobs:
           path: ${{ runner.temp }}/state-shadow
           if-no-files-found: ignore
           retention-days: 1
+      - name: Re-track the event map (rollback only)
+        # APIs.md "Rollback after 3b", step 3: the hydrated event map back into git as phase 3a's hour shards, byte for
+        # byte the generation's days (src/event-map-store.ts retrack checks each), the sentinel and the .gitignore lines
+        # removed, committed and pushed under this job's writer lock. The derive below then commits on top as usual.
+        if: inputs.retrack
+        working-directory: .data
+        run: |
+          git config user.name  "earthquakes-feed-bot"
+          git config user.email "bot@users.noreply.github.com"
+          ( cd "$GITHUB_WORKSPACE" && DATA_DIR=.data npx --no-install tsx src/event-map-store.ts retrack )
+          git commit -q -m "retrack: the event map back in git (storage phase 3b rollback) @ $(date -u +%FT%TZ)"
+          PUSH_ATTEMPTS=5 PUSH_BACKOFF_S=5 bash "$GITHUB_WORKSPACE/scripts/push-data.sh"
       - name: Snapshot the silent-change baseline
-        # As in aggregate.yml (src/live-baseline.ts): nothing writes the checkout before derive here, so the snapshot is
-        # the event map derive reads.
+        # As in aggregate.yml (src/live-baseline.ts), after the hydrate: nothing else writes the checkout before derive
+        # here, so the snapshot is the event map derive reads.
         continue-on-error: true
         # About half a second (the event map of the window), plus at most 45 s of Pages requests after a failed derive;
         # a hang must not eat the job budget the deploy counts on.

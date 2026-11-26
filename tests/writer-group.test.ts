@@ -296,9 +296,9 @@ test('workflows: every commit to data is pushed by scripts/push-data.sh, nowhere
     assert.equal(viaScript, commits, `${f}: ${commits} commit(s), ${viaScript} push-data.sh call(s)`);
     pushes += viaScript;
   }
-  // aggregate, derive's steps, backfill, archive, and the history / first-solutions / remediate / remerge / stats commit
-  // jobs.
-  assert.equal(pushes, 9);
+  // aggregate, derive's steps, backfill, archive, the history / first-solutions / remediate / remerge / stats commit
+  // jobs, and derive.yml's rollback-only re-track (storage phase 3b).
+  assert.equal(pushes, 10);
 });
 
 test('workflows: derive runs at the end of every aggregate job, and derive.yml only by hand', () => {
@@ -308,9 +308,11 @@ test('workflows: derive runs at the end of every aggregate job, and derive.yml o
   assert.ok(push > 0 && derive > push, 'derive after the aggregate commit is pushed');
   assert.match(agg, /- name: Aggregate\n {8}timeout-minutes: 4\n/);
   const d = read('.github/workflows/derive.yml');
-  // Dispatched by hand only (its one input: force, SHLTR-149).
+  // Dispatched by hand only (its inputs: force, SHLTR-149; retrack, storage phase 3b's rollback only, default off).
   assert.equal(d.slice(d.indexOf('\non:'), d.indexOf('\n    inputs:')), '\non:\n  workflow_dispatch:');
-  assert.deepEqual([...d.slice(d.indexOf('\n    inputs:'), d.indexOf('\npermissions:')).matchAll(/^ {6}(\w+):$/gm)].map((m) => m[1]), ['force']);
+  assert.deepEqual([...d.slice(d.indexOf('\n    inputs:'), d.indexOf('\npermissions:')).matchAll(/^ {6}(\w+):$/gm)].map((m) => m[1]), ['force', 'retrack']);
+  assert.match(d, /\n {6}retrack:\n(?: {8}#.*\n)+ {8}description: .*\n {8}type: boolean\n {8}default: false\n/);
+  assert.match(d, /- name: Re-track the event map \(rollback only\)\n(?: {8}#.*\n)+ {8}if: inputs\.retrack\n/);
   assert.match(d, /uses: \.\/\.github\/actions\/derive-publish/);
   // The composite reads each secret through an input, so each step sees only its own.
   const action = read('.github/actions/derive-publish/action.yml');

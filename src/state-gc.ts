@@ -33,8 +33,9 @@ import { BATCH_MAX, GC_MAX_KEEP, backendFromEnv, type GcPage, type StateBackend 
  * persist, or an empty map), or a keep set outside the Worker's 1..10,000: the Worker would refuse the call (400), and
  * there is nothing to check the keep set against. The run still completes and writes its marker (`skipped`).
  *
- * The store off (FEED_STATE_BACKEND off or unset: the repository variable set to `off`, phase 3a's kill switch): nothing
- * is read or called; the run completes and writes its marker with `off: true`.
+ * The store off (FEED_STATE_BACKEND off or unset: a local run; state-gc.yml sets `worker` itself since storage phase 3b,
+ * which removed phase 3a's kill switch): nothing is read or called; the run completes and writes its marker with
+ * `off: true`. GC's production brake is STATE_GC_SCHEDULED=dry-run (nothing deleted).
  *
  *   GH_TOKEN=… FEED_STATE_BACKEND=worker STATE_GC_DRY_RUN=1 npx --no-install tsx src/state-gc.ts
  */

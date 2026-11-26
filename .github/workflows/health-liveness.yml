@@ -4,7 +4,7 @@ name: health-liveness
 # dead-man switch Healthchecks.io was to be (dropped: its sign-up email never arrived). health.yml has no way to report
 # that it stopped reconciling (no run at all, or runs that fail before reconcile saves the boards), so this workflow
 # reads the boards' state and health's runs from outside, on two paths: a GitHub cron of its own, independent of the
-# heartbeat Worker that dispatches health, and the Worker's dispatches at :13 and :43 (with tick=1; since 2026-11-26:
+# heartbeat Worker that dispatches health, and the Worker's dispatches at :28 and :58 (with tick=1; since 2026-11-26:
 # GitHub delivered the cron about 20 times in 6.5 days). While the Worker is down the cron is the only path, as before.
 # No reconcile for 45 min dispatches health.yml once (self-heal); for 90 min, one comment on the "[health] platform"
 # board mentions HEALTH_MENTION (a GitHub Mobile push), once per outage, and that run is red (the failed-run email). health.yml switched off, or a health:liveness silence: quiet and green. A failure of this
@@ -25,7 +25,7 @@ on:
         type: boolean
         default: true
       tick:
-        # Set by the heartbeat Worker (heartbeat/src/worker.js, :13 and :43): its dispatch is a real check like a cron
+        # Set by the heartbeat Worker (heartbeat/src/worker.js, :28 and :58, none of the cron's minutes): its dispatch is a real check like a cron
         # delivery, never the manual dispatch's dry run.
         description: 'Set to 1 by the heartbeat Worker: a real check, as a cron delivery'
         required: false

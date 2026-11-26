@@ -9,7 +9,7 @@ workers_dev = false
 preview_urls = false
 
 # GitHub throttles/delays low-activity scheduled workflows, so this external tick
-# drives them reliably: aggregate every 5 min, health every 15 min, health-liveness at :13 and :43 (its own cron stays
+# drives them reliably: aggregate every 5 min, health every 15 min, health-liveness at :28 and :58 (its own cron stays
 # the second path), hourly backfill (:41), first-solutions (:48) and history (:26), state-backup (00:31 and 06:31 UTC)
 # and state-gc (03:33 UTC).
 # health's own hourly GitHub cron was delivered ~20x per 48h with 2-4.5h gaps, so a

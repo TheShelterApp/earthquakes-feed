@@ -364,7 +364,7 @@ variable.
 ### The heartbeat Worker (`heartbeat/`)
 
 A cron-only Cloudflare Worker that dispatches `aggregate` (every 5 min), `health` (every 15 min), `health-liveness`
-(:13 and :43, with `tick=1`, so the run acts like a cron delivery instead of the manual dry run), `backfill`,
+(:28 and :58, minutes none of its own cron slots share, with `tick=1`, so the run acts like a cron delivery instead of the manual dry run), `backfill`,
 `first-solutions` and `history` (hourly), and the state store's `state-backup` (00:31 and 06:31 UTC: the second retries a lost first
 dispatch or failed run before `feed:state-backup`'s P2 line at 12:00 UTC of the next day) and
 `state-gc` (03:33 UTC, with `tick=1`: the scheduled run) through the Actions API with a fine-grained
@@ -599,7 +599,7 @@ and the boards just stop changing; when its runs start but never reconcile (the 
 exiting 3 before it saves), each run is red but no P1/P2 can be mentioned either. `health-liveness.yml` runs on a GitHub
 cron of its own (every 10 minutes, never at minute 0; GitHub delivers this repository's crons late or not at all, so it
 is frequent and idempotent; about 20 deliveries in 6.5 days to 2026-11-26), and the heartbeat Worker also dispatches it
-at :13 and :43 (`tick=1`): two paths, the cron sharing nothing with the Worker. It measures what health wrote, not how
+at :28 and :58 (`tick=1`; between its cron's slots, never on one): two paths, the cron sharing nothing with the Worker. It measures what health wrote, not how
 its runs ended: the newest hidden state of the three boards (`updatedMs`, rewritten by every reconcile; the same time
 `reconcile` measures its own gap from). No reconcile
 for 45 minutes dispatches `health.yml` once (not again while a health run created in the last 45 minutes exists); over

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
@@ -24,28 +24,36 @@ test('heartbeat: the hour, minute by minute', () => {
   assert.deepEqual(minutesOf('backfill.yml'), [41]);
   assert.deepEqual(minutesOf('first-solutions.yml'), [48]);
   assert.deepEqual(minutesOf('history.yml'), [26]);
-  assert.deepEqual(minutesOf('health-liveness.yml'), [13, 43]);
+  assert.deepEqual(minutesOf('health-liveness.yml'), [28, 58]);
   // 21 dispatches an hour, every other minute does nothing.
   assert.equal(minutes.filter((m) => workflowFor(m, 9) != null).length, 21);
 });
 
-test('heartbeat: health-liveness at :13 and :43, on minutes nothing else uses in any hour; dispatched with tick=1 (a real check); its own cron stays the second path', () => {
+test('heartbeat: health-liveness at :28 and :58, on minutes nothing else uses in any hour, its own cron included; dispatched with tick=1 (a real check); its own cron stays the second path', () => {
   // No other workflow on those minutes, in any hour (the daily state jobs' 00:31, 03:33 and 06:31 included).
   const taken = new Map<string, string>();
   for (const h of hours) for (const m of minutes) {
     const w = workflowFor(m, h);
     if (w) taken.set(`${h}:${m}`, w);
   }
-  for (const h of hours) for (const m of [13, 43]) assert.equal(taken.get(`${h}:${m}`), 'health-liveness.yml', `${h}:${m}`);
-  for (const [, m] of DAILY) assert.ok(![13, 43].includes(m), `daily minute ${m}`);
+  for (const h of hours) for (const m of [28, 58]) assert.equal(taken.get(`${h}:${m}`), 'health-liveness.yml', `${h}:${m}`);
+  for (const [, m] of DAILY) assert.ok(![28, 58].includes(m), `daily minute ${m}`);
   for (const w of ['aggregate.yml', 'health.yml', 'backfill.yml', 'first-solutions.yml', 'history.yml']) {
-    for (const m of minutesOf(w)) assert.ok(![13, 43].includes(m), `${w} at :${m}`);
+    for (const m of minutesOf(w)) assert.ok(![28, 58].includes(m), `${w} at :${m}`);
   }
   // Every 30 minutes: inside the check's 45-minute self-heal line, with a missed tick still inside its 90-minute one.
-  assert.equal(43 - 13, 30);
+  assert.equal(58 - 28, 30);
   assert.deepEqual(inputsFor('health-liveness.yml'), { tick: '1' });
   const yml = readFileSync(here('../.github/workflows/health-liveness.yml'), 'utf8');
   assert.match(yml, /\non:\n {2}schedule:\n {4}- cron: '3,13,23,33,43,53 \* \* \* \*'\n {2}workflow_dispatch:\n/, 'the cron stays');
+  // No tick on a minute of any workflow's own cron (health-liveness's 3,13,…,53 above all: the first version ticked at
+  // :13 and :43, two of them), so a tick and a cron delivery never land in the same minute by design.
+  for (const f of readdirSync(here('../.github/workflows')).filter((x) => x.endsWith('.yml'))) {
+    for (const [, field] of readFileSync(here(`../.github/workflows/${f}`), 'utf8').matchAll(/- cron: '([^ ']+) /g)) {
+      const cronMinutes = field!.split(',').flatMap((p) => (p === '*' ? minutes : /^\*\/(\d+)$/.test(p) ? minutes.filter((m) => m % Number(p.slice(2)) === 0) : [Number(p)]));
+      for (const m of [28, 58]) assert.ok(!cronMinutes.includes(m), `${f}: its cron uses :${m}`);
+    }
+  }
   assert.match(yml, /\n {6}tick:\n(?: {8}#.*\n)* {8}description: /, 'the workflow declares tick (GitHub refuses an undeclared input)');
   // A tick acts; a manual dispatch stays a dry run by default; a cron delivery acts.
   assert.ok(yml.includes("DRY_RUN: ${{ inputs.tick != '1' && inputs.dry_run && '1' || '' }}"));

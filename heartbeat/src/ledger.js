@@ -20,7 +20,7 @@
 // Cost on the Workers Free plan (account-wide, shared with the alerts gateway: DO rows written 100,000/day, rows read
 // 5,000,000/day, requests 100,000/day). Measured in workerd: a claim writes 2 rows (the insert and the one row pruned)
 // and reads 3, a duplicate writes 0 and reads 2, a release writes 1. 21 dispatches an hour (19 before health-liveness's
-// :13 and :43, 2026-11-26) and 3 a day = about 1,014 rows written, 1,500 rows read and 507 requests a day (twice the reads
+// :28 and :58, 2026-11-26) and 3 a day = about 1,014 rows written, 1,500 rows read and 507 requests a day (twice the reads
 // and requests while Cloudflare doubles the activations).
 //
 // Pure functions over a `sql.exec(query, ...bindings)` handle (the Durable Object's `ctx.storage.sql`), so the tests

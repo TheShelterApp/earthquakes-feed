@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Health's own liveness (owner decision 2026-11-19), run by .github/workflows/health-liveness.yml on a GitHub cron of
-// its own and, since 2026-11-26, also dispatched by the heartbeat Worker at :13 and :43 (GitHub delivered the cron about
+// its own and, since 2026-11-26, also dispatched by the heartbeat Worker at :28 and :58 (GitHub delivered the cron about
 // 20 times in 6.5 days; the cron stays the path that shares nothing with the Worker). It replaces the dead-man switch
 // Healthchecks.io was to be (dropped: its sign-up email never arrived).
 //

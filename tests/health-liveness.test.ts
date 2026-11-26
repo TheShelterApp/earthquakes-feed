@@ -412,9 +412,10 @@ const read = (rel: string): string => readFileSync(fileURLToPath(new URL(`../${r
 test('health-liveness.yml: its own cron (independent of the heartbeat Worker) and the Worker\'s ticks, the bot token, the two write scopes, the variable', () => {
   const yml = read('.github/workflows/health-liveness.yml');
   assert.match(yml, /\non:\n {2}schedule:\n {4}- cron: '3,13,23,33,43,53 \* \* \* \*'\n/);
-  // Two paths since 2026-11-26: the Worker dispatches it at :13 and :43 (tests/heartbeat.test.ts), and the cron, which
-  // shares nothing with the Worker, stays: while the Worker is down (and health with it) the cron is the only path.
-  assert.match(read('heartbeat/src/worker.js'), /if \(minute === 13 \|\| minute === 43\) return 'health-liveness\.yml';/);
+  // Two paths since 2026-11-26: the Worker dispatches it at :28 and :58, between the cron's slots (tests/heartbeat.test.ts),
+  // and the cron, which shares nothing with the Worker, stays: while the Worker is down (and health with it) the cron is
+  // the only path.
+  assert.match(read('heartbeat/src/worker.js'), /if \(minute === 28 \|\| minute === 58\) return 'health-liveness\.yml';/);
   assert.match(yml, /\n {6}actions: write\n/);
   assert.match(yml, /\n {6}issues: write\n/);
   assert.match(yml, /\n {10}GH_TOKEN: \$\{\{ github\.token \}\}\n/);

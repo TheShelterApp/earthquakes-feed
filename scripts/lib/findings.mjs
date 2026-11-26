@@ -485,16 +485,20 @@ export const RULES = Object.freeze({
   'feed:state-shadow': rule('feed:state-shadow', {
     title: 'feed run stopped at the state store',
     // Storage phase 3b (src/event-map-store.ts; the key keeps its phase-3a name, the boards' entries with it): one of
-    // the newest `runs` aggregate (or derive.yml) runs of the last `holdMs` reported a state step that did not succeed.
+    // the newest `runs` aggregate (or derive.yml) runs of the last `holdMs` reported a state step that did not succeed:
+    // its hydrate, its persist, or derive-publish's re-hydrate after the push (`hydrate-publish`).
     // The store holds the only copy of the event map, so each is a failed feed run that stopped before its push: the
     // hydrate could not read or verify the generation's days (a store request failed: auth, budget, the Worker down;
     // a blob missing or corrupt), or persist could not upload them (the generation then stays as it was), or the step
     // was killed by its timeout (`killed`). The next run retries 5 minutes later; a failure that lasts stops the feed,
     // which feed:freshness (whose text then names this row) reports at 30 minutes. In phase 3a this row was the
     // shadow's mismatch or error and the feed carried on from git. Read from the markers each run uploads (artifact
-    // state-shadow, `if: always()`); only artifacts of scheduled or dispatched runs of `workflows` on main count (a
-    // pull request can upload an artifact of any name).
-    board: 'feed', class: 'redundancy', severity: 'P2', key: 'feed:state-shadow', check: 'gh-redundancy',
+    // state-shadow, its last step, `if: always()`); only artifacts of scheduled or dispatched runs of `workflows` on
+    // main count (a pull request can upload an artifact of any name). Class symptom on the feed's path (gh-feed), no
+    // longer redundancy: in phase 3a the shadow had git behind it; since 3b nothing covers a run the store stopped.
+    // first-solutions' collect hydrate is not here (not the feed): its failure is a blocked line of that walk's marker
+    // (walks:first-solutions:run).
+    board: 'feed', class: 'symptom', severity: 'P2', key: 'feed:state-shadow', check: 'gh-feed',
     limits: { artifact: 'state-shadow', workflows: ['aggregate.yml', 'derive.yml'], runs: 3, holdMs: 2 * HOUR },
   }),
   'feed:state-gc': rule('feed:state-gc', {

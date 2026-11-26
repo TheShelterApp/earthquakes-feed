@@ -153,17 +153,6 @@ jobs:
           FEED_STATE_AUDIENCE: earthquakes-feed-state
           FEED_STATE_MARKER_DIR: ${{ runner.temp }}/state-shadow
         run: npx --no-install tsx src/event-map-store.ts persist
-      - name: Upload the state report
-        # The markers of the two state steps (hydrate.json, persist.json), which the health workflow's feed evaluator
-        # reads from the newest runs (scripts/feed-health.mjs, feed:state-shadow).
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: state-shadow
-          path: ${{ runner.temp }}/state-shadow
-          if-no-files-found: ignore
-          retention-days: 1
       - name: Commit & push observation log
         working-directory: .data
         run: |
@@ -199,3 +188,16 @@ jobs:
           r2-s3-endpoint: ${{ vars.R2_S3_ENDPOINT }}
           r2-bucket: ${{ vars.R2_BUCKET }}
           r2-public-base: ${{ vars.R2_PUBLIC_BASE }}
+      - name: Upload the state report
+        # The markers of the three state steps (hydrate.json, persist.json and derive-publish's hydrate-publish.json),
+        # which the health workflow's feed evaluator reads from the newest runs (scripts/feed-health.mjs,
+        # feed:state-shadow). Last, so derive-publish's re-hydrate is in it; `always()`, so a failed or cancelled run's
+        # markers are too (a step killed by its timeout left its `killed` marker).
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: state-shadow
+          path: ${{ runner.temp }}/state-shadow
+          if-no-files-found: ignore
+          retention-days: 1

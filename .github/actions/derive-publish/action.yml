@@ -88,13 +88,17 @@ runs:
       # and verified, so a push retry's rebase that removed an ignored day file, or the reset above, cannot leave derive
       # with fewer days (it would refuse to read them as empty). Fails closed (a 60 s deadline over the store requests).
       # While git still tracks event-map files (derive.yml before the transition commit, or after a rollback's
-      # re-track) the checkout is kept. The calling job holds id-token: write.
+      # re-track) the checkout is kept. The calling job holds id-token: write. Its marker goes beside the job's first
+      # hydrate's (hydrate-publish.json, not over hydrate.json), and the calling job's last step uploads both: a store
+      # that fails between the aggregate push and this re-hydrate (a day a rebase removed) is feed:state-shadow too.
       shell: bash
       env:
         DATA_DIR: .data
         FEED_STATE_BACKEND: worker
         FEED_STATE_URL: https://feed-state.theshelter.app
         FEED_STATE_AUDIENCE: earthquakes-feed-state
+        FEED_STATE_MARKER_DIR: ${{ runner.temp }}/state-shadow
+        FEED_STATE_MARKER_NAME: hydrate-publish
       run: npx --no-install tsx src/event-map-store.ts hydrate
     - name: Derive views
       shell: bash

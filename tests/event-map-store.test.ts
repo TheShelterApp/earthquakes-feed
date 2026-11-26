@@ -29,6 +29,7 @@ import {
   hydrate,
   main,
   markStarted,
+  markerFile,
   parseGeneration,
   persist,
   pruneGeneration,
@@ -481,6 +482,12 @@ test('the steps (phase 3b): markers for the health workflow; no store, a store e
     // health sees (feed:state-shadow), never a missing marker. Every step that ends overwrites it.
     markStarted('hydrate', { at: '2026-11-16T12:00:00.000Z', run_id: '43' }, env({}));
     assert.deepEqual([marker('hydrate').ok, marker('hydrate').error_kind, marker('hydrate').run_id], [false, 'killed', '43']);
+    // derive-publish's re-hydrate runs in the same job and directory: FEED_STATE_MARKER_NAME keeps its marker beside the
+    // first hydrate's instead of over it (health reads every file of the artifact). A bad name falls back to the step's.
+    assert.equal(await main(['hydrate'], env({ FEED_STATE_BACKEND: 'bogus', FEED_STATE_MARKER_NAME: 'hydrate-publish' })), 1);
+    assert.deepEqual([marker('hydrate-publish').step, marker('hydrate-publish').error_kind, marker('hydrate').error_kind], ['hydrate', 'config', 'killed']);
+    assert.equal(markerFile('hydrate', env({ FEED_STATE_MARKER_NAME: '../x' })), join(markers, 'hydrate.json'));
+    assert.equal(markerFile('persist', env({})), join(markers, 'persist.json'));
     // The bounds: phase 3b's hydrate fails closed within a minute of store requests, inside its 3-minute timeout-minutes;
     // persist keeps the client's defaults (its timeout-minutes is 4); phase 3a's shadow policy stays for the shadow mode.
     assert.equal(SHADOW_RETRY_POLICY.attempts, 2);

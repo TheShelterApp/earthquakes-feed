@@ -2025,11 +2025,19 @@ green. The store holds the only copy of the event map; git holds the generation 
   scripts that load a data checkout's event map (heal-dryrun, correction-dryrun, live-baseline-replay) fail with
   that message; scripts/bootstrap-data-branch.sh and reset-data-branch.sh write the phase-3b layout (the empty
   generation, the sentinels, the ignore lines).
-- *Health*: `feed:state-shadow` (key kept, title "feed run stopped at the state store") now means a feed run that
-  stopped at its state step before its push: a hydrate that could not read or verify the generation's days, a persist
-  that could not upload, a step killed by its timeout. P2; the next run retries 5 minutes later; a failure that lasts
-  stops the feed, and `feed:freshness`'s text then starts with "the newest feed runs stopped at the state store
-  (feed:state-shadow)". `feed:state-quota` (P1) names a Cloudflare 1027. `feed:repo-growth`'s line is 11 MB a day.
+- *Health*: `feed:state-shadow` (key kept, title "feed run stopped at the state store", class `symptom` on the feed's
+  path since 3b, no longer `redundancy`: nothing covers a run the store stopped) now means a feed run that stopped at a
+  state step: a hydrate that could not read or verify the generation's days, a persist that could not upload, derive-
+  publish's re-hydrate after the push (its marker `hydrate-publish.json` beside `hydrate.json`, `FEED_STATE_MARKER_NAME`;
+  a day a rebase removed that the store could not give back), a step killed by its timeout. Every state step of a run
+  writes its marker into one directory, which the job's last step uploads (`if: always()`). P2; the next run retries 5
+  minutes later; a failure that lasts stops the feed, and when the newest feed run's marker failed, `feed:freshness`'s
+  text starts with "the newest feed runs stopped at the state store (feed:state-shadow)" (an older failure the later
+  runs got past leaves the freshness row's own causes, a Pages outage say, as they are). first-solutions' collect hydrate
+  is a background walk, not the feed: when it fails, the collect job uploads that walk's blocked marker itself (the
+  commit job that usually does is skipped), a `walks:first-solutions:run` row (P3, never red) instead of silence until
+  the last marker's 26 h hold ends. `feed:state-quota` (P1) names a Cloudflare 1027. `feed:repo-growth`'s line is 11 MB a
+  day.
 - *Growth*: the replay's aggregate commits after the transition add 0.04–0.08 MB of new blobs each (production's
   commits of the same runs: 0.19–0.37 MB, the hour shards); the event_map tree is no longer rewritten.
 

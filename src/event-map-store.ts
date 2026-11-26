@@ -868,6 +868,17 @@ export interface StateMarker {
 }
 
 /**
+ * The marker's file under FEED_STATE_MARKER_DIR: the step's name, or FEED_STATE_MARKER_NAME when a job runs the same step
+ * twice into one directory (derive-publish's re-hydrate, `hydrate-publish`, beside the job's first `hydrate`), so the
+ * second does not overwrite the first. health reads every marker file of the artifact (scripts/feed-health.mjs). A name
+ * that is not a short lowercase word falls back to the step's (a marker in the wrong file beats none).
+ */
+export function markerFile(step: StateMarker['step'], env: NodeJS.ProcessEnv = process.env): string {
+  const name = (env.FEED_STATE_MARKER_NAME ?? '').trim();
+  return join(env.FEED_STATE_MARKER_DIR!, `${/^[a-z][a-z0-9-]{0,40}$/.test(name) ? name : step}.json`);
+}
+
+/**
  * The marker a step writes when it starts, before any request: not ok, error_kind `killed`. The step overwrites it with
  * its real report when it ends, so it survives only when the runner killed the step (its timeout-minutes) before it
  * could report: health then sees a hung store as a failed step (feed:state-shadow), not as a missing marker.
@@ -882,11 +893,11 @@ export function markStarted(step: StateMarker['step'], common: Pick<StateMarker,
     error_kind: 'killed',
   };
   mkdirSync(env.FEED_STATE_MARKER_DIR, { recursive: true });
-  writeFileSync(join(env.FEED_STATE_MARKER_DIR, `${step}.json`), `${JSON.stringify(m, null, 2)}\n`);
+  writeFileSync(markerFile(step, env), `${JSON.stringify(m, null, 2)}\n`);
 }
 
-/** The step's marker for the health workflow (FEED_STATE_MARKER_DIR/<step>.json, uploaded as the artifact
- *  state-shadow), its step-summary line and its log line. */
+/** The step's marker for the health workflow (FEED_STATE_MARKER_DIR/<step>.json, or markerFile's name; uploaded as the
+ *  artifact state-shadow), its step-summary line and its log line. */
 export function report(m: StateMarker, env: NodeJS.ProcessEnv = process.env, log: (l: string) => void = console.log): void {
   log(`state ${m.step}: ${m.summary}`);
   for (const x of (m.mismatches ?? []).slice(0, 20)) log(`  mismatch ${x}`);
@@ -894,7 +905,7 @@ export function report(m: StateMarker, env: NodeJS.ProcessEnv = process.env, log
   if (!m.ok && !m.off) log(`::${EVENT_MAP_STORE_AUTHORITATIVE && m.mode !== 'shadow' ? 'error' : 'warning'} title=State ${m.step}::${m.summary.replace(/\n/g, ' ').slice(0, 400)}`);
   if (env.FEED_STATE_MARKER_DIR) {
     mkdirSync(env.FEED_STATE_MARKER_DIR, { recursive: true });
-    writeFileSync(join(env.FEED_STATE_MARKER_DIR, `${m.step}.json`), `${JSON.stringify(m, null, 2)}\n`);
+    writeFileSync(markerFile(m.step, env), `${JSON.stringify(m, null, 2)}\n`);
   }
   if (env.GITHUB_STEP_SUMMARY) {
     try {

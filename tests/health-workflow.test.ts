@@ -214,7 +214,13 @@ test('walks: a blocked marker is a warning on a green run and the artifact walk-
     assert.match(warn[0]!, /\n {8}if: always\(\)\n/, workflow);
     assert.match(warn[0]!, /echo '::warning::/, workflow);
     assert.doesNotMatch(warn[0]!, /exit 1|::error::/, workflow);
-    const upload = steps(yml).filter((s) => s.includes(`name: ${lim.artifactPrefix}${workflow}\n`));
+    const all = steps(yml).filter((s) => s.includes(`name: ${lim.artifactPrefix}${workflow}\n`));
+    // first-solutions' collect job uploads the marker itself when its state hydrate failed (the commit job, the usual
+    // uploader, is then skipped): only then, and over any earlier marker of the name.
+    const stopped = all.filter((s) => s.includes("\n        if: failure() && steps.hydrate.outcome == 'failure'\n"));
+    assert.equal(stopped.length, workflow === 'first-solutions' ? 1 : 0, workflow);
+    for (const s of stopped) assert.match(s, /\n {10}overwrite: true\n/, workflow);
+    const upload = all.filter((s) => !stopped.includes(s));
     assert.equal(upload.length, 1, workflow);
     assert.match(upload[0]!, /\n {8}if: always\(\)( && !inputs\.dry_run)?\n {8}uses: actions\/upload-artifact@[0-9a-f]{40} # v/, workflow);
     assert.ok(upload[0]!.includes(`\n          path: ${marker}\n          if-no-files-found: ignore\n`), workflow);
@@ -248,7 +254,8 @@ test('walks: a blocked marker is a warning on a green run and the artifact walk-
     const tool = at((s) => MARK[workflow]!.tool.test(s));
     const warn = at((s) => s.includes(`if [ -f ${marker} ]`));
     const mark = at((s) => s.includes('name: Mark a run with nothing blocked'));
-    const upload = at((s) => s.includes(`name: ${lim.artifactPrefix}${workflow}\n`));
+    // The usual uploader (first-solutions' collect-job upload on a failed hydrate aside, checked above).
+    const upload = at((s) => s.includes(`name: ${lim.artifactPrefix}${workflow}\n`) && !s.includes("if: failure() && steps.hydrate.outcome == 'failure'"));
     assert.ok(tool >= 0 && tool < warn && warn < mark && mark < upload, `${workflow}: tool ${tool} < warn ${warn} < mark ${mark} < upload ${upload}`);
     assert.match(all[mark]!, MARK[workflow]!.when, workflow);
     assert.ok(all[mark]!.includes(`[ -f ${marker} ] || echo "# nothing blocked: run \${{ github.run_id }}" > ${marker}`), workflow);

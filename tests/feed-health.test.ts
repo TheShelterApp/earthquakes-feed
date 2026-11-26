@@ -683,6 +683,11 @@ test('parseMarker: each line under the leftmost whole-word registry id, else run
   assert.deepEqual(parseMarker('# nothing blocked: run 7\n  # usgs\nusgs # x', IDS).map((l) => l.source), ['usgs']);
   // An id that cannot be part of a key is never used.
   assert.deepEqual(parseMarker('Bad: x', ['Bad']).map((l) => l.source), ['run']);
+  // first-solutions' collect job when its state hydrate failed (first-solutions.yml, "Mark a walk the state store
+  // stopped"): a line about the walk itself, walks:first-solutions:run, whatever the store's summary says.
+  const fs = readFileSync(new URL('../.github/workflows/first-solutions.yml', import.meta.url), 'utf8');
+  assert.ok(fs.includes("printf 'state store: the hydrate failed, the walk read nothing (run %s; the next run retries): %s\\n'"));
+  assert.deepEqual(parseMarker('state store: the hydrate failed, the walk read nothing (run 9; the next run retries): failed: batchGet: HTTP 429 {"error":"budget"}', IDS).map((l) => l.source), ['run']);
 });
 
 const MARKER_AT = NOW - 2 * HOUR;
@@ -1355,6 +1360,22 @@ test('feed:state-shadow: a state step not ok in the newest markers of the last 2
   assert.match(fresh.text, /^the newest feed runs stopped at the state store \(feed:state-shadow\): live manifest is 40 min stale .*the state store/);
   assert.ok(both.findings.some((f) => f.key === 'feed:state-shadow'));
   assert.match(evaluateFeed(healthyInputs({ v1: stale, v2: stale })).findings.find((f) => f.key === 'feed:freshness')!.text, /^live manifest is 40 min stale/, 'no state row: as before');
+  // An older failure the newest run got past (the hold is 2 h) is still a state row, but the stale feed has another
+  // cause (a Pages outage, say): its freshness row does not blame the store.
+  const recovered = { ok: true as const, markers: [m(MIN, ok, ok), m(40 * MIN, { ok: false, summary: 'failed: batchGet: HTTP 503', error_kind: 'transport' })] };
+  assert.equal(evaluateStateShadow(recovered, NOW).newestFailed, false);
+  assert.equal(evaluateStateShadow(shadowBad, NOW).newestFailed, true);
+  const pages = evaluateFeed(healthyInputs({ v1: stale, v2: stale, stateShadow: recovered }));
+  assert.ok(pages.findings.some((f) => f.key === 'feed:state-shadow'));
+  assert.match(pages.findings.find((f) => f.key === 'feed:freshness')!.text, /^live manifest is 40 min stale/);
+  // derive-publish's re-hydrate (hydrate-publish.json, after the push) counts as any state step; a stray file of the
+  // artifact that is no state step does not.
+  const publish = evaluateStateShadow({ ok: true, markers: [{ createdAtMs: NOW - MIN, runId: 8, steps: { hydrate: ok, persist: ok, 'hydrate-publish': { step: 'hydrate', ok: false, summary: 'failed: batchGet: HTTP 429 budget' }, other: { ok: false } } }] }, NOW);
+  assert.deepEqual(publish.findings.map((f) => [f.key, f.members]), [['feed:state-shadow', ['hydrate-publish']]]);
+  assert.match(publish.findings[0]!.text, /^hydrate-publish \(run 8, /);
+  assert.equal(publish.newestFailed, true);
+  // Since 3b nothing covers a run the store stopped: a symptom on the feed's path, not a lost redundancy.
+  assert.deepEqual([RULES['feed:state-shadow'].class, RULES['feed:state-shadow'].check], ['symptom', 'gh-feed']);
   assert.deepEqual(evaluateStateShadow({ ok: true, markers: [m(3 * HOUR, { ok: false, summary: 'old' })] }, NOW).unjudged, ['feed:state-shadow']);
   const off = evaluateStateShadow({ ok: true, markers: [m(MIN, { ok: true, off: true, summary: 'off' }, { ok: true, off: true })] }, NOW);
   assert.deepEqual(off.findings, []);

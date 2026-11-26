@@ -117,15 +117,6 @@ jobs:
           FEED_STATE_AUDIENCE: earthquakes-feed-state
           FEED_STATE_MARKER_DIR: ${{ runner.temp }}/state-shadow
         run: npx --no-install tsx src/event-map-store.ts hydrate
-      - name: Upload the state report
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: state-shadow
-          path: ${{ runner.temp }}/state-shadow
-          if-no-files-found: ignore
-          retention-days: 1
       - name: Re-track the event map (rollback only)
         # APIs.md "Rollback after 3b", step 3: the hydrated event map back into git as phase 3a's hour shards, byte for
         # byte the generation's days (src/event-map-store.ts retrack checks each), the sentinel and the .gitignore lines
@@ -163,3 +154,14 @@ jobs:
           r2-s3-endpoint: ${{ vars.R2_S3_ENDPOINT }}
           r2-bucket: ${{ vars.R2_BUCKET }}
           r2-public-base: ${{ vars.R2_PUBLIC_BASE }}
+      - name: Upload the state report
+        # As in aggregate.yml: the first hydrate's marker and derive-publish's re-hydrate's (hydrate-publish.json), last
+        # and `always()`, for health's feed:state-shadow.
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: state-shadow
+          path: ${{ runner.temp }}/state-shadow
+          if-no-files-found: ignore
+          retention-days: 1

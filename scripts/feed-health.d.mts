@@ -127,8 +127,11 @@ export interface RepoSample {
 export function pickArtifacts(listing: unknown, name: string, n: number): Array<{ id: number; createdAtMs: number; runId: number | null }>;
 /** Whether a workflow run may vouch for a state marker: one of `workflows`, on this repository's main, by schedule or dispatch. */
 export function trustedRun(run: unknown, workflows: readonly string[]): boolean;
-/** feed:state-shadow (P2): a state step not ok in the newest markers younger than 2 h; none that young: unjudged. */
-export function evaluateStateShadow(read: StateShadowRead | undefined, nowMs: number): Judged;
+/** The state-step files of one marker artifact (hydrate, persist, and any file whose JSON names one, e.g. hydrate-publish), by name. */
+export function stateSteps(steps: unknown): Array<[string, Record<string, unknown>]>;
+/** feed:state-shadow (P2): a state step not ok in the newest markers younger than 2 h; none that young: unjudged.
+ *  `newestFailed`: the newest marker has a step not ok (feed:freshness then names the store). */
+export function evaluateStateShadow(read: StateShadowRead | undefined, nowMs: number): Judged & { newestFailed?: boolean };
 /** feed:state-gc (P2): no completed state GC run in 3 days, or none on record. */
 export function evaluateStateGc(read: FeedInputs['stateGc'], nowMs: number): Judged;
 /** feed:state-backup: the newest daily state over 36 h old (P2) or 7 days (P1); no backup on record: P2. */

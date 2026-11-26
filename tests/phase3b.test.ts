@@ -445,7 +445,7 @@ function stepOf(yml: string, name: string): string {
 
 test('wiring: every reader of the event map hydrates first, fail closed; the snapshot reads the hydrated checkout; persist stops the run before its push', () => {
   const agg = read('.github/workflows/aggregate.yml');
-  const order = ['State hydrate', 'Snapshot the silent-change baseline', 'Aggregate', 'State persist', 'Upload the state report', 'Commit & push observation log', 'Derive and publish'];
+  const order = ['State hydrate', 'Snapshot the silent-change baseline', 'Aggregate', 'State persist', 'Commit & push observation log', 'Derive and publish', 'Upload the state report'];
   const at = order.map((n) => agg.indexOf(`- name: ${n}\n`));
   assert.ok(at.every((x, i) => x > 0 && (i === 0 || x > at[i - 1]!)), `aggregate.yml order: ${order.join(' → ')}`);
   for (const [name, minutes] of [['State hydrate', 3], ['State persist', 4]] as const) {
@@ -456,7 +456,14 @@ test('wiring: every reader of the event map hydrates first, fail closed; the sna
     assert.match(s, /\n {10}FEED_STATE_MARKER_DIR: \$\{\{ runner\.temp \}\}\/state-shadow\n/);
   }
   assert.match(stepOf(agg, 'State hydrate'), /\n {8}run: npx --no-install tsx src\/event-map-store\.ts hydrate$/);
-  assert.match(stepOf(agg, 'Upload the state report'), /\n {8}if: always\(\)\n/, 'the markers of a failed run are uploaded too');
+  // Last, so derive-publish's re-hydrate marker is in it; always(), so the markers of a failed run are too.
+  for (const [f, yml] of [['aggregate.yml', agg], ['derive.yml', read('.github/workflows/derive.yml')]] as const) {
+    const up = stepOf(yml, 'Upload the state report');
+    assert.match(up, /\n {8}if: always\(\)\n/, `${f}: the markers of a failed run are uploaded too`);
+    assert.match(up, /\n {10}name: state-shadow\n {10}path: \$\{\{ runner\.temp \}\}\/state-shadow\n/);
+    assert.ok(yml.indexOf('- name: Upload the state report\n') > yml.indexOf('- name: Derive and publish\n'), `${f}: the upload after derive-publish`);
+    assert.doesNotMatch(yml.slice(yml.indexOf('- name: Upload the state report\n') + 1), /\n {6}- (name|uses|run): /, `${f}: the last step`);
+  }
   const derive = read('.github/workflows/derive.yml');
   const dh = stepOf(derive, 'State hydrate');
   assert.doesNotMatch(dh, /\n {8}continue-on-error:/);
@@ -467,11 +474,23 @@ test('wiring: every reader of the event map hydrates first, fail closed; the sna
   const action = read('.github/actions/derive-publish/action.yml');
   assert.ok(action.indexOf('- name: Start from the data commit\n') < action.indexOf('- name: State hydrate (after the reset)\n'));
   assert.ok(action.indexOf('- name: State hydrate (after the reset)\n') < action.indexOf('- name: Derive views\n'));
+  // Its marker beside the job's first hydrate's, never over it.
+  const ah = stepOf(action, 'State hydrate (after the reset)');
+  assert.match(ah, /\n {8}FEED_STATE_MARKER_DIR: \$\{\{ runner\.temp \}\}\/state-shadow\n {8}FEED_STATE_MARKER_NAME: hydrate-publish\n/);
   const fs = read('.github/workflows/first-solutions.yml');
   const fh = stepOf(fs, 'State hydrate');
   assert.doesNotMatch(fh, /\n {8}continue-on-error:/);
   assert.match(fh, /\n {8}timeout-minutes: 3\n/);
   assert.ok(fs.indexOf('- name: State hydrate\n') < fs.indexOf('- name: Collect\n'));
+  // A hydrate that fails skips the commit job, the walk marker's uploader: the collect job files its own marker then.
+  assert.match(fh, /\n {8}id: hydrate\n/);
+  assert.match(fh, /\n {10}FEED_STATE_MARKER_DIR: \$\{\{ runner\.temp \}\}\/state-shadow\n/);
+  const mark = stepOf(fs, 'Mark a walk the state store stopped');
+  assert.match(mark, /\n {8}if: failure\(\) && steps\.hydrate\.outcome == 'failure'\n/);
+  const up = stepOf(fs, 'Upload the blocked marker of a stopped walk (read by the health workflow)');
+  assert.match(up, /\n {8}if: failure\(\) && steps\.hydrate\.outcome == 'failure'\n/);
+  assert.match(up, /\n {10}name: walk-blocked-first-solutions\n {10}path: fs-out\/blocked\.txt\n(?: {10}.*\n)* {10}overwrite: true\n/);
+  assert.ok(fs.indexOf('- name: Upload the blocked marker of a stopped walk') < fs.indexOf('\n  commit:\n'), 'in the collect job');
   // No step is phase-3b-only any more, and no workflow or action runs a shadow hydrate.
   for (const f of ['.github/workflows/aggregate.yml', '.github/workflows/derive.yml', '.github/workflows/first-solutions.yml', '.github/actions/derive-publish/action.yml']) {
     assert.doesNotMatch(read(f), /--3b-only|--mode shadow|State shadow hydrate/, f);

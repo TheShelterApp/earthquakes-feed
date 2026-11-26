@@ -2082,7 +2082,9 @@ days are lacking), so the event map must be back in git first, and nothing of ph
    meanwhile; `feed:freshness` fires after 30 minutes, which is expected: silence it for the window).
 2. Wait until `node scripts/writer-queue.mjs status` (line 6 above) prints `nothing`.
 3. `gh workflow run derive.yml -R TheShelterApp/earthquakes-feed -f retrack=true` (add `-f force=true` if the gate
-   refuses). Under the writer lock it hydrates (authoritative), then `event-map-store.ts retrack` writes the map back
+   refuses). Under the writer lock it first checks steps 1 and 2 itself (`writer-queue.mjs retrack-check`: aggregate.yml
+   `disabled_manually` and no aggregate run holding, waiting or about to enter the writer group; either unreadable
+   refuses too) and stops red otherwise, before anything is hydrated or committed. Then it hydrates (authoritative), then `event-map-store.ts retrack` writes the map back
    as phase 3a's hour shards, checks every day's canonical bytes against the generation (it refuses an unhydrated or
    differing checkout), removes the ignore lines and both sentinels, and commits and pushes "retrack: …"; the derive
    and publish steps follow as usual (their re-hydrate keeps the now-tracked checkout). About 12 MB of shards enter

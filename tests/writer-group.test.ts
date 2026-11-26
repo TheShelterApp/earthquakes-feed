@@ -313,6 +313,10 @@ test('workflows: derive runs at the end of every aggregate job, and derive.yml o
   assert.deepEqual([...d.slice(d.indexOf('\n    inputs:'), d.indexOf('\npermissions:')).matchAll(/^ {6}(\w+):$/gm)].map((m) => m[1]), ['force', 'retrack']);
   assert.match(d, /\n {6}retrack:\n(?: {8}#.*\n)+ {8}description: .*\n {8}type: boolean\n {8}default: false\n/);
   assert.match(d, /- name: Re-track the event map \(rollback only\)\n(?: {8}#.*\n)+ {8}if: inputs\.retrack\n/);
+  // The re-track checks its own preconditions (aggregate.yml disabled, no aggregate run queued) before the hydrate.
+  const check = d.indexOf("- name: Check the re-track's preconditions (rollback only)");
+  assert.ok(check > 0 && check < d.indexOf('- name: State hydrate'), 'the check precedes the hydrate');
+  assert.match(d.slice(check), /^[^\n]*\n(?: {8}#.*\n)+ {8}if: inputs\.retrack\n {8}env:\n {10}GH_TOKEN: \$\{\{ github\.token \}\}\n {8}run: node scripts\/writer-queue\.mjs retrack-check\n/);
   assert.match(d, /uses: \.\/\.github\/actions\/derive-publish/);
   // The composite reads each secret through an input, so each step sees only its own.
   const action = read('.github/actions/derive-publish/action.yml');

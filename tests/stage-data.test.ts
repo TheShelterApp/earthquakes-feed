@@ -330,7 +330,7 @@ test('wiring: exactly the state store\'s jobs hold id-token: write, at job level
   // The jobs that push to data keep contents: write next to it; first-solutions' collect uploads Release chunks.
   for (const [file, job, perms] of [
     ['aggregate.yml', 'aggregate', ['contents: write', 'id-token: write']],
-    ['derive.yml', 'derive', ['contents: write', 'id-token: write']],
+    ['derive.yml', 'derive', ['contents: write', 'actions: read', 'id-token: write']],
     ['first-solutions.yml', 'collect', ['contents: write', 'actions: read', 'id-token: write']],
     ['health.yml', 'feed', ['contents: read', 'actions: read', 'id-token: write']],
     ['state-gc.yml', 'gc', ['contents: read', 'actions: read', 'id-token: write']],

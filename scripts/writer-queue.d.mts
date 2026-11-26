@@ -50,6 +50,9 @@ export interface GateDecision {
 }
 export function decideGate(opts: { queue: readonly QueueEntry[]; selfId: number; force?: boolean; retried?: boolean; workflow: string; maxQueued?: number }): GateDecision;
 
+/** derive.yml's rollback re-track may run: aggregate.yml `disabled_manually` and no aggregate run left in the queue. */
+export function decideRetrack(opts: { workflowState: string | null | undefined; queue: readonly QueueEntry[] }): { ok: boolean; problems: string[] };
+
 export type FetchImpl = (url: string, init?: { method?: string; headers?: Record<string, string> }) => Promise<Response>;
 export function readQueue(opts: { repo: string; token: string; nowMs?: number; fetchImpl?: FetchImpl; sleep?: (ms: number) => Promise<void> }): Promise<QueueEntry[]>;
 export function run(opts?: {

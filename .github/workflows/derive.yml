@@ -16,7 +16,8 @@ on:
       retrack:
         # Storage phase 3b's rollback only (APIs.md "Rollback after 3b"): with aggregate.yml disabled and the writer
         # queue empty, this run commits the hydrated event map back into git as hour shards (the sentinel and the ignore
-        # lines removed); the revert to phase 3a is merged next, then aggregate.yml enabled again. Never otherwise.
+        # lines removed); the revert to phase 3a is merged next, then aggregate.yml enabled again. Never otherwise. The
+        # job checks both preconditions itself before it hydrates (writer-queue.mjs retrack-check) and stops otherwise.
         description: 'ROLLBACK ONLY (APIs.md "Rollback after 3b"): commit the event map back into git; aggregate.yml must be disabled first'
         type: boolean
         default: false
@@ -70,10 +71,12 @@ jobs:
     # 12, not 6: a failing Pages deploy alone runs ~3 min before erroring out. The deploy reads this budget
     # (job-timeout-minutes below, kept equal by tests/pages-deploy.test.ts) and retries only while 7 min are left.
     timeout-minutes: 12
-    # Restated in full at job level (aggregate.yml says why): the push, and an OIDC token for the state store's
-    # hydrate (read only: derive's prune of the generation is a local edit, src/event-map-store.ts).
+    # Restated in full at job level (aggregate.yml says why): the push, the workflow state and the runs for the
+    # re-track's precondition check (rollback only), and an OIDC token for the state store's hydrate (read only:
+    # derive's prune of the generation is a local edit, src/event-map-store.ts).
     permissions:
       contents: write
+      actions: read
       id-token: write
     steps:
       # First, so the Pages deploy (.github/actions/derive-publish) counts the job's budget from about its start.
@@ -91,6 +94,16 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+      - name: Check the re-track's preconditions (rollback only)
+        # APIs.md "Rollback after 3b", steps 1 and 2, enforced before anything is hydrated or committed: aggregate.yml
+        # disabled (`disabled_manually`) and no aggregate run left in the writer queue (holding, waiting or about to
+        # enter: disabling a workflow does not cancel its queued runs). A phase-3b aggregate run after the re-track would
+        # find the shards tracked and make the transition again (the 12 MB of shards twice in the history), and fail
+        # closed once the revert is merged. Fails closed when either cannot be read (scripts/writer-queue.mjs decideRetrack).
+        if: inputs.retrack
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/writer-queue.mjs retrack-check
       - run: npm ci
       - name: State hydrate
         # As in aggregate.yml (storage phase 3b): the generation's days from the state store into the checkout, which

@@ -7,8 +7,10 @@
  * Usage:
  *   npx tsx scripts/heal-dryrun.ts --data <data-branch dir> [--now <iso>] [--regular] [--epoch <n>] [--out <report.md>]
  *
- * <data-branch dir> needs knowledge/index (event_map shards + head.json), e.g.
- *   git archive origin/data knowledge/index | tar -x -C /tmp/data
+ * <data-branch dir> needs knowledge/index (head.json, generation.json) and the event map's day files. Since storage
+ * phase 3b git holds only the generation and two sentinels (`git archive origin/data knowledge/index` gives no day), so
+ * hydrate the directory first from a daily backup (APIs.md "Reading the event map outside the feed's jobs"); without
+ * it the load refuses to read the lacking days as empty and says so.
  * --now defaults to head.ingest_time + 5 min (the next aggregate run).
  * --epoch runs the live identity rules of that re-merge epoch (config identityRules, without the offline-only density
  * rule) instead of the current REMERGE_EPOCH's: what the next run would do once REMERGE_EPOCH is raised to it.

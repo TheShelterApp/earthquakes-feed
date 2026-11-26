@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { gzipSync } from 'node:zlib';
+import { gunzipSync, gzipSync } from 'node:zlib';
 import { loadEventMap, pruneEventMapShards, saveEventMap } from '../src/bitemporal.js';
 import { dataPaths } from '../src/config.js';
 import {
@@ -15,11 +15,13 @@ import {
   PersistRefused,
   SENTINEL_FILE,
   SENTINEL_TEXT,
+  BLOB_GZIP_OS,
   assertEventMapNotStaged,
   emptyGeneration,
   ensureIgnoreLines,
   eventMapFiles,
   eventMapStagingProblems,
+  gzipDay,
   moveToDayLayout,
   SENTINEL_FILES,
   SENTINEL_PATHS,
@@ -189,6 +191,31 @@ test('persist: every day uploaded once as gzip, the generation names the blobs; 
     assert.equal(g2.generation.parent, g1.sha256);
     assert.equal(g2.generation.head_seq, 11);
     assert.deepEqual(g2.generation.days['2026-11-14'], g1.generation.days['2026-11-14']);
+  } finally {
+    rmSync(r, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('gzipDay: the blob\'s gzip header names Unix whatever the platform, so a Mac persists the runners\' blob keys', async () => {
+  // zlib writes its build platform into byte 9 (3 on Linux, 19 on macOS); the 2026-11-26 rehearsal's seed on a Mac
+  // re-keyed every day of production's generation until the byte was pinned (46 of 46 keys equal since).
+  const text = '{"feedId":"efd_a"}\n{"feedId":"efd_b"}\n';
+  const gz = gzipDay(text);
+  assert.equal(BLOB_GZIP_OS, 3);
+  assert.deepEqual([...gz.subarray(0, 4)], [0x1f, 0x8b, 8, 0], 'gzip, deflate, no flags');
+  assert.equal(gz[9], BLOB_GZIP_OS);
+  assert.equal(gunzipSync(gz).toString('utf8'), text);
+  const native = gzipSync(text, { level: 9 });
+  assert.deepEqual(gz.subarray(10), native.subarray(10), 'only the OS byte differs from zlib\'s own output');
+  // persist names exactly that blob.
+  const r = dataRoot();
+  const dir = tmp();
+  try {
+    await persist(r, new FsBackend(dir), { cutoffDay: CUTOFF });
+    const e = readGeneration(r)!.generation.days['2026-11-15']!;
+    assert.equal(e.blob, sha256Hex(gzipDay(dayText(r, '2026-11-15'))));
+    assert.equal((await new FsBackend(dir).batchGet([e.blob])).get(e.blob)![9], BLOB_GZIP_OS);
   } finally {
     rmSync(r, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });

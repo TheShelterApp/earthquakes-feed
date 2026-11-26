@@ -82,6 +82,21 @@ export const SENTINEL_FILES = [SENTINEL_FILE, SENTINEL_HIGH_FILE] as const;
 export const EVENT_MAP_STORE_AUTHORITATIVE = true;
 /** gzip level of a day blob: the store keys a blob by the sha256 of its gzip bytes, so the level only sets the size. */
 export const BLOB_GZIP_LEVEL = 9;
+/** The gzip header's OS byte of a day blob: 3 (Unix), what zlib writes on the Linux runners. */
+export const BLOB_GZIP_OS = 3;
+
+/**
+ * A day's canonical NDJSON as its blob: gzip at BLOB_GZIP_LEVEL with the header's OS byte pinned to BLOB_GZIP_OS. zlib
+ * writes the build platform there (19 on macOS), so the same day persisted on a Mac had another blob key than on the
+ * runners: the 2026-11-26 phase-3b rehearsal's seed re-keyed all 46 days of production's generation, sha256, bytes and
+ * nodes equal, and a local persist (a dry run, a disaster replay) could never leave a production generation as it was.
+ * The byte is informational for every gunzip; with it pinned the blob is the runners' byte for byte (same zlib).
+ */
+export function gzipDay(text: string): Buffer {
+  const gz = gzipSync(text, { level: BLOB_GZIP_LEVEL });
+  gz[9] = BLOB_GZIP_OS;
+  return gz;
+}
 /** PUTs in flight at once (the first phase-3a run uploads all 46 days). */
 export const PUT_CONCURRENCY = 4;
 /**
@@ -502,7 +517,7 @@ export async function persist(root: string, backend: StateBackend, opts: { cutof
       days[day] = held;
       continue;
     }
-    const gz = gzipSync(text, { level: BLOB_GZIP_LEVEL });
+    const gz = gzipDay(text);
     const entry: DayEntry = { sha256: sha, bytes, nodes, blob: sha256Hex(gz), blob_bytes: gz.length };
     days[day] = entry;
     todo.push({ day, gz, entry });

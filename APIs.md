@@ -1738,7 +1738,9 @@ to the ref.
 - *The store* (`state/`, its README): the Worker `earthquakes-feed-state` at `feed-state.theshelter.app` in front of the
   R2 bucket `earthquakes-feed-state` (staging: `-staging` for both). The key is `cas/sha256/<first 2 hex>/<hex>`, where
   the hex is the sha256 of the stored bytes (the gzip, level 9, of a day's canonical NDJSON: about 0.26 MB a day, 12.1
-  MB for the 46 days). No static secret exists. Every request carries a GitHub Actions OIDC token for the audience
+  MB for the 46 days; `gzipDay` pins the gzip header's OS byte to 3, Unix, what zlib writes on the runners, so a day
+  persisted on a Mac has the runners' key: zlib writes 19 there, and the 2026-11-26 rehearsal's seed re-keyed all 46
+  days of production's generation until it was pinned). No static secret exists. Every request carries a GitHub Actions OIDC token for the audience
   `earthquakes-feed-state`. The Worker admits only this repository's numeric id, `refs/heads/main` (any branch on
   staging), github-hosted runners, `schedule` and `workflow_dispatch`, and per route an allow-list of workflow files.
 - *The contract* (protocol 1). Every request sends `Authorization: Bearer <OIDC JWT>`,
@@ -1884,7 +1886,9 @@ directory store):
 - an authoritative hydrate into an empty directory gave the 46 files byte for byte.
 
 `scripts/phase3/dryrun.sh` replays whole cycles on a local worktree of `data` with `FEED_STATE_BACKEND=fs:<dir>`; since
-the phase-3b PR it replays phase 3b's (below, *Rehearsed*).
+the phase-3b PR it replays phase 3b's, a store outage at the hydrate or at persist (`--outage`, against
+`scripts/phase3/outage-store.mjs`, a stand-in Worker on 127.0.0.1 that answers 502, 503 or nothing) and the rollback's
+re-track (`--retrack`) (below, *Rehearsed*).
 
 **The daily jobs.**
 - `state-gc.yml` runs in the writer group (gated, `scripts/writer-queue.mjs` WRITERS), so no persist can re-reference a
@@ -1945,7 +1949,12 @@ for ever (the Releases). Until phase 3, git kept every 5-minute version for ever
 stale, and `feed:freshness` fires at 30 minutes. No data is lost for about 48 hours: the sources' live query windows
 (2 days, `QUERY_LOOKBACK_MS`) and the sweeps' cursors hold what happened meanwhile. Past that, rows older than a
 source's own window are lost until a backfill or a `SWEEP_EPOCH` catch-up (7 days). In phase 3a an outage costs
-nothing but the shadow.
+nothing but the shadow. Rehearsed against a stand-in Worker that was down (`dryrun.sh --outage`; the real client and
+the steps' production policies): a hydrate that met 502s failed after 6 s (its first batch's 4 attempts, the 2 other
+batches cancelled), one that met no answer at all after 44 s (4 attempts of about 10 s, inside the 60 s deadline), a
+persist that met 503 `unavailable` after 10 s and one that met no answer after 88 s (4 attempts of 20 s, inside the
+step's 4 minutes); each exited 1 with a marker that was not ok (`transport`), no commit, generation.json as committed,
+no day file written by the failed hydrate and the store untouched, and the next cycle on the same commit went through.
 
 **Restore** (a store that lost blobs or was corrupted; never a routine rollback).
 1. `gh release download state-YYYY-MM -p state-D.tar.zst`.
@@ -2051,10 +2060,48 @@ it. Every hydrate verified, every persist and commit step passed, derive-publish
 each rebase, and an authoritative hydrate of each committed generation into an empty directory gave the checkout's
 days byte for byte. The generation's days (sha256, bytes, nodes) equalled production's after the first and the
 fifth replayed commit: the store's event map is git's, day for day. Only the transition commit touched the event map.
-The rehearsal predates three changes of the review that followed it, each covered by tests rather than a new replay:
-the transition's persist uploads all 46 days, not only the changed ones (`uploadAll`; tests/phase3b.test.ts replays it
-on a store that lost an unchanged day's blob), derive-publish's re-hydrate writes a marker of its own
-(`hydrate-publish`), and the re-track checks its preconditions (`retrack-check`, tests/writer-queue.test.ts).
+The rehearsal predated three changes of the review that followed it: the transition's persist uploads all 46 days
+(`uploadAll`), derive-publish's re-hydrate writes a marker of its own (`hydrate-publish`), and the re-track checks
+its preconditions (`retrack-check`, tests/writer-queue.test.ts: GitHub's state, outside a local replay).
+
+**Rehearsed again (2026-11-26, the merged code)**, the same way, from production's derive commit 00a18327b7e (23:38
+UTC), on a store seeded with the start commit's own generation (persist left generation.json byte for byte
+production's, so the local blobs are production's keys; `gzipDay`, above, was the fix this needed):
+1. *The transition* on production's aggregate commit f49b7239bc6, after one blob of the seeded store was deleted
+   (11-02) and another corrupted (11-20): the hydrate kept the tracked checkout (1,104 shards, all 46 days identical
+   to the generation, no store request), persist PUT all 46 days (12.1 MB) and so healed both, `stage` untracked the
+   1,104 shards and moved the 46 days to day files, and the commit was exactly 1,104 `D`, the two sentinels `A`,
+   `.gitignore` `M` (the three ignore lines) and the run's 8 usual paths: 1,115 paths, 1.35 MB of new blobs
+   (production's commit: 10 paths, 1.45 MB, of it 0.11 MB two hour shards). derive-publish's re-hydrate wrote the 46
+   days from disk (0 fetched); the closing authoritative hydrate fetched and verified all 46 (12.1 MB in 6 batches,
+   the two damaged blobs included).
+2. *The transition with a lockless commit pushed first*: the same commit replayed on a fresh store (`--seed`) with
+   `--inject-side-commit`; the rebase gave the same 1,115 paths on top of the first-solutions commit, the checkout
+   clean, the 46 ignored day files still on disk (re-hydrate: 0 fetched).
+3. *Two steady-state runs* (f87572a0133, 9fb578389e3): each hydrate fetched all 46 days (12.1 MB in 6 batches, about
+   0.5 s from the directory), persist uploaded 2 and 1 day(s), and each commit carried 8 paths, none under the event
+   map, generation.json one of them (production's commits of the same runs also rewrote 2 and 1 hour shards, 0.12 and
+   0.05 MB).
+4. *Across midnight* (fake clock): ea2ce39262e with derive at 23:59:59 and the staging at 00:00:01 (11-15 froze:
+   `events/2026/11/15.ndjson` committed by that derive, once), then 0b1d8431f3c at production's 00:03:51 (the prune:
+   2026-10-11 left the disk and the generation, 45 days; the derive commit carried generation.json and no event-map
+   path, where production's deleted that day's 24 shards; the closing hydrate gave 45 days).
+5. *Store outages* on d180740f9c9 (*Outage budget*, above: 502 and no answer at the hydrate, 503 and no answer at
+   persist), each failed closed with the checkout unharmed; then the same commit replayed normally.
+6. *The rollback's re-track* (`--retrack`, derive.yml with `retrack=true` at 00:12:30): the authoritative hydrate
+   fetched the 46 days, `retrack` wrote 1,081 hour shards (76.6 MB) and the commit was exactly those 1,081 `A`, the
+   two sentinels `D` and `.gitignore` `M` (no event-map line left); its event-map tree was production's at 4a45e31d855,
+   object for object (tree 10c3e44a048); derive-publish's re-hydrate kept the tracked checkout. Then phase 3a's code
+   (origin/main 510feef1398, its own dryrun.sh, the step after the revert) ran production's next aggregate commit
+   708e93ce58f on it: the shadow hydrate found all 46 days identical, persist uploaded the 4 changed days, the commit
+   rewrote 5 hour shards, and its event-map tree was again production's (fda3abd3e41). A phase-3b run that slips in
+   after the re-track (2fe3a4054b5) made the transition again: 1,081 `D`, the sentinels, `.gitignore`, all 46 days
+   PUT.
+
+After every replayed commit the generation's days equalled production's in every field (sha256, bytes, nodes, blob,
+blob_bytes) and its head_seq production's, and every closing authoritative hydrate into an empty directory gave the
+checkout's days byte for byte; only the two transitions and the re-track touched the event map. Phase 3a's code
+(no `gzipDay`) re-keyed the 4 days it persisted on the Mac: blob alone differed, sha256, bytes and nodes equal.
 
 **Before the merge (the checklist).** Run each line; merge only when all hold.
 1. `gh run list -R TheShelterApp/earthquakes-feed -w state-backup.yml -L 3`, `-w state-gc.yml -L 3`,
@@ -2105,8 +2152,9 @@ days are lacking), so the event map must be back in git first, and nothing of ph
    refuses too) and stops red otherwise, before anything is hydrated or committed. Then it hydrates (authoritative), then `event-map-store.ts retrack` writes the map back
    as phase 3a's hour shards, checks every day's canonical bytes against the generation (it refuses an unhydrated or
    differing checkout), removes the ignore lines and both sentinels, and commits and pushes "retrack: …"; the derive
-   and publish steps follow as usual (their re-hydrate keeps the now-tracked checkout). About 12 MB of shards enter
-   the repository once.
+   and publish steps follow as usual (their re-hydrate keeps the now-tracked checkout). The push carries about 13 MB
+   (the rehearsal's thin pack for 1,081 shards, 76.6 MB raw); a shard identical to one committed before the
+   transition is an object the repository already holds, so the days changed since the transition are what it keeps.
 4. Check `data`: `git ls-tree origin/data knowledge/index/event_map/ | wc -l` about 1,100 hour shards and no
    `0000-00-00.ndjson`/`9999-12-31.ndjson`; `git show origin/data:.gitignore` without the event-map lines.
 5. Merge a revert of the phase-3b commits (phase 3a's code, `EVENT_MAP_STORE_AUTHORITATIVE = false`), but not of the

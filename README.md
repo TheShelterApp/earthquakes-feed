@@ -230,8 +230,9 @@ HTML bulletin is read by a custom adapter (hypocentre parameters only).
   a 45-day dedup horizon; identity older than that lives in the frozen day partitions. Storage phase 3 moves it out of
   git: its days live as content-addressed blobs in the state store (the `earthquakes-feed-state` Worker in front of one
   R2 bucket, GitHub OIDC, no static secret), named by `knowledge/index/generation.json`, which every aggregate and
-  derive commit carries ([APIs.md](APIs.md#repository-size), phase 3); in phase 3a git still tracks the hour shards and the
-  store is written and shadow-verified. Every source with a time-range query reached the target
+  derive commit carries ([APIs.md](APIs.md#repository-size), phase 3). Since phase 3b the store holds the only copy: git
+  tracks the generation and two sentinel files under `knowledge/index/event_map/`, every job hydrates the map from the
+  store before it reads it, and a failed hydrate or persist stops the run before its push. Every source with a time-range query reached the target
   (2023-07-06) in July 2026 except ISC, whose walk is paused; a backfilled row is the
   source's solution when it was fetched, while the log holds each report as first seen
   since 2026-07-05 (`scripts/first-observations.ts`; [APIs.md](APIs.md#history-and-backfill)). A source that answers
@@ -335,7 +336,8 @@ npm run typecheck
 
 # Run the pipeline against a scratch dir (hits live public APIs, read-only). A fresh dir has no event map, which the
 # readers refuse to take as empty (storage phase 3): EVENT_MAP_BOOTSTRAP=1 starts one, as the data branch's empty
-# knowledge/index/generation.json does.
+# knowledge/index/generation.json does. A checkout of `data` holds no event-map day either (phase 3b): hydrate it from a
+# daily backup first (APIs.md "Reading the event map outside the feed's jobs").
 EVENT_MAP_BOOTSTRAP=1 DATA_DIR=.data npm run aggregate   # fetch → dedup → append log
 DATA_DIR=.data PUBLIC_DIR=public npm run derive  # summaries + day files + partitions + live and month index + detail hours + manifest
 DATA_DIR=.data PUBLIC_DIR=public npm run validate
@@ -354,21 +356,24 @@ variable.
    point your domain at it, and add repo secrets `CF_API_TOKEN` + `CF_ACCOUNT_ID`.
 3. **Enable Actions.** `aggregate` (with its derive steps) runs on a cron. Because GitHub throttles low-activity
    schedules, an external 5-minute heartbeat (`workflow_dispatch`) is recommended for tight freshness.
-4. **The state store** (storage phase 3, optional in phase 3a: without it the state steps report errors and the feed
-   runs on): deploy the state Worker (`state/`, its README) with your own repository id and domain, and point
-   `FEED_STATE_URL` in the workflows at it; `bash scripts/phase3/dryrun.sh` rehearses a cycle with a local directory
-   as the store (`FEED_STATE_BACKEND=fs:<dir>`).
+4. **The state store** (storage phase 3, required since phase 3b: it holds the event map, and the feed's state steps
+   fail closed without it): deploy the state Worker (`state/`, its README) with your own repository id and domain, and
+   point `FEED_STATE_URL` in the workflows at it; `bash scripts/phase3/dryrun.sh` rehearses a cycle with a local
+   directory as the store (`FEED_STATE_BACKEND=fs:<dir>`).
 
 ### The heartbeat Worker (`heartbeat/`)
 
-A cron-only Cloudflare Worker that dispatches `aggregate` (every 5 min), `health` (every 15 min),
-`backfill`, `first-solutions` and `history` (hourly), and the state store's `state-backup` (00:31 and 06:31 UTC: the second retries a lost first
+A cron-only Cloudflare Worker that dispatches `aggregate` (every 5 min), `health` (every 15 min), `health-liveness`
+(:28 and :58, minutes none of its own cron slots share, with `tick=1`, so the run acts like a cron delivery instead of the manual dry run), `backfill`,
+`first-solutions` and `history` (hourly), and the state store's `state-backup` (00:31 and 06:31 UTC: the second retries a lost first
 dispatch or failed run before `feed:state-backup`'s P2 line at 12:00 UTC of the next day) and
 `state-gc` (03:33 UTC, with `tick=1`: the scheduled run) through the Actions API with a fine-grained
 `GH_PAT` (Actions: write). The two daily jobs keep their own GitHub crons (00:41, 03:23) as the fallback for a Worker
 outage; GitHub delivered neither on 2026-11-16 or 11-17. Health has no such fallback of its own beyond its `:25` cron:
 `health-liveness.yml` dispatches it when no health run reconciled for 45 minutes and mentions the owner after 90
-(*Health watchdogs*, Liveness). It has no HTTP surface (`workers_dev = false`, `preview_urls = false`).
+(*Health watchdogs*, Liveness); the Worker's ticks of `health-liveness.yml` came in 2026-11-26, when GitHub had
+delivered that workflow's own cron about 20 times in 6.5 days, and the cron stays its second, independent path (while
+the Worker is down it is the only one, as before). It has no HTTP surface (`workers_dev = false`, `preview_urls = false`).
 Cron Triggers are not exactly-once (on 2026-10-14 the one `* * * * *` trigger fired twice a minute, 30 s apart, and every
 workflow was dispatched twice), so each activation first claims its (workflow, intended UTC minute) in a dispatch
 ledger, one SQLite-backed Durable Object (`heartbeat/src/ledger.js`): exactly one activation per minute dispatches, a
@@ -533,12 +538,12 @@ hundred, the board is not written at all: exit 3). The label `health:p1` … `he
 | `feed:stats` | P2 (after 30 min) | `providers/stats.json` says `derive_publish: "on"` and the live v1 manifest has no `stats` pointer | derive's `::warning::stats dropped: …` says why; the live feed is unaffected and the app keeps its last verified statistics |
 | `feed:stats-through` | P3 | With `history_enabled`, the statistics index's `through` null or more than 3 days behind the last frozen day | The stats builder's runs (`stats.yml`) and its ComCat gate |
 | `feed:stats-days` | P3 | The statistics index names `missing_days` | A window day with neither an event-map day nor a partition on `data`; today only once 30 min past 00:00 UTC without an event (ingest stalled or every provider failing: see `feed:freshness` and the `feed:source:<id>` rows) |
-| `feed:state-shadow` | P2 | (This row and the three below are judged while the state store is on: the default; the repository variable `FEED_STATE_BACKEND=off`, phase 3a's kill switch, turns them into a note: APIs.md, the phase-3a rollout.) Storage phase 3a: a state step that did not succeed in one of the newest 3 aggregate (or `derive.yml`) runs of the last 2 h (artifact `state-shadow`): the shadow hydrate found the checkout's event map differing from the generation it committed, a store request failed (token, budget, the Worker down; the hydrate reads the days that differ and a rotating sample of 4, every day about hourly, in batches of at most 2.5 MB each retried on its own), or persist failed (its generation then stays as it was) | The run's "State shadow hydrate" / "State persist" step and its summary; the feed is unaffected (git is still the truth); phase 3b waits for 24 h without this row ([APIs.md](APIs.md#repository-size)) |
+| `feed:state-shadow` | P2 | (Title "feed run stopped at the state store"; the key keeps its phase-3a name. This row and the three below are always judged since phase 3b: no workflow reads phase 3a's kill switch, the repository variable `FEED_STATE_BACKEND`, any more.) Storage phase 3b: a state step that did not succeed in one of the newest 3 aggregate (or `derive.yml`) runs of the last 2 h (artifact `state-shadow`, the job's last step, uploaded by failed runs too; derive-publish's re-hydrate after the push included, as `hydrate-publish`): the hydrate could not read or verify the generation's days (a store request failed: token, budget, the Worker down; a blob missing or corrupt; batches of at most 2.5 MB, each retried on its own, a 60 s deadline), persist could not upload (the generation stays as it was), or a step was killed by its timeout. Each is a feed run that stopped before its push | The run's "State hydrate" / "State persist" step and its summary; the next run retries 5 minutes later, and a failure that lasts stops the feed: `feed:freshness`'s text then starts with "the newest feed runs stopped at the state store" (only while the newest run's marker failed) ([APIs.md](APIs.md#repository-size), Outage budget, Restore) |
 | `feed:state-gc` | P2 | No completed `state-gc.yml` run (dry or not) in 3 days, or none on record | Dispatch `state-gc.yml` (`dry_run` first); its log names the keep set and what it would delete |
 | `feed:state-backup` | P2; P1 past 7 days | The newest daily state in a `state-YYYY-MM` Release is over 36 h old (its 00:00 UTC), a newest marker that names no day (no generation yet, or the store off) over 36 h old itself, or no backup on record | `state-backup.yml`'s run; it catches up to the first day it has not copied (at most 120 days), and GC keeps every such day |
 | `feed:state-budget` | P2 / P1 | The state Worker's `GET /v1/budget`: today's Class A or B operations, bytes written or stored bytes over 60 % of its free-tier ceiling (where background work starts being refused), or the Worker over 10,000 requests a day; P1 when a request of the feed itself (aggregate, derive, restore: refused only above 95 %) was refused today, or a ref swap found its reflog slot taken (member `reflog`: an integrity alarm, state/README.md) | What spends them (the Worker's request log); at a ceiling the store refuses until 00:00 UTC |
 | `feed:state-quota` | P1 | Health's own `GET /v1/budget`, or a job's state step in the last 2 h (artifact `state-shadow`, `error_kind` `quota`), met a Cloudflare error 1027 (the account's 100,000 Workers requests a day are used up) or a platform 429 | The account's request use (`platform:cf-usage`); the store answers again at 00:00 UTC (APIs.md outage table) |
-| `feed:repo-growth` | P3 | The repository's `size` grew more than 16 MB a day (the current storage phase's budget: phase 2 and phase 3a grow 14–15; 11 from phase 3b) since the newest daily sample at least 6 days old (artifact `repo-size-samples`) | What grows ([APIs.md](APIs.md#repository-size)): the data tree notes of `feed:size` |
+| `feed:repo-growth` | P3 | The repository's `size` grew more than 11 MB a day (the current storage phase's budget: phase 3b grows 8–10.7; it was 16 through phase 2 and phase 3a) since the newest daily sample at least 6 days old (artifact `repo-size-samples`) | What grows ([APIs.md](APIs.md#repository-size)): the data tree notes of `feed:size` |
 | `walks:<workflow>:<source>` | P3 | A line of the newest blocked marker of `history`, `first-solutions`, `backfill`, `archive`, `remerge` or `stats` (a year that failed its ComCat gate or its build, a failed verify, a month that cannot be re-rolled or merged, a source failing for days), if under 26 h old (`run` for a line about the walk itself) | The walk run's warning; the row resolves with the walk's next run that names it no more (each run states every standing block), at the latest 26 h after the last marker |
 | `platform:api` | P2 | `/v1/health` not 200 `ok: true` after 3 tries over 60 s, or `sessionKeySource: "ephemeral"` | The API Worker; an ephemeral key means its session signing secret is missing (random 401s in the app) |
 | `platform:api:envelope` | P3 | `providerTokenEnvelope: "missing"` | Account deletion cannot revoke at Apple until the envelope key is set |
@@ -593,8 +598,10 @@ When health stops (the Worker down or its `GH_PAT` refused, and GitHub not deliv
 and the boards just stop changing; when its runs start but never reconcile (the gate failing at checkout, `reconcile`
 exiting 3 before it saves), each run is red but no P1/P2 can be mentioned either. `health-liveness.yml` runs on a GitHub
 cron of its own (every 10 minutes, never at minute 0; GitHub delivers this repository's crons late or not at all, so it
-is frequent and idempotent) and measures what health wrote, not how its runs ended: the newest hidden state of the three
-boards (`updatedMs`, rewritten by every reconcile; the same time `reconcile` measures its own gap from). No reconcile
+is frequent and idempotent; about 20 deliveries in 6.5 days to 2026-11-26), and the heartbeat Worker also dispatches it
+at :28 and :58 (`tick=1`; between its cron's slots, never on one): two paths, the cron sharing nothing with the Worker. It measures what health wrote, not how
+its runs ended: the newest hidden state of the three boards (`updatedMs`, rewritten by every reconcile; the same time
+`reconcile` measures its own gap from). No reconcile
 for 45 minutes dispatches `health.yml` once (not again while a health run created in the last 45 minutes exists); over
 90 minutes, one comment on the "[health] platform" board mentions `HEALTH_MENTION`, once per outage (the outage is
 everything since the last reconcile: a bot comment with the hidden `<!-- health-liveness v1 outage=<ms> -->` marker since
@@ -658,9 +665,9 @@ copyrightable expression) and honor removal requests reactively — see
 
 Live end-to-end: 42 sources, stateful field-level dedup (superset model — every source
 field preserved), bitemporal log, 20 rolling feeds, per-day partitions + Pages day
-files, manifest, CI, and Cloudflare Pages serving. `event_map` is one file per event-day, mirrored to the state store
-(storage phase 3a: dual-write, shadow-verified), and pruned to a 45-day dedup horizon, with older identity preserved in
-the day partitions.
+files, manifest, CI, and Cloudflare Pages serving. `event_map` is one file per event-day, held in the state store (storage
+phase 3b: git tracks only its generation and two sentinels; the jobs hydrate it), and pruned to a 45-day dedup horizon,
+with older identity preserved in the day partitions.
 
 Running in production: `updatedafter` revision + `includedeleted` tombstone sweeps (the
 ComCat revision sweep also adds events ComCat published days after their origin, inside the

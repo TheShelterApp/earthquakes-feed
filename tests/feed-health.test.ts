@@ -683,6 +683,11 @@ test('parseMarker: each line under the leftmost whole-word registry id, else run
   assert.deepEqual(parseMarker('# nothing blocked: run 7\n  # usgs\nusgs # x', IDS).map((l) => l.source), ['usgs']);
   // An id that cannot be part of a key is never used.
   assert.deepEqual(parseMarker('Bad: x', ['Bad']).map((l) => l.source), ['run']);
+  // first-solutions' collect job when its state hydrate failed (first-solutions.yml, "Mark a walk the state store
+  // stopped"): a line about the walk itself, walks:first-solutions:run, whatever the store's summary says.
+  const fs = readFileSync(new URL('../.github/workflows/first-solutions.yml', import.meta.url), 'utf8');
+  assert.ok(fs.includes("printf 'state store: the hydrate failed, the walk read nothing (run %s; the next run retries): %s\\n'"));
+  assert.deepEqual(parseMarker('state store: the hydrate failed, the walk read nothing (run 9; the next run retries): failed: batchGet: HTTP 429 {"error":"budget"}', IDS).map((l) => l.source), ['run']);
 });
 
 const MARKER_AT = NOW - 2 * HOUR;
@@ -913,7 +918,7 @@ function stateWorld(o: { shadow?: Record<string, unknown>; gcAgoMs?: number | nu
     [`${API_REPO}/actions/artifacts?name=state-backup&per_page=10`, () => json({ artifacts: o.backupNewest === null ? [] : [art(903, 'state-backup', HOUR)] })],
     [`${API_REPO}/actions/artifacts/903/zip`, () => zipJson({ 'state-backup': { ok: true, newest: o.backupNewest ?? '2026-10-22' } })],
     [`${API_REPO}/actions/artifacts?name=repo-size-samples&per_page=10`, () => json({ artifacts: [art(904, 'repo-size-samples', 2 * HOUR)] })],
-    // A week ago the repository was 50 MB smaller: about 7 MB a day, under the 16 MB line.
+    // A week ago the repository was 50 MB smaller: about 7 MB a day, under the 11 MB line.
     [`${API_REPO}/actions/artifacts/904/zip`, () => zipJson({ 'repo-size': { samples: [{ atMs: NOW - 7 * DAY, kb: 6_050_000 }, { atMs: NOW - 2 * HOUR, kb: 6_099_000 }] } })],
     // The runs behind them: scheduled runs of the expected workflow files on main.
     run(9010, 'aggregate.yml'),
@@ -1344,7 +1349,33 @@ test('feed:state-shadow: a state step not ok in the newest markers of the last 2
   assert.deepEqual([clean.findings, clean.unjudged], [[], []]);
   const bad = evaluateStateShadow({ ok: true, markers: [m(MIN, ok, ok), m(6 * MIN, { ok: false, summary: '1 MISMATCH(ES) with the checkout' }, { ok: false, summary: 'failed: PUT: HTTP 429 budget' })] }, NOW);
   assert.deepEqual(bad.findings.map((f) => [f.key, f.severity, f.members, f.sinceMs]), [['feed:state-shadow', 'P2', ['hydrate', 'persist'], NOW - 6 * MIN]]);
-  assert.match(bad.findings[0]!.text, /^hydrate \(run 7, .*\): 1 MISMATCH\(ES\) with the checkout \(\+1 more\): the state store disagrees with git/);
+  // Storage phase 3b: each is a feed run that stopped before its push (the store holds the only copy of the event map).
+  assert.match(bad.findings[0]!.text, /^hydrate \(run 7, .*\): 1 MISMATCH\(ES\) with the checkout \(\+1 more\): the feed run stopped at the state store before its push \(phase 3b/);
+  assert.equal(RULES['feed:state-shadow'].title, 'feed run stopped at the state store');
+  // A stale feed whose runs stop at the store says so first in its freshness row (the one the owner is told about).
+  const stale = { ok: true as const, generatedMs: NOW - 40 * MIN, staleAfterMs: 30 * MIN };
+  const shadowBad = { ok: true as const, markers: [m(6 * MIN, { ok: false, summary: 'failed: batchGet: HTTP 503 after 4 attempt(s)', error_kind: 'transport' })] };
+  const both = evaluateFeed(healthyInputs({ v1: stale, v2: stale, stateShadow: shadowBad }));
+  const fresh = both.findings.find((f) => f.key === 'feed:freshness')!;
+  assert.match(fresh.text, /^the newest feed runs stopped at the state store \(feed:state-shadow\): live manifest is 40 min stale .*the state store/);
+  assert.ok(both.findings.some((f) => f.key === 'feed:state-shadow'));
+  assert.match(evaluateFeed(healthyInputs({ v1: stale, v2: stale })).findings.find((f) => f.key === 'feed:freshness')!.text, /^live manifest is 40 min stale/, 'no state row: as before');
+  // An older failure the newest run got past (the hold is 2 h) is still a state row, but the stale feed has another
+  // cause (a Pages outage, say): its freshness row does not blame the store.
+  const recovered = { ok: true as const, markers: [m(MIN, ok, ok), m(40 * MIN, { ok: false, summary: 'failed: batchGet: HTTP 503', error_kind: 'transport' })] };
+  assert.equal(evaluateStateShadow(recovered, NOW).newestFailed, false);
+  assert.equal(evaluateStateShadow(shadowBad, NOW).newestFailed, true);
+  const pages = evaluateFeed(healthyInputs({ v1: stale, v2: stale, stateShadow: recovered }));
+  assert.ok(pages.findings.some((f) => f.key === 'feed:state-shadow'));
+  assert.match(pages.findings.find((f) => f.key === 'feed:freshness')!.text, /^live manifest is 40 min stale/);
+  // derive-publish's re-hydrate (hydrate-publish.json, after the push) counts as any state step; a stray file of the
+  // artifact that is no state step does not.
+  const publish = evaluateStateShadow({ ok: true, markers: [{ createdAtMs: NOW - MIN, runId: 8, steps: { hydrate: ok, persist: ok, 'hydrate-publish': { step: 'hydrate', ok: false, summary: 'failed: batchGet: HTTP 429 budget' }, other: { ok: false } } }] }, NOW);
+  assert.deepEqual(publish.findings.map((f) => [f.key, f.members]), [['feed:state-shadow', ['hydrate-publish']]]);
+  assert.match(publish.findings[0]!.text, /^hydrate-publish \(run 8, /);
+  assert.equal(publish.newestFailed, true);
+  // Since 3b nothing covers a run the store stopped: a symptom on the feed's path, not a lost redundancy.
+  assert.deepEqual([RULES['feed:state-shadow'].class, RULES['feed:state-shadow'].check], ['symptom', 'gh-feed']);
   assert.deepEqual(evaluateStateShadow({ ok: true, markers: [m(3 * HOUR, { ok: false, summary: 'old' })] }, NOW).unjudged, ['feed:state-shadow']);
   const off = evaluateStateShadow({ ok: true, markers: [m(MIN, { ok: true, off: true, summary: 'off' }, { ok: true, off: true })] }, NOW);
   assert.deepEqual(off.findings, []);
@@ -1478,7 +1509,7 @@ test('feed:state-quota: a 1027 or a platform 429 on health\'s budget read, or a 
   assert.deepEqual(evaluateStateQuota({ stateBudget: { ok: false, message: 'no token' }, stateShadow: { ok: false, message: 'x' } as never }, NOW).unjudged, ['feed:state-quota']);
 });
 
-test('feed:repo-growth: a sample a day kept as a series; MB a day since the newest sample 6 days old, over the phase\'s 16 is P3', () => {
+test('feed:repo-growth: a sample a day kept as a series; MB a day since the newest sample 6 days old, over the phase\'s 11 is P3', () => {
   const first = nextSamples(null, NOW - 8 * DAY, 6_000_000);
   assert.deepEqual(first, { samples: [{ atMs: NOW - 8 * DAY, kb: 6_000_000 }], changed: true });
   assert.equal(nextSamples(first, NOW - 8 * DAY + HOUR, 6_000_100).changed, false, 'one sample a day');
@@ -1489,9 +1520,10 @@ test('feed:repo-growth: a sample a day kept as a series; MB a day since the newe
   const ok = evaluateRepoGrowth(series.samples, NOW, 6_072_000);
   assert.deepEqual(ok.findings, []);
   assert.match(ok.notes[0]!, /^repository growth: 9\.0 MB a day over 6\.0 days/);
-  // Phase 2 and the 3a soak grow 14–15 MB a day (APIs.md): within the line, no standing row.
-  assert.deepEqual(evaluateRepoGrowth(series.samples, NOW, 6_018_000 + 15 * 6_000).findings, [], '15 MB a day');
-  assert.equal(RULES['feed:repo-growth'].limits.maxMbPerDay, 16);
+  // Phase 3b grows 8–10.7 MB a day (APIs.md): within the line, no standing row; phase 3a's 14–15 MB a day is now over it.
+  assert.deepEqual(evaluateRepoGrowth(series.samples, NOW, 6_018_000 + 10.7 * 6_000).findings, [], '10.7 MB a day');
+  assert.deepEqual(evaluateRepoGrowth(series.samples, NOW, 6_018_000 + 15 * 6_000).findings.map((f) => f.key), ['feed:repo-growth'], '15 MB a day');
+  assert.equal(RULES['feed:repo-growth'].limits.maxMbPerDay, 11);
   const fast = evaluateRepoGrowth(series.samples, NOW, 6_200_000);
   assert.deepEqual(fast.findings.map((f) => [f.key, f.severity]), [['feed:repo-growth', 'P3']]);
   assert.deepEqual(evaluateRepoGrowth(first.samples, NOW - 7 * DAY, 6_000_000).unjudged, ['feed:repo-growth'], 'not 6 days of samples yet');

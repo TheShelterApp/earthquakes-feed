@@ -14,6 +14,8 @@
 //
 //   node scripts/writer-queue.mjs gate     # in the gate job: decide, write admit=true|false to $GITHUB_OUTPUT
 //   node scripts/writer-queue.mjs status   # print the queue (a local run with GH_TOKEN and GITHUB_REPOSITORY)
+//   node scripts/writer-queue.mjs retrack-check   # derive.yml's rollback re-track: exit 1 unless aggregate.yml is
+//                                                 # disabled and no aggregate run is left in the queue (decideRetrack)
 //
 // Environment: GH_TOKEN (actions: read), GITHUB_REPOSITORY, GITHUB_RUN_ID (the gate's own run), WRITER_WORKFLOW (the
 // gated workflow's file name), FORCE ('true': join whatever waits), RETRIED ('true': a refused run's work is done by
@@ -157,6 +159,26 @@ export function decideGate({ queue, selfId, force = false, retried = false, work
   };
 }
 
+/**
+ * Whether storage phase 3b's rollback re-track (derive.yml `retrack`, APIs.md "Rollback after 3b") may commit the event
+ * map back into git: only with aggregate.yml disabled (`workflowState` as GET /actions/workflows/aggregate.yml answers
+ * it: `disabled_manually`) and no aggregate run left in the writer queue (holding, waiting or about to enter; ghosts and
+ * refused runs aside). Either one left over runs phase 3b's aggregate on the re-tracked branch: its hydrate finds the
+ * shards tracked and its commit makes the transition again, which undoes the re-track and adds the ~12 MB of shards to
+ * the history a second time; and once the revert to phase 3a is merged on top, the run after it fails closed. Disabling
+ * a workflow does not cancel its runs already queued, hence the queue. Other writers are no harm: they run after this
+ * job's push, on the re-tracked branch, and none of them makes the transition (only aggregate's commit step stages it).
+ */
+export function decideRetrack({ workflowState, queue }) {
+  const problems = [];
+  if (workflowState !== 'disabled_manually') {
+    problems.push(`aggregate.yml is ${workflowState ? `\`${workflowState}\`` : 'of unknown state'}, not disabled_manually: gh workflow disable aggregate.yml first`);
+  }
+  const left = (queue ?? []).filter((q) => q.workflow === 'aggregate.yml' && q.state !== 'stale' && q.state !== 'refused');
+  if (left.length) problems.push(`aggregate run(s) still in the writer queue (${describe(left)}): cancel them, or wait until \`writer-queue.mjs status\` lists none`);
+  return { ok: problems.length === 0, problems };
+}
+
 const headers = (token) => ({
   authorization: `Bearer ${token}`,
   accept: 'application/vnd.github+json',
@@ -214,9 +236,30 @@ export async function run({ argv = process.argv.slice(2), env = process.env, now
   const cmd = argv[0];
   const token = env.GH_TOKEN;
   const repo = env.GITHUB_REPOSITORY;
-  if ((cmd !== 'gate' && cmd !== 'status') || !token || !repo) {
-    log('::error::writer-queue: usage `writer-queue.mjs gate|status` with GH_TOKEN and GITHUB_REPOSITORY set');
+  if ((cmd !== 'gate' && cmd !== 'status' && cmd !== 'retrack-check') || !token || !repo) {
+    log('::error::writer-queue: usage `writer-queue.mjs gate|status|retrack-check` with GH_TOKEN and GITHUB_REPOSITORY set');
     return 3;
+  }
+  if (cmd === 'retrack-check') {
+    // Fails closed: a state or a queue that cannot be read refuses the re-track (run it again).
+    let workflowState;
+    let queue;
+    try {
+      const wf = await getJson(`/repos/${repo}/actions/workflows/aggregate.yml`, { token, fetchImpl, sleep });
+      workflowState = typeof wf?.state === 'string' ? wf.state : null;
+      queue = await readQueue({ repo, token, nowMs, fetchImpl, sleep });
+    } catch (e) {
+      log(`::error::writer-queue: the re-track's preconditions could not be read (${e instanceof Error ? e.message : String(e)}): not re-tracking; dispatch it again`);
+      return 1;
+    }
+    const d = decideRetrack({ workflowState, queue });
+    log(`writer queue: ${describe(queue)}; aggregate.yml: ${workflowState ?? '?'}`);
+    if (!d.ok) {
+      log(`::error::retrack refused (APIs.md "Rollback after 3b", steps 1 and 2): ${d.problems.join('; ')}`);
+      return 1;
+    }
+    log('retrack: aggregate.yml is disabled and no aggregate run is queued: the re-track may run');
+    return 0;
   }
   const workflow = env.WRITER_WORKFLOW ?? '';
   if (cmd === 'gate' && (!WRITERS[workflow]?.gated || !/^\d+$/.test(env.GITHUB_RUN_ID ?? ''))) {

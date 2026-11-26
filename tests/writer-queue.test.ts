@@ -6,6 +6,7 @@ import {
   STALE_RUN_MS,
   classifyRun,
   decideGate,
+  decideRetrack,
   queueOf,
   readQueue,
   run,
@@ -111,7 +112,7 @@ test('decideGate: 10 backfill dispatches in a loop: 2 join, 8 are refused, wheth
 });
 
 /** A fake GitHub API: unfinished runs by status, jobs by run id; every call is recorded. */
-function fakeApi(runs: RunJson[], jobs: Record<number, JobJson[]>, { failJobsOf = null as number | null, status = 200 } = {}) {
+function fakeApi(runs: RunJson[], jobs: Record<number, JobJson[]>, { failJobsOf = null as number | null, status = 200, aggregateState = 'active' as string | null } = {}) {
   const calls: string[] = [];
   const fetchImpl = async (url: string, init?: { headers?: Record<string, string> }): Promise<Response> => {
     calls.push(url);
@@ -119,6 +120,9 @@ function fakeApi(runs: RunJson[], jobs: Record<number, JobJson[]>, { failJobsOf 
     const u = new URL(url);
     assert.equal(u.host, 'api.github.com');
     if (status !== 200) return new Response('{}', { status });
+    if (u.pathname === '/repos/TheShelterApp/earthquakes-feed/actions/workflows/aggregate.yml') {
+      return aggregateState === null ? new Response('{}', { status: 404 }) : Response.json({ id: 1, path: '.github/workflows/aggregate.yml', state: aggregateState });
+    }
     const m = /^\/repos\/TheShelterApp\/earthquakes-feed\/actions\/runs\/(\d+)\/jobs$/.exec(u.pathname);
     if (m) {
       if (Number(m[1]) === failJobsOf) return new Response('{}', { status: 502 });
@@ -188,4 +192,42 @@ test('run gate: refused at the bound (exit 1, admit=false, an ::error:: naming t
   // Misconfigured: aggregate is never gated; no token.
   assert.equal((await go(env({ WRITER_WORKFLOW: 'aggregate.yml' }))).code, 3);
   assert.equal((await go(env({ GH_TOKEN: '' }))).code, 3);
+});
+
+test('retrack-check: the rollback re-track runs only with aggregate.yml disabled and no aggregate run in the writer queue; fails closed', async () => {
+  const entry = (id: number, workflow: string, state: QueueEntry['state']): QueueEntry => ({ id, workflow, event: 'workflow_dispatch', created: iso(1), state });
+  const self = entry(900, 'derive.yml', 'holding');
+  assert.deepEqual(decideRetrack({ workflowState: 'disabled_manually', queue: [self] }), { ok: true, problems: [] });
+  // Other writers, an aggregate ghost and a refused run do not block: none of them makes the transition.
+  assert.equal(decideRetrack({ workflowState: 'disabled_manually', queue: [self, entry(901, 'backfill.yml', 'waiting'), entry(1, 'aggregate.yml', 'stale'), entry(902, 'archive.yml', 'refused')] }).ok, true);
+  const active = decideRetrack({ workflowState: 'active', queue: [self] });
+  assert.deepEqual([active.ok, active.problems.length], [false, 1]);
+  assert.match(active.problems[0]!, /aggregate\.yml is `active`, not disabled_manually: gh workflow disable aggregate\.yml first/);
+  for (const state of ['holding', 'waiting', 'approaching'] as const) {
+    const d = decideRetrack({ workflowState: 'disabled_manually', queue: [self, entry(903, 'aggregate.yml', state)] });
+    assert.equal(d.ok, false, state);
+    assert.match(d.problems[0]!, new RegExp(`aggregate run\\(s\\) still in the writer queue \\(aggregate #903 ${state}\\)`));
+  }
+  assert.equal(decideRetrack({ workflowState: null, queue: [] }).ok, false);
+
+  // The CLI, on the fake API (derive.yml's step: GH_TOKEN and GITHUB_REPOSITORY only).
+  const go = async (api: ReturnType<typeof fakeApi>) => {
+    const lines: string[] = [];
+    const code = await run({ argv: ['retrack-check'], env: { GH_TOKEN: 't', GITHUB_REPOSITORY: REPO }, nowMs: NOW, fetchImpl: api.fetchImpl, sleep: async () => {}, log: (l) => lines.push(l) });
+    return { code, lines };
+  };
+  const quiet = { runs: [runJson(900, 'derive.yml', 'in_progress', 1), runJson(901, 'backfill.yml', 'in_progress', 0.5)], jobs: { 900: [job('gate', 'completed', 'success'), job('derive', 'in_progress')], 901: [job('gate', 'completed', 'success'), job('backfill', 'pending')] } };
+  const ok = await go(fakeApi(quiet.runs, quiet.jobs, { aggregateState: 'disabled_manually' }));
+  assert.equal(ok.code, 0, ok.lines.join('\n'));
+  assert.ok(ok.lines.some((l) => l.startsWith('retrack: aggregate.yml is disabled')));
+  const enabled = await go(fakeApi(quiet.runs, quiet.jobs));
+  assert.equal(enabled.code, 1);
+  assert.ok(enabled.lines.some((l) => /^::error::retrack refused .*aggregate\.yml is `active`/.test(l)), enabled.lines.join('\n'));
+  const { runs, jobs } = fixtureRuns();
+  const queued = await go(fakeApi(runs, jobs, { aggregateState: 'disabled_manually' }));
+  assert.equal(queued.code, 1);
+  assert.ok(queued.lines.some((l) => /^::error::retrack refused .*aggregate #500 holding, aggregate #501 waiting/.test(l)), queued.lines.join('\n'));
+  // Unreadable (the workflow or the queue): refused.
+  assert.equal((await go(fakeApi(quiet.runs, quiet.jobs, { aggregateState: null }))).code, 1);
+  assert.equal((await go(fakeApi(quiet.runs, quiet.jobs, { aggregateState: 'disabled_manually', status: 502 }))).code, 1);
 });

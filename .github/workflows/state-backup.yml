@@ -49,7 +49,9 @@ jobs:
       - name: Back up the daily states
         env:
           GH_TOKEN: ${{ github.token }}
-          FEED_STATE_BACKEND: ${{ vars.FEED_STATE_BACKEND || 'worker' }}
+          # Always on since storage phase 3b (no kill switch: the store holds the only copy of the event map, and this
+          # is its only off-Cloudflare copy).
+          FEED_STATE_BACKEND: worker
           FEED_STATE_URL: https://feed-state.theshelter.app
           FEED_STATE_AUDIENCE: earthquakes-feed-state
           STATE_BACKUP_MARKER_DIR: state-backup-out

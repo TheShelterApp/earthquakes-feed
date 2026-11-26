@@ -362,8 +362,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   const token = env.GH_TOKEN;
   const backend = backendFromEnv(env);
   if (!backend) {
-    // The store is off (FEED_STATE_BACKEND off or unset): nothing to copy. The marker names no day,
-    // so health ages it by its own date (feed:state-backup) and GC reads it as no backup (a hold).
+    // The store is off (FEED_STATE_BACKEND off or unset: a local run; state-backup.yml sets `worker` itself since
+    // storage phase 3b): nothing to copy. The marker names no day, so health ages it by its own date
+    // (feed:state-backup) and GC reads it as no backup (a hold).
     console.log('state backup: the state store is off (FEED_STATE_BACKEND off): nothing copied');
     if (env.STATE_BACKUP_MARKER_DIR) {
       mkdirSync(env.STATE_BACKUP_MARKER_DIR, { recursive: true });

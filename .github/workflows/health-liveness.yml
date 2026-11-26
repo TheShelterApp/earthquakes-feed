@@ -3,10 +3,11 @@ name: health-liveness
 # Health's own liveness (owner decision 2026-11-19; scripts/health-liveness.mjs, README "Health watchdogs"): the
 # dead-man switch Healthchecks.io was to be (dropped: its sign-up email never arrived). health.yml has no way to report
 # that it stopped reconciling (no run at all, or runs that fail before reconcile saves the boards), so this workflow
-# reads the boards' state and health's runs from outside, on a GitHub cron of its own, independent of the heartbeat
-# Worker that dispatches health: no reconcile for 45 min dispatches health.yml once (self-heal); for 90 min, one comment
-# on the "[health] platform" board mentions HEALTH_MENTION (a GitHub Mobile push), once per outage, and that run is red
-# (the failed-run email). health.yml switched off, or a health:liveness silence: quiet and green. A failure of this
+# reads the boards' state and health's runs from outside, on two paths: a GitHub cron of its own, independent of the
+# heartbeat Worker that dispatches health, and the Worker's dispatches at :28 and :58 (with tick=1; since 2026-11-26:
+# GitHub delivered the cron about 20 times in 6.5 days). While the Worker is down the cron is the only path, as before.
+# No reconcile for 45 min dispatches health.yml once (self-heal); for 90 min, one comment on the "[health] platform"
+# board mentions HEALTH_MENTION (a GitHub Mobile push), once per outage, and that run is red (the failed-run email). health.yml switched off, or a health:liveness silence: quiet and green. A failure of this
 # check itself is red at most once a day.
 #
 # GitHub delivers this repository's crons late or not at all (backfill, derive and health each got 4 scheduled runs in
@@ -20,9 +21,15 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Dry run: decide and print, dispatch and comment nothing'
+        description: 'Dry run: decide and print, dispatch and comment nothing (ignored with tick=1)'
         type: boolean
         default: true
+      tick:
+        # Set by the heartbeat Worker (heartbeat/src/worker.js, :28 and :58, none of the cron's minutes): its dispatch is a real check like a cron
+        # delivery, never the manual dispatch's dry run.
+        description: 'Set to 1 by the heartbeat Worker: a real check, as a cron delivery'
+        required: false
+        default: ''
 
 # One check at a time; a newer delivery waiting replaces the pending one (both would decide the same).
 concurrency:
@@ -66,5 +73,6 @@ jobs:
           # A `health:liveness=<until>,<reason>` entry (reconcile's syntax) turns this check off until then: no dispatch,
           # no comment (README "Silences").
           HEALTH_SILENCES: ${{ vars.HEALTH_SILENCES }}
-          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          # A cron delivery and a Worker tick act; a manual dispatch is a dry run unless dry_run=false.
+          DRY_RUN: ${{ inputs.tick != '1' && inputs.dry_run && '1' || '' }}
         run: node scripts/health-liveness.mjs

@@ -67,8 +67,8 @@ jobs:
       queue: max
     # Restated in full at job level (a job-level block sets every permission it does not name to none): contents: write
     # for the chunk Releases it creates and uploads to (src/first-solutions-collect.ts, FIRST_SOLUTIONS_UPLOAD), actions:
-    # read for the previous run's artifact, and an OIDC token for the state store (storage phase 3: in phase 3a it still
-    # reads the event map from the checkout; from phase 3b it hydrates it first, src/event-map-store.ts).
+    # read for the previous run's artifact, and an OIDC token for the state store (storage phase 3b: it hydrates the
+    # event map before it reads it, src/event-map-store.ts).
     permissions:
       contents: write
       actions: read
@@ -89,17 +89,21 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      - name: State hydrate (phase 3b)
-        # Storage phase 3b only (src/event-map-store.ts hydrate --3b-only; nothing in phase 3a, where the checkout holds
-        # the event map): the unfrozen days come from the event map, which from phase 3b only the state store holds.
-        # Fails closed: without it the walk would find no reports for those days.
+      - name: State hydrate
+        # Storage phase 3b (src/event-map-store.ts hydrate): the unfrozen days come from the event map, which only the
+        # state store holds; read only (the Worker's read route; nothing is persisted, and this job never commits:
+        # the commit job below has its own sparse checkout). Fails closed: without it the walk would refuse to read the
+        # map (loadEventMap throws on the generation's days the checkout lacks). A 60 s deadline over the store
+        # requests; this timeout is the backstop.
+        id: hydrate
         timeout-minutes: 3
         env:
           DATA_DIR: .data
           FEED_STATE_BACKEND: worker
           FEED_STATE_URL: https://feed-state.theshelter.app
           FEED_STATE_AUDIENCE: earthquakes-feed-state
-        run: npx --no-install tsx src/event-map-store.ts hydrate --3b-only
+          FEED_STATE_MARKER_DIR: ${{ runner.temp }}/state-shadow
+        run: npx --no-install tsx src/event-map-store.ts hydrate
       - name: Collect
         env:
           DATA_DIR: .data
@@ -122,6 +126,27 @@ jobs:
             fs-out/blocked.txt
           if-no-files-found: error
           retention-days: 7
+      # A failed hydrate skips the commit job (needs: collect), which uploads the walk's marker, so without these two
+      # steps a walk the store starves (its background lane is refused above 60 % of a budget ceiling, or the store is
+      # down) would reach the board only when the last marker's 26 h hold ends. The hydrate's marker becomes one blocked
+      # line of the walk's marker instead (walks:first-solutions:run, P3, never red): the next run's marker, blocked or
+      # not, replaces it. The feed is not affected (aggregate's own hydrate is feed:state-shadow).
+      - name: Mark a walk the state store stopped
+        if: failure() && steps.hydrate.outcome == 'failure'
+        run: |
+          mkdir -p fs-out
+          summary=$(jq -r '.summary // "no summary"' "$RUNNER_TEMP/state-shadow/hydrate.json" 2>/dev/null || echo 'no marker')
+          printf 'state store: the hydrate failed, the walk read nothing (run %s; the next run retries): %s\n' "$GITHUB_RUN_ID" "$(printf '%s' "$summary" | tr '\n' ' ' | cut -c1-300)" > fs-out/blocked.txt
+          cat fs-out/blocked.txt
+      - name: Upload the blocked marker of a stopped walk (read by the health workflow)
+        if: failure() && steps.hydrate.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: walk-blocked-first-solutions
+          path: fs-out/blocked.txt
+          if-no-files-found: ignore
+          retention-days: 3
+          overwrite: true
 
   commit:
     needs: collect

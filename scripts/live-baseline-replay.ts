@@ -16,6 +16,9 @@
  * failed run's aggregate changed come from that derive's Pages copy (here: its committed partitions, the same bytes);
  * --no-pages replays them without it (no baseline for those days). Production is not compared then.
  *
+ * Commits from the storage phase-3b merge on hold no event-map day (the state store does): the replay covers the commits
+ * before it, and on a later one the load refuses to read the lacking days as empty and says so.
+ *
  * Usage (a detached worktree of `data` the script may check out at will; never pushed):
  *   git worktree add --detach /tmp/data-replay origin/data
  *   npx tsx scripts/live-baseline-replay.ts --dir /tmp/data-replay --from <commit> --to <commit> [--failed-derive]

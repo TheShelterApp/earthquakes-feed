@@ -390,9 +390,9 @@ successful GC in 3 days) fire long before. The ledger's new columns are added in
 a no-op once present), so a rollback to a protocol-1 version still reads every row; that version's re-seed leaves the
 meta bytes out (the estimate then reads low by them: tens of kB a day).
 
-The feed's own use (2026-11-19, batches of at most 2.5 MB): phase 3a about 830 requests a day (about 290 aggregate
+The feed's own use (2026-11-19, batches of at most 2.5 MB): phase 3a (until 2026-11-26) about 830 requests a day (about 290 aggregate
 runs, each one batchGet for the shadow hydrate's sample of 4 days and about 1.4 PUTs; health's budget reads, the
-backups' 6 batchGets a day and GC's pages), about 1,200 Class B a day. Phase 3b about 2,400 a day: each aggregate run
+backups' 6 batchGets a day and GC's pages), about 1,200 Class B a day. Phase 3b (since its merge) about 2,400 a day: each aggregate run
 fetches all 46 days in 6 batchGets (about 1,750 a day), first-solutions' about 24 collects 6 each, the PUTs and health
 as before; Class B about 14,400 a day (a blob is one GET however it is batched). A batch retried on every attempt (4)
 on every run would be about 8,000 a day: under 10 % of the account's 100,000 even then. The ledger's Durable Object
@@ -460,9 +460,12 @@ caller's environment (a separate profile through `XDG_CONFIG_HOME` works unchang
 `state-rehearsal.yml` against it before a production deploy that changes behaviour.
 
 The first deploy follows the phase-3a merge (#155), which was inert; a second commit then switched the jobs on
-(`${{ vars.FEED_STATE_BACKEND || 'worker' }}`), and the repository variable `FEED_STATE_BACKEND=off` is phase 3a's
-kill switch: off, the feed's jobs never call the Worker and health judges no state row. The order (staging, the
-rehearsal, production, the first GC and backup dispatches, then the switch commit) is APIs.md's phase-3a rollout.
+(`${{ vars.FEED_STATE_BACKEND || 'worker' }}`), and the repository variable `FEED_STATE_BACKEND=off` was phase 3a's
+kill switch. The order (staging, the rehearsal, production, the first GC and backup dispatches, then the switch commit)
+is APIs.md's phase-3a rollout. Since the phase-3b merge the store holds the only copy of the event map: every job sets
+`FEED_STATE_BACKEND: worker` itself, no workflow reads the variable, and the feed stops while the Worker cannot answer
+(APIs.md "Outage budget"). A Worker rollback (below) must keep the blob routes and protocol 1 that the feed's client
+speaks.
 
 ## Rollback
 

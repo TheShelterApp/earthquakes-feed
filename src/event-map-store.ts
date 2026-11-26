@@ -4,7 +4,6 @@ import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { DATA_DIR, EVENT_MAP_HORIZON_DAYS, dataPaths } from './config.js';
-import { isSparseCheckout, treeNames } from './sparse-checkout.js';
 import { StateStoreError, backendFromEnv, getBlobs, isSha256Hex, sha256Hex, type GetBlobsStats, type RetryPolicy, type StateBackend } from './state-store.js';
 
 /**
@@ -27,44 +26,77 @@ import { StateStoreError, backendFromEnv, getBlobs, isSha256Hex, sha256Hex, type
  * - pruneGeneration (derive, beside the prune of the day files): a pure local edit, no network.
  * - hydrate: blobs of the generation fetched (in batches of at most 2.5 MB, three at a time, each retried on its own:
  *   src/state-store.ts getBlobs), each checked against the generation (gzip sha256 by the client, NDJSON sha256, bytes
- *   and node count here). Phase 3a (`shadow`): every checked-out day is compared with its generation entry, mismatches
- *   reported, and the store is exercised with the days that differ plus a rotating sample (SHADOW_SAMPLE_DAYS a run,
- *   every day about hourly); the checkout is never touched, the run never failed by it (git is still the truth). Phase
- *   3b (`authoritative`, behind EVENT_MAP_STORE_AUTHORITATIVE): every day not already identical on disk is fetched, the
- *   directory is replaced by exactly the generation's days and any failure throws.
+ *   and node count here). Phase 3b (`authoritative`, EVENT_MAP_STORE_AUTHORITATIVE, since the 3b merge): every day not
+ *   already identical on disk is fetched, the directory is replaced by exactly the generation's days and any failure
+ *   throws: the store holds the only copy of the event map, so a run never starts from less. One exception, while git
+ *   still tracks event-map files in the checkout (the run that makes the transition commit, or a run after a rollback's
+ *   re-track): git is the truth for that run, as in phase 3a, so the checkout is compared and kept, never replaced.
+ *   Phase 3a's `shadow` mode (compare the checkout with the store, a rotating sample fetched) is kept for
+ *   state-rehearsal.ts and the dry runs.
  *
- * The layout on disk follows git (eventMapShardHours): while git tracks the event map (phase 3a) saveEventMap keeps
- * writing round 17's hour shards, so each 5-minute commit still adds ~70 KB shards to the repository's history instead
- * of ~1.7 MB day files (APIs.md "Repository size": day files would add about 7–22 MB a day for as long as the soak
- * lasts, for ever); once git no longer holds the files (phase 3b) it writes one file per day. The knob
- * EVENT_MAP_SHARD_HOURS is gone. A day's store bytes are canonicalDay of its files, whatever their layout: byte for
- * byte the day file, so a hydrated day (always a day file) hashes to its entry. moveToDayLayout (aggregate, phase 3b
- * only) moves any day still in shards to its day file.
+ * The layout on disk follows git (eventMapShardHours): while git tracks the event map in a checkout saveEventMap keeps
+ * writing round 17's hour shards, so a commit never adds ~1.7 MB day files to the repository's permanent history
+ * (APIs.md "Repository size"); once git no longer tracks it (phase 3b) it writes one file per day. A day's store bytes
+ * are canonicalDay of its files, whatever their layout: byte for byte the day file, so a hydrated day (always a day
+ * file) hashes to its entry. The commit step of aggregate (`stage`) untracks first and only then moves any day still in
+ * shards to its day file (moveToDayLayout), so no layout change ever reaches the index.
  *
- * Absence never reads as empty or as today any more: loadEventMap throws when the generation lists a day the checkout
- * lacks, or when there is neither a map nor a generation (EVENT_MAP_BOOTSTRAP=1 starts an empty one); liveFloor (the
- * live pipeline's first day, which backfill fills strictly before and archive never reaches) throws when it has no
- * source. A file named `0000-00-00*` is the phase-3b sentinel and skipped by every reader here.
+ * Absence never reads as empty or as today: loadEventMap throws when the generation lists a day the checkout lacks
+ * (since 3b a fresh checkout lacks them all until it is hydrated), or when there is neither a map nor a generation
+ * (EVENT_MAP_BOOTSTRAP=1 starts an empty one); liveFloor (the live pipeline's first day, which backfill fills strictly
+ * before and archive never reaches) takes the generation's oldest day and throws without a generation. The files named
+ * `0000-00-00*` and `9999-12-31*` are the phase-3b sentinels (SENTINEL_FILES), the only tracked paths under
+ * knowledge/index/event_map/, skipped by every reader here and fatal to code from before phase 3 (they are not JSON).
  *
- *   DATA_DIR=.data FEED_STATE_BACKEND=worker npx --no-install tsx src/event-map-store.ts hydrate|persist|layout|stage|untrack|assert-staged|floor
+ *   DATA_DIR=.data FEED_STATE_BACKEND=worker npx --no-install tsx src/event-map-store.ts hydrate|persist|layout|stage|assert-staged|retrack|floor
  */
 
 export const GENERATION_FORMAT = 1;
 export const EVENT_MAP_LAYOUT = 'day';
 /** The EventNode line schema the day files hold; a reader refuses another. */
 export const NODE_SCHEMA = 1;
-/** The phase-3b sentinel's day: never an event-day, skipped by every reader of this module. */
-export const SENTINEL_DAY = '0000-00-00';
-export const SENTINEL_FILE = `${SENTINEL_DAY}.ndjson`;
 /**
- * Phase 3b's switch. false in phase 3a: git still tracks the day files and stays the truth; the store is written and
- * shadow-verified. true (the phase-3b PR, after its gate in APIs.md): hydrate replaces the checkout's event map and
- * fails closed, persist failures fail the run, and EVENT_MAP_IN_GIT defaults to 0, which turns on the assert that no
- * event-map path but the sentinel is staged.
+ * The phase-3b sentinels: two tracked files under knowledge/index/event_map/, each one line that is not JSON, never an
+ * event-day, skipped by every reader of this module. Two, because code from before phase 3 (re-run from an old run)
+ * reads the directory in two ways and each must fail or stop:
+ * - its loader parses every `*.ndjson` whose first 10 characters are not below the load's cutoff day (aggregate and
+ *   derive load with one): `0000-00-00` is below every cutoff and skipped, so alone it would let an old aggregate or
+ *   derive read an empty map, mint every event anew and publish empty views. `9999-12-31` is above every cutoff: its
+ *   JSON.parse throws (the loader also parses it when it loads without a cutoff);
+ * - its live floor (backfill's, onboard's) is the smallest name: `0000-00-00`, so an old backfill, which fills strictly
+ *   before it, writes nothing (with only the high sentinel the floor would be 9999-12-31 and it would fill live days).
+ * tests/event-map-store.test.ts replays both with the pre-phase-3 loader and floor.
  */
-export const EVENT_MAP_STORE_AUTHORITATIVE = false;
+export const SENTINEL_DAY = '0000-00-00';
+export const SENTINEL_HIGH_DAY = '9999-12-31';
+export const SENTINEL_FILE = `${SENTINEL_DAY}.ndjson`;
+export const SENTINEL_HIGH_FILE = `${SENTINEL_HIGH_DAY}.ndjson`;
+export const SENTINEL_FILES = [SENTINEL_FILE, SENTINEL_HIGH_FILE] as const;
+/**
+ * Phase 3b's switch, true since the phase-3b merge (APIs.md "Phase 3b, as merged"): the store holds the only copy of
+ * the event map. hydrate replaces the checkout's event map and fails closed, a persist failure fails the run before its
+ * push, the state store must be configured (no `off`), and every commit refuses a staged event-map path but the
+ * sentinels. It goes back to false only by the rollback of APIs.md (a re-track under the writer lock, then a revert),
+ * never by a plain revert.
+ */
+export const EVENT_MAP_STORE_AUTHORITATIVE = true;
 /** gzip level of a day blob: the store keys a blob by the sha256 of its gzip bytes, so the level only sets the size. */
 export const BLOB_GZIP_LEVEL = 9;
+/** The gzip header's OS byte of a day blob: 3 (Unix), what zlib writes on the Linux runners. */
+export const BLOB_GZIP_OS = 3;
+
+/**
+ * A day's canonical NDJSON as its blob: gzip at BLOB_GZIP_LEVEL with the header's OS byte pinned to BLOB_GZIP_OS. zlib
+ * writes the build platform there (19 on macOS), so the same day persisted on a Mac had another blob key than on the
+ * runners: the 2026-11-26 phase-3b rehearsal's seed re-keyed all 46 days of production's generation, sha256, bytes and
+ * nodes equal, and a local persist (a dry run, a disaster replay) could never leave a production generation as it was.
+ * The byte is informational for every gunzip; with it pinned the blob is the runners' byte for byte (same zlib).
+ */
+export function gzipDay(text: string): Buffer {
+  const gz = gzipSync(text, { level: BLOB_GZIP_LEVEL });
+  gz[9] = BLOB_GZIP_OS;
+  return gz;
+}
 /** PUTs in flight at once (the first phase-3a run uploads all 46 days). */
 export const PUT_CONCURRENCY = 4;
 /**
@@ -87,8 +119,10 @@ export const SHADOW_STEP_DEADLINE_MS = { hydrate: 30_000, persist: 60_000 } as c
  * batches): 4 attempts a batch, each at most 20 s (batchTimeoutMs: 10 s for a full batch), 15 s of backoff a request,
  * and a 60 s deadline over the step, after which it fails closed (the run stops; the next one, 5 minutes later, tries
  * again). At the 3a failure rate (one batch stall in about 200 runs, now one of 6 smaller batches, retried for its
- * missing blobs only) a run needs 2–4 s, a stalled one about 15 s. The step's timeout-minutes (2) stays the backstop.
- * persist keeps the client's defaults in 3b (a failure stops the run; APIs.md "Phase 3b").
+ * missing blobs only) a run needs 2–4 s, a stalled one about 15 s. The step's timeout-minutes (3: aggregate.yml,
+ * derive.yml, first-solutions.yml) stays the backstop; derive-publish's re-hydrate (a composite step, no timeout of its
+ * own) fetches nothing in an aggregate run and is bounded by this deadline alone. persist keeps the client's defaults
+ * in 3b (up to about 87 s a request; a failure stops the run; its timeout-minutes is 4; APIs.md "Phase 3b, as merged").
  */
 export const AUTHORITATIVE_HYDRATE_POLICY = { batchAttempts: 4, timeoutMs: 20_000, retryBudgetMs: 15_000 } as const;
 export const AUTHORITATIVE_HYDRATE_DEADLINE_MS = 60_000;
@@ -136,21 +170,34 @@ export function shadowSample(days: readonly string[], rotation: number, k: numbe
 const DAY_MS = 86_400_000;
 const dayKey = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
-/** Whether git tracks the event map (EVENT_MAP_IN_GIT, default 1 while EVENT_MAP_STORE_AUTHORITATIVE is false). */
-export function eventMapInGit(env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = (env.EVENT_MAP_IN_GIT ?? '').trim();
-  if (raw === '') return !EVENT_MAP_STORE_AUTHORITATIVE;
-  if (raw !== '0' && raw !== '1') throw new Error(`EVENT_MAP_IN_GIT=${raw.slice(0, 20)}: 0 or 1`);
-  return raw === '1';
+export const EVENT_MAP_PATH = 'knowledge/index/event_map';
+export const EVENT_MAP_LEGACY_PATH = 'knowledge/index/event_map.ndjson';
+/** The sentinels' paths in the data checkout: the only tracked paths under knowledge/index/event_map/ in phase 3b. */
+export const SENTINEL_PATHS: readonly string[] = SENTINEL_FILES.map((f) => `${EVENT_MAP_PATH}/${f}`);
+
+/**
+ * The event-map paths git tracks in the checkout at `root`, the sentinels left out (sorted). Empty after the phase-3b
+ * transition commit; the hour shards before it (phase 3a's branch) or after a rollback's re-track. Not a repository (a
+ * test root, a dry run's directory, an unpacked backup): empty. Sparse checkouts list their skip-worktree entries too.
+ */
+export function trackedEventMapPaths(root: string): string[] {
+  let out: string;
+  try {
+    out = execFileSync('git', ['-C', root, 'ls-files', '-z', '--', EVENT_MAP_PATH, EVENT_MAP_LEGACY_PATH], { encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    return [];
+  }
+  return out.split('\0').filter((p) => p && !SENTINEL_PATHS.includes(p)).sort();
 }
 
 /**
- * The hours of event time one event-map file holds (src/bitemporal.ts saveEventMap): 1 (round 17's hour shards) while
- * git tracks the event map, since git keeps every rewritten file for ever; 24 (one file per day, the store's blob
- * layout) once it does not (phase 3b).
+ * The hours of event time one event-map file of the checkout at `root` holds (src/bitemporal.ts saveEventMap): 1
+ * (round 17's hour shards) while git tracks event-map files there, since git keeps every rewritten file for ever; 24
+ * (one file per day, the store's blob layout) once it does not (phase 3b). In the transition run aggregate therefore
+ * still writes hour shards, and its commit step untracks them before it moves any day to a day file.
  */
-export function eventMapShardHours(env: NodeJS.ProcessEnv = process.env): number {
-  return eventMapInGit(env) ? 1 : 24;
+export function eventMapShardHours(root: string): number {
+  return trackedEventMapPaths(root).length ? 1 : 24;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -218,7 +265,7 @@ export function parseGeneration(text: string): Generation {
   const days: Record<string, DayEntry> = {};
   for (const [d, v] of Object.entries(rawDays as Record<string, unknown>)) {
     const e = v as Partial<DayEntry>;
-    if (!DAY_RE.test(d) || d === SENTINEL_DAY) throw new Error(`generation.json: day ${JSON.stringify(d)}`);
+    if (!DAY_RE.test(d) || d === SENTINEL_DAY || d === SENTINEL_HIGH_DAY) throw new Error(`generation.json: day ${JSON.stringify(d)}`);
     if (!e || !isSha256Hex(e.sha256) || !isSha256Hex(e.blob) || !isCount(e.bytes) || !isCount(e.nodes) || !isCount(e.blob_bytes)) {
       throw new Error(`generation.json: entry of ${d} unreadable: ${JSON.stringify(v).slice(0, 200)}`);
     }
@@ -275,10 +322,10 @@ function headSeqOf(root: string): number {
 
 /** An event-map file name: `YYYY-MM-DD.ndjson` (a day file) or `YYYY-MM-DD-HH.ndjson` (a round-17 hour shard). */
 export const EVENT_MAP_FILE = /^(\d{4}-\d{2}-\d{2})(?:-(\d{2}))?\.ndjson$/;
-export const isSentinelName = (name: string): boolean => name.startsWith(SENTINEL_DAY);
+export const isSentinelName = (name: string): boolean => name.startsWith(SENTINEL_DAY) || name.startsWith(SENTINEL_HIGH_DAY);
 export const dayFileName = (day: string): string => `${day}.ndjson`;
 
-/** Event-day → its file names (name order: hour shards before the day file), for the given names. The sentinel and
+/** Event-day → its file names (name order: hour shards before the day file), for the given names. The sentinels and
  *  anything that is not an event-map file name are left out. */
 export function daysOfNames(names: Iterable<string>): Map<string, string[]> {
   const out = new Map<string, string[]>();
@@ -331,11 +378,14 @@ export function readCanonicalDay(root: string, names: readonly string[]): Canoni
 
 /**
  * The layout move: every day held in any other file than its day file (hour shards, or a mix after an old code's run)
- * is written as its canonical day file, and its other files removed. Aggregate runs it only once git no longer tracks
- * the event map (phase 3b: the files never reach git; the authoritative hydrate already writes day files, so it
- * usually finds nothing). Returns the days moved.
+ * is written as its canonical day file, and its other files removed. Aggregate's commit step runs it (`stage`) right
+ * after the untrack, so the files it rewrites are never tracked: the authoritative hydrate already writes day files, so
+ * it finds days to move only in the transition run (and the first run after a rollback's re-track). Returns the days
+ * moved. Refuses while git tracks event-map files in the checkout (a move there would stage 78 MB of day files).
  */
 export function moveToDayLayout(root: string): string[] {
+  const tracked = trackedEventMapPaths(root);
+  if (tracked.length) throw new Error(`event map layout: git still tracks ${tracked.length} event-map file(s) (${tracked[0]} …): untrack them first (stage)`);
   const dir = dataPaths(root).eventMapDir;
   const moved: string[] = [];
   for (const [day, names] of eventMapFiles(root)) {
@@ -351,32 +401,33 @@ export function moveToDayLayout(root: string): string[] {
 // ---------------------------------------------------------------------------------------------------------------------
 // The live floor
 
-export type FloorSource = 'generation' | 'checkout' | 'tree' | 'empty-generation' | 'bootstrap';
+export type FloorSource = 'generation' | 'checkout' | 'empty-generation' | 'bootstrap';
 
 /**
  * The live pipeline's first event-day: backfill fills strictly before it, onboarding at and after it, archive never
- * archives a month that reaches it. In order: the generation's oldest day; the checkout's oldest event-map file; on a
- * sparse checkout (backfill.yml) the oldest event-map name in git's tree; otherwise it throws: a floor read as "today"
- * would let backfill write the days the live pipeline owns. Two explicit starts answer today: a generation that exists
- * and names no day while no event-map file exists anywhere (the empty generation scripts/bootstrap-data-branch.sh and
- * reset-data-branch.sh write: a fresh branch until its first aggregate run), and EVENT_MAP_BOOTSTRAP=1.
+ * archives a month that reaches it. From phase 3b it comes from the generation, which every checkout of `data` holds
+ * (backfill's sparse checkout includes /knowledge/index/*.json): the event-map files are no longer in git, so neither
+ * the checkout (archive's is never hydrated) nor git's tree (only the sentinels) can stand in for it. In order: the
+ * generation's oldest day; with an empty generation (a fresh branch, scripts/bootstrap-data-branch.sh), the checkout's
+ * oldest event-map file (that branch's first aggregate run, before its persist names the days), else today; no
+ * generation: today with EVENT_MAP_BOOTSTRAP=1, otherwise it throws, since a floor read as "today" would let backfill
+ * write the days the live pipeline owns.
  */
 export function liveFloorOf(root: string, nowMs: number = Date.now(), env: NodeJS.ProcessEnv = process.env): { day: string; source: FloorSource } {
   const gen = readGeneration(root);
-  const genDays = gen ? Object.keys(gen.generation.days).sort() : [];
+  if (!gen) {
+    if (env.EVENT_MAP_BOOTSTRAP === '1') return { day: dayKey(nowMs), source: 'bootstrap' };
+    throw new Error(
+      'event map: no live floor: the checkout has no knowledge/index/generation.json (since storage phase 3b the generation is the only record of ' +
+        "the event map's days in git): refusing to read it as today, which would let backfill write the days the live pipeline owns " +
+        '(EVENT_MAP_BOOTSTRAP=1 on a fresh data branch)',
+    );
+  }
+  const genDays = Object.keys(gen.generation.days).sort();
   if (genDays.length) return { day: genDays[0]!, source: 'generation' };
   const disk = [...eventMapFiles(root).keys()];
   if (disk.length) return { day: disk[0]!, source: 'checkout' };
-  if (isSparseCheckout(root)) {
-    const tree = [...daysOfNames(treeNames(root, 'knowledge/index/event_map')).keys()];
-    if (tree.length) return { day: tree[0]!, source: 'tree' };
-  }
-  if (gen && genDays.length === 0) return { day: dayKey(nowMs), source: 'empty-generation' };
-  if (env.EVENT_MAP_BOOTSTRAP === '1') return { day: dayKey(nowMs), source: 'bootstrap' };
-  throw new Error(
-    'event map: no live floor (no generation day, no event-map file in the checkout or in git): refusing to read it as today, ' +
-      'which would let backfill write the days the live pipeline owns (EVENT_MAP_BOOTSTRAP=1 on a fresh data branch)',
-  );
+  return { day: dayKey(nowMs), source: 'empty-generation' };
 }
 
 export const liveFloor = (root: string, nowMs: number = Date.now(), env: NodeJS.ProcessEnv = process.env): string => liveFloorOf(root, nowMs, env).day;
@@ -428,8 +479,17 @@ async function inPool<T>(items: readonly T[], limit: number, fn: (item: T) => Pr
  * `cutoffDay` (derive pruned it). Every PUT completes before the generation is written: on any store error nothing is
  * written, so a generation only ever names blobs that exist; the next run uploads again (its sha differs). An unchanged
  * set of entries leaves the file untouched.
+ *
+ * `uploadAll` (main sets it while git still tracks event-map files: the phase-3b transition run, or a run after a
+ * rollback's re-track) PUTs every day, unchanged ones included. Otherwise an unchanged day keeps its entry without an
+ * upload, and the transition commit, which untracks the shards, would leave a blob nobody had read since the 3a shadow's
+ * last sample as the only copy: a blob missing or corrupt in the store would surface only at the next run's hydrate,
+ * which then fails closed on every run, and the rollback's re-track (which starts with an authoritative hydrate) could
+ * not run either. A PUT is always written and R2 checks its bytes against the key, so after this persist every blob the
+ * generation names was just written from the checkout's day: the transition heals the store instead of trusting it (a
+ * PUT that fails stops the run before its commit, git untouched). 46 PUTs, about 12 MB, once.
  */
-export async function persist(root: string, backend: StateBackend, opts: { cutoffDay: string; concurrency?: number }): Promise<PersistReport> {
+export async function persist(root: string, backend: StateBackend, opts: { cutoffDay: string; concurrency?: number; uploadAll?: boolean }): Promise<PersistReport> {
   const prev = readGeneration(root);
   const prevDays = prev?.generation.days ?? {};
   const files = eventMapFiles(root);
@@ -453,11 +513,11 @@ export async function persist(root: string, backend: StateBackend, opts: { cutof
     const sha = sha256Hex(text);
     const bytes = Buffer.byteLength(text);
     const held = prevDays[day];
-    if (held && held.sha256 === sha && held.bytes === bytes && held.nodes === nodes) {
+    if (!opts.uploadAll && held && held.sha256 === sha && held.bytes === bytes && held.nodes === nodes) {
       days[day] = held;
       continue;
     }
-    const gz = gzipSync(text, { level: BLOB_GZIP_LEVEL });
+    const gz = gzipDay(text);
     const entry: DayEntry = { sha256: sha, bytes, nodes, blob: sha256Hex(gz), blob_bytes: gz.length };
     days[day] = entry;
     todo.push({ day, gz, entry });
@@ -511,6 +571,12 @@ export interface HydrateReport {
   sampled: string[];
   /** The batchGet batches the fetch was planned into (each one request unless retried). */
   batches: number;
+  /**
+   * authoritative: the event-map files git tracks in the checkout (the transition run, or a run after a rollback's
+   * re-track). Non-zero: git is the truth for this run; the checkout was compared (`mismatches`) and kept, nothing
+   * fetched or written.
+   */
+  tracked: number;
   /** ms of local work (reading and canonicalizing the checkout's days) before the first store request. */
   localMs: number;
   headSeq: number | null;
@@ -549,18 +615,20 @@ export async function fetchGenerationDays(backend: StateBackend, g: Generation, 
 }
 
 /**
- * Hydrate the checkout's event map from the store. `shadow` (phase 3a) compares every checked-out day with its
- * generation entry (each difference a mismatch line) and fetches and verifies the days that differ plus a rotating
+ * Hydrate the checkout's event map from the store. `shadow` (phase 3a; kept for state-rehearsal.ts) compares every
+ * checked-out day with its generation entry (each difference a mismatch line) and fetches and verifies the days that differ plus a rotating
  * sample of `sample` days (SHADOW_SAMPLE_DAYS; `rotation` from shadowRotation), so the store is exercised every run and
  * every blob about hourly; the checkout is never written. A store or integrity failure throws; the caller reports it.
- * `authoritative` (phase 3b) replaces the directory with exactly the generation's days (the sentinel kept), fetching
+ * `authoritative` (phase 3b) replaces the directory with exactly the generation's days (the sentinels kept), fetching
  * every day not already identical on disk, and throws on anything, including a missing generation unless
- * EVENT_MAP_BOOTSTRAP=1. Both refuse a generation ahead of head.json (its head_seq above the checkout's seq).
+ * EVENT_MAP_BOOTSTRAP=1; with `tracked` (the event-map paths git tracks in the checkout, trackedEventMapPaths) it keeps
+ * the checkout instead (git is the truth while it tracks them). Both refuse a generation ahead of head.json (its
+ * head_seq above the checkout's seq).
  */
 export async function hydrate(
   root: string,
   backend: StateBackend | (() => StateBackend),
-  opts: { mode: HydrateMode; env?: NodeJS.ProcessEnv; sample?: number; rotation?: number },
+  opts: { mode: HydrateMode; env?: NodeJS.ProcessEnv; sample?: number; rotation?: number; tracked?: readonly string[] },
 ): Promise<HydrateReport> {
   const env = opts.env ?? process.env;
   const t0 = Date.now();
@@ -582,6 +650,7 @@ export async function hydrate(
     changed: [],
     sampled: [],
     batches: 0,
+    tracked: opts.tracked?.length ?? 0,
     localMs: 0,
     headSeq: gen?.generation.head_seq ?? null,
   };
@@ -601,6 +670,21 @@ export async function hydrate(
   const days = Object.keys(g.days).sort();
   report.days = days.length;
   const only = (keep: ReadonlySet<string>): Generation => ({ ...g, days: Object.fromEntries(Object.entries(g.days).filter(([d]) => keep.has(d))) });
+  if (opts.mode === 'authoritative' && report.tracked) {
+    // Git still tracks event-map files here: the branch before the phase-3b transition commit (this run's commit step
+    // makes it), or after a rollback's re-track. Git is the truth for this run, as in phase 3a: the generation can only
+    // lag the files committed beside it (a 3a persist that failed left it unchanged), never lead them. So the checkout
+    // is kept as it is, compared with the generation without a store request (each difference listed; persist uploads
+    // it), and a day the generation lists that the checkout lacks is left to persist, which refuses it (fail closed).
+    // Replacing the files here would also change tracked files (a layout move) before the untrack.
+    for (const day of days) {
+      const names = files.get(day);
+      if (!names) report.mismatches.push(`${day}: in the generation, not in the checkout`);
+      else if (sha256Hex(readCanonicalDay(root, names).text) !== g.days[day]!.sha256) report.mismatches.push(`${day}: the checkout's day differs from the generation's (persist uploads it)`);
+    }
+    for (const day of files.keys()) if (!g.days[day]) report.mismatches.push(`${day}: in the checkout, not in the generation (persist adds it)`);
+    return report;
+  }
   if (opts.mode === 'authoritative') {
     // A day whose files on disk already canonicalize to the entry's sha256 is that content: it is rewritten from disk,
     // not fetched (derive-publish's hydrate after the aggregate commit then fetches only what a rebase removed).
@@ -656,12 +740,9 @@ export async function hydrate(
 // ---------------------------------------------------------------------------------------------------------------------
 // The phase-3b staging assert
 
-export const EVENT_MAP_PATH = 'knowledge/index/event_map';
-export const EVENT_MAP_LEGACY_PATH = 'knowledge/index/event_map.ndjson';
-
 /**
  * The staged event-map paths a phase-3b commit must not carry: anything added or modified under
- * knowledge/index/event_map/ but the sentinel, or the legacy file. Deletions pass (the phase-3b transition commit
+ * knowledge/index/event_map/ but the sentinels, or the legacy file. Deletions pass (the phase-3b transition commit
  * untracks every day file). `nameStatus`: `git diff --cached --name-status --no-renames` lines.
  */
 export function eventMapStagingProblems(nameStatus: readonly string[]): string[] {
@@ -670,54 +751,106 @@ export function eventMapStagingProblems(nameStatus: readonly string[]): string[]
     const [status, path] = l.split('\t');
     if (!status || !path || status.startsWith('D')) continue;
     if (path === EVENT_MAP_LEGACY_PATH) out.push(`${status} ${path}`);
-    else if (path.startsWith(`${EVENT_MAP_PATH}/`) && path !== `${EVENT_MAP_PATH}/${SENTINEL_FILE}`) out.push(`${status} ${path}`);
+    else if (path.startsWith(`${EVENT_MAP_PATH}/`) && !SENTINEL_PATHS.includes(path)) out.push(`${status} ${path}`);
   }
   return out;
 }
 
 /**
- * The commit hook of every committer that stages `knowledge` (aggregate.yml after its `git add`; src/stage-data.ts for
- * derive-publish, backfill and archive): with EVENT_MAP_IN_GIT=0 (phase 3b), throws when an event-map path but the
- * sentinel is staged (a lost `.gitignore` line would otherwise re-track 78 MB silently). Phase 3a: off.
+ * The commit hook of every committer that stages `knowledge` (aggregate.yml's `assert-staged` after its `git add`;
+ * src/stage-data.ts for derive-publish, backfill and archive): throws when an event-map path other than the sentinels
+ * is added or modified in the index, or when a sentinel is staged with other bytes than SENTINEL_TEXT. A lost
+ * `.gitignore` line, or a `git add -f`, would otherwise re-track 78 MB of day files for ever. Deletions pass (the transition commit
+ * deletes the hour shards). The rollback's re-track (`retrack`) commits on its own, never through this hook.
  */
-export function assertEventMapNotStaged(git: (args: string[]) => string, env: NodeJS.ProcessEnv = process.env): { checked: boolean; problems: string[] } {
-  if (eventMapInGit(env)) return { checked: false, problems: [] };
+export function assertEventMapNotStaged(git: (args: string[]) => string): { checked: boolean; problems: string[] } {
+  if (!EVENT_MAP_STORE_AUTHORITATIVE) return { checked: false, problems: [] };
   const lines = git(['diff', '--cached', '--name-status', '--no-renames', '--', EVENT_MAP_PATH, EVENT_MAP_LEGACY_PATH]).split('\n').filter(Boolean);
   const problems = eventMapStagingProblems(lines);
+  for (const path of SENTINEL_PATHS) {
+    if (lines.some((l) => /^[AM]\t/.test(l) && l.endsWith(`\t${path}`)) && git(['show', `:${path}`]) !== SENTINEL_TEXT) problems.push(`${path} staged with other bytes than the sentinel's line`);
+  }
   if (problems.length) {
     throw new Error(
-      `event map staged for a commit while EVENT_MAP_IN_GIT=0 (phase 3b: the store holds it, git only the sentinel): ${problems.slice(0, 5).join(', ')}` +
+      `event map staged for a commit (phase 3b: the state store holds it, git only the sentinels): ${problems.slice(0, 5).join(', ')}` +
         `${problems.length > 5 ? ', …' : ''}; is the .gitignore line ${EVENT_MAP_PATH}/* missing?`,
     );
   }
   return { checked: true, problems };
 }
 
-/** The `.gitignore` lines of phase 3b: the day files are not tracked, the sentinel is. */
-export const IGNORE_LINES = [`${EVENT_MAP_PATH}/*`, `!${EVENT_MAP_PATH}/${SENTINEL_FILE}`] as const;
+/** The `.gitignore` lines of phase 3b: the day files are not tracked, the sentinels are. */
+export const IGNORE_LINES = [`${EVENT_MAP_PATH}/*`, ...SENTINEL_PATHS.map((p) => `!${p}`)] as const;
 
-/** The sentinel's one line: not JSON on purpose, so code from before phase 3a that reads it throws instead of taking
- *  an untracked event map as empty, and its live floor (the oldest name) becomes 0000-00-00 (backfill writes nothing). */
+/**
+ * The sentinels' one line (both files): not JSON on purpose, so code from before phase 3 throws on it instead of taking
+ * an untracked event map as empty (SENTINEL_FILES says which file each old reader meets). Phase-3a code skips
+ * `0000-00-00`, throws on `9999-12-31` (an event-day to it) and fails closed on the generation's days the checkout
+ * lacks anyway.
+ */
 export const SENTINEL_TEXT = 'phase 3b sentinel: the event map lives in the state store (knowledge/index/generation.json); this line is not JSON on purpose\n';
 
 /**
- * The phase-3b transition, in the aggregate commit step before its `git add` (EVENT_MAP_IN_GIT=0 only; a no-op while
- * git tracks the event map): the ignore lines, the tracked sentinel, and every other tracked event-map path out of the
- * index (`git rm --cached`: the files stay on disk). Idempotent: after the transition commit nothing is tracked but the
- * sentinel and it changes nothing. Returns the paths it untracked.
+ * The phase-3b transition, at the start of aggregate's commit step (`stage`, before its `git add`): the ignore lines,
+ * the sentinels on disk, `git rm -r --cached` of the whole event-map directory (the files stay on disk), then the
+ * sentinels and `.gitignore` added back. Idempotent: after the transition commit only the sentinels were tracked, they
+ * are added back unchanged and nothing is staged. Returns the paths that were tracked besides the sentinels (phase 3a's
+ * hour shards in the transition run; nothing afterwards).
  */
-export function untrackEventMap(root: string, git: (args: string[]) => string, env: NodeJS.ProcessEnv = process.env): string[] | null {
-  if (eventMapInGit(env)) return null;
+export function untrackEventMap(root: string, git: (args: string[]) => string): string[] {
   ensureIgnoreLines(root);
-  const sentinel = join(dataPaths(root).eventMapDir, SENTINEL_FILE);
-  if (!existsSync(sentinel) || readFileSync(sentinel, 'utf8') !== SENTINEL_TEXT) {
-    mkdirSync(dirname(sentinel), { recursive: true });
-    writeFileSync(sentinel, SENTINEL_TEXT);
+  for (const f of SENTINEL_FILES) {
+    const sentinel = join(dataPaths(root).eventMapDir, f);
+    if (!existsSync(sentinel) || readFileSync(sentinel, 'utf8') !== SENTINEL_TEXT) {
+      mkdirSync(dirname(sentinel), { recursive: true });
+      writeFileSync(sentinel, SENTINEL_TEXT);
+    }
   }
-  const tracked = git(['ls-files', '-z', '--', EVENT_MAP_PATH, EVENT_MAP_LEGACY_PATH]).split('\0').filter((p) => p && p !== `${EVENT_MAP_PATH}/${SENTINEL_FILE}`);
-  if (tracked.length) git(['rm', '-q', '--cached', '--', ...tracked]);
-  git(['add', '-f', '--', `${EVENT_MAP_PATH}/${SENTINEL_FILE}`, '.gitignore']);
+  const tracked = git(['ls-files', '-z', '--', EVENT_MAP_PATH, EVENT_MAP_LEGACY_PATH]).split('\0').filter((p) => p && !SENTINEL_PATHS.includes(p)).sort();
+  git(['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', EVENT_MAP_PATH, EVENT_MAP_LEGACY_PATH]);
+  git(['add', '-f', '--', ...SENTINEL_PATHS, '.gitignore']);
   return tracked;
+}
+
+/**
+ * The rollback's re-track (APIs.md "Rollback after 3b"; derive.yml with `retrack`, under the writer lock, right after
+ * its authoritative hydrate): the hydrated event map written back as phase 3a's hour shards (byte for byte the
+ * generation's days: canonicalDay of each day's shards is checked against its entry), the ignore lines taken out of
+ * `.gitignore`, the sentinels deleted, and the shards and `.gitignore` staged, so phase-3a code (the revert that
+ * follows) finds git holding the event map again. It refuses unless every generation day is on disk as its entry.
+ * `rewriteAsShards` is src/bitemporal.ts's load of the whole map and its save at 1 hour a file (passed in: bitemporal
+ * imports this module).
+ * Returns the shards staged. The caller commits and pushes; no commit hook runs (this is the one commit that adds
+ * event-map files).
+ */
+export function retrackEventMap(root: string, git: (args: string[]) => string, rewriteAsShards: (root: string) => void): string[] {
+  const gen = readGeneration(root);
+  if (!gen) throw new Error('retrack: no knowledge/index/generation.json in the checkout');
+  const check = (what: string): void => {
+    const files = eventMapFiles(root);
+    const bad = Object.entries(gen.generation.days)
+      .filter(([day, e]) => {
+        const names = files.get(day);
+        return !names || sha256Hex(readCanonicalDay(root, names).text) !== e.sha256;
+      })
+      .map(([day]) => day);
+    const extra = [...files.keys()].filter((d) => !gen.generation.days[d]);
+    if (bad.length || extra.length) {
+      throw new Error(`retrack: ${what}: ${bad.length} generation day(s) not on disk as their entry (${bad.slice(0, 5).join(', ')}), ${extra.length} day(s) the generation lacks (${extra.slice(0, 5).join(', ')}): hydrate first (authoritative)`);
+    }
+  };
+  check('before');
+  rewriteAsShards(root);
+  check('after writing the hour shards');
+  const f = join(root, '.gitignore');
+  if (existsSync(f)) {
+    const drop = new Set<string>(IGNORE_LINES);
+    writeFileSync(f, readFileSync(f, 'utf8').split('\n').filter((l) => !drop.has(l.trim())).join('\n'));
+  }
+  for (const f of SENTINEL_FILES) rmSync(join(dataPaths(root).eventMapDir, f), { force: true });
+  git(['rm', '-q', '--cached', '--ignore-unmatch', '--', ...SENTINEL_PATHS]);
+  git(['add', '-f', '--', EVENT_MAP_PATH, '.gitignore']);
+  return git(['diff', '--cached', '--name-only', '--diff-filter=AM', '--', EVENT_MAP_PATH]).split('\n').filter(Boolean);
 }
 
 /** Phase 3b: add the ignore lines to the data checkout's .gitignore when missing (aggregate stages .gitignore). */
@@ -750,6 +883,17 @@ export interface StateMarker {
 }
 
 /**
+ * The marker's file under FEED_STATE_MARKER_DIR: the step's name, or FEED_STATE_MARKER_NAME when a job runs the same step
+ * twice into one directory (derive-publish's re-hydrate, `hydrate-publish`, beside the job's first `hydrate`), so the
+ * second does not overwrite the first. health reads every marker file of the artifact (scripts/feed-health.mjs). A name
+ * that is not a short lowercase word falls back to the step's (a marker in the wrong file beats none).
+ */
+export function markerFile(step: StateMarker['step'], env: NodeJS.ProcessEnv = process.env): string {
+  const name = (env.FEED_STATE_MARKER_NAME ?? '').trim();
+  return join(env.FEED_STATE_MARKER_DIR!, `${/^[a-z][a-z0-9-]{0,40}$/.test(name) ? name : step}.json`);
+}
+
+/**
  * The marker a step writes when it starts, before any request: not ok, error_kind `killed`. The step overwrites it with
  * its real report when it ends, so it survives only when the runner killed the step (its timeout-minutes) before it
  * could report: health then sees a hung store as a failed step (feed:state-shadow), not as a missing marker.
@@ -764,18 +908,19 @@ export function markStarted(step: StateMarker['step'], common: Pick<StateMarker,
     error_kind: 'killed',
   };
   mkdirSync(env.FEED_STATE_MARKER_DIR, { recursive: true });
-  writeFileSync(join(env.FEED_STATE_MARKER_DIR, `${step}.json`), `${JSON.stringify(m, null, 2)}\n`);
+  writeFileSync(markerFile(step, env), `${JSON.stringify(m, null, 2)}\n`);
 }
 
-/** The step's marker for the health workflow (FEED_STATE_MARKER_DIR/<step>.json, uploaded as the artifact
- *  state-shadow), its step-summary line and its log line. */
+/** The step's marker for the health workflow (FEED_STATE_MARKER_DIR/<step>.json, or markerFile's name; uploaded as the
+ *  artifact state-shadow), its step-summary line and its log line. */
 export function report(m: StateMarker, env: NodeJS.ProcessEnv = process.env, log: (l: string) => void = console.log): void {
   log(`state ${m.step}: ${m.summary}`);
   for (const x of (m.mismatches ?? []).slice(0, 20)) log(`  mismatch ${x}`);
-  if (!m.ok && !m.off) log(`::warning title=State ${m.step}::${m.summary.replace(/\n/g, ' ').slice(0, 400)}`);
+  // Phase 3b: a step that did not succeed stops the run (its exit code), so it is an error; a shadow step's a warning.
+  if (!m.ok && !m.off) log(`::${EVENT_MAP_STORE_AUTHORITATIVE && m.mode !== 'shadow' ? 'error' : 'warning'} title=State ${m.step}::${m.summary.replace(/\n/g, ' ').slice(0, 400)}`);
   if (env.FEED_STATE_MARKER_DIR) {
     mkdirSync(env.FEED_STATE_MARKER_DIR, { recursive: true });
-    writeFileSync(join(env.FEED_STATE_MARKER_DIR, `${m.step}.json`), `${JSON.stringify(m, null, 2)}\n`);
+    writeFileSync(markerFile(m.step, env), `${JSON.stringify(m, null, 2)}\n`);
   }
   if (env.GITHUB_STEP_SUMMARY) {
     try {
@@ -806,38 +951,34 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
     console.log(`event map live floor: ${f.day} (from the ${f.source})`);
     return 0;
   }
-  if (cmd === 'untrack') {
-    const r = untrackEventMap(root, (args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 1 << 26 }), env);
-    console.log(r == null ? 'event map: still tracked by git (EVENT_MAP_IN_GIT=1, phase 3a)' : `event map: ${r.length} path(s) untracked; the sentinel and the ignore lines staged`);
-    return 0;
-  }
+  const git = (args: string[]): string => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 1 << 26 });
   if (cmd === 'stage') {
-    // aggregate.yml's commit step, after its `git add`: the phase-3b transition (untrack) and the staging check; both do
-    // nothing while git tracks the event map (phase 3a).
-    const git = (args: string[]): string => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 1 << 26 });
-    const untracked = untrackEventMap(root, git, env);
-    const r = assertEventMapNotStaged(git, env);
+    // aggregate.yml's commit step, BEFORE its `git add`: the transition (every tracked event-map path out of the index,
+    // the sentinels and the ignore lines staged; after the transition commit it stages nothing), and only then the
+    // layout move, so no day file is ever written over a tracked path. `assert-staged` follows the `git add`.
+    const untracked = untrackEventMap(root, git);
+    const moved = moveToDayLayout(root);
     console.log(
-      untracked == null
-        ? 'event map staging: not checked (EVENT_MAP_IN_GIT=1: git tracks the event map in phase 3a)'
-        : `event map staging: ${untracked.length ? `${untracked.length} path(s) untracked (the phase-3b transition), ` : ''}no event-map path but the sentinel staged (checked: ${r.checked})`,
+      `event map staging: ${untracked.length ? `${untracked.length} tracked event-map path(s) untracked (the phase-3b transition: ${untracked[0]} … ${untracked.at(-1)}), the sentinels and the ignore lines staged` : 'only the sentinels tracked'}` +
+        `; ${moved.length ? `${moved.length} day(s) moved to day files (${moved[0]} … ${moved.at(-1)})` : 'every day a day file'}`,
     );
     return 0;
   }
   if (cmd === 'assert-staged') {
-    const r = assertEventMapNotStaged((args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 1 << 26 }), env);
-    console.log(r.checked ? 'event map staging: no event-map path but the sentinel staged (EVENT_MAP_IN_GIT=0)' : 'event map staging: not checked (EVENT_MAP_IN_GIT=1: git tracks the event map in phase 3a)');
+    assertEventMapNotStaged(git);
+    console.log('event map staging: no event-map path but the sentinels staged');
+    return 0;
+  }
+  if (cmd === 'retrack') {
+    // The rollback's first half (APIs.md "Rollback after 3b"), after an authoritative hydrate in the same job.
+    const { loadEventMap, saveEventMap } = await import('./bitemporal.js');
+    const shards = retrackEventMap(root, git, (r) => saveEventMap(r, loadEventMap(r), { hours: 1 }));
+    console.log(`event map re-tracked: ${shards.length} hour shard(s) staged, the sentinels and the ignore lines removed; commit, push, then merge the revert to phase 3a`);
     return 0;
   }
   if (cmd !== 'hydrate' && cmd !== 'persist') {
-    console.error('usage: event-map-store.ts hydrate [--mode shadow|authoritative] [--3b-only] | persist | layout | floor | stage | untrack | assert-staged');
+    console.error('usage: event-map-store.ts hydrate [--mode shadow|authoritative] | persist | layout | floor | stage | assert-staged | retrack');
     return 3;
-  }
-  // The steps that exist for phase 3b only (derive-publish's re-hydrate after the push, first-solutions' hydrate): in
-  // phase 3a the checkout holds the event map and they do nothing.
-  if (argv.includes('--3b-only') && !authoritative) {
-    console.log(`state ${cmd}: phase 3a (git holds the event map): nothing to do`);
-    return 0;
   }
   markStarted(cmd, common, env);
   const t0 = Date.now();
@@ -851,11 +992,13 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
     return authoritative ? 1 : 0;
   }
   if (!backend) {
-    report({ step: cmd, ok: true, off: true, ...common, summary: 'state store off (FEED_STATE_BACKEND off): nothing read or written' }, env);
+    // Phase 3b has no kill switch: the store holds the only copy of the event map, so a run without it stops here (the
+    // production jobs set FEED_STATE_BACKEND=worker themselves and read no repository variable for it).
     if (authoritative) {
-      console.error('::error::the state store is required once it is authoritative (phase 3b)');
+      report({ step: cmd, ok: false, ...common, summary: 'no state store configured (FEED_STATE_BACKEND unset or off): required since phase 3b, the run stops', error: 'FEED_STATE_BACKEND unset or off', error_kind: 'config' }, env);
       return 1;
     }
+    report({ step: cmd, ok: true, off: true, ...common, summary: 'state store off (FEED_STATE_BACKEND off): nothing read or written' }, env);
     return 0;
   }
   if (cmd === 'hydrate') {
@@ -863,7 +1006,8 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
       // The step's deadline (stepPolicy) starts when the store requests do, after hydrate's local comparison: the
       // backend is built again there with a policy from that instant (the first one above checked the configuration).
       const first = backend;
-      const r = await hydrate(root, () => backendFromEnv(env, { policy: stepPolicy('hydrate', mode, Date.now())! }) ?? first, { mode, env });
+      const tracked = mode === 'authoritative' ? trackedEventMapPaths(root) : [];
+      const r = await hydrate(root, () => backendFromEnv(env, { policy: stepPolicy('hydrate', mode, Date.now())! }) ?? first, { mode, env, tracked });
       const ms = Date.now() - t0;
       const mb = `${(r.blobBytes / 1e6).toFixed(1)} MB in ${r.batches} batch(es)`;
       const summary = r.noGeneration
@@ -871,8 +1015,12 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
         : mode === 'shadow'
           ? `${r.days} day(s) compared with the checkout; ${r.fetched.length} fetched and verified (${r.changed.length} changed, ${r.sampled.length} sampled: ${r.sampled.join(' ') || 'none'}), ` +
             `${mb} from ${backend.label} in ${ms} ms (${r.localMs} ms of it local); ${r.mismatches.length ? `${r.mismatches.length} MISMATCH(ES) with the checkout` : 'identical to the checkout'} (generation at seq ${r.headSeq})`
-          : `${r.written.length} day(s) written, ${r.fetched.length} fetched (${mb}) from ${backend.label} (the rest already identical on disk) in ${ms} ms (${r.localMs} ms of it local; generation at seq ${r.headSeq})`;
-      report({ step: 'hydrate', ok: r.mismatches.length === 0, mode, ...common, summary, mismatches: r.mismatches }, env);
+          : r.tracked
+            ? `git still tracks ${r.tracked} event-map file(s) in the checkout (the phase-3b transition run, or a run after a rollback's re-track): the checkout is the truth for this run and was kept, nothing fetched; ` +
+              `${r.days} generation day(s), ${r.mismatches.length ? `${r.mismatches.length} differing from the checkout (persist uploads them; a day the checkout lacks stops persist)` : 'every one identical to the checkout'} (generation at seq ${r.headSeq})`
+            : `${r.written.length} day(s) written, ${r.fetched.length} fetched (${mb}) from ${backend.label} (the rest already identical on disk) in ${ms} ms (${r.localMs} ms of it local; generation at seq ${r.headSeq})`;
+      // The transition run's differences are git's truth moving ahead of a lagging generation, not a store fault: ok.
+      report({ step: 'hydrate', ok: r.tracked > 0 || r.mismatches.length === 0, mode, ...common, summary, mismatches: r.mismatches }, env);
       return 0;
     } catch (e) {
       report({ step: 'hydrate', ok: false, mode, ...common, summary: `failed: ${errText(e)}`, error: errText(e), error_kind: e instanceof StateStoreError ? e.kind : 'error' }, env);
@@ -881,16 +1029,19 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
   }
   const cutoffDay = dayKey(Date.now() - EVENT_MAP_HORIZON_DAYS * DAY_MS);
   try {
-    if (authoritative && ensureIgnoreLines(root)) console.log('state persist: the event-map ignore lines added to .gitignore');
-    const r = await persist(root, backend, { cutoffDay });
+    // While git still tracks event-map files (the transition run, or after a rollback's re-track) every day is uploaded:
+    // the commit after it may untrack them, leaving the store's blobs as the only copy (persist, uploadAll).
+    const tracked = trackedEventMapPaths(root).length;
+    const r = await persist(root, backend, { cutoffDay, uploadAll: authoritative && tracked > 0 });
     const summary =
+      `${tracked ? `git still tracks ${tracked} event-map file(s): every day uploaded, unchanged ones included (the store's blobs become the only copy once the commit untracks them); ` : ''}` +
       `${r.days} day(s); ${r.uploaded.length ? `${r.uploaded.length} uploaded (${r.uploaded.join(', ')}, ${(r.uploadedBytes / 1e6).toFixed(2)} MB)` : 'nothing uploaded'}` +
       `${r.dropped.length ? `; ${r.dropped.length} pruned day(s) left the generation` : ''}; generation ${r.written ? `written at seq ${r.headSeq}` : 'unchanged'} (${Date.now() - t0} ms, ${backend.label})`;
     report({ step: 'persist', ok: true, ...common, summary }, env);
     return 0;
   } catch (e) {
-    // Phase 3a: git still holds the event map; the generation is left as it was (it names only blobs that exist) and
-    // the next run uploads again. Phase 3b: the commit must not go out without its state.
+    // The generation is left as it was (it names only blobs that exist). Phase 3b: the commit must not go out without
+    // its state, so the run stops before its push; the next run starts again from the committed generation.
     report({ step: 'persist', ok: false, ...common, summary: `failed, generation.json left unchanged: ${errText(e)}`, error: errText(e), error_kind: e instanceof StateStoreError ? e.kind : e instanceof PersistRefused ? 'refused' : 'error' }, env);
     return authoritative || e instanceof PersistRefused ? 1 : 0;
   }

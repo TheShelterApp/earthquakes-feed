@@ -483,14 +483,22 @@ export const RULES = Object.freeze({
     board: 'feed', class: 'config', severity: 'P3', key: 'feed:stats-days',
   }),
   'feed:state-shadow': rule('feed:state-shadow', {
-    title: 'state store shadow mismatch or error',
-    // Storage phase 3a (src/event-map-store.ts): one of the newest `runs` aggregate (or derive.yml) runs of the last
-    // `holdMs` reported a state step that did not succeed: the shadow hydrate found the store's event map differing
-    // from the checkout's, or a store request failed (auth, budget, the Worker down), or persist failed (its generation
-    // then stays as it was). Git is still the truth in phase 3a, so the feed is unaffected; phase 3b's gate needs 24 h
-    // without one. Read from the markers each run uploads (artifact state-shadow); only artifacts of scheduled or
-    // dispatched runs of `workflows` on main count (a pull request can upload an artifact of any name).
-    board: 'feed', class: 'redundancy', severity: 'P2', key: 'feed:state-shadow', check: 'gh-redundancy',
+    title: 'feed run stopped at the state store',
+    // Storage phase 3b (src/event-map-store.ts; the key keeps its phase-3a name, the boards' entries with it): one of
+    // the newest `runs` aggregate (or derive.yml) runs of the last `holdMs` reported a state step that did not succeed:
+    // its hydrate, its persist, or derive-publish's re-hydrate after the push (`hydrate-publish`).
+    // The store holds the only copy of the event map, so each is a failed feed run that stopped before its push: the
+    // hydrate could not read or verify the generation's days (a store request failed: auth, budget, the Worker down;
+    // a blob missing or corrupt), or persist could not upload them (the generation then stays as it was), or the step
+    // was killed by its timeout (`killed`). The next run retries 5 minutes later; a failure that lasts stops the feed,
+    // which feed:freshness (whose text then names this row) reports at 30 minutes. In phase 3a this row was the
+    // shadow's mismatch or error and the feed carried on from git. Read from the markers each run uploads (artifact
+    // state-shadow, its last step, `if: always()`); only artifacts of scheduled or dispatched runs of `workflows` on
+    // main count (a pull request can upload an artifact of any name). Class symptom on the feed's path (gh-feed), no
+    // longer redundancy: in phase 3a the shadow had git behind it; since 3b nothing covers a run the store stopped.
+    // first-solutions' collect hydrate is not here (not the feed): its failure is a blocked line of that walk's marker
+    // (walks:first-solutions:run).
+    board: 'feed', class: 'symptom', severity: 'P2', key: 'feed:state-shadow', check: 'gh-feed',
     limits: { artifact: 'state-shadow', workflows: ['aggregate.yml', 'derive.yml'], runs: 3, holdMs: 2 * HOUR },
   }),
   'feed:state-gc': rule('feed:state-gc', {
@@ -538,11 +546,13 @@ export const RULES = Object.freeze({
     title: 'repository growth over budget',
     // The repository's `size` (feed:repo-size's reading) sampled about once a day (the artifact repo-size-samples the
     // feed job keeps): the growth from the newest sample at least minSpanMs old, in MB a day, over maxMbPerDay: the
-    // current storage phase's budget (APIs.md "Where the repository stands": phase 2 and the 3a soak 14–15 MB a day, so
-    // 16 now; lower it to 11 in the phase-3b PR, 8–10.7 expected), so the row means growth beyond the budget. GitHub
-    // counts no rewrite back; 10 GB is about 3.2 GB away (APIs.md Repository size, the budget per storage phase).
+    // current storage phase's budget (APIs.md "Where the repository stands": phase 3b 8–10.7 MB a day expected, so 11;
+    // it was 16 through phase 2 and the 3a soak, 14–15 MB a day), so the row means growth beyond the budget. The 7-day
+    // window spans the transition for a week after the 3b merge (the line may fire then: the transition commit itself is
+    // small, deletions of the hour shards). GitHub counts no rewrite back; 10 GB is about 3.2 GB away (APIs.md
+    // Repository size, the budget per storage phase).
     board: 'feed', class: 'capacity', severity: 'P3', key: 'feed:repo-growth',
-    limits: { artifact: 'repo-size-samples', workflows: ['health.yml'], sampleEveryMs: 20 * HOUR, minSpanMs: 6 * DAY, keepSamples: 40, maxMbPerDay: 16 },
+    limits: { artifact: 'repo-size-samples', workflows: ['health.yml'], sampleEveryMs: 20 * HOUR, minSpanMs: 6 * DAY, keepSamples: 40, maxMbPerDay: 11 },
   }),
   'walks': rule('walks', {
     title: 'maintenance walk blocked',

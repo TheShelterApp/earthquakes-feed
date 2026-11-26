@@ -46,10 +46,10 @@ const BACKFILL_TARGET_YEARS = envNumber('BACKFILL_TARGET_YEARS', 3, { integer: f
 
 type Cursor = BackfillCursorFile;
 
-/** Oldest UTC day owned by the live pipeline (src/event-map-store.ts liveFloor: the generation's oldest day, else the
- *  oldest event-map file of the checkout, else, on the sparse checkout of backfill.yml where the files are not checked
- *  out, the oldest name in git's tree). Backfill fills strictly before it, so it never collides with aggregate/derive
- *  rewrites. With none of them it throws: a floor read as "today" would let the run write live-owned days. */
+/** Oldest UTC day owned by the live pipeline (src/event-map-store.ts liveFloor: the generation's oldest day, which
+ *  backfill.yml's sparse checkout holds in /knowledge/index/*.json; since storage phase 3b the event-map files are in
+ *  neither the checkout nor git's tree). Backfill fills strictly before it, so it never collides with aggregate/derive
+ *  rewrites. Without a generation it throws: a floor read as "today" would let the run write live-owned days. */
 function earliestLiveDay(root: string, nowMs: number): string {
   return liveFloor(root, nowMs);
 }

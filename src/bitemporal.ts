@@ -33,9 +33,9 @@ export const eventMapDayFile = dayFileName;
 /**
  * The event-map file of a node of `day` at `eventTimeMs`: with `hours` 24 the day file, otherwise the shard of
  * `hours` hours from HH (`YYYY-MM-DD-HH.ndjson`, round 17). saveEventMap writes hour shards (1) while git tracks the
- * event map (phase 3a): an aggregate commit then rewrites ~70 KB shards instead of ~1.7 MB day files, which git keeps
- * for ever. Once the store is authoritative and git no longer holds the files (phase 3b), it writes day files
- * (src/event-map-store.ts eventMapShardHours). Either layout reads alike everywhere, and a day's store bytes are
+ * event map in the checkout (phase 3a, and the phase-3b transition run): an aggregate commit then rewrites ~70 KB
+ * shards instead of ~1.7 MB day files, which git keeps for ever. Once git no longer tracks the files (phase 3b), it
+ * writes day files (src/event-map-store.ts eventMapShardHours). Either layout reads alike everywhere, and a day's store bytes are
  * canonicalDay of its files, whatever their layout.
  */
 export function eventMapShardName(day: string, eventTimeMs: number, hours: number): string {
@@ -86,9 +86,17 @@ export function loadEventMap(
     const files = eventMapFiles(root);
     const lacking = genDays.filter((d) => !files.has(d));
     if (lacking.length) {
+      // Since storage phase 3b a fresh checkout of `data` holds none of the days (git tracks only the sentinel): the
+      // jobs hydrate before they read; a local copy needs a daily state from the Releases (APIs.md "Reading the event
+      // map outside the feed's jobs").
+      const none = files.size === 0;
       throw new Error(
         `event map: the generation lists ${lacking.length} day(s) the checkout lacks (${lacking.slice(0, 5).join(', ')}${lacking.length > 5 ? ', …' : ''}): ` +
-          'refusing to read them as empty',
+          'refusing to read them as empty' +
+          (none
+            ? '. The checkout holds no event-map day at all: since storage phase 3b git tracks only the sentinel and the state store holds the map; hydrate first ' +
+              '(src/event-map-store.ts hydrate in a workflow, or locally from a daily backup: APIs.md "Reading the event map outside the feed\'s jobs")'
+            : ''),
       );
     }
     for (const [day, names] of files) {
@@ -118,8 +126,9 @@ export function loadEventMap(
   return map;
 }
 
-/** Persist the in-memory event_map as shards of `opts.hours` hours of each event-day (default eventMapShardHours():
- *  1 while git tracks the event map, 24, one file per day, from phase 3b; byte-compare writes, lines in feed-id order).
+/** Persist the in-memory event_map as shards of `opts.hours` hours of each event-day (default eventMapShardHours(root):
+ *  1 while git tracks event-map files in the checkout, 24, one file per day, once it does not (phase 3b); byte-compare
+ *  writes, lines in feed-id order).
  *  Only days present in `map` are (re)written, and each of those loses the files it no longer fills (an hour every node
  *  left, or the other layout's files); other days' files are left untouched. With `opts.floorDay` (the first event-day
  *  the run loaded), a day below it is not rewritten from `map`: its nodes there are merged into its files on disk,
@@ -128,7 +137,7 @@ export function loadEventMap(
  *  Whatever the layout, canonicalDay of a day's files is the day file's bytes, so the day's sha256 is the generation's
  *  entry (src/event-map-store.ts). */
 export function saveEventMap(root: string, map: Map<string, EventNode>, opts: { floorDay?: string; hours?: number } = {}): void {
-  const hours = opts.hours ?? eventMapShardHours();
+  const hours = opts.hours ?? eventMapShardHours(root);
   if (!Number.isInteger(hours) || hours < 1 || hours > 24 || 24 % hours !== 0) throw new Error(`event map shard hours ${hours}: a divisor of 24`);
   const p = dataPaths(root);
   const byDay = new Map<string, EventNode[]>();

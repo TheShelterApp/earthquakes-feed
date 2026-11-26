@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { test } from 'node:test';
@@ -338,16 +338,20 @@ test('the store off (the repository variable FEED_STATE_BACKEND unset): GC and t
   }
 });
 
-test('workflows: the store is on by default and the repository variable FEED_STATE_BACKEND=off switches every production job off (never a bare hard-coded worker)', () => {
+test('workflows: storage phase 3b has no kill switch: every production job sets FEED_STATE_BACKEND=worker itself and none reads the repository variable', () => {
   const wf = (f: string): string => readFileSync(fileURLToPath(new URL(`../.github/workflows/${f}`, import.meta.url)), 'utf8');
-  const sw = /FEED_STATE_BACKEND: \$\{\{ vars\.FEED_STATE_BACKEND \|\| 'worker' \}\}/;
-  for (const f of ['aggregate.yml', 'derive.yml', 'state-gc.yml', 'state-backup.yml', 'health.yml']) {
-    const text = wf(f);
-    assert.match(text, sw, f);
-    assert.doesNotMatch(text, /FEED_STATE_BACKEND: worker/, f);
+  const action = readFileSync(fileURLToPath(new URL('../.github/actions/derive-publish/action.yml', import.meta.url)), 'utf8');
+  for (const f of readdirSync(fileURLToPath(new URL('../.github/workflows/', import.meta.url))).filter((x) => x.endsWith('.yml'))) {
+    assert.doesNotMatch(wf(f), /vars\.FEED_STATE_BACKEND/, `${f}: the store holds the only copy of the event map, so no variable may switch it off`);
   }
-  assert.equal(wf('aggregate.yml').match(new RegExp(sw.source, 'g'))!.length, 2, 'hydrate and persist');
-  // The kill switch reads as off everywhere the switch is read.
+  assert.doesNotMatch(action, /vars\.FEED_STATE_BACKEND/);
+  const count = (text: string): number => (text.match(/\n {10}FEED_STATE_BACKEND: worker\n/g) ?? []).length;
+  for (const [f, n] of [['aggregate.yml', 2], ['derive.yml', 1], ['first-solutions.yml', 1], ['state-gc.yml', 1], ['state-backup.yml', 1], ['health.yml', 1]] as const) {
+    assert.equal(count(wf(f)), n, f);
+  }
+  assert.equal((action.match(/\n {8}FEED_STATE_BACKEND: worker\n/g) ?? []).length, 1, 'derive-publish: the re-hydrate');
+  // A run that still meets `off` (a local run) reads it as no store; the feed's state steps then fail closed
+  // (tests/event-map-store.test.ts).
   assert.equal(stateBackendSetting({ FEED_STATE_BACKEND: 'off' }), '');
   assert.equal(stateBackendSetting({ FEED_STATE_BACKEND: ' worker ' }), 'worker');
   assert.equal(backendFromEnv({ FEED_STATE_BACKEND: 'off' }), null);

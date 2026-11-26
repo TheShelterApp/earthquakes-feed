@@ -5,6 +5,7 @@ import { basename, join } from 'node:path';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import { type ArchiveIo, type ArchiveOptions, extractTarball, makeTarball, runArchive } from '../src/archive.js';
+import { SENTINEL_FILE, SENTINEL_TEXT, emptyGeneration, writeGeneration } from '../src/event-map-store.js';
 import { isGnuTar } from '../src/tar.js';
 
 // FEED-TEST-1: the archive run's decisions, end to end on a temporary data root with a stub for the Releases: which
@@ -43,7 +44,9 @@ function stubReleases(opts: { corruptDownloadOf?: (asset: string) => boolean } =
 }
 
 /** May 2026 is cold (2 days), June is not (06-10 is inside 120 days); the live event map starts at 06-05 (its floor,
- *  src/event-map-store.ts liveFloor), so no cold month reaches it. `floorDay` moves the event map's first day. */
+ *  src/event-map-store.ts liveFloor), so no cold month reaches it. `floorDay` moves the event map's first day. The
+ *  checkout is phase 3b's: the generation names the event map's days and the only file under event_map/ is the sentinel
+ *  (archive's checkout is never hydrated), so the floor comes from the generation alone. */
 function dataRoot(floorDay = '2026-06-05'): string {
   const root = mkdtempSync(join(tmpdir(), 'archive-run-'));
   const day = (d: string, n: number): void => {
@@ -56,7 +59,9 @@ function dataRoot(floorDay = '2026-06-05'): string {
   day('2026-06-05', 1);
   day('2026-06-10', 1);
   mkdirSync(join(root, 'knowledge', 'index', 'event_map'), { recursive: true });
-  writeFileSync(join(root, 'knowledge', 'index', 'event_map', `${floorDay}.ndjson`), '');
+  writeFileSync(join(root, 'knowledge', 'index', 'event_map', SENTINEL_FILE), SENTINEL_TEXT);
+  const entry = { sha256: 'a'.repeat(64), bytes: 1, nodes: 1, blob: 'b'.repeat(64), blob_bytes: 1 };
+  writeGeneration(root, { ...emptyGeneration(), days: { [floorDay]: entry, '2026-06-20': entry } });
   const inv: Record<string, unknown> = {};
   for (const d of ['2026-05-01', '2026-05-02', '2026-06-05', '2026-06-10']) inv[d] = { count: 1 };
   writeFileSync(join(root, 'knowledge', 'index', 'partitions.json'), JSON.stringify(inv) + '\n');
@@ -111,17 +116,18 @@ test('archive run: only the fully cold month rolls; verified before index and pr
   assert.equal(calls[i + 1], `download archive-2026-05/${e.asset}`);
 });
 
-test('archive run: a cold month that reaches the live event map is refused; without an event map the run throws', () => {
+test('archive run: a cold month that reaches the live event map is refused; without a generation the run throws', () => {
   // The 45-day event-map horizon is far inside the 120-day archive horizon, so this guard should never fire; it is the
-  // backstop for an event map that grew old (its floor from the generation, else the files: liveFloor).
+  // backstop for an event map that grew old (its floor from the generation: liveFloor).
   const root = dataRoot('2026-05-02');
   const { io } = stubReleases();
   const res = silently(() => runArchive(root, NOW, io, opts(root)));
   assert.deepEqual(res.archived, []);
   assert.ok(existsSync(join(root, 'events', '2026', '05', '01.ndjson')), 'a month that reaches the live floor is never archived');
-  // No event map at all (storage phase 3: absence never reads as "no live day"): the run stops before it archives.
+  // No generation (storage phase 3b: the generation is the only record of the event map's days in git; absence never
+  // reads as "no live day"): the run stops before it archives.
   const bare = dataRoot();
-  rmSync(join(bare, 'knowledge', 'index', 'event_map'), { recursive: true });
+  rmSync(join(bare, 'knowledge', 'index', 'generation.json'));
   assert.throws(() => silently(() => runArchive(bare, NOW, stubReleases().io, opts(bare))), /no live floor/);
   assert.ok(existsSync(join(bare, 'events', '2026', '05', '01.ndjson')));
 });

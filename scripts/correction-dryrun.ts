@@ -7,8 +7,10 @@
  * Usage:
  *   npx tsx scripts/correction-dryrun.ts --data <data-branch dir> [--now <iso>] [--from-epoch <n>] [--lines <out.ndjson>] [--splits]
  *
- * <data-branch dir> needs knowledge/index (event_map shards + head.json), e.g.
- *   git archive origin/data knowledge/index | tar -x -C /tmp/data
+ * <data-branch dir> needs knowledge/index (head.json, generation.json) and the event map's day files. Since storage
+ * phase 3b git holds only the generation and two sentinels (`git archive origin/data knowledge/index` gives no day), so
+ * hydrate the directory first from a daily backup (APIs.md "Reading the event map outside the feed's jobs"); without
+ * it the load refuses to read the lacking days as empty and says so.
  * --now defaults to head.ingest_time + 5 min (the next aggregate run). --from-epoch defaults to the data branch's
  * marker (knowledge/index/correction.json), so only the steps aggregate would make run. --lines writes the lines it
  * would append; --splits lists the AFAD rows still beside EMSC's AFAD-authored copy afterwards, with the gate that

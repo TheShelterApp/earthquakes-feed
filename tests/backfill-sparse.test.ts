@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { sparseMonthPatterns, windowDays } from '../src/backfill-plan.js';
 import { dayStartMs } from '../src/backfill-cursor.js';
 import { isSparseCheckout, missingFromWorktree, treeNames } from '../src/sparse-checkout.js';
-import { emptyGeneration, liveFloorOf, serializeGeneration } from '../src/event-map-store.js';
+import { IGNORE_LINES, SENTINEL_FILES, SENTINEL_TEXT, emptyGeneration, liveFloorOf, serializeGeneration } from '../src/event-map-store.js';
 
 // SHLTR-149: backfill.yml holds the writer lock on a sparse, blobless checkout of `data` (the full checkout took 94–101 s
 // of the 2 min 15 s each backfill held the lock on 2026-11-08). The plan step prints the months a run reads and writes,
@@ -51,27 +51,33 @@ function gitEnv(home: string): NodeJS.ProcessEnv {
   };
 }
 
-/** A `data` branch with the index files, two event-map shards (the live window starts 2026-10-01) and three partitions;
+/** A `data` branch in storage phase 3b's layout: the index files, the generation naming two event-map days (the live
+ *  window starts 2026-10-01; their files are in the state store, git tracks only the sentinels) and three partitions;
  *  `clone(patterns)` makes a blobless, depth-1, sparse clone of it as actions/checkout does. */
-function setup(extraFiles: Record<string, string> = {}) {
+const ENTRY = { sha256: 'a'.repeat(64), bytes: 1, nodes: 1, blob: 'b'.repeat(64), blob_bytes: 1 };
+const GENERATION = serializeGeneration({ ...emptyGeneration(), days: { '2026-10-01': ENTRY, '2026-10-02': ENTRY } });
+
+function setup(extraFiles: Record<string, string | null> = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'backfill-sparse-'));
   const e = gitEnv(dir);
   writeFileSync(join(dir, 'gitconfig'), '[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = data\n[uploadpack]\n\tallowFilter = true\n\tallowAnySHA1InWant = true\n');
   const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, env: e, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   const origin = join(dir, 'origin');
-  const files: Record<string, string> = {
+  const files: Record<string, string | null> = {
     'knowledge/index/backfill.json': '{"targetStart":"2023-07-06","providers":{}}\n',
     'knowledge/index/archives.json': '{"list":[]}\n',
     'knowledge/index/head.json': '{"seq":5,"ingest_time":"2026-11-14T15:00:00.000Z"}\n',
     'knowledge/index/partitions.json': '{}\n',
-    'knowledge/index/event_map/2026-10-01-00.ndjson': '\n',
-    'knowledge/index/event_map/2026-10-02-00.ndjson': '\n',
+    'knowledge/index/generation.json': GENERATION,
+    ...Object.fromEntries(SENTINEL_FILES.map((f) => [`knowledge/index/event_map/${f}`, SENTINEL_TEXT])),
+    '.gitignore': `${IGNORE_LINES.join('\n')}\n`,
     'events/2026/08/31.ndjson': '{"x":1}\n',
     'events/2026/09/15.ndjson': '{"x":2}\n',
     'events/2026/10/02.ndjson': '{"x":3}\n',
     ...extraFiles,
   };
   for (const [rel, text] of Object.entries(files)) {
+    if (text === null) continue;
     mkdirSync(dirname(join(origin, rel)), { recursive: true });
     writeFileSync(join(origin, rel), text);
   }
@@ -111,17 +117,17 @@ const backfill = (s: ReturnType<typeof setup>, data: string, extra: Record<strin
     encoding: 'utf8',
   });
 
-test('backfill on a sparse checkout: the plan step names the months before the live window (from git, not the missing shards); once added, they are checked out', () => {
+test('backfill on a sparse checkout: the plan step names the months before the live window (from the generation: the event map is not in git); once added, they are checked out', () => {
   const s = setup();
   const work = s.clone(['/knowledge/index/*.json']);
   assert.equal(isSparseCheckout(work), true);
-  assert.equal(existsSync(join(work, 'knowledge/index/event_map')), false, 'the shards are not checked out');
-  assert.deepEqual(treeNames(work, 'knowledge/index/event_map'), ['2026-10-01-00.ndjson', '2026-10-02-00.ndjson']);
+  assert.equal(existsSync(join(work, 'knowledge/index/event_map')), false, 'nothing of the event map is checked out');
+  assert.deepEqual(treeNames(work, 'knowledge/index/event_map'), [...SENTINEL_FILES], 'git holds only the sentinels (phase 3b)');
   const out = join(s.dir, 'paths.txt');
   const r = backfill(s, work, { BACKFILL_PHASE: 'paths', BACKFILL_PATHS_OUT: out });
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  // 2026-08-29 .. 2026-09-30: the live window (2026-10-01 on, from the shard names in git) is never touched. Had the
-  // missing directory read as "no shards", the live day would be today and October would be in the list.
+  // 2026-08-29 .. 2026-09-30: the live window (2026-10-01 on, the generation's first day) is never touched. Had the
+  // missing event map read as "no live day", the live day would be today and October would be in the list.
   assert.equal(readFileSync(out, 'utf8'), '/events/2026/08/\n/events/2026/09/\n');
   assert.match(r.stdout, /backfill: 1 window\(s\) over 2026-08-29\.\.2026-09-30: 2 month\(s\) to check out/);
   execFileSync('git', ['-C', work, 'sparse-checkout', 'add', '--stdin'], { input: readFileSync(out), env: s.e });
@@ -140,7 +146,8 @@ test('backfill on a sparse checkout refuses to run when a partition of its windo
   const bare = s.clone(['/events/2026/09/']);
   const r2 = backfill(s, bare, { BACKFILL_PHASE: 'paths', BACKFILL_PATHS_OUT: join(s.dir, 'p2.txt') });
   assert.equal(r2.status, 1, r2.stdout + r2.stderr);
-  assert.match(r2.stderr, /lacks 4 file\(s\) this run reads \(knowledge\/index\/archives\.json, knowledge\/index\/backfill\.json, knowledge\/index\/head\.json, knowledge\/index\/partitions\.json\)/);
+  // generation.json among them: the live floor (storage phase 3b) would otherwise have no source.
+  assert.match(r2.stderr, /lacks 5 file\(s\) this run reads \(knowledge\/index\/archives\.json, knowledge\/index\/backfill\.json, knowledge\/index\/generation\.json, knowledge\/index\/head\.json, knowledge\/index\/partitions\.json\)/);
   assert.equal(existsSync(join(s.dir, 'p2.txt')), false);
 });
 
@@ -227,18 +234,18 @@ test('backfill.yml commit step, the phase-2 transition on a sparse checkout: the
   assert.deepEqual(staged(win), [`D\t${path(today)}`, `D\t${path(yesterday)}`, 'M\tevents/2026/09/15.ndjson'].sort());
 });
 
-test('the live floor on backfill.yml\'s sparse checkout: the generation (checked out with the index files) first, else the names in git\'s tree, never today', () => {
+test('the live floor on backfill.yml\'s sparse checkout: the generation (checked out with the index files), never git\'s tree, never today', () => {
   const s = setup();
   const work = s.clone(['/knowledge/index/*.json']);
-  assert.deepEqual(liveFloorOf(work, Date.parse('2026-11-14T15:00:00Z'), {}), { day: '2026-10-01', source: 'tree' });
-  const gen = setup({ 'knowledge/index/generation.json': serializeGeneration({ ...emptyGeneration(), days: { '2026-09-30': { sha256: 'a'.repeat(64), bytes: 1, nodes: 1, blob: 'b'.repeat(64), blob_bytes: 1 } } }) });
-  const gw = gen.clone(['/knowledge/index/*.json']);
-  assert.equal(existsSync(join(gw, 'knowledge/index/generation.json')), true);
-  assert.deepEqual(liveFloorOf(gw, Date.parse('2026-11-14T15:00:00Z'), {}), { day: '2026-09-30', source: 'generation' });
-  // Phase 3b: the tree holds only the sentinel and the generation names the days. Without a generation: no floor.
-  const b3 = setup({ 'knowledge/index/event_map/0000-00-00.ndjson': 'phase 3b sentinel\n' });
-  const w3 = b3.clone(['/knowledge/index/*.json']);
-  b3.git(w3, 'rm', '-q', '--cached', '--sparse', 'knowledge/index/event_map/2026-10-01-00.ndjson', 'knowledge/index/event_map/2026-10-02-00.ndjson');
-  b3.git(w3, 'commit', '-q', '-m', 'untrack');
-  assert.throws(() => liveFloorOf(w3, Date.parse('2026-11-14T15:00:00Z'), {}), /no live floor/);
+  assert.equal(existsSync(join(work, 'knowledge/index/generation.json')), true);
+  assert.deepEqual(liveFloorOf(work, Date.parse('2026-11-14T15:00:00Z'), {}), { day: '2026-10-01', source: 'generation' });
+  // Without a generation there is no floor, whatever git's tree holds: since storage phase 3b the event-map files are
+  // not tracked (only the sentinels), and a tree that still held phase 3a's shards is no record of the live window.
+  const noGen = setup({ 'knowledge/index/generation.json': null });
+  assert.throws(() => liveFloorOf(noGen.clone(['/knowledge/index/*.json']), Date.parse('2026-11-14T15:00:00Z'), {}), /no live floor/);
+  const shards = setup({ 'knowledge/index/generation.json': null, 'knowledge/index/event_map/2026-10-01-00.ndjson': '\n', '.gitignore': null });
+  assert.throws(() => liveFloorOf(shards.clone(['/knowledge/index/*.json']), Date.parse('2026-11-14T15:00:00Z'), {}), /no live floor/);
+  // An empty generation (a fresh branch, scripts/bootstrap-data-branch.sh) with no event-map file: today.
+  const fresh = setup({ 'knowledge/index/generation.json': serializeGeneration(emptyGeneration()) });
+  assert.deepEqual(liveFloorOf(fresh.clone(['/knowledge/index/*.json']), Date.parse('2026-11-14T15:00:00Z'), {}), { day: '2026-11-14', source: 'empty-generation' });
 });

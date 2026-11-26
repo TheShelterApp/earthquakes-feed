@@ -1,17 +1,31 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { eventDayKey, loadEventMap, pruneEventMapShards, saveEventMap } from '../src/bitemporal.js';
 import { dataPaths } from '../src/config.js';
-import { SENTINEL_FILE, canonicalDay, emptyGeneration, eventMapShardHours, liveFloor, liveFloorOf, moveToDayLayout, writeGeneration } from '../src/event-map-store.js';
+import {
+  SENTINEL_FILE,
+  SENTINEL_TEXT,
+  canonicalDay,
+  emptyGeneration,
+  eventMapShardHours,
+  liveFloor,
+  liveFloorOf,
+  moveToDayLayout,
+  pruneGeneration,
+  trackedEventMapPaths,
+  writeGeneration,
+} from '../src/event-map-store.js';
 import type { EventNode } from '../src/types.js';
 
 // The event map's files. Round 17 (LANE G) wrote shards of one UTC hour of each event-day (`YYYY-MM-DD-HH.ndjson`),
-// and saveEventMap keeps writing them while git tracks the event map (storage phase 3a: git keeps every rewritten file
-// for ever, and a shard is ~70 KB where a day is ~1.7 MB). Once git no longer holds the files (phase 3b) it writes one
-// file per event-day (`YYYY-MM-DD.ndjson`, the store's blob layout), and moveToDayLayout moves any day left in shards.
+// and saveEventMap keeps writing them while git tracks event-map files in the checkout (storage phase 3a, and phase
+// 3b's transition run: git keeps every rewritten file for ever, and a shard is ~70 KB where a day is ~1.7 MB). Once git
+// no longer tracks them (phase 3b) it writes one file per event-day (`YYYY-MM-DD.ndjson`, the store's blob layout), and
+// moveToDayLayout moves any day left in shards, after the untrack.
 // Every reader takes the event-day from the first 10 characters of a name and reads both layouts alike; a day's store
 // bytes are canonicalDay of its files in either; absence never reads as an empty map.
 
@@ -43,6 +57,12 @@ function node(feedId: string, eventTimeMs: number, lastSeq = 1, place = 'x'): Ev
 }
 
 const root = (): string => mkdtempSync(join(tmpdir(), 'efd-em-shards-'));
+/** git in `r` with a fixed identity and no user configuration. */
+const gitIn = (r: string) => (...args: string[]): string =>
+  execFileSync('git', ['-C', r, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, GIT_AUTHOR_NAME: 'x', GIT_AUTHOR_EMAIL: 'x@x', GIT_COMMITTER_NAME: 'x', GIT_COMMITTER_EMAIL: 'x@x', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
+  });
 const files = (r: string): string[] => readdirSync(dataPaths(r).eventMapDir).sort();
 const ids = (r: string, f: string): string[] =>
   readFileSync(join(dataPaths(r).eventMapDir, f), 'utf8').trim().split('\n').map((l) => (JSON.parse(l) as EventNode).feedId);
@@ -60,22 +80,36 @@ function writeHourShards(r: string, nodes: EventNode[]): void {
   for (const [f, ns] of byFile) writeFileSync(join(dir, f), ns.sort((a, b) => (a.feedId < b.feedId ? -1 : 1)).map((n) => JSON.stringify(n)).join('\n') + '\n');
 }
 
-test('save in phase 3a (git tracks the map): hour shards, the day\'s canonical bytes unchanged; phase 3b: one file per day', () => {
-  assert.equal(eventMapShardHours({}), 1, 'phase 3a: EVENT_MAP_IN_GIT defaults to 1');
-  assert.equal(eventMapShardHours({ EVENT_MAP_IN_GIT: '0' }), 24, 'phase 3b');
+test('save while git tracks event-map files in the checkout: hour shards, the day\'s canonical bytes unchanged; once it does not (phase 3b): one file per day', () => {
   const shards = root();
   const days = root();
   try {
+    // A checkout whose git tracks an event-map file (phase 3a's branch: the transition run, or after a re-track).
+    writeHourShards(shards, [node('efd_x', Date.parse('2026-10-06T13:10:00Z'))]);
+    writeFileSync(join(dataPaths(shards).eventMapDir, SENTINEL_FILE), SENTINEL_TEXT);
+    const git = gitIn(shards);
+    git('init', '-q');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'phase 3a');
+    assert.deepEqual(trackedEventMapPaths(shards), ['knowledge/index/event_map/2026-10-06-13.ndjson'], 'the sentinel is not counted');
+    assert.equal(eventMapShardHours(shards), 1);
+    assert.equal(eventMapShardHours(days), 24, 'not a repository: nothing tracked');
     const m = mapOf(node('efd_b', at('00:10')), node('efd_a', at('00:50')), node('efd_c', Date.parse('2026-10-06T13:00:00Z')), node('efd_d', at('23:59')));
     saveEventMap(shards, m);
-    assert.deepEqual(files(shards), [`${DAY}-00.ndjson`, `${DAY}-23.ndjson`, '2026-10-06-13.ndjson']);
-    saveEventMap(days, m, { hours: 24 });
+    assert.deepEqual(files(shards), [SENTINEL_FILE, `${DAY}-00.ndjson`, `${DAY}-23.ndjson`, '2026-10-06-13.ndjson']);
+    // Untracked (the transition): day files from the next save on.
+    git('rm', '-r', '-q', '--cached', 'knowledge/index/event_map');
+    git('add', '-f', `knowledge/index/event_map/${SENTINEL_FILE}`);
+    git('commit', '-q', '-m', 'phase 3b');
+    assert.equal(eventMapShardHours(shards), 24);
+    rmSync(join(dataPaths(shards).eventMapDir, SENTINEL_FILE));
+    saveEventMap(days, m);
     assert.deepEqual(files(days), [`${DAY}.ndjson`, '2026-10-06.ndjson']);
     const dir = (r: string): string => dataPaths(r).eventMapDir;
     const shardTexts = files(shards).filter((f) => f.startsWith(DAY)).map((f) => readFileSync(join(dir(shards), f), 'utf8'));
     assert.equal(canonicalDay(shardTexts).text, readFileSync(join(dir(days), `${DAY}.ndjson`), 'utf8'), 'the same store bytes in either layout');
     // A day saved in the other layout loses its old files.
-    saveEventMap(days, m);
+    saveEventMap(days, m, { hours: 1 });
     assert.deepEqual(files(days), files(shards));
     assert.throws(() => saveEventMap(days, m, { hours: 5 }), /a divisor of 24/);
   } finally {
@@ -179,16 +213,20 @@ function loadEventMapBeforeRound17(r: string, opts: { sinceDays?: number; nowMs:
   return map;
 }
 
-test('prune removes every file of a day before the horizon, never the sentinel; the live floor follows', () => {
+test('prune removes every file of a day before the horizon, never the sentinel; the generation\'s prune moves the live floor', () => {
   const r = root();
   try {
     writeHourShards(r, [node('efd_a', Date.parse('2026-08-01T01:00:00Z')), node('efd_b', Date.parse('2026-08-01T02:00:00Z'))]);
-    saveEventMap(r, mapOf(node('efd_c', at('03:00'))));
+    saveEventMap(r, mapOf(node('efd_c', at('03:00'))), { hours: 1 });
     writeFileSync(join(dataPaths(r).eventMapDir, SENTINEL_FILE), 'phase 3b sentinel: not JSON\n');
+    const entry = { sha256: 'a'.repeat(64), bytes: 1, nodes: 1, blob: 'b'.repeat(64), blob_bytes: 1 };
+    writeGeneration(r, { ...emptyGeneration(), days: { '2026-08-01': entry, [DAY]: entry } });
     assert.equal(files(r).length, 4);
     assert.equal(liveFloor(r), '2026-08-01');
     assert.deepEqual(pruneEventMapShards(r, Date.parse('2026-08-21T00:00:00Z')), ['2026-08-01']);
     assert.deepEqual(files(r), [SENTINEL_FILE, `${DAY}-03.ndjson`]);
+    assert.equal(liveFloor(r), '2026-08-01', 'the floor is the generation\'s until derive prunes it there too');
+    assert.deepEqual(pruneGeneration(r, '2026-08-21'), ['2026-08-01']);
     assert.equal(liveFloor(r), DAY);
     // The sentinel is no day: the loader skips it.
     assert.deepEqual([...loadEventMap(r).keys()], ['efd_c']);

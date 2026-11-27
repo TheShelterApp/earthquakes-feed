@@ -1,0 +1,45 @@
+name: usage-alarm
+
+# Free-tier usage alarm (server-content plan of 2026-11-27, guard G11; scripts/usage-alarm.mjs). Fails, and GitHub emails
+# the owner, when the Cloudflare account nears a free-tier limit: R2 Class B month to date over 60 % or projected over
+# 80 %, R2 Class A over 60 %, Workers requests yesterday over 70,000, D1 rows written yesterday over 60,000. A dataset the
+# plan cannot read fails by name. The repository is public: the log and the summary carry shares in percent only.
+#
+# GitHub delivers this repository's crons late or not at all (README "Health watchdogs"), so there are two a day; the
+# check is idempotent and a second delivery only repeats the same read. The only secret is CF_ANALYTICS_TOKEN
+# (Account Analytics: Read); the account id is the repository variable CF_ANALYTICS_ACCOUNT_ID. Manual run:
+# gh workflow run usage-alarm.yml
+on:
+  schedule:
+    - cron: '11 5 * * *'
+    - cron: '11 17 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: usage-alarm
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  usage:
+    # Pinned, not ubuntu-latest (as health.yml).
+    runs-on: ubuntu-24.04
+    # Three GraphQL queries, no retries.
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - name: Check the account's free-tier usage
+        env:
+          CF_ANALYTICS_TOKEN: ${{ secrets.CF_ANALYTICS_TOKEN }}
+          CF_ACCOUNT_ID: ${{ vars.CF_ANALYTICS_ACCOUNT_ID }}
+        run: node scripts/usage-alarm.mjs

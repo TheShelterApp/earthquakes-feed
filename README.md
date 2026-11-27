@@ -450,6 +450,14 @@ minutes (one that was cancelled or skipped does not count). One health run runs 
   - `platform` ([`scripts/platform-watchdog.mjs`](scripts/platform-watchdog.mjs)): `https://api.theshelter.app/v1/health`,
     `https://config.theshelter.app/healthz` and the config bundle's age; the staging and dev bundles' expiry, from
     `config-staging.theshelter.app/healthz` and `config-dev.theshelter.app/healthz`.
+- **`usage-alarm.yml`** ([`scripts/usage-alarm.mjs`](scripts/usage-alarm.mjs), guard G11 of the 2026-11-27 server-content
+  plan): outside the findings pipeline, two crons a day (idempotent) and a manual run. It reads the account's R2, Workers
+  and D1 usage from the GraphQL Analytics API (secret `CF_ANALYTICS_TOKEN`, variable `CF_ANALYTICS_ACCOUNT_ID`) and
+  fails the run, which GitHub emails, when R2 Class B passes 60 % of the month (or projects over 80 %), Class A passes
+  60 %, Workers requests yesterday pass 70,000 or D1 rows written yesterday pass 60,000. A dataset the plan cannot
+  read fails by name, never as zero. Public logs: shares in percent only. On a failure the order is: remove `learn`
+  from ios-config, then switch `quiz_compare` off; core is never switched off by it. Offline check:
+  `node scripts/usage-alarm.mjs --file tests/fixtures/usage-alarm/healthy.json --now 2026-11-16T12:00:00Z`.
 - **`reconcile`** ([`scripts/reconcile.mjs`](scripts/reconcile.mjs)): the only job that writes issues. It applies each
   rule's holds, resolves, inhibitions, escalation and the silences, writes the boards and sets the run's conclusion. It
   runs after a failed evaluator too (its rows freeze), but not in a run cancelled by hand. Exit 1 is red for a finding;

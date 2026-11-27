@@ -1,0 +1,94 @@
+{
+ "r2": {
+  "data": {
+   "viewer": {
+    "accounts": [
+     {
+      "r2OperationsAdaptiveGroups": [
+       {
+        "sum": {
+         "requests": 1500000
+        },
+        "dimensions": {
+         "actionType": "GetObject"
+        }
+       },
+       {
+        "sum": {
+         "requests": 500000
+        },
+        "dimensions": {
+         "actionType": "HeadObject"
+        }
+       },
+       {
+        "sum": {
+         "requests": 200000
+        },
+        "dimensions": {
+         "actionType": "PutObject"
+        }
+       },
+       {
+        "sum": {
+         "requests": 5000
+        },
+        "dimensions": {
+         "actionType": "DeleteObject"
+        }
+       }
+      ]
+     }
+    ]
+   }
+  }
+ },
+ "workers": {
+  "data": {
+   "viewer": {
+    "accounts": [
+     {
+      "workersInvocationsAdaptive": [
+       {
+        "sum": {
+         "requests": 15000
+        },
+        "dimensions": {
+         "scriptName": "api"
+        }
+       },
+       {
+        "sum": {
+         "requests": 15000
+        },
+        "dimensions": {
+         "scriptName": "config"
+        }
+       }
+      ]
+     }
+    ]
+   }
+  }
+ },
+ "d1": {
+  "data": {
+   "viewer": {
+    "accounts": [
+     {
+      "d1AnalyticsAdaptiveGroups": [
+       {
+        "sum": {
+         "rowsWritten": 20000
+        },
+        "dimensions": {
+         "databaseId": "x"
+        }
+       }
+      ]
+     }
+    ]
+   }
+  }
+ }
+}
